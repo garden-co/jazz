@@ -2425,6 +2425,8 @@ pub struct DurableStorage {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Retainer {
     Subscription(String),
+    /// Keeps a pending first-result graph alive, without demanding tick maintenance.
+    Hydration(String),
     PreparedShape(String),
     DurableSchemaObject(String),
 }

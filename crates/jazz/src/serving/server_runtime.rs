@@ -1,9 +1,9 @@
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Poll;
@@ -63,13 +63,91 @@ impl ServerRuntimeActivity {
 
 /// Opaque stream of per-tick outbound frame batches.
 pub struct ServerRuntimeFrameStream {
-    receiver: tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>,
+    receiver: tokio_mpsc::UnboundedReceiver<(
+        Result<Vec<AbiBytes>, String>,
+        Option<Arc<FrameQueueCredit>>,
+    )>,
 }
 
 impl ServerRuntimeFrameStream {
     /// Receive the next completed tick's outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
-        self.receiver.recv().await
+        self.receiver.recv().await.map(|(result, _credit)| result)
+    }
+}
+
+// Charging at least 16 KiB per frame bounds both count (512) and bytes
+// (8 MiB), including tiny-frame floods. Credits follow queued work to Drop.
+const FRAME_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+struct FrameQueueCredit {
+    used: Arc<AtomicUsize>,
+    charge: usize,
+}
+impl FrameQueueCredit {
+    fn reserve(used: &Arc<AtomicUsize>, frames: &[AbiBytes]) -> Result<Arc<Self>, String> {
+        let charge = frames
+            .iter()
+            .try_fold(0usize, |sum, frame| {
+                sum.checked_add(crate::wire::channel_credit::channel_frame_credit_cost(
+                    frame.len(),
+                ))
+            })
+            .ok_or_else(|| "wire frame queue budget exceeded".to_owned())?
+            .max(16 * 1024);
+        used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(charge)
+                .filter(|next| *next <= FRAME_QUEUE_BUDGET)
+        })
+        .map_err(|_| "wire frame queue backpressure".to_owned())?;
+        Ok(Arc::new(Self {
+            used: Arc::clone(used),
+            charge,
+        }))
+    }
+}
+impl Drop for FrameQueueCredit {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+struct FrameStreamSender {
+    sender:
+        tokio_mpsc::UnboundedSender<(Result<Vec<AbiBytes>, String>, Option<Arc<FrameQueueCredit>>)>,
+    used: Arc<AtomicUsize>,
+    failed: Arc<AtomicBool>,
+    tick_queued: Arc<AtomicBool>,
+    persistent: bool,
+}
+impl FrameStreamSender {
+    fn send(&self, result: Result<Vec<AbiBytes>, String>) -> Result<(), ()> {
+        if result.as_ref().is_ok_and(Vec::is_empty) {
+            return Ok(());
+        }
+        if self.failed.load(Ordering::Acquire) || self.sender.is_closed() {
+            return Err(());
+        }
+        let credit = match &result {
+            Ok(frames) => match FrameQueueCredit::reserve(&self.used, frames) {
+                Ok(credit) => Some(credit),
+                Err(error) => {
+                    if !self.failed.swap(true, Ordering::AcqRel) {
+                        let _ = self.sender.send((Err(error), None));
+                    }
+                    return Err(());
+                }
+            },
+            Err(_) => {
+                self.failed.store(true, Ordering::Release);
+                None
+            }
+        };
+        self.sender.send((result, credit)).map_err(|_| ())
+    }
+    fn is_closed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) || self.sender.is_closed()
     }
 }
 
@@ -122,6 +200,8 @@ struct ServerShellInner {
     join: Mutex<Option<thread::JoinHandle<()>>>,
     shutdown: Mutex<ShutdownState>,
     shutdown_changed: Condvar,
+    ingress_bytes: Mutex<HashMap<ServerSession, Arc<AtomicUsize>>>,
+    wire_streams: Mutex<HashMap<ServerSession, FrameStreamSender>>,
     activity_tx: watch::Sender<u64>,
     io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
 }
@@ -153,6 +233,13 @@ type AsyncServerShellJob =
 enum ServerShellCommand {
     Run(ServerShellJob),
     RunAsync(AsyncServerShellJob),
+    CloseSession(ServerSession),
+    ReceiveFrames {
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        reply: FrameStreamSender,
+        credit: Arc<FrameQueueCredit>,
+    },
     AttachUpstreamWire {
         transport: Box<dyn WireTransport + Send>,
         transport_terminal: NativeTransportTerminalFuture,
@@ -179,16 +266,154 @@ struct ServerShellTickScheduler {
     state: Arc<ServerShellTickState>,
 }
 
+// The owner uses LocalPool without a Tokio timer context. One lazily started
+// host worker services all incomplete-channel deadlines for this runtime.
+// Each pending future owns one removable entry; ordinary traffic starts none.
+#[derive(Default)]
+struct ReceiveTimerState {
+    next_id: u64,
+    stopped: bool,
+    deadlines: BTreeMap<(std::time::Instant, u64), Arc<ReceiveTimerSignal>>,
+}
+#[derive(Default)]
+struct ReceiveTimerSignal {
+    callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    ready: AtomicBool,
+    waker: futures::task::AtomicWaker,
+}
+struct ReceiveTimerQueue {
+    shared: Arc<(Mutex<ReceiveTimerState>, Condvar)>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl ReceiveTimerQueue {
+    fn new() -> Self {
+        let shared = Arc::new((Mutex::new(ReceiveTimerState::default()), Condvar::new()));
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::Builder::new()
+            .name("jazz-receive-deadlines".into())
+            .spawn(move || {
+                let (lock, changed) = &*worker_shared;
+                let mut state = lock.lock().unwrap();
+                loop {
+                    if state.stopped {
+                        break;
+                    }
+                    let Some((&(deadline, _), _)) = state.deadlines.first_key_value() else {
+                        state = changed.wait(state).unwrap();
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    if deadline > now {
+                        state = changed.wait_timeout(state, deadline - now).unwrap().0;
+                        continue;
+                    }
+                    let (_, signal) = state.deadlines.pop_first().unwrap();
+                    drop(state);
+                    signal.ready.store(true, Ordering::Release);
+                    signal.waker.wake();
+                    if let Some(callback) = signal.callback.lock().unwrap().take() {
+                        callback();
+                    }
+                    state = lock.lock().unwrap();
+                }
+            })
+            .expect("server receive timer worker starts");
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+    fn after(&self, delay_ms: u64) -> ReceiveTimer {
+        self.register(delay_ms, None)
+    }
+    fn register(&self, delay_ms: u64, callback: Option<Box<dyn FnOnce() + Send>>) -> ReceiveTimer {
+        let signal = Arc::new(ReceiveTimerSignal {
+            callback: Mutex::new(callback),
+            ..Default::default()
+        });
+        let (lock, changed) = &*self.shared;
+        let mut state = lock.lock().unwrap();
+        let key = (
+            std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+            state.next_id,
+        );
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("receive timer id exhausted");
+        state.deadlines.insert(key, Arc::clone(&signal));
+        changed.notify_one();
+        ReceiveTimer {
+            shared: Arc::downgrade(&self.shared),
+            key,
+            signal,
+        }
+    }
+}
+impl Drop for ReceiveTimerQueue {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.shared;
+        lock.lock().unwrap().stopped = true;
+        changed.notify_one();
+        if let Some(worker) = self.worker.take() {
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+struct ReceiveTimer {
+    shared: std::sync::Weak<(Mutex<ReceiveTimerState>, Condvar)>,
+    key: (std::time::Instant, u64),
+    signal: Arc<ReceiveTimerSignal>,
+}
+impl std::future::Future for ReceiveTimer {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        self.signal.waker.register(cx.waker());
+        if self.signal.ready.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+impl Drop for ReceiveTimer {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.upgrade() {
+            let (lock, changed) = &*shared;
+            lock.lock().unwrap().deadlines.remove(&self.key);
+            changed.notify_one();
+        }
+        self.signal.waker.take();
+    }
+}
+
 #[derive(Default)]
 struct ServerShellTickState {
+    receive_timers: std::sync::OnceLock<ReceiveTimerQueue>,
     queued: AtomicBool,
-    delayed: AtomicBool,
+    delayed: Mutex<Option<(std::time::Instant, ReceiveTimer)>>,
     deferred: AtomicBool,
     query_wake_queued: AtomicBool,
     #[cfg(test)]
     deferred_timer_gate: Mutex<Option<ServerShellTimerGate>>,
     #[cfg(test)]
     delayed_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+}
+
+impl ServerShellTickState {
+    async fn receive_deadline(&self, delay_ms: Option<u64>) {
+        match delay_ms {
+            Some(delay) => {
+                self.receive_timers
+                    .get_or_init(ReceiveTimerQueue::new)
+                    .after(delay)
+                    .await
+            }
+            None => futures::future::pending::<()>().await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -329,27 +554,45 @@ impl TickScheduler for ServerShellTickScheduler {
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
-        // The shell owner must not sleep: it owns the thread-affine database
-        // and needs to keep accepting transport work while an upload waits for
-        // its admission window. Coalesce same-window retry wakes, then return
-        // to the owner queue from a tiny timer thread.
-        #[cfg(test)]
-        let _ = delay_ms;
-        if self.state.delayed.swap(true, Ordering::AcqRel) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
             return;
         }
         let jobs = self.jobs.clone();
         let activity_tx = self.activity_tx.clone();
         let io_wakers = Arc::clone(&self.io_wakers);
-        let state = Arc::clone(&self.state);
-        thread::spawn(move || {
-            #[cfg(test)]
-            wait_for_test_timer_gate(&state.delayed_timer_gate);
-            #[cfg(not(test))]
-            thread::sleep(std::time::Duration::from_millis(delay_ms));
-            state.delayed.store(false, Ordering::Release);
-            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
-        });
+        let weak = Arc::downgrade(&self.state);
+        let timer = self
+            .state
+            .receive_timers
+            .get_or_init(ReceiveTimerQueue::new)
+            .register(
+                delay_ms,
+                Some(Box::new(move || {
+                    let Some(state) = weak.upgrade() else {
+                        return;
+                    };
+                    // A cancelled older callback may already have left the timer map.
+                    // It must not consume a replacement deadline or emit an extra tick.
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending
+                        .as_ref()
+                        .is_none_or(|(current, _)| *current != deadline)
+                    {
+                        return;
+                    }
+                    pending.take();
+                    drop(pending);
+                    #[cfg(test)]
+                    wait_for_test_timer_gate(&state.delayed_timer_gate);
+                    Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+                })),
+            );
+        *pending = Some((deadline, timer));
     }
 
     fn query_runtime_waker(&self) -> Option<std::task::Waker> {
@@ -357,6 +600,171 @@ impl TickScheduler for ServerShellTickScheduler {
             scheduler: self.clone(),
         })))
     }
+}
+
+struct AuxiliaryIngress {
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    _credit: Arc<FrameQueueCredit>,
+}
+
+type SessionPumps = HashMap<ServerSession, crate::db::PeerIoPump>;
+type AuxiliaryWorkers = HashMap<ServerSession, mpsc::UnboundedSender<AuxiliaryIngress>>;
+
+fn snapshot_session_pumps(shell: &InMemoryServerShell) -> SessionPumps {
+    shell
+        .sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(transport, state)| {
+            state.as_ref().map(|state| {
+                (
+                    ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    },
+                    state.auxiliary_pump.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+// Called by the owner even while a semantic job holds its mutable shell borrow.
+// Only host-admitted session capabilities can select a pump. Canonical jobs
+// remain in the original owner FIFO and validate that capability again on use.
+fn dispatch_ingress(
+    session: ServerSession,
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    credit: Arc<FrameQueueCredit>,
+    pumps: &SessionPumps,
+    workers: &mut AuxiliaryWorkers,
+    spawner: &futures::executor::LocalSpawner,
+    scheduler: ServerShellTickScheduler,
+) -> Option<ServerShellCommand> {
+    let activity_tx = scheduler.activity_tx.clone();
+    let Some(pump) = pumps.get(&session).filter(|pump| !pump.is_disconnected()) else {
+        let _ = reply.send(Err("invalid or retired server session".to_owned()));
+        return None;
+    };
+    if reply.is_closed() {
+        return None;
+    }
+    let mut canonical = Vec::new();
+    let mut auxiliary = Vec::new();
+    for frame in frames {
+        match pump.wire_frame_is_auxiliary(&frame) {
+            Ok(true) => auxiliary.push(frame),
+            Ok(false) => canonical.push(frame),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return None;
+            }
+        }
+    }
+    if !auxiliary.is_empty() {
+        let worker = workers.entry(session).or_insert_with(|| {
+            let (sender, mut receiver) = mpsc::unbounded::<AuxiliaryIngress>();
+            let pump = pump.clone();
+            let auxiliary_activity = scheduler.activity_tx.clone();
+            spawner.spawn_local(async move {
+                let mut active_reply: Option<FrameStreamSender> = None;
+                loop {
+                    if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                        if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                        break;
+                    }
+                    let output_enabled = active_reply.as_ref().is_some_and(|reply| !reply.is_closed());
+                    let outbound = async {
+                        if output_enabled {
+                            pump.outbound_ready().await;
+                        } else {
+                            futures::future::pending::<()>().await;
+                        }
+                    }.fuse();
+                    let deadline = scheduler.state.receive_deadline(pump.incomplete_receive_timeout_ms()).fuse();
+                    let incoming = receiver.next().fuse();
+                    futures::pin_mut!(outbound, incoming, deadline);
+                    let work = futures::select! {
+                        _ = deadline => {
+                            if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                                if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                                break;
+                            }
+                            continue;
+                        },
+                        work = incoming => match work { Some(work) => work, None => break },
+                        _ = outbound => {
+                            if pump.is_disconnected() { break; }
+                            if let Some(reply) = &active_reply {
+                                if reply.send(pump.take_outbound_wire_frames(32, 4 * 1024 * 1024)).is_err() {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    if work.reply.is_closed() || pump.is_disconnected() { continue; }
+                    if work.reply.persistent { active_reply = Some(work.reply.clone()); }
+                    for frame in work.frames {
+                        if work.reply.is_closed() || pump.is_disconnected() { break; }
+                        let result = match pump.route_incoming_wire_frame(frame).await {
+                            Ok(None) => pump.take_outbound_wire_frames(32, 4 * 1024 * 1024),
+                            Ok(Some(_)) => Err("canonical frame entered auxiliary worker".to_owned()),
+                            Err(error) => Err(error),
+                        };
+                        if pump.take_canonical_credit_progress() { notify_shell_activity(&auxiliary_activity); }
+                        let failed = result.is_err();
+                        if work.reply.send(result).is_err() || failed { break; }
+                    }
+                }
+            }).expect("owner local executor accepts auxiliary worker");
+            sender
+        });
+        if worker
+            .unbounded_send(AuxiliaryIngress {
+                frames: auxiliary,
+                reply: reply.clone(),
+                _credit: Arc::clone(&credit),
+            })
+            .is_err()
+        {
+            let _ = reply.send(Err("auxiliary worker stopped".to_owned()));
+            return None;
+        }
+    }
+    if canonical.is_empty() {
+        return None;
+    }
+    Some(ServerShellCommand::RunAsync(Box::new(move |shell| {
+        Box::pin(async move {
+            let _credit = credit;
+            for frame in canonical {
+                if reply.is_closed() {
+                    return;
+                }
+                let phase = inbound_frame_phase(&frame);
+                let result = match shell.receive_frames_async(session, [frame]).await {
+                    Err(error) => Err(format!("server receive {phase}: {error}")),
+                    Ok(()) => match shell.tick_async().await {
+                        Err(error) => Err(format!("server tick after {phase}: {error}")),
+                        Ok(()) => shell
+                            .take_frames(session)
+                            .map_err(|error| format!("server drain after {phase}: {error}")),
+                    },
+                };
+                let failed = result.is_err();
+                if reply.send(result).is_err() || failed {
+                    return;
+                }
+                notify_shell_activity(&activity_tx);
+            }
+        })
+    })))
 }
 
 fn run_server_shell_owner(
@@ -377,6 +785,7 @@ fn run_server_shell_owner(
     let spawner = executor.spawner();
     executor.run_until(async move {
         let mut pending = VecDeque::new();
+        let mut workers = AuxiliaryWorkers::new();
         loop {
             let command = match pending.pop_front() {
                 Some(command) => command,
@@ -385,7 +794,31 @@ fn run_server_shell_owner(
                     None => return,
                 },
             };
+            let pumps = snapshot_session_pumps(&shell);
+            workers.retain(|session, _| pumps.contains_key(session));
             match command {
+                ServerShellCommand::ReceiveFrames {
+                    session,
+                    frames,
+                    reply,
+                    credit,
+                } => {
+                    if let Some(command) = dispatch_ingress(
+                        session,
+                        frames,
+                        reply,
+                        credit,
+                        &pumps,
+                        &mut workers,
+                        &spawner,
+                        scheduler.clone(),
+                    ) {
+                        pending.push_front(command);
+                    }
+                }
+                ServerShellCommand::CloseSession(session) => {
+                    let _ = shell.close_session(session);
+                }
                 ServerShellCommand::Run(job) => job(&mut shell),
                 ServerShellCommand::RunAsync(job) => {
                     let mut operation = job(&mut shell);
@@ -402,6 +835,37 @@ fn run_server_shell_owner(
                                 drop(shell);
                                 let _ = stopped.send(());
                                 return;
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::ReceiveFrames {
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                }),
+                                _,
+                            )) => {
+                                if let Some(command) = dispatch_ingress(
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                    &pumps,
+                                    &mut workers,
+                                    &spawner,
+                                    scheduler.clone(),
+                                ) {
+                                    pending.push_back(command);
+                                }
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::CloseSession(session)),
+                                _,
+                            )) => {
+                                if let Some(pump) = pumps.get(&session) {
+                                    pump.disconnect();
+                                }
+                                pending.push_back(ServerShellCommand::CloseSession(session));
                             }
                             futures::future::Either::Right((Some(command), _)) => {
                                 pending.push_back(command);
@@ -514,18 +978,25 @@ async fn drive_upstream_wire(
     let connection_id = io.connection_id;
     let reason = async {
         loop {
+            if let Err(error) = io.pump.expire_incomplete_receive() {
+                return ServerUpstreamTerminalReason::ProtocolFailed(error);
+            }
             let mut staged_semantic_input = false;
             while let Some(frame) = wire.try_recv_frame() {
                 match io.pump.route_incoming_wire_frame(frame).await {
                     Ok(Some(canonical)) => {
-                        io.transport
-                            .queues
-                            .borrow_mut()
-                            .inbound
-                            .push_back(canonical);
+                        if let Err(error) =
+                            io.transport.queues.borrow_mut().stage_inbound(canonical)
+                        {
+                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                        }
                         staged_semantic_input = true;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if io.pump.take_canonical_credit_progress() {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
+                        }
+                    }
                     Err(error) => {
                         return ServerUpstreamTerminalReason::ProtocolFailed(error);
                     }
@@ -539,64 +1010,86 @@ async fn drive_upstream_wire(
                 scheduler.schedule_tick(TickUrgency::Immediate);
             }
             let mut transport_backpressured = false;
-            loop {
+            // A bounded turn alternates physical frames so a long canonical
+            // stream cannot starve the reserved chunk channel.
+            for _ in 0..16 {
                 let frame = io.transport.queues.borrow_mut().outbound.pop_front();
-                let Some(frame) = frame else { break };
-                match wire.send_frame(frame.clone()) {
-                    Ok(()) => {}
-                    Err(TransportError::Backpressure) => {
-                        // Backpressure is a retry signal from this live
-                        // transport, not a disconnect. Put the exact frame
-                        // back ahead of later semantic work so its FIFO
-                        // obligation cannot be lost or overtaken.
-                        io.transport.queues.borrow_mut().outbound.push_front(frame);
-                        transport_backpressured = true;
-                        break;
-                    }
-                    Err(TransportError::Failed(error)) => {
-                        return ServerUpstreamTerminalReason::TransportFailed(error);
-                    }
-                }
-            }
-            if !transport_backpressured {
-                loop {
-                    let reservation = match io.pump.reserve_outbound_wire_frame() {
-                        Ok(reservation) => reservation,
-                        Err(error) => {
-                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame.clone()) {
+                        Ok(()) => {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
                         }
-                    };
-                    let Some(mut reservation) = reservation else {
-                        break;
-                    };
-                    match wire.send_frame(reservation.take_frame()) {
-                        Ok(()) => reservation.commit(),
                         Err(TransportError::Backpressure) => {
-                            // The reservation restores requests and relay
-                            // responses (including their capacity claim) to
-                            // their exact FIFO lane before we wait for this
-                            // same transport to become writable again.
-                            drop(reservation);
+                            io.transport.queues.borrow_mut().outbound.push_front(frame);
+                            transport_backpressured = true;
                             break;
                         }
                         Err(TransportError::Failed(error)) => {
-                            // Do not let a failed connection consume the
-                            // auxiliary obligation while the driver reports
-                            // its terminal outcome to the reconnect owner.
-                            drop(reservation);
                             return ServerUpstreamTerminalReason::TransportFailed(error);
                         }
                     }
                 }
+                let reservation = match io.pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return ServerUpstreamTerminalReason::ProtocolFailed(error),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            // The endpoint retains the exact compressed extent
+                            // and sequence until this same connection accepts it.
+                            transport_backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !transport_backpressured
+                && (!io.transport.queues.borrow().outbound.is_empty()
+                    || io.pump.outbound_is_ready())
+            {
+                yield_to_local_tasks().await;
+                continue;
             }
 
+            let deadline = scheduler
+                .state
+                .receive_deadline(io.pump.incomplete_receive_timeout_ms())
+                .fuse();
             let external_wake = wake_rx.next().fuse();
-            let auxiliary_wake = io.pump.outbound_ready().fuse();
+            let auxiliary_wake = async {
+                if transport_backpressured {
+                    futures::future::pending::<()>().await;
+                } else {
+                    io.pump.outbound_ready().await;
+                }
+            }
+            .fuse();
             let transport_stopped = transport_terminal.as_mut().fuse();
             let cancelled = (&mut cancel_rx).fuse();
-            futures::pin_mut!(external_wake, auxiliary_wake, transport_stopped, cancelled);
+            futures::pin_mut!(
+                external_wake,
+                auxiliary_wake,
+                transport_stopped,
+                cancelled,
+                deadline
+            );
             futures::select_biased! {
                 _ = cancelled => return ServerUpstreamTerminalReason::Cancelled,
+                _ = deadline => {
+                    if let Err(error) = io.pump.expire_incomplete_receive() {
+                        return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                    }
+                },
                 terminal = transport_stopped => {
                     return ServerUpstreamTerminalReason::NativeTransport(terminal);
                 }
@@ -693,6 +1186,8 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
@@ -757,21 +1252,22 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
         })
     }
 
-    /// Encode the trusted catalogue through the negotiated wire format.
-    pub async fn encoded_trusted_catalogue_snapshot(
+    /// Read the owned authority snapshot for an authenticated bootstrap socket.
+    /// The socket retains its live adapter until credit-driven delivery ends.
+    pub async fn trusted_catalogue_snapshot(
         &self,
-        protocol_version: u16,
-        features: crate::wire::WireFeatures,
-    ) -> Result<Vec<AbiBytes>, String> {
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
         self.run(move |shell| {
             shell
-                .encoded_trusted_catalogue_snapshot(protocol_version, features)
+                .trusted_catalogue_snapshot()
                 .map_err(|error| error.to_string())
         })
         .await
@@ -943,6 +1439,8 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
@@ -1054,32 +1552,120 @@ impl ServerRuntimeHandle {
         session: ServerSession,
         frames: Vec<AbiBytes>,
     ) -> Result<ServerRuntimeFrameStream, String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: false,
+            },
+        })?;
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn reserve_session_ingress(
+        &self,
+        session: ServerSession,
+        frames: &[AbiBytes],
+    ) -> Result<Arc<FrameQueueCredit>, String> {
+        let used = self
+            .inner
+            .ingress_bytes
+            .lock()
+            .map_err(|_| "ingress budget lock poisoned")?
+            .entry(session)
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        FrameQueueCredit::reserve(&used, frames)
+    }
+
+    /// Open one bounded, ordered output stream for a host-owned socket session.
+    /// All canonical ticks and lock-independent auxiliary replies share this
+    /// FIFO; a pending semantic reply cannot prevent receiving later wire input.
+    pub fn open_wire_stream(
+        &self,
+        session: ServerSession,
+    ) -> Result<ServerRuntimeFrameStream, String> {
+        let mut streams = self
+            .inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?;
+        if streams.contains_key(&session) {
+            return Err("session already has a wire stream".to_owned());
+        }
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        streams.insert(
+            session,
+            FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: true,
+            },
+        );
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn wire_stream_sender(&self, session: ServerSession) -> Result<FrameStreamSender, String> {
+        self.inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?
+            .get(&session)
+            .cloned()
+            .ok_or_else(|| "session has no wire stream".to_owned())
+    }
+
+    /// Stage bounded input while the socket continues polling its output stream.
+    pub fn receive_wire_frames(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+    ) -> Result<(), String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: self.wire_stream_sender(session)?,
+        })
+    }
+
+    /// Coalesce host activity into one semantic tick whose output shares the
+    /// session FIFO with ingress replies. This never waits for the node lock.
+    pub fn request_wire_tick(&self, session: ServerSession) -> Result<(), String> {
+        let reply = self.wire_stream_sender(session)?;
+        if reply.tick_queued.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let activity_tx = self.inner.activity_tx.clone();
-        let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
         self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
             Box::pin(async move {
-                for frame in frames {
-                    let phase = inbound_frame_phase(&frame);
-                    let result = match shell.receive_frames_async(session, [frame]).await {
-                        Err(error) => Err(format!("server receive {phase}: {error}")),
-                        Ok(()) => match shell.tick_async().await {
-                            Err(error) => Err(format!("server tick after {phase}: {error}")),
-                            Ok(()) => shell
-                                .take_frames(session)
-                                .map_err(|error| format!("server drain after {phase}: {error}")),
-                        },
-                    };
-                    let keep_streaming = result.is_ok();
-                    if outbound_tx.send(result).is_err() || !keep_streaming {
-                        return;
-                    }
+                reply.tick_queued.store(false, Ordering::Release);
+                if reply.is_closed() {
+                    return;
+                }
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                let _ = reply.send(result);
+                if made_progress {
                     notify_shell_activity(&activity_tx);
                 }
             })
-        })))?;
-        Ok(ServerRuntimeFrameStream {
-            receiver: outbound_rx,
-        })
+        })))
     }
 
     /// Tick the runtime once and return pending frames for one session.
@@ -1189,9 +1775,13 @@ impl ServerRuntimeHandle {
 
     /// Close a semantic session without exposing runtime storage or peer state.
     pub fn close(&self, session: ServerSession) {
-        let _ = self.send(ServerShellCommand::Run(Box::new(move |shell| {
-            let _ = shell.close_session(session);
-        })));
+        if let Ok(mut streams) = self.inner.wire_streams.lock() {
+            streams.remove(&session);
+        }
+        if let Ok(mut budgets) = self.inner.ingress_bytes.lock() {
+            budgets.remove(&session);
+        }
+        let _ = self.send(ServerShellCommand::CloseSession(session));
     }
 
     /// Retire the job sender, then wait until the owner has dropped the shell
@@ -1355,6 +1945,8 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Hello(_) => "wire hello".to_owned(),
             WireFrame::Error(_) => "wire error".to_owned(),
             WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
+            WireFrame::Channel(_) => "wire channel extent".to_owned(),
+            WireFrame::ChannelCredit(_) => "wire channel credit".to_owned(),
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };
@@ -1417,6 +2009,7 @@ fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::WireTransportAdapter;
     use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -1430,6 +2023,7 @@ mod tests {
     #[derive(Default)]
     struct QueuedWireTransport {
         inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        outbound: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl QueuedWireTransport {
@@ -1439,7 +2033,8 @@ mod tests {
     }
 
     impl WireTransport for QueuedWireTransport {
-        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            self.outbound.lock().unwrap().push(frame);
             Ok(())
         }
 
@@ -1669,24 +2264,32 @@ mod tests {
         let session = shell
             .accept_subscriber_session(AuthorSubject::for_test_bytes([0x77; 16]))
             .unwrap();
+        let wire = QueuedWireTransport::default();
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            })
+            .unwrap();
+        client
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }))
+            .unwrap();
         shell
-            .receive_frames(
-                session,
-                [
-                    encode_message(SyncMessage::RegisterShape {
-                        shape_id: shape.shape_id(),
-                        ast: crate::protocol::ShapeAst::from_validated(&shape),
-                        opts: crate::protocol::RegisterShapeOptions::default(),
-                    }),
-                    encode_message(SyncMessage::Subscribe(Subscribe {
-                        shape_id: shape.shape_id(),
-                        subscription,
-                        values: Vec::new(),
-                        known_state: None,
-                        delegated_session: None,
-                    })),
-                ],
-            )
+            .receive_frames(session, std::mem::take(&mut *outbound.lock().unwrap()))
             .unwrap();
         shell.tick().unwrap();
         assert_eq!(
@@ -1915,6 +2518,475 @@ mod tests {
         );
     }
 
+    // Holding the owner borrow is an internal scheduling fault-injection seam;
+    // real authenticated sessions and channel bytes exercise the ingress path.
+    #[tokio::test]
+    async fn auxiliary_ingress_serves_two_sessions_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let mut sessions = Vec::new();
+        for byte in [91, 92] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        features,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        for (index, session) in sessions.iter().copied().enumerate() {
+            let mut stream = runtime.open_wire_stream(session).unwrap();
+            let mut client =
+                crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                    crate::wire::WIRE_PROTOCOL_VERSION,
+                    features,
+                    None,
+                ))
+                .unwrap();
+            client
+                .enqueue(SyncMessage::ChunkRequestBatch(
+                    crate::protocol::ChunkRequestBatch {
+                        requests: vec![crate::protocol::ChunkRequestEntry {
+                            request_id: index as u64,
+                            locator: groove::large_values::Locator::random(),
+                            expected_hash: [37; 32],
+                            remaining_hops: 0,
+                        }],
+                    },
+                ))
+                .unwrap();
+            let frame = client.peek_outbound().unwrap().unwrap();
+            client.accept_outbound().unwrap();
+            runtime.receive_wire_frames(session, vec![frame]).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for bytes in stream.recv().await.unwrap().unwrap() {
+                        match crate::wire::decode_frame(&bytes).unwrap() {
+                            WireFrame::ChannelCredit(grant) => client
+                                .channel_credits()
+                                .lock()
+                                .unwrap()
+                                .receive_credit(grant)
+                                .unwrap(),
+                            WireFrame::Channel(envelope) => {
+                                if let Some(message) =
+                                    client.receive(envelope, bytes.len()).unwrap()
+                                {
+                                    return message;
+                                }
+                            }
+                            _ => panic!("only channel traffic expected"),
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("auxiliary response must not wait for the suspended semantic owner");
+            assert!(matches!(response, SyncMessage::ChunkResponseBatch(batch)
+                if batch.responses.len() == 1 && batch.responses[0].request_id == index as u64
+                && batch.responses[0].result == crate::protocol::ChunkResponse::Unavailable));
+            assert!(
+                !held.is_finished(),
+                "serving chunks did not resume the held semantic job"
+            );
+            runtime.close(session);
+            let mut retired = runtime.receive_tick_stream(session, vec![]).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                error.is_err(),
+                "retired session cannot regain auxiliary authority"
+            );
+        }
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    // Exercise the actual timer and persistent output stream: no inbound frame
+    // or explicit tick is allowed to rescue an expired canonical receiver.
+    #[tokio::test]
+    async fn canonical_expiry_closes_only_failed_session_and_healthy_query_progresses() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey::default(),
+        };
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let mut sessions = Vec::new();
+        for byte in [94, 95] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        crate::wire::FEATURE_NONE,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let failed = sessions[0];
+        let healthy = sessions[1];
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let state = shell.sessions[failed.transport].as_ref().unwrap();
+                    match &state.connection {
+                        super::super::ShellPeerConnection::Memory(connection)
+                        | super::super::ShellPeerConnection::Durable(connection) => {
+                            connection
+                                .lock()
+                                .await
+                                .set_incomplete_receive_timeout_for_test(20);
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut failed_stream = runtime.open_wire_stream(failed).unwrap();
+        let mut activity = runtime.subscribe_activity();
+        let partial = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+            protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+            features: crate::wire::FEATURE_NONE,
+            session: None,
+            extent: crate::wire::channels::ChannelFrame {
+                channel: 1,
+                generation: 0,
+                sequence: 0,
+                class: crate::wire::channels::ChannelClass::Requests,
+                first: true,
+                last: false,
+                message_len: 2,
+                decoded_len: 1,
+                payload: vec![0],
+            },
+        }))
+        .unwrap();
+        runtime.receive_wire_frames(failed, vec![partial]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let result = tokio::select! {
+                    result = failed_stream.recv() => result,
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(failed).unwrap();
+                        continue;
+                    }
+                };
+                match result {
+                    Some(Err(_)) | None => break,
+                    Some(Ok(frames)) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_) | WireFrame::Channel(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("timer alone must retire the failed persistent output stream");
+        let mut healthy_stream = runtime.open_wire_stream(healthy).unwrap();
+        let wire = QueuedWireTransport::default();
+        let inbound = Arc::clone(&wire.inbound);
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        for message in [
+            SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            },
+            SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }),
+        ] {
+            client.send(message).unwrap();
+        }
+        runtime
+            .receive_wire_frames(healthy, std::mem::take(&mut *outbound.lock().unwrap()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frames = tokio::select! {
+                    result = healthy_stream.recv() => result.expect("healthy stream remains open").unwrap(),
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(healthy).unwrap();
+                        continue;
+                    }
+                };
+                inbound.lock().unwrap().extend(frames);
+                while let Some(message) = client.try_recv_strict().unwrap() {
+                    if let SyncMessage::ViewUpdate(update) = message {
+                        assert_eq!(update.subscription, subscription);
+                        return;
+                    }
+                }
+                let credits = std::mem::take(&mut *outbound.lock().unwrap());
+                if !credits.is_empty() {
+                    runtime.receive_wire_frames(healthy, credits).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("unrelated session query must publish after peer expiry");
+        runtime.shutdown().await.unwrap();
+    }
+
+    // The owner suspension is an internal scheduling seam: real admitted
+    // session bytes must expire without another frame or a semantic tick.
+    #[tokio::test]
+    async fn partial_auxiliary_receive_expires_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let session = runtime
+            .open_with_session_context(
+                AuthorSubject::for_test_bytes([93; 16]),
+                BTreeMap::new(),
+                CommitUnitTrust::TrustedAdmin,
+                features,
+                None,
+                crate::serving::ServerLinkAdmission::OrdinarySession,
+            )
+            .await
+            .unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump
+                        .clone();
+                    pump.set_incomplete_receive_timeout_for_test(20);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut peer =
+            crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                features,
+                None,
+            ))
+            .unwrap();
+        peer.enqueue(SyncMessage::ChunkResponseBatch(
+            crate::protocol::ChunkResponseBatch {
+                responses: vec![crate::protocol::ChunkResponseEntry {
+                    request_id: 1,
+                    result: crate::protocol::ChunkResponse::Found(
+                        vec![7; 3 * crate::wire::channels::CHANNEL_CHUNK_BYTES],
+                    ),
+                }],
+            },
+        ))
+        .unwrap();
+        let first = peer.peek_outbound().unwrap().unwrap();
+        peer.accept_outbound().unwrap();
+        assert!(
+            matches!(crate::wire::decode_frame(&first).unwrap(), WireFrame::Channel(frame) if frame.extent.first && !frame.extent.last)
+        );
+        runtime.receive_wire_frames(session, vec![first]).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match stream
+                    .recv()
+                    .await
+                    .expect("session emits a terminal expiry")
+                {
+                    Err(error) => return error,
+                    Ok(frames) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("idle partial must expire without traffic or explicit polling");
+        assert!(error.contains("expired"), "{error}");
+        assert!(
+            !held.is_finished(),
+            "expiry does not require the semantic owner"
+        );
+        let next = peer.peek_outbound().unwrap().unwrap();
+        let mut retired = runtime.receive_tick_stream(session, vec![next]).unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rejection.is_err(),
+            "retired decoder cannot resume after expiry"
+        );
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = &shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump;
+                    assert!(pump.is_disconnected());
+                    assert!(
+                        pump.incomplete_receive_timeout_ms().is_none(),
+                        "expiry frees partial codec state"
+                    );
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn earlier_server_deadline_replaces_pending_later_wake() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::clone(&state),
+        };
+        scheduler.schedule_tick_after(30_000);
+        scheduler.schedule_tick_after(5);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        state.queued.store(false, Ordering::Release);
+        // The tick services all peers; a still-partial peer rearms its remaining deadline.
+        scheduler.schedule_tick_after(10);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        assert!(state.delayed.lock().unwrap().is_none());
+    }
+
+    // Timer cancellation and deadline ordering are host resources, not visible
+    // through row APIs. Dropping one connection's wait must not retain its slot
+    // or prevent another connection's earlier deadline from waking.
+    #[test]
+    fn receive_timer_queue_cancels_and_reorders_without_retaining_waiters() {
+        let timers = ReceiveTimerQueue::new();
+        let long = timers.after(60_000);
+        let cancelled = timers.after(60_000);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 2);
+        drop(cancelled);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        futures::executor::block_on(timers.after(5));
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        drop(long);
+        assert!(timers.shared.0.lock().unwrap().deadlines.is_empty());
+        let weak = Arc::downgrade(&timers.shared);
+        drop(timers);
+        assert!(
+            weak.upgrade().is_none(),
+            "worker exits when its runtime timer owner drops"
+        );
+    }
+
+    // Queue credits are private ownership, so test their exact release at this
+    // seam rather than relying on allocation timing through a remote socket.
+    #[test]
+    fn session_frame_queue_caps_bytes_and_tiny_frame_count_and_releases_on_drop() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let frames = vec![vec![0]; 512];
+        let credit = FrameQueueCredit::reserve(&used, &frames).unwrap();
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        let held = Arc::clone(&credit);
+        drop(credit);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        drop(held);
+        assert_eq!(used.load(Ordering::Acquire), 0);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0; FRAME_QUEUE_BUDGET + 1]]).is_err());
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_ok());
+    }
+
     #[tokio::test]
     async fn shutdown_cancels_a_suspended_local_shell_operation() {
         let schema = JazzSchema::new(
@@ -2017,6 +3089,8 @@ mod tests {
             join: Mutex::new(None),
             shutdown: Mutex::new(ShutdownState::Running),
             shutdown_changed: Condvar::new(),
+            ingress_bytes: Mutex::new(HashMap::new()),
+            wire_streams: Mutex::new(HashMap::new()),
             activity_tx,
             io_wakers: Arc::new(Mutex::new(Vec::new())),
         });

@@ -1105,7 +1105,7 @@ where
             )
             .await?;
         }
-        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+        let (staged_versions, fate, global_time) = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,

@@ -320,6 +320,22 @@ struct WireQueues {
     outbound: VecDeque<Vec<u8>>,
 }
 
+impl WireQueues {
+    fn stage_inbound(&mut self, frame: Vec<u8>) -> std::result::Result<(), String> {
+        let charge = crate::wire::channel_credit::channel_frame_credit_cost;
+        let used = self
+            .inbound
+            .iter()
+            .map(|frame| charge(frame.len()))
+            .sum::<usize>();
+        if used.saturating_add(charge(frame.len())) > 8 * 1024 * 1024 {
+            return Err("inbound physical channel queue exceeds receive budget".to_owned());
+        }
+        self.inbound.push_back(frame);
+        Ok(())
+    }
+}
+
 pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
@@ -328,7 +344,19 @@ pub(super) struct ServerUpstreamIo {
 
 impl WireTransport for SharedWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
-        self.queues.borrow_mut().outbound.push_back(frame);
+        let mut queues = self.queues.borrow_mut();
+        if queues.outbound.len() >= 128
+            || queues
+                .outbound
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                .saturating_add(frame.len())
+                > 8 * 1024 * 1024
+        {
+            return Err(TransportError::Backpressure);
+        }
+        queues.outbound.push_back(frame);
         Ok(())
     }
 
@@ -1045,23 +1073,6 @@ impl InMemoryServerShell {
         self.db.set_catalogue_activation_failpoint(failpoint);
     }
 
-    /// Encode the snapshot through the ordinary negotiated wire codec so
-    /// large catalogues retain the protocol's fragmentation and feature rules.
-    pub(crate) fn encoded_trusted_catalogue_snapshot(
-        &self,
-        protocol_version: u16,
-        features: crate::wire::WireFeatures,
-    ) -> ShellResult<Vec<AbiBytes>> {
-        let transport = SharedWireTransport::default();
-        let mut wire =
-            WireTransportAdapter::new(transport.clone(), protocol_version, features, None);
-        wire.send(SyncMessage::CatalogueSnapshot(Box::new(
-            self.trusted_catalogue_snapshot()?,
-        )))
-        .map_err(|error| ShellError::Transport(format!("{error:?}")))?;
-        Ok(transport.queues.borrow_mut().outbound.drain(..).collect())
-    }
-
     /// Return the shell's ABI runtime handle for diagnostics in unit tests.
     #[cfg(test)]
     pub fn runtime_handle(&self) -> usize {
@@ -1532,7 +1543,12 @@ impl InMemoryServerShell {
                 crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
                     .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())
@@ -1557,7 +1573,12 @@ impl InMemoryServerShell {
                 .await
                 .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())
@@ -1598,6 +1619,24 @@ impl InMemoryServerShell {
     /// chunk reads before this future resumes.
     pub async fn tick_async(&mut self) -> ShellResult<()> {
         let stats = self.db.tick_stats_async().await?;
+        let retired = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(transport, state)| {
+                state
+                    .as_ref()
+                    .filter(|state| state.auxiliary_pump.is_disconnected())
+                    .map(|state| ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for session in retired {
+            self.close_session(session)?;
+        }
         self.metrics.ticks += 1;
         let stats = ShellTickStats {
             inbound: 0,
@@ -1626,19 +1665,20 @@ impl InMemoryServerShell {
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
         let state = self.session_state(session)?;
-        let mut frames = state
-            .transport
-            .queues
-            .borrow_mut()
-            .outbound
-            .drain(..)
-            .collect::<Vec<_>>();
-        while let Some(frame) = state
-            .auxiliary_pump
-            .take_outbound_wire_frame()
-            .map_err(ShellError::Transport)?
-        {
-            frames.push(frame);
+        let mut frames = Vec::new();
+        // Bound each host turn and alternate sources at physical-frame
+        // granularity. A chunk response may itself span several extents.
+        for _ in 0..16 {
+            let canonical = state.transport.queues.borrow_mut().outbound.pop_front();
+            let auxiliary = state
+                .auxiliary_pump
+                .take_outbound_wire_frame()
+                .map_err(ShellError::Transport)?;
+            if canonical.is_none() && auxiliary.is_none() {
+                break;
+            }
+            frames.extend(canonical);
+            frames.extend(auxiliary);
         }
         self.metrics.frames_sent += frames.len() as u64;
         self.metrics.bytes_sent += frames.iter().map(Vec::len).sum::<usize>() as u64;

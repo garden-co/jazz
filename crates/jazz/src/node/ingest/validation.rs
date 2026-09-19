@@ -474,7 +474,7 @@ where
         staged_global_times: &mut Vec<GlobalTime>,
         staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
-        let staged_versions = self
+        let (staged_versions, fate, global_time) = self
             .stage_transaction_and_versions_with_current_indexes(
                 batch,
                 tx,
@@ -581,7 +581,7 @@ where
         // Staging owns the decoded records and derived-index working set. Keep
         // it behind an async allocation boundary so admission does not retain
         // that state on the caller's poll stack.
-        let staged_versions = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
+        let (staged_versions, fate, global_time) = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -627,7 +627,7 @@ where
         update_current_indexes: bool,
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
-    ) -> Result<Vec<VersionRow>, Error> {
+    ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>), Error> {
         // Provenance operation identities participate in merge deduplication.
         // Admit them before accepting staged values or writing any derived
         // transaction/current state, on every local, remote, and view ingress.
@@ -652,6 +652,26 @@ where
             self.ensure_schema_version_alias(schema).await?;
         }
         let stored_tx = self.query_transaction(tx.tx_id).await?;
+        // A discarded Pending view may have preserved only its transaction
+        // identity. Every extension of a view-scoped fragment must retain
+        // settlement learned in the meantime, including after restart and
+        // earlier partial extensions, before indexing new bodies.
+        let (fate, global_time, durability) = if let Some(stored) = stored_tx.as_ref()
+            && stored.view_scoped_cardinality
+        {
+            if let (Some(current), Some(next)) = (stored.global_time, global_time)
+                && next < current
+            {
+                return Err(Error::NonMonotoneState("global seq cannot move backwards"));
+            }
+            (
+                next_fate(&stored.fate, fate)?,
+                global_time.or(stored.global_time),
+                durability.max(stored.durability),
+            )
+        } else {
+            (fate, global_time, durability)
+        };
         let tx_already_known = stored_tx.is_some();
         let preserve_authoritative_cardinality = view_scoped_cardinality
             && stored_tx
@@ -844,7 +864,7 @@ where
             self.record_child_edges(tx.tx_id, parent_edges).await;
         }
         self.cache_tx_versions(tx.tx_id, stored_versions.clone());
-        Ok(stored_versions)
+        Ok((stored_versions, fate, global_time))
     }
 
     async fn finalize_staged_transaction_ingest(

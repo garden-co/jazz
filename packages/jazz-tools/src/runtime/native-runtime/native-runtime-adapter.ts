@@ -1,3 +1,4 @@
+import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
@@ -413,6 +414,8 @@ export type Transport = {
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
   recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
+  auxiliaryReceiveTimeoutMs?(): number | null | undefined;
+  expireAuxiliaryReceive?(): void;
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   /** Bounded redacted diagnostics emitted by the auxiliary chunk relay. */
   takeAuxiliaryTrace?(): unknown[];
@@ -644,6 +647,7 @@ function openMemoryDb(
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly pendingNativeReadCancels = new Set<() => void>();
   private readonly db: NativeDb;
@@ -711,6 +715,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
   private coreTickScheduled = false;
+  private coreDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  private coreDeadlineAt: number | undefined;
   private coreTickAgain = false;
   private coreOperation: {
     kind: "tick" | "admission";
@@ -946,6 +952,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   retirePeerTransport(transport: Transport): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
+    this.auxiliaryReceiveDeadlines.get(transport)?.close();
+    this.auxiliaryReceiveDeadlines.delete(transport);
     if (!this.coreOperation) {
       transport.close();
       return Promise.resolve();
@@ -989,6 +997,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
     if (this.closed) throw new Error("Native runtime is already closed");
     this.closed = true;
+    this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
     const capture = this.captureForegroundTxTimeHighWater();
     this.foregroundLeaseCapture = capture;
@@ -1135,6 +1144,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
@@ -1164,6 +1174,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private closeRuntimeState(alreadyMarkedClosed = false): boolean {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
     for (const [handle, subscription] of this.subscriptions) {
@@ -3034,6 +3045,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private clearCoreDeadline(): void {
+    if (this.coreDeadlineTimer !== undefined) clearTimeout(this.coreDeadlineTimer);
+    this.coreDeadlineTimer = undefined;
+    this.coreDeadlineAt = undefined;
+  }
+
   private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
     if (urgency === "after-current-turn") {
@@ -3050,7 +3067,17 @@ export class NativeRuntimeAdapter implements Runtime {
       // A protocol admission deadline is not a deferred microtask. Keep the
       // host event loop live and only wake the thread-affine core after the
       // promised window has elapsed.
-      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      const deadline = performance.now() + delayMs;
+      if (this.coreDeadlineAt !== undefined && this.coreDeadlineAt <= deadline) return;
+      this.clearCoreDeadline();
+      this.coreDeadlineAt = deadline;
+      this.coreDeadlineTimer = setTimeout(() => {
+        this.coreDeadlineTimer = undefined;
+        this.coreDeadlineAt = undefined;
+        // This tick services every connection. Still-live later obligations
+        // re-arm their remaining deadline through the same earliest timer.
+        this.scheduleCoreWake("immediate");
+      }, delayMs);
       return;
     }
     this.notifyPeerTransportWork();
@@ -3343,6 +3370,8 @@ export class NativeRuntimeAdapter implements Runtime {
     let processedInbound = false;
     const operation = this.serverInboundRouting.then(async () => {
       const transport = this.serverTransport;
+      const carrier = this.serverCarrier;
+      const generation = this.serverConnectionGeneration;
       if (!transport || this.pendingInboundServerFrames.length === 0) return;
       const frames = this.pendingInboundServerFrames.splice(0);
       processedInbound = true;
@@ -3352,6 +3381,9 @@ export class NativeRuntimeAdapter implements Runtime {
         const routed = transport.routeAuxiliaryWireFrame
           ? await transport.routeAuxiliaryWireFrame(frame)
           : frame;
+        if (carrier) this.refreshAuxiliaryReceiveDeadline(transport, carrier, generation);
+        if (transport !== this.serverTransport || generation !== this.serverConnectionGeneration)
+          return;
         if (routed != null) canonical.push(normalizeTransportFrame(routed));
       }
       this.publishAuxiliaryTrace(transport);
@@ -3365,7 +3397,6 @@ export class NativeRuntimeAdapter implements Runtime {
       // narrower than the general native tick scheduler, whose routine wakes
       // must remain coalescible to avoid self-sustaining peer-pump loops.
       this.notifyPeerTransportWork(true);
-      const carrier = this.serverCarrier;
       if (carrier) {
         this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
       }
@@ -3376,6 +3407,41 @@ export class NativeRuntimeAdapter implements Runtime {
     );
     await operation;
     return processedInbound;
+  }
+
+  private refreshAuxiliaryReceiveDeadline(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    if (
+      this.closed ||
+      transport !== this.serverTransport ||
+      generation !== this.serverConnectionGeneration
+    )
+      return;
+    let deadline = this.auxiliaryReceiveDeadlines.get(transport);
+    if (!deadline) {
+      deadline = new AuxiliaryReceiveDeadline(transport, (error) => {
+        if (
+          this.closed ||
+          transport !== this.serverTransport ||
+          generation !== this.serverConnectionGeneration
+        )
+          return;
+        const failure = error instanceof Error ? error : new Error(errorMessage(error));
+        const attempt = this.serverConnectionAttempt;
+        if (attempt?.transport === transport) {
+          this.finishServerConnectionAttempt(attempt, failure);
+        } else {
+          carrier.close();
+          this.handleServerTransportError(failure, generation);
+          void this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+        }
+      });
+      this.auxiliaryReceiveDeadlines.set(transport, deadline);
+    }
+    deadline.refresh();
   }
 
   private flushAuxiliaryOutbound(

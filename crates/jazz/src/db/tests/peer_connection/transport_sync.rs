@@ -346,6 +346,7 @@ fn handoff_receive_pre_staged_view_update_is_ineligible_after_immediate_drain() 
             .borrow_mut()
             .staged_inbound
             .push_back(crate::db::StagedInboundMessage {
+                lease: None,
                 message,
                 authority_receipt_eligible: true,
             });

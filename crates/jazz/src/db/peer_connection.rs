@@ -825,6 +825,7 @@ pub(super) struct UpstreamConnectionState {
     /// version and recording the ViewUpdate that needs it.
     pub(super) pending_row_version_fetches: VecDeque<PendingRowVersionFetch>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
+    pub(super) deferred_repair_fates: VecDeque<StagedInboundMessage>,
     pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
@@ -982,6 +983,8 @@ pub(super) struct PendingCatalogueSubscription {
 
 pub(super) struct PendingRowVersionRepair {
     pub(super) update: SyncMessage,
+    pub(super) lease: Option<crate::wire::channel_credit::BufferLease>,
+    pub(super) pending_tx_ids: BTreeSet<TxId>,
     pub(super) authority_receipt_eligible: bool,
     /// A later complete set has arrived for this exact usage. Its immutable
     /// bodies may still be useful, but this older set must never be installed.
@@ -1029,6 +1032,13 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.transport
+            .set_incomplete_receive_timeout_for_test(timeout_ms);
+    }
+
     pub(super) fn take_released_outbox_tx_ids(&mut self) -> Vec<TxId> {
         std::mem::take(&mut self.released_outbox_tx_ids)
     }
@@ -1045,6 +1055,9 @@ where
 
     /// Clone the binding-driven auxiliary I/O endpoint for this peer link.
     pub fn io_pump(&self) -> PeerIoPump {
+        // A plain byte-adapter connection drives its own credits/auxiliary
+        // frames. Transfer output only when a binding actually takes the pump.
+        self.auxiliary_pump.claim_binding_output();
         self.auxiliary_pump.clone()
     }
     /// Replace the claims authenticated by the host for this subscriber link.
@@ -1907,12 +1920,16 @@ where
 
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
+            deferred_repair_fates,
             sent_subscriptions,
             awaiting_support_snapshots,
             pending,
             ..
         }) = &mut self.link
         {
+            for staged in deferred_repair_fates {
+                staged.authority_receipt_eligible = false;
+            }
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
             }
@@ -1936,9 +1953,10 @@ where
             }
         }
         loop {
-            match self.transport.try_recv_result() {
+            match self.transport.try_recv_owned_result() {
                 Ok(Some(message)) => self.staged_inbound.push_back(StagedInboundMessage {
-                    message,
+                    message: message.message,
+                    lease: message.lease,
                     authority_receipt_eligible: false,
                 }),
                 Ok(None) => {
@@ -1962,7 +1980,23 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
-        let result = self.tick_inner().await;
+        let mut result = self.tick_inner().await;
+        if result.is_ok() {
+            match self.transport.poll_flush() {
+                Ok(super::WireFlushStatus::MoreReady) => {
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn)
+                }
+                Ok(super::WireFlushStatus::Idle | super::WireFlushStatus::Backpressured) => {}
+                Err(error) => result = Err(transport_error(error)),
+            }
+        }
+        if result.is_ok() {
+            if let Some(delay_ms) = self.transport.incomplete_receive_timeout_ms() {
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(delay_ms);
+                }
+            }
+        }
         if let Err(error) = &result {
             if matches!(self.link, ConnectionLink::Upstream(_)) {
                 finish_open_schema_connection(
@@ -2006,6 +2040,9 @@ where
     }
 
     async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
+        // Retain decoded message reservations through batched application, not
+        // merely until dequeue. Deferrals clone the same lease into their front.
+        let mut received_leases = Vec::new();
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -2060,6 +2097,7 @@ where
                 failed_large_value_uploads,
                 pending_row_version_fetches,
                 pending_row_version_repairs,
+                deferred_repair_fates,
                 scope_view_cuts,
                 scope_receipts,
                 expected_scope_authority,
@@ -2678,11 +2716,15 @@ where
                     let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                     let mut deferred_stop = false;
                     loop {
-                        let next = match self.staged_inbound.pop_front() {
+                        let resumed_fate = if pending_row_version_repairs.is_empty() {
+                            deferred_repair_fates.pop_front()
+                        } else { None };
+                        let next = match resumed_fate.or_else(|| self.staged_inbound.pop_front()) {
                             Some(staged) => Some(staged),
-                            None => match self.transport.try_recv_result() {
+                            None => match self.transport.try_recv_owned_result() {
                                 Ok(Some(message)) => Some(StagedInboundMessage {
-                                    message,
+                                    message: message.message,
+                                    lease: message.lease,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
                                 }),
@@ -2705,11 +2747,24 @@ where
                         };
                         let Some(StagedInboundMessage {
                             message,
+                            lease,
                             authority_receipt_eligible,
                         }) = next
                         else {
                             break;
                         };
+                        if let Some(lease)=&lease { received_leases.push(lease.clone()); }
+                        if matches!(&message, SyncMessage::FateUpdate { tx_id, .. }
+                            if pending_row_version_repairs.iter().any(|repair|
+                                repair.pending_tx_ids.contains(tx_id))) {
+                            if deferred_repair_fates.len() >= crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
+                                return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
+                            }
+                            deferred_repair_fates.push_back(StagedInboundMessage {
+                                message, lease, authority_receipt_eligible,
+                            });
+                            continue;
+                        }
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -2817,6 +2872,7 @@ where
                                                     durability: None,
                                                 },
                                                 authority_receipt_eligible: false,
+                                                lease: None,
                                             });
                                         }
                                     }
@@ -2851,6 +2907,7 @@ where
                                     drop(catalogue_owner);
                                     self.staged_inbound.push_front(StagedInboundMessage {
                                         message: SyncMessage::CatalogueSnapshot(snapshot),
+                                        lease: lease.clone(),
                                         authority_receipt_eligible,
                                     });
                                     break;
@@ -2964,6 +3021,7 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 }
                                 let repair = pending_row_version_repairs.pop_front().expect("active repair");
+                                if let Some(lease) = repair.lease { received_leases.push(lease); }
                                 if !repair.superseded {
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -2992,6 +3050,7 @@ where
                                 {
                                     pending_row_version_fetches.pop_front();
                                     let successor = pending_row_version_repairs.pop_front().expect("paired pending successor");
+                                    if let Some(lease) = successor.lease { received_leases.push(lease); }
                                     if successor.superseded { continue; }
                                     stage_initial_coverage_clear_for_update(&successor.update,
                                         &self.latest_coverage_subscriptions, &mut pending_initial_coverage_clears);
@@ -3019,6 +3078,9 @@ where
                                         || settled_through < *minimum_cut {
                                         #[cfg(any(test, feature = "testing"))]
                                         crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", self.node.borrow().groove_runtime_token(), settled_through.0, minimum_cut.0));
+                                        if let SyncMessage::ViewUpdate(view) = &message {
+                                            self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                        }
                                         continue;
                                     }
                                     awaiting_support_snapshots.remove(&subscription);
@@ -3035,6 +3097,16 @@ where
                                         if matches!(&pending_row_version_repairs[index].update, SyncMessage::ViewUpdate(payload)
                                             if payload.subscription == subscription)
                                         {
+                                            // Superseding membership does not retract already
+                                            // observed Pending transaction identities. Preserve
+                                            // only those headers for later fates; do not publish
+                                            // discarded row bodies or their old supporting set.
+                                            if !pending_row_version_repairs[index].superseded {
+                                                if let SyncMessage::ViewUpdate(view) = &pending_row_version_repairs[index].update {
+                                                    self.node.lock().await
+                                                        .remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                                }
+                                            }
                                             if pending_row_version_fetches[index].sent_count == 0 {
                                                 pending_row_version_repairs.remove(index);
                                                 pending_row_version_fetches.remove(index);
@@ -3073,6 +3145,16 @@ where
                                     for index in (0..pending_row_version_repairs.len()).rev() {
                                         if matches!(&pending_row_version_repairs[index].update,
                                             SyncMessage::ViewUpdate(view) if view.subscription == subscription) {
+                                            // Superseding membership does not retract already
+                                            // observed Pending transaction identities. Preserve
+                                            // only those headers for later fates; do not publish
+                                            // discarded row bodies or their old supporting set.
+                                            if !pending_row_version_repairs[index].superseded {
+                                                if let SyncMessage::ViewUpdate(view) = &pending_row_version_repairs[index].update {
+                                                    self.node.lock().await
+                                                        .remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                                }
+                                            }
                                             if pending_row_version_fetches[index].sent_count == 0 {
                                                 pending_row_version_repairs.remove(index);
                                                 pending_row_version_fetches.remove(index);
@@ -3080,6 +3162,9 @@ where
                                                 pending_row_version_repairs[index].superseded = true;
                                             }
                                         }
+                                    }
+                                    if let SyncMessage::ViewUpdate(view) = &message {
+                                        self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
                                     }
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                     continue;
@@ -3144,7 +3229,11 @@ where
                                         // A queued complete snapshot may arrive after its
                                         // last reader has closed. Do not fetch bytes for a
                                         // retired subscription or borrow another reader's
-                                        // authorization to repair it.
+                                        // authorization to repair it. Preserve only Pending
+                                        // transaction headers for already-registered fate observers.
+                                        if let SyncMessage::ViewUpdate(view) = &message {
+                                            self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                        }
                                         continue;
                                     };
                                     pending_row_version_fetches.push_back(PendingRowVersionFetch {
@@ -3154,7 +3243,9 @@ where
                                     });
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
+                                            pending_tx_ids: pending_view_transaction_ids(&message)?,
                                             update: message,
+                                            lease: lease.clone(),
                                             authority_receipt_eligible,
                                             superseded: false,
                                         },
@@ -3757,7 +3848,7 @@ where
                                     && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
                                 {
                                     drop(ingress_owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message, authority_receipt_eligible });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible });
                                     break;
                                 }
                                 if *local_receiver {
@@ -4074,14 +4165,12 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) =
-                        if let Some(message) =
-                            self.staged_inbound.pop_front().map(|staged| staged.message)
-                        {
-                            (Box::new(message), None)
+                    let (message, parked_policy_binding, lease) =
+                        if let Some(staged) = self.staged_inbound.pop_front() {
+                            (Box::new(staged.message), None, staged.lease)
                         } else {
-                            match self.transport.try_recv_result() {
-                                Ok(Some(message)) => (Box::new(message), None),
+                            match self.transport.try_recv_owned_result() {
+                                Ok(Some(message)) => (Box::new(message.message), None, message.lease),
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
@@ -4111,10 +4200,12 @@ where
                                     (
                                         Box::new(SyncMessage::Subscribe(pending.subscribe)),
                                         Some(pending.policy_binding),
+                                        None,
                                     )
                                 }
                             }
                         };
+                    if let Some(lease)=&lease { received_leases.push(lease.clone()); }
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
@@ -5479,7 +5570,7 @@ where
                                 let mut owner = self.node.lock().await;
                                 if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
                                     drop(owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, authority_receipt_eligible: false });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false });
                                     catalogue_deferred = true;
                                     return Ok::<bool, Error>(false);
                                 }
@@ -6354,6 +6445,24 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         },
         _ => unreachable!("expected view update message"),
     }
+}
+
+fn pending_view_transaction_ids(message: &SyncMessage) -> Result<BTreeSet<TxId>, Error> {
+    let SyncMessage::ViewUpdate(view) = message else {
+        return Ok(BTreeSet::new());
+    };
+    let mut ids = BTreeSet::new();
+    for carrier in &view.version_carriers {
+        for bundle in carrier
+            .bundle_refs()
+            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?
+        {
+            if matches!(bundle.fate, Fate::Pending) {
+                ids.insert(bundle.tx.tx_id);
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn push_view_update_message_for_receiver(

@@ -2225,19 +2225,26 @@ fn byte_wire_round_trips_subscription_to_client() {
         let queued = server_inbound.borrow();
         let first = queued.front().expect("register shape frame");
         let second = queued.get(1).expect("subscribe frame");
-        let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
-        let first = match decode_frame(first).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
+        let mut decoder = crate::db::channel_endpoint::ChannelEndpoint::new(
+            crate::wire::WireInboundContext::new(
+                WIRE_PROTOCOL_VERSION,
+                current_wire_features(),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut decode = |bytes: &Vec<u8>| match decode_frame(bytes).unwrap() {
+            WireFrame::Channel(envelope) => {
+                decoder.receive(envelope, bytes.len()).unwrap().unwrap()
+            }
+            other => panic!("expected channel frame, got {other:?}"),
         };
-        let second = match decode_frame(second).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
-        };
-        let SyncMessage::RegisterShape { shape_id, .. } = first else {
+        let first = decode(first);
+        let second = decode(second);
+        let SyncMessage::RegisterShape { shape_id, .. } = first.message else {
             panic!("expected RegisterShape, got {first:?}");
         };
-        let SyncMessage::Subscribe(subscribe) = second else {
+        let SyncMessage::Subscribe(subscribe) = second.message else {
             panic!("expected Subscribe, got {second:?}");
         };
         assert_eq!(subscribe.shape_id, shape_id);
@@ -4460,6 +4467,63 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         })
     ));
     assert!(!routes.borrow().contains_key(&rejected_id));
+}
+
+// The host scheduler and physical partial frame are intentionally exposed:
+// row-level APIs cannot simulate a peer falling silent halfway through a frame.
+// The only second service turn is triggered by the real scheduled timer.
+#[test]
+fn silent_partial_canonical_receive_schedules_its_own_expiry() {
+    struct TimerHost(std::sync::mpsc::Sender<()>);
+    impl TickScheduler for TimerHost {
+        fn schedule_tick(&self, _urgency: TickUrgency) {}
+        fn schedule_tick_after(&self, delay_ms: u64) {
+            let sender = self.0.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let _ = sender.send(());
+            });
+        }
+    }
+    let client = open_db(0x75, AuthorSubject::for_test_bytes([0x75; 16]), &schema());
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+    client.set_tick_scheduler(Some(Rc::new(TimerHost(wake_tx))));
+    let (client_bytes, mut remote) = byte_duplex_raw();
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let mut adapter =
+        WireTransportAdapter::new(client_bytes, WIRE_PROTOCOL_VERSION, features, None);
+    adapter.set_incomplete_receive_timeout_for_test(20);
+    let connection = block_on(client.connect_upstream(Box::new(adapter)));
+    remote
+        .send_frame(
+            encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+                protocol_version: WIRE_PROTOCOL_VERSION,
+                features,
+                session: None,
+                extent: crate::wire::channels::ChannelFrame {
+                    channel: 3,
+                    generation: 0,
+                    sequence: 0,
+                    class: crate::wire::channels::ChannelClass::Delivery,
+                    first: true,
+                    last: false,
+                    message_len: 2,
+                    decoded_len: 1,
+                    payload: vec![0],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    block_on(async { connection.lock().await.tick().await }).unwrap();
+    wake_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("a silent partial receive must schedule its own host timer");
+    let error = block_on(async { connection.lock().await.tick().await }).unwrap_err();
+    assert!(
+        error.message.contains("incomplete channel message expired"),
+        "{error:?}"
+    );
 }
 
 /// Alice's second independent query may finish the first query's cold graph.

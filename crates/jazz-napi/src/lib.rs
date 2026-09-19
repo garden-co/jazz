@@ -1487,6 +1487,23 @@ impl Transport {
         Ok(frames)
     }
 
+    #[napi(js_name = "auxiliaryReceiveTimeoutMs")]
+    pub fn auxiliary_receive_timeout_ms(&self) -> Option<u32> {
+        self.auxiliary_pump
+            .incomplete_receive_timeout_ms()
+            .map(|delay| delay.min(u64::from(u32::MAX)) as u32)
+    }
+
+    #[napi(js_name = "expireAuxiliaryReceive")]
+    pub fn expire_auxiliary_receive(&self) -> napi::Result<()> {
+        self.auxiliary_pump
+            .expire_incomplete_receive()
+            .map_err(|error| {
+                self.auxiliary_pump.disconnect();
+                napi::Error::from_reason(error)
+            })
+    }
+
     #[napi(js_name = "auxiliaryOutboundReady")]
     pub fn auxiliary_outbound_ready(&self) -> bool {
         self.auxiliary_pump.outbound_is_ready()

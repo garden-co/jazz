@@ -258,6 +258,7 @@ pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
 
 #[cfg(feature = "testing")]
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
+#[cfg(test)]
 use maintained_views::SubscriptionPreparedPlan;
 pub(crate) use maintained_views::{
     CoveredInputReceiver, LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
@@ -541,12 +542,14 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        // One-shot reads can use every eligible access path. Maintained reads
-        // deliberately retain their ordinary source except for the separately
-        // proved physical primary-key path: secondary indexes can settle at a
-        // frontier distinct from their maintained source, while one immutable
-        // physical row has no such independent frontier.
-        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        // The first result is hydration of the same live source graph used by
+        // a retained consumer, not a snapshot-only physical scan.
+        let access_paths = self.current_query_hydration_access_paths(
+            &request,
+            shape,
+            binding,
+            HydrationLifetime::FirstResult,
+        )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
@@ -1121,6 +1124,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::TrustedServing,
+            None,
         )
         .await
     }
@@ -1142,6 +1146,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::ClientLocal,
+            None,
         )
         .await
     }
@@ -1358,6 +1363,7 @@ where
             identity,
             true,
             authorization_mode,
+            None,
         )
         .await
     }
@@ -1367,11 +1373,13 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
+        _prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorSubject,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
+        mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let phase_started = profile.as_ref().map(|_| Instant::now());
         if include_deleted {
             let mut rows = self
                 .query_rows_including_deleted_with_query_engine(
@@ -1435,26 +1443,6 @@ where
         {
             return Ok(Vec::new());
         }
-        let has_one_shot_access_path = settled_binding_view.is_none()
-            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty();
-        // A concrete one-shot access path is binding-specific. Inline that
-        // binding so execution keeps the selected graph instead of replacing it
-        // with the generic cached parameterized plan. Prepared Local reads also
-        // take this path: their reusable graph cannot embed the current binding's
-        // physical index prefix and would otherwise hydrate the complete table.
-        let inline_query = if has_one_shot_access_path {
-            let schema = self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-            let inline_shape =
-                inline_snapshot_bind_filter_literals(shape, binding, &schema.schema)?;
-            let inline_binding = inline_shape.bind(BTreeMap::new())?;
-            Some((inline_shape, inline_binding))
-        } else {
-            None
-        };
         let rebased_window_query = client_settled_binding_view
             .as_ref()
             .and_then(|view| view.retained_window.as_ref())
@@ -1476,18 +1464,14 @@ where
             .transpose()?;
         let (shape, binding) = rebased_window_query
             .as_ref()
-            .or(inline_query.as_ref())
-            .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan.filter(|plan| {
-            !has_one_shot_access_path
-                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
-        });
         let mut ephemeral_covered_inputs = None;
-        let program = if prepared_plan.is_some() {
-            None
-        } else if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.resolve_view = started.elapsed();
+        }
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        let program = if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             let request = self.current_query_program_request(
                 shape,
                 binding,
@@ -1498,7 +1482,12 @@ where
                 settled_binding_view,
                 authorization_mode,
             )?;
-            let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+            let access_paths = self.current_query_hydration_access_paths(
+                &request,
+                shape,
+                binding,
+                HydrationLifetime::FirstResult,
+            )?;
             let Some((program, receiver)) = self
                 .compile_client_one_shot_with_covered_inputs(
                     request,
@@ -1512,92 +1501,24 @@ where
                 return Ok(Vec::new());
             };
             ephemeral_covered_inputs = Some(receiver);
-            Some(program)
+            program
         } else {
-            Some(
-                self.compile_current_query_program_for_one_shot_read(
-                    shape,
-                    binding,
-                    tier,
-                    identity,
-                    settled_binding_view,
-                    authorization_mode,
-                )
-                .await?,
+            self.compile_current_query_program_for_one_shot_read(
+                shape,
+                binding,
+                tier,
+                identity,
+                settled_binding_view,
+                authorization_mode,
             )
+            .await?
         };
-        let needs_binding = || {
-            let parameters = &program
-                .as_ref()
-                .expect("program is compiled when no prepared plan is supplied")
-                .lowered
-                .parameters;
-            !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
-        };
-        let plan = match prepared_plan {
-            Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
-            Some(_) => None,
-            None if authorization_mode == QueryAuthorizationMode::TrustedServing
-                && settled_binding_view.is_none()
-                && self.can_use_prepared_current_query_plan(shape)
-                && needs_binding() =>
-            {
-                Some(
-                    self.prepared_query_plan(shape, binding, tier, identity)
-                        .await?,
-                )
-            }
-            None if authorization_mode == QueryAuthorizationMode::TrustedServing
-                && settled_binding_view.is_none()
-                && needs_binding() =>
-            {
-                Some(std::sync::Arc::new(
-                    self.prepared_query_plan_from_program(
-                        program
-                            .as_ref()
-                            .expect("program is compiled when no prepared plan is supplied"),
-                        shape,
-                        binding,
-                    )
-                    .await?,
-                ))
-            }
-            None => None,
-        };
-        let policy = self.query_program_policy_context(identity);
-        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
-        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
-        let deltas_result = match plan {
-            None => self
-                .database
-                .query_graph(lowered_materialization_app_rows_graph(
-                    &program.expect("program is compiled when no prepared plan is supplied"),
-                )?)
-                .await
-                .map_err(Error::Groove),
-            Some(plan) => match plan.as_ref() {
-                PreparedQueryPlan::Prepared { shape, params, .. } => {
-                    let values = binding_values_for_plan(
-                        binding,
-                        params,
-                        &policy,
-                        PreparedClaimBindingMode::Strict,
-                    )?;
-                    take_required_sink_deltas(
-                        self.bind_shape_snapshot(*shape, &values).await?,
-                        JAZZ_APP_ROWS_SINK,
-                    )
-                }
-                PreparedQueryPlan::Graph { graph, .. } => self
-                    .database
-                    .query_graph(graph.clone())
-                    .await
-                    .map_err(Error::Groove),
-                PreparedQueryPlan::PeerMaintainedMarker => {
-                    unreachable!("peer maintained markers are filtered before query execution")
-                }
-            },
-        };
+        let app_output = materialization_app_row_schema(None, Some(&program))?;
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.compile_program = started.elapsed();
+        }
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        let deltas_result = self.hydrate_lowered_program_once(program, binding).await;
         // Retire transient receiver inputs even if the one-shot graph itself
         // fails.  These identities are runtime-local capabilities and must
         // never be re-used by a later receipt.
@@ -1612,15 +1533,18 @@ where
         };
         let deltas = deltas_result?;
         retire_result?;
-        let rows = self.materialize_and_finalize_query_rows(
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.execute_plan = started.elapsed();
+        }
+        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
+        self.materialize_and_finalize_query_rows(
             shape.query(),
             shape.schema_version(),
             &table_schema,
             &app_output,
             &deltas,
-            None,
-        )?;
-        Ok(rows)
+            profile,
+        )
     }
 
     /// Materialize one-shot current rows and expose the canonical public
@@ -1706,142 +1630,21 @@ where
         prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorSubject,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
-        let total_started = Instant::now();
-        let phase_started = Instant::now();
-        // Profiled reads are trusted-serving only, so they evaluate the
-        // complete authority program rather than attempting to resolve a
-        // receiver-local CoveredInput receipt.
-        let settled_binding_view = None;
-        // A concrete one-shot access path is binding-specific. Inline that
-        // binding so execution keeps the selected graph instead of replacing it
-        // with the generic cached parameterized plan.
-        let inline_query = if prepared_plan.is_none()
-            && settled_binding_view.is_none()
-            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
-        {
-            let schema = self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-            let inline_shape =
-                inline_snapshot_bind_filter_literals(shape, binding, &schema.schema)?;
-            let inline_binding = inline_shape.bind(BTreeMap::new())?;
-            Some((inline_shape, inline_binding))
-        } else {
-            None
-        };
-        let (shape, binding) = inline_query
-            .as_ref()
-            .map(|(shape, binding)| (shape, binding))
-            .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
-        let mut profile = QueryReadProfile {
-            resolve_view: phase_started.elapsed(),
-            ..Default::default()
-        };
-
-        let phase_started = Instant::now();
-        let program = if prepared_plan.is_some() {
-            None
-        } else {
-            Some(
-                self.compile_current_query_program_for_one_shot_read(
-                    shape,
-                    binding,
-                    tier,
-                    identity,
-                    settled_binding_view,
-                    QueryAuthorizationMode::TrustedServing,
-                )
-                .await?,
+        let started = Instant::now();
+        let mut profile = QueryReadProfile::default();
+        let rows = self
+            .query_rows_with_options_for_identity(
+                shape,
+                binding,
+                tier,
+                prepared_plan,
+                identity,
+                false,
+                QueryAuthorizationMode::TrustedServing,
+                Some(&mut profile),
             )
-        };
-        profile.compile_program = phase_started.elapsed();
-
-        let phase_started = Instant::now();
-        let needs_binding = || {
-            let parameters = &program
-                .as_ref()
-                .expect("program is compiled when no prepared plan is supplied")
-                .lowered
-                .parameters;
-            !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
-        };
-        let plan = match prepared_plan {
-            Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
-            Some(_) => None,
-            None if settled_binding_view.is_none()
-                && self.can_use_prepared_current_query_plan(shape)
-                && needs_binding() =>
-            {
-                Some(
-                    self.prepared_query_plan(shape, binding, tier, identity)
-                        .await?,
-                )
-            }
-            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
-                self.prepared_query_plan_from_program(
-                    program
-                        .as_ref()
-                        .expect("program is compiled when no prepared plan is supplied"),
-                    shape,
-                    binding,
-                )
-                .await?,
-            )),
-            None => None,
-        };
-        let policy = self.query_program_policy_context(identity);
-        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
-        profile.select_plan = phase_started.elapsed();
-
-        let phase_started = Instant::now();
-        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
-        let deltas_result = match plan {
-            None => self
-                .database
-                .query_graph(lowered_materialization_app_rows_graph(
-                    &program.expect("program is compiled when no prepared plan is supplied"),
-                )?)
-                .await
-                .map_err(Error::Groove),
-            Some(plan) => match plan.as_ref() {
-                PreparedQueryPlan::Prepared { shape, params, .. } => {
-                    let values = binding_values_for_plan(
-                        binding,
-                        params,
-                        &policy,
-                        PreparedClaimBindingMode::Strict,
-                    )?;
-                    take_required_sink_deltas(
-                        self.bind_shape_snapshot(*shape, &values).await?,
-                        JAZZ_APP_ROWS_SINK,
-                    )
-                }
-                PreparedQueryPlan::Graph { graph, .. } => self
-                    .database
-                    .query_graph(graph.clone())
-                    .await
-                    .map_err(Error::Groove),
-                PreparedQueryPlan::PeerMaintainedMarker => {
-                    unreachable!("peer maintained markers are filtered before query execution")
-                }
-            },
-        };
-        let deltas = deltas_result?;
-        profile.execute_plan = phase_started.elapsed();
-
-        let rows = self.materialize_and_finalize_query_rows(
-            shape.query(),
-            shape.schema_version(),
-            &table_schema,
-            &app_output,
-            &deltas,
-            Some(&mut profile),
-        )?;
-        profile.total = total_started.elapsed();
+            .await?;
+        profile.total = started.elapsed();
         Ok((rows, profile))
     }
 
@@ -2516,6 +2319,7 @@ where
         Ok((shape, binding, plan))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -2536,6 +2340,7 @@ where
         }
     }
 
+    #[cfg(test)]
     async fn prepare_client_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2558,6 +2363,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     async fn prepare_trusted_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2578,6 +2384,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
@@ -3814,12 +3621,12 @@ where
                 }
             }
         }
-        let mut access_paths = self.current_query_primary_key_access_paths(&shape, &binding)?;
-        access_paths.extend(
-            self.query_program_access_paths(&request, true)?
-                .into_iter()
-                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
-        );
+        let access_paths = self.current_query_hydration_access_paths(
+            &request,
+            &shape,
+            &binding,
+            HydrationLifetime::Retained,
+        )?;
         // Receiver inputs are allocated from the compiler's source
         // requirements before any source is resolved. This keeps the initial
         // lowering from consulting an authority result just to discover a
@@ -3916,6 +3723,8 @@ where
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        let compiled_authorization_mode = program.request.authorization_mode;
         let subscription = match self
             .subscribe_lowered_program(
                 program,
@@ -3937,6 +3746,10 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        #[cfg(test)]
+        {
+            maintained.compiled_authorization_mode = Some(compiled_authorization_mode);
+        }
         maintained.physical_tables = self
             .catalogue
             .physical_mappings

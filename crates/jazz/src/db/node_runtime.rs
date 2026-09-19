@@ -346,6 +346,7 @@ where
         let mut connection = connection.lock().await;
         connection.staged_inbound.push_back(StagedInboundMessage {
             message,
+            lease: None,
             authority_receipt_eligible,
         });
         self.schedule_tick(TickUrgency::Immediate);
@@ -2175,6 +2176,7 @@ where
             let confirmation_floor = node.committed_global_time();
             drop(node);
             let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+            let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
             let upstream_upload_destination = session_context.and_then(|context| {
                 context.remote.map(|remote| UpstreamUploadDestination {
                     remote_node: *remote.node.as_bytes(),
@@ -2448,6 +2450,7 @@ where
                     failed_large_value_uploads: BTreeSet::new(),
                     pending_row_version_fetches: VecDeque::new(),
                     pending_row_version_repairs: VecDeque::new(),
+                    deferred_repair_fates: VecDeque::new(),
                     scope_view_cuts: BTreeMap::new(),
                     scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
@@ -2460,7 +2463,8 @@ where
                     connection_epoch,
                     PeerIoPumpRole::Upstream,
                     wire_inbound_context,
-                ),
+                )
+                .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
             }));
             self.connections.borrow_mut().push(Rc::clone(&connection));
             self.schedule_tick(TickUrgency::Immediate);
@@ -2816,6 +2820,7 @@ where
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         transport.set_trusted_encoder(ingest_context.trust.is_trusted());
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+        let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
@@ -2889,7 +2894,8 @@ where
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
                 wire_inbound_context,
-            ),
+            )
+            .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -3033,6 +3039,12 @@ where
         }
         if let ConnectionLink::Subscriber(state) = &mut connection_ref.link {
             state.pending_authority_repairs.clear();
+        }
+        connection_ref.staged_inbound.clear();
+        if let ConnectionLink::Upstream(state) = &mut connection_ref.link {
+            state.pending_row_version_repairs.clear();
+            state.pending_row_version_fetches.clear();
+            state.deferred_repair_fates.clear();
         }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
@@ -3420,19 +3432,38 @@ where
         // its initial view can suspend on cold storage, while later inbound
         // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
-        let connections = self.connections.borrow().clone();
-        for connection in &connections {
-            let mut connection = connection.lock().await;
+        let mut connections = self.connections.borrow().clone();
+        let mut retired = Vec::new();
+        for handle in &connections {
+            let mut connection = handle.lock().await;
             // `PeerConnection::tick` contains the subscriber admission state
             // machine. Keep that future off the enclosing Db tick frame so a
             // normal host/test thread cannot accumulate it across connection
             // passes.
-            let next = Box::pin(connection.tick()).await?;
+            let next = match Box::pin(connection.tick()).await {
+                Ok(next) => next,
+                Err(_)
+                    if matches!(connection.link, ConnectionLink::Subscriber(_))
+                        && connection.transport.has_terminal_failure() =>
+                {
+                    connection.auxiliary_pump.disconnect();
+                    drop(connection);
+                    retired.push(Rc::clone(handle));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
+        retired.clear();
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
@@ -3454,8 +3485,21 @@ where
                         connection.mark_subscriber_dirty() || subscriber_state_changed
                     };
                     if should_tick {
-                        let mut connection = connection.lock().await;
-                        let next = Box::pin(connection.tick()).await?;
+                        let handle = connection;
+                        let mut connection = handle.lock().await;
+                        let next = match Box::pin(connection.tick()).await {
+                            Ok(next) => next,
+                            Err(_)
+                                if matches!(connection.link, ConnectionLink::Subscriber(_))
+                                    && connection.transport.has_terminal_failure() =>
+                            {
+                                connection.auxiliary_pump.disconnect();
+                                drop(connection);
+                                retired.push(Rc::clone(handle));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;
@@ -3463,6 +3507,11 @@ where
                 }
             }
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
@@ -4137,19 +4186,12 @@ where
                     .await
                     .unsubscribe_groove_subscription(subscription_id);
             }
-            let (shape, binding, prepared_plan) = {
+            let (shape, binding) = {
                 let mut owner = node.lock().await;
-                let mut scoped =
-                    owner.scoped_optional_session_claims(author, request_claims.clone());
-                scoped
-                    .prepare_query_binding_for_link_in_authorization_mode(
-                        &shape,
-                        &binding,
-                        read_tier,
-                        author,
-                        authorization_mode,
-                    )
-                    .await?
+                let scoped = owner.scoped_optional_session_claims(author, request_claims.clone());
+                // Reopening installs its own maintained graph, just like the
+                // initial opener; no unused AppRows graph needs to be retained.
+                scoped.query_binding_for_link(&shape, &binding)?
             };
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
@@ -4172,7 +4214,7 @@ where
                         author,
                         read_tier,
                         &read_view,
-                        Some(prepared_plan),
+                        None,
                         authorization_mode,
                         pending_overlay,
                         progress_waker,
@@ -5476,6 +5518,39 @@ pub trait Transport {
     /// not expose transport failures retain the Option-only behavior.
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
         Ok(self.try_recv())
+    }
+
+    /// Retain decoded-buffer ownership while a canonical message is deferred.
+    fn try_recv_owned_result(
+        &mut self,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        self.try_recv_result()
+            .map(|message| message.map(super::ReceivedSyncMessage::unleased))
+    }
+
+    /// Drive one bounded output turn. Backpressure must wait for a binding wake.
+    fn poll_flush(&mut self) -> Result<super::WireFlushStatus, TransportError> {
+        Ok(super::WireFlushStatus::Idle)
+    }
+    /// Whether the byte connection has entered an unrecoverable transport state.
+    /// Runtime owners retire only this peer; database/storage errors remain errors.
+    fn has_terminal_failure(&self) -> bool {
+        false
+    }
+
+    /// Remaining time until an incomplete receive must be serviced, even if
+    /// the remote peer sends no further bytes. Hosts use a real delayed wake.
+    fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        None
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    fn set_incomplete_receive_timeout_for_test(&mut self, _timeout_ms: u64) {}
+
+    /// Persistent fixed auxiliary channel shared with a lock-independent pump.
+    #[doc(hidden)]
+    fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
+        None
     }
 
     /// Assign encoder trust from the locally admitted connection role.

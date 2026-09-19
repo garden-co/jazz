@@ -801,3 +801,38 @@ test("RN test bridge recipe changes NAPI provenance and fingerprint only", () =>
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("excluded vendored path dependencies remain source-bound", () => {
+  const root = fixture();
+  try {
+    const vendor = "vendor/codec";
+    const workspaceManifest = join(root, "Cargo.toml");
+    writeFileSync(
+      workspaceManifest,
+      readFileSync(workspaceManifest, "utf8").replace(
+        "[workspace]",
+        '[workspace]\nexclude = ["vendor/codec"]',
+      ),
+    );
+    mkdirSync(join(root, vendor, "src"), { recursive: true });
+    writeFileSync(
+      join(root, vendor, "Cargo.toml"),
+      '[package]\nname = "fixture-codec"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n',
+    );
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn codec() {}\n");
+    const manifest = join(root, "crates/jazz-compression/Cargo.toml");
+    writeFileSync(
+      manifest,
+      readFileSync(manifest, "utf8").replace(
+        "[dependencies]",
+        '[dependencies]\nfixture-codec = { path = "../../vendor/codec" }',
+      ),
+    );
+    assert.ok(workspaceDependencyInputs(root, "crates/jazz-wasm/Cargo.toml").includes(vendor));
+    const before = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn changed_codec() {}\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

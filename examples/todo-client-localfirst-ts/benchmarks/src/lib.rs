@@ -2,6 +2,7 @@
 //! Direct nodes intentionally expose phase boundaries that the public Db owner
 //! loop combines. This excludes JS, IndexedDB, scheduling and auth bootstrap.
 use std::{collections::BTreeMap, time::Instant};
+pub mod history_depth;
 mod perf_control;
 mod support;
 use jazz::{

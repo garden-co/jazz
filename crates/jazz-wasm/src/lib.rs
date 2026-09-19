@@ -2593,6 +2593,25 @@ impl WasmTransport {
         Ok(frames)
     }
 
+    /// Remaining receive deadline, independent of the semantic node lock.
+    #[wasm_bindgen(js_name = auxiliaryReceiveTimeoutMs)]
+    pub fn auxiliary_receive_timeout_ms(&self) -> Option<u32> {
+        self.auxiliary_pump
+            .incomplete_receive_timeout_ms()
+            .map(|delay| delay.min(u64::from(u32::MAX)) as u32)
+    }
+
+    /// Retire only this connection when a partial channel exceeds its deadline.
+    #[wasm_bindgen(js_name = expireAuxiliaryReceive)]
+    pub fn expire_auxiliary_receive(&self) -> Result<(), JsValue> {
+        self.auxiliary_pump
+            .expire_incomplete_receive()
+            .map_err(|error| {
+                self.auxiliary_pump.disconnect();
+                JsValue::from_str(&error)
+            })
+    }
+
     /// Resolve when the independently driven chunk lane has socket output.
     #[wasm_bindgen(js_name = auxiliaryOutboundReady)]
     pub fn auxiliary_outbound_ready(&self) -> js_sys::Promise {

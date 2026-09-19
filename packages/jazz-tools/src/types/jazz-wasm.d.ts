@@ -55,6 +55,8 @@ declare module "jazz-wasm" {
     recvWireFrames(): Uint8Array[];
     routeAuxiliaryWireFrame(frame: Uint8Array): Promise<Uint8Array | undefined>;
     recvAuxiliaryWireFrames(maxFrames?: number, maxBytes?: number): Uint8Array[];
+    auxiliaryReceiveTimeoutMs(): number | undefined;
+    expireAuxiliaryReceive(): void;
     auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
