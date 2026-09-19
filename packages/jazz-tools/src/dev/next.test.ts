@@ -523,6 +523,7 @@ describe("withJazz", () => {
   it("serves the inspector through a reusable loopback rewrite without replacing app routes", async () => {
     const schemaDir = await tempRoots.create("jazz-next-inspector-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const appRoutes = {
       beforeFiles: [{ source: "/api/:path*", destination: "http://localhost:3001/:path*" }],
       afterFiles: [{ source: "/old", destination: "/new" }],
@@ -557,6 +558,7 @@ describe("withJazz", () => {
   it("keeps array-form application rewrites in the afterFiles phase", async () => {
     const schemaDir = await tempRoots.create("jazz-next-inspector-array-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const appRoutes = [{ source: "/old", destination: "/new" }];
     const resolved = await resolveWrappedConfig(
       withJazz({ rewrites: async () => appRoutes }, { schemaDir, server: { inMemory: true } }),
@@ -577,6 +579,7 @@ describe("withJazz", () => {
   it("leaves inspector routing disabled when opted out", async () => {
     const schemaDir = await tempRoots.create("jazz-next-no-inspector-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const appRoutes = [{ source: "/old", destination: "/new" }];
     const resolved = await resolveWrappedConfig(
       withJazz(
