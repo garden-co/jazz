@@ -2859,9 +2859,10 @@ where
             else {
                 continue;
             };
-            if canonical.schema_version_alias() == version.schema_version_alias()
-                && self.physical_table_id_for_version(&canonical)? == projected_table_id
-            {
+            // The read projection may change the schema alias even when the
+            // table layout is unchanged. This exact history key identifies the
+            // authored version; never replace its identity with the projection.
+            if self.physical_table_id_for_version(&canonical)? == projected_table_id {
                 return Ok(canonical);
             }
         }

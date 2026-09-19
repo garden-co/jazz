@@ -2,6 +2,206 @@
 
 use super::*;
 
+// Use the public Db point-read API here: client query handles record predicates,
+// which cannot exercise the name-only RowRead/AbsentRead migration boundary.
+fn renamed_point_read_views(
+    reuse_name: bool,
+) -> (
+    Db<doctest_support::MemoryStorage>,
+    Db<doctest_support::MemoryStorage>,
+    impl Fn(),
+    CoreDb,
+) {
+    let before = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let families = before.column_families();
+    let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let owner = block_on(Db::open(DbConfig {
+        schema: before.clone(),
+        storage: doctest_support::MemoryStorage::new(&families).unwrap(),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x96; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(96))),
+    }))
+    .unwrap();
+    let authority = open_core(0x95, AuthorSubject::SYSTEM, &before);
+    let (upstream, downstream) = duplex();
+    block_on(owner.connect_upstream(upstream));
+    let peer = authority.accept_subscriber_with_trust(
+        downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    for _ in 0..32 {
+        owner.tick().unwrap();
+        peer.borrow_mut().tick().unwrap();
+    }
+    let old = owner.register_schema_view(before.clone()).unwrap();
+    let mut builder = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text));
+    if reuse_name {
+        builder = builder.table(
+            PublicTableSchemaBuilder::new("todos").column("summary", PublicColumnType::Text),
+        );
+    }
+    let after = build_public_db_test_schema(builder);
+    let version = SchemaVersion::new(after.clone());
+    let lens = MigrationLens::new(
+        before.version_id(),
+        version.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "tasks".to_owned(),
+            ops: vec![LensOp::RenameTable {
+                from: "todos".to_owned(),
+                to: "tasks".to_owned(),
+            }],
+        }],
+    )
+    .unwrap();
+    let publication = authority
+        .author_schema_lineage_publication(
+            version.clone(),
+            lens,
+            if reuse_name {
+                vec!["todos".to_owned()]
+            } else {
+                Vec::new()
+            },
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    authority
+        .publish_schema_with_lens(1, publication.clone())
+        .unwrap();
+    owner.publish_schema_with_lens(1, publication).unwrap();
+    authority
+        .activate_catalogue_schema_for_test(CurrentWriteSchema {
+            revision: 2,
+            schema: version.id,
+        })
+        .unwrap();
+    block_on(
+        owner.activate_catalogue_schema_for_test(CurrentWriteSchema {
+            revision: 2,
+            schema: version.id,
+        }),
+    )
+    .unwrap();
+    let new = owner.register_schema_view(after).unwrap();
+    let pump = move || {
+        for _ in 0..32 {
+            owner.tick().unwrap();
+            peer.borrow_mut().tick().unwrap();
+        }
+    };
+    pump();
+    (old, new, pump, authority)
+}
+
+#[test]
+fn renamed_point_absence_accepts_stable_read_and_rejects_concurrent_insert() {
+    let (old, _new, pump, authority) = renamed_point_read_views(false);
+    let missing = row(0x97);
+    let stable = OpenTransactionId::new();
+    old.begin_exclusive(stable).unwrap();
+    assert_eq!(
+        old.exclusive_tx_ref(stable).read("todos", missing).unwrap(),
+        None
+    );
+    let accepted = old
+        .commit_exclusive_handle(stable)
+        .expect("unambiguous stable absence is valid");
+    pump();
+    assert_eq!(old.write_state(accepted).unwrap().fate, Fate::Accepted);
+
+    let changed = OpenTransactionId::new();
+    old.begin_exclusive(changed).unwrap();
+    assert_eq!(
+        old.exclusive_tx_ref(changed)
+            .read("todos", missing)
+            .unwrap(),
+        None
+    );
+    let cells = crate::row_input!("title" => "concurrent")
+        .into_iter()
+        .map(|(name, value)| {
+            let PublicValue::Text(text) = value else {
+                unreachable!("text-only fixture")
+            };
+            (name, Value::String(text))
+        })
+        .collect();
+    authority.insert_with_id("tasks", missing, cells).unwrap();
+    // Read-only commit: no write precondition can mask absent-read validation.
+    let committed = old.commit_exclusive_handle(changed).unwrap();
+    pump();
+    assert_eq!(
+        old.write_state(committed).unwrap().fate,
+        Fate::Rejected(RejectionReason::ExclusiveConflict)
+    );
+}
+
+#[test]
+fn reused_table_name_rejects_point_read_and_absence() {
+    let (old, new, pump, _authority) = renamed_point_read_views(true);
+    let present = row(0x98);
+    let cells = crate::row_input!("title" => "existing")
+        .into_iter()
+        .map(|(name, value)| {
+            let PublicValue::Text(text) = value else {
+                unreachable!("text-only fixture")
+            };
+            (name, Value::String(text))
+        })
+        .collect();
+    let inserted = new
+        .insert(
+            "tasks",
+            cells,
+            InsertOptions {
+                row_id: Some(present),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    pump();
+    assert_eq!(
+        new.write_state(inserted.mergeable_tx_id()).unwrap().fate,
+        Fate::Accepted
+    );
+    for target in [present, row(0x99)] {
+        let open = OpenTransactionId::new();
+        old.begin_exclusive(open).unwrap();
+        let observed = old.exclusive_tx_ref(open).read("todos", target).unwrap();
+        assert_eq!(observed.is_some(), target == present);
+        let committed = old.commit_exclusive_handle(open).unwrap();
+        pump();
+        assert_eq!(
+            old.write_state(committed).unwrap().fate,
+            Fate::Rejected(RejectionReason::ExclusiveConflict)
+        );
+    }
+    let current = OpenTransactionId::new();
+    new.begin_exclusive(current).unwrap();
+    assert_eq!(
+        new.exclusive_tx_ref(current)
+            .read("todos", row(0x99))
+            .unwrap(),
+        None
+    );
+    let committed = new.commit_exclusive_handle(current).unwrap();
+    pump();
+    assert_eq!(
+        new.write_state(committed).unwrap().fate,
+        Fate::Rejected(RejectionReason::ExclusiveConflict)
+    );
+}
+
 #[test]
 fn tick_yields_to_a_retained_lock_owner_before_cleanup() {
     // Internal scheduling seam: public calls cannot deterministically suspend
