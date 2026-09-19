@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
+use groove::db::SubscriptionLifetime;
 
 /// A first-result consumer owns exactly its subscription and, when needed,
 /// its prepared shape. Dropping a suspended read cannot keep a binding alive
@@ -1120,6 +1121,7 @@ where
             binding_source_shape,
             prepared_claim_binding_mode,
             progress_waker,
+            SubscriptionLifetime::Retained,
         )
         .await
         .map(|(subscription, _)| subscription)
@@ -1134,6 +1136,7 @@ where
         binding_source_shape: String,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
+        lifetime: SubscriptionLifetime,
     ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
@@ -1144,7 +1147,7 @@ where
             let sinks = lowered_program_sinks(&program);
             return self
                 .database
-                .subscribe_with_waker(sinks, progress_waker)
+                .subscribe_with_lifetime(sinks, lifetime, progress_waker)
                 .map(|subscription| (subscription, None))
                 .map_err(|error| {
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -1211,7 +1214,7 @@ where
         };
         let subscription = owner
             .database
-            .bind_shape_with_waker(prepared.id(), &values, progress_waker)
+            .bind_shape_with_lifetime(prepared.id(), &values, lifetime, progress_waker)
             .await
             .map_err(|error| {
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -1256,6 +1259,7 @@ where
                 binding_source_shape,
                 PreparedClaimBindingMode::Strict,
                 None,
+                SubscriptionLifetime::FirstResult,
             )
             .await?;
         let mut owner = HydrationSubscription {

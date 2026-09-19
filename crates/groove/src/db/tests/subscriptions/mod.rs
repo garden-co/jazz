@@ -2,6 +2,71 @@
 
 use super::*;
 
+/// Alice cancels or completes a cold first-result read while Bob waits on the
+/// same source. Releasing Alice must unblock Bob without retiring his graph.
+/// cold read -> live attach -> cancel/complete -> Bob receives seed -> write -> delta.
+#[futures_test::test]
+async fn first_result_cold_completion_and_cancellation_preserve_live_successors() {
+    use crate::db::SubscriptionLifetime;
+
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+        let mut db = Database::new(albums_artists_schema(), storage.clone())
+            .await
+            .unwrap();
+        let seed = vec![Value::U64(1), Value::U64(1), Value::String("seed".into())];
+        let mut batch = db.open_batch();
+        batch.insert("albums", seed.clone());
+        db.commit_batch(batch).await.unwrap();
+        storage.evict_all();
+        control.pause_on(TestStorageOperation::ScanOpen);
+        let alice = db
+            .subscribe_with_lifetime(
+                [("albums", GraphBuilder::table("albums"))],
+                SubscriptionLifetime::FirstResult,
+                None,
+            )
+            .unwrap();
+        let bob = db
+            .subscribe_one_sink(GraphBuilder::table("albums"))
+            .await
+            .unwrap();
+        assert!(db.has_pending_progress());
+        if cancel {
+            assert!(db.unsubscribe(alice.id()));
+        }
+        control.resume_operation(TestStorageOperation::ScanOpen);
+        for _ in 0..64 {
+            db.drive_ready_progress().await.unwrap();
+            if !db.has_pending_progress() {
+                break;
+            }
+        }
+        assert!(!db.has_pending_progress());
+        if !cancel {
+            assert_eq!(
+                alice.try_recv().unwrap().sinks["albums"]
+                    .to_values()
+                    .unwrap(),
+                [(seed.clone(), 1)]
+            );
+        }
+        assert!(matches!(alice.try_recv(), Err(TryRecvError::Disconnected)));
+        assert_eq!(bob.try_recv().unwrap().to_values().unwrap(), [(seed, 1)]);
+        let added = vec![Value::U64(2), Value::U64(1), Value::String("later".into())];
+        let mut batch = db.open_batch();
+        batch.insert("albums", added.clone());
+        db.commit_batch(batch).await.unwrap();
+        for _ in 0..64 {
+            db.drive_ready_progress().await.unwrap();
+            if !db.has_pending_progress() {
+                break;
+            }
+        }
+        assert_eq!(bob.try_recv().unwrap().to_values().unwrap(), [(added, 1)]);
+    }
+}
+
 /// A non-blocking owner turn must leave a real wake route behind for cold
 /// hydration. Merely noticing pending work on a later manually-driven tick is
 /// insufficient for event-driven hosts: no unrelated transport activity is

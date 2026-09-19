@@ -150,17 +150,6 @@ impl IvmRuntime {
         meta.retainers.insert(retainer)
     }
 
-    pub(super) fn retain_as_subscription(
-        &mut self,
-        subscription_id: SubscriptionId,
-        output_node: NodeId,
-    ) -> bool {
-        self.add_retainer(
-            output_node,
-            Retainer::Subscription(subscription_id.retainer_key()),
-        )
-    }
-
     pub(super) fn remove_multisink_retainers(
         &mut self,
         subscription_id: SubscriptionId,
@@ -171,6 +160,10 @@ impl IvmRuntime {
             removed |= self.remove_retainer(
                 output.node,
                 &Retainer::Subscription(subscription_id.retainer_key()),
+            );
+            removed |= self.remove_retainer(
+                output.node,
+                &Retainer::Hydration(subscription_id.retainer_key()),
             );
         }
         self.collect_unretained_ephemeral_nodes();
