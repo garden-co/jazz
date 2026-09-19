@@ -80,17 +80,18 @@ fn renamed_point_read_views(
         .unwrap();
     owner.publish_schema_with_lens(1, publication).unwrap();
     authority
-        .set_current_write_schema(CurrentWriteSchema {
+        .activate_catalogue_schema_for_test(CurrentWriteSchema {
             revision: 2,
             schema: version.id,
         })
         .unwrap();
-    owner
-        .set_current_write_schema(CurrentWriteSchema {
+    block_on(
+        owner.activate_catalogue_schema_for_test(CurrentWriteSchema {
             revision: 2,
             schema: version.id,
-        })
-        .unwrap();
+        }),
+    )
+    .unwrap();
     let new = owner.register_schema_view(after).unwrap();
     let pump = move || {
         for _ in 0..32 {
