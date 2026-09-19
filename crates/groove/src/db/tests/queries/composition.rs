@@ -2,6 +2,74 @@
 
 use super::*;
 
+/// Reusing lookup inputs inside an evaluation must not retain a binding's
+/// context or watermark across later writes and fresh subscriptions.
+#[futures_test::test]
+async fn prepared_memo_lookup_keeps_bindings_and_write_frontiers_distinct() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("selected_row", params),
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"]),
+        ["row"],
+        ["row"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.row", "row"),
+        ProjectField::renamed("right.stamp", "stamp"),
+    ]);
+    let prepared = db
+        .prepare_one_sink(graph, "selected_row", params, ["row"])
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(2, 20, 1, "second"));
+    db.commit_batch(batch).await.unwrap();
+    let first = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+        .await
+        .unwrap();
+    let second = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(2)])
+        .await
+        .unwrap();
+    let values = |row, stamp| vec![Value::U64(row), Value::U64(stamp)];
+    assert_eq!(
+        first.recv().unwrap().to_values().unwrap(),
+        [(values(1, 10), 1)]
+    );
+    assert_eq!(
+        second.recv().unwrap().to_values().unwrap(),
+        [(values(2, 20), 1)]
+    );
+    for (row, old, new, changed, unchanged) in [
+        (1, 10, 30, &first, &second),
+        (2, 20, 40, &second, &first),
+        (1, 30, 50, &first, &second),
+    ] {
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(row, old, 1));
+        batch.insert("history", history_values(row, new, 1, "replacement"));
+        db.commit_batch(batch).await.unwrap();
+        let deltas = changed.recv().unwrap().to_values().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert!(deltas.contains(&(values(row, old), -1)));
+        assert!(deltas.contains(&(values(row, new), 1)));
+        assert!(matches!(unchanged.try_recv(), Err(TryRecvError::Empty)));
+        let fresh = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(row)])
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.recv().unwrap().to_values().unwrap(),
+            [(values(row, new), 1)]
+        );
+        assert!(db.unsubscribe(fresh.id()));
+    }
+}
+
 /// Keeping a prepared graph (and its immutable dependency classification)
 /// across detachment must not keep a stale runtime-readiness proof.
 #[futures_test::test]
