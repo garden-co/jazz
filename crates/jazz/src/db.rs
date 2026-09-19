@@ -4996,7 +4996,7 @@ impl SubscriptionStream {
     }
 
     #[cfg(test)]
-    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+    fn compiled_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
         let state = self._state.borrow();
         let SubscriptionKind::Prepared {
             maintained_subscription,
@@ -5004,7 +5004,7 @@ impl SubscriptionStream {
         } = &state.kind;
         maintained_subscription
             .as_ref()
-            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
+            .and_then(LocalMaintainedViewSubscription::compiled_authorization_mode)
     }
 }
 

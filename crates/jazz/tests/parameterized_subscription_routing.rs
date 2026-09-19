@@ -109,6 +109,46 @@ fn take_initial_reset(label: &str, stream: &mut SubscriptionStream) -> BTreeSet<
     }
 }
 
+/// The installed maintained graph owns its execution. Neither the public
+/// prepared handle nor a sibling binding is its lifetime owner.
+#[test]
+fn fresh_subscription_owns_its_graph_after_prepared_handles_are_dropped() {
+    let db = open_db();
+    let team_a = row(100);
+    let team_b = row(200);
+    insert_document(&db, row(1), team_a, 1);
+    insert_document(&db, row(2), team_b, 2);
+    let query = Query::from("documents").filter(eq(col("team"), param("team")));
+    let open = |team: RowUuid| {
+        let prepared = db
+            .prepare_query_bound(
+                &query,
+                BTreeMap::from([("team".into(), Value::Uuid(team.0))]),
+            )
+            .expect("prepare bound subscription");
+        // `prepared` is dropped before the caller receives the stream.
+        block_on(db.subscribe(&prepared, local_read_opts())).expect("open subscription")
+    };
+    let mut a = open(team_a);
+    let mut b = open(team_b);
+    let mut a_rows = take_initial_reset("A", &mut a);
+    let mut b_rows = take_initial_reset("B", &mut b);
+    assert_eq!(a_rows, BTreeSet::from([row(1)]));
+    assert_eq!(b_rows, BTreeSet::from([row(2)]));
+    insert_document(&db, row(3), team_a, 3);
+    apply_pending_events("A", &mut a, &mut a_rows);
+    apply_pending_events("B", &mut b, &mut b_rows);
+    assert_eq!(a_rows, BTreeSet::from([row(1), row(3)]));
+    assert_eq!(b_rows, BTreeSet::from([row(2)]));
+    drop(a);
+    block_on(db.tick()).expect("retire A without retiring B");
+    insert_document(&db, row(4), team_b, 4);
+    apply_pending_events("B after A dropped", &mut b, &mut b_rows);
+    assert_eq!(b_rows, BTreeSet::from([row(2), row(4)]));
+    drop(b);
+    block_on(db.close()).expect("close subscription fixture");
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppliedEvents {
     count: usize,

@@ -258,6 +258,7 @@ pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
 
 #[cfg(feature = "testing")]
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
+#[cfg(test)]
 use maintained_views::SubscriptionPreparedPlan;
 pub(crate) use maintained_views::{
     CoveredInputReceiver, LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
@@ -2515,6 +2516,7 @@ where
         Ok((shape, binding, plan))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -2535,6 +2537,7 @@ where
         }
     }
 
+    #[cfg(test)]
     async fn prepare_client_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2557,6 +2560,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     async fn prepare_trusted_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2577,6 +2581,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
@@ -3915,6 +3920,8 @@ where
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        let compiled_authorization_mode = program.request.authorization_mode;
         let subscription = match self
             .subscribe_lowered_program(
                 program,
@@ -3936,6 +3943,10 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        #[cfg(test)]
+        {
+            maintained.compiled_authorization_mode = Some(compiled_authorization_mode);
+        }
         maintained.physical_tables = self
             .catalogue
             .physical_mappings
