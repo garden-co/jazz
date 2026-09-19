@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
     CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates,
@@ -77,32 +79,59 @@ struct ByteDuplexTransport {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
 }
 
-struct ByteQueues {
-    left_to_right: Rc<RefCell<VecDeque<Vec<u8>>>>,
-    right_to_left: Rc<RefCell<VecDeque<Vec<u8>>>>,
-}
-
-impl ByteQueues {
-    fn is_empty(&self) -> bool {
-        self.left_to_right.borrow().is_empty() && self.right_to_left.borrow().is_empty()
-    }
-}
-
 fn pump_aux(left: &PeerIoPump, right: &PeerIoPump) {
     loop {
         let mut progressed = false;
-        while let Some(message) = left.take_outbound(64) {
-            block_on(right.route_incoming(message)).expect("route W1 left auxiliary message");
+        while let Some(frame) = left
+            .take_outbound_wire_frame()
+            .expect("drain W1 left wire pump")
+        {
+            assert!(
+                block_on(right.route_incoming_wire_frame(frame))
+                    .expect("route W1 left wire frame")
+                    .is_none()
+            );
             progressed = true;
         }
-        while let Some(message) = right.take_outbound(64) {
-            block_on(left.route_incoming(message)).expect("route W1 right auxiliary message");
+        while let Some(frame) = right
+            .take_outbound_wire_frame()
+            .expect("drain W1 right wire pump")
+        {
+            assert!(
+                block_on(left.route_incoming_wire_frame(frame))
+                    .expect("route W1 right wire frame")
+                    .is_none()
+            );
             progressed = true;
         }
         if !progressed {
             break;
         }
     }
+}
+
+// Empty carrier queues do not establish remote settlement: adapters can still
+// own accepted messages waiting for credits. Keep driving both real wire pumps
+// until the public write wait proves the authority has applied the frontier.
+fn pump_until_settled(
+    writer: &Db<MemoryStorage>,
+    server: &Db<MemoryStorage>,
+    writer_pump: &PeerIoPump,
+    server_pump: &PeerIoPump,
+    max_turns: usize,
+) {
+    let mut settled = std::pin::pin!(writer.wait_for_pending_writes(DurabilityTier::Global));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..max_turns {
+        block_on(writer.tick()).expect("ship W1 pending writes");
+        block_on(server.tick()).expect("ingest W1 pending writes");
+        pump_aux(writer_pump, server_pump);
+        if let Poll::Ready(result) = settled.as_mut().poll(&mut context) {
+            result.expect("settle W1 writes at the authority");
+            return;
+        }
+    }
+    panic!("W1 writes must reach global settlement within bounded pump turns");
 }
 
 impl WireTransport for ByteDuplexTransport {
@@ -166,7 +195,7 @@ impl ResumeFixture {
         let server = open_memory_node(schema(false), 0x72, true);
         let client = open_memory_node(schema(false), 0x73, false);
 
-        let (writer_transport, server_writer_transport, queues) = byte_duplex(1);
+        let (writer_transport, server_writer_transport) = byte_duplex(1);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
         // These fixture writes are database-authored SYSTEM work, admitted by
         // the synthetic host as a backend rather than an ordinary user session.
@@ -178,23 +207,16 @@ impl ResumeFixture {
         );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
-        let mut quiet_ticks = 0;
-        for _ in 0..10_000 {
-            block_on(writer.db.tick()).expect("ship W1 resume seed rows");
-            block_on(server.tick()).expect("ingest W1 resume seed rows");
-            pump_aux(&writer_pump, &server_writer_pump);
-            quiet_ticks = if queues.is_empty() {
-                quiet_ticks + 1
-            } else {
-                0
-            };
-            if quiet_ticks == 2 {
-                break;
-            }
-        }
+        pump_until_settled(
+            &writer.db,
+            &server,
+            &writer_pump,
+            &server_writer_pump,
+            10_000,
+        );
         assert!(writer.db.detach_connection(&writer_upstream));
         assert!(server.detach_connection(&writer_subscriber));
-        let (client_transport, server_transport, _queues) = byte_duplex(2);
+        let (client_transport, server_transport) = byte_duplex(2);
         let upstream = block_on(client.connect_upstream(client_transport));
         let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
         let client_pump = block_on(upstream.lock()).io_pump();
@@ -261,7 +283,7 @@ impl ResumeFixture {
         ))
         .expect("write disconnected W1 task update");
         block_on(write.wait(DurabilityTier::Local)).expect("settle disconnected W1 task update");
-        let (writer_transport, server_writer_transport, queues) = byte_duplex(3);
+        let (writer_transport, server_writer_transport) = byte_duplex(3);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
         let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
             server_writer_transport,
@@ -271,20 +293,13 @@ impl ResumeFixture {
         );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
-        let mut quiet_ticks = 0;
-        for _ in 0..1_000 {
-            block_on(writer.db.tick()).expect("ship disconnected W1 task update");
-            block_on(server.tick()).expect("ingest disconnected W1 task update");
-            pump_aux(&writer_pump, &server_writer_pump);
-            quiet_ticks = if queues.is_empty() {
-                quiet_ticks + 1
-            } else {
-                0
-            };
-            if quiet_ticks == 2 {
-                break;
-            }
-        }
+        pump_until_settled(
+            &writer.db,
+            &server,
+            &writer_pump,
+            &server_writer_pump,
+            1_000,
+        );
         assert!(writer.db.detach_connection(&writer_upstream));
         assert!(server.detach_connection(&writer_subscriber));
 
@@ -310,7 +325,7 @@ impl ResumeFixture {
 
     pub fn resume_once(&mut self) -> usize {
         let cursor = self.cursor.take().expect("W1 resume fixture is single-use");
-        let (client_transport, server_transport, _queues) = byte_duplex(4);
+        let (client_transport, server_transport) = byte_duplex(4);
         let _upstream = block_on(self.client.connect_upstream(client_transport));
         let resumed = self.server.accept_subscriber_with_resume(
             server_transport,
@@ -430,7 +445,7 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
         .unwrap();
     let server = open_memory_node(schema(false), 0x74, true);
     let client = open_memory_node(schema(false), 0x75, false);
-    let (transport, server_transport, queues) = byte_duplex(5);
+    let (transport, server_transport) = byte_duplex(5);
     let upstream = block_on(writer.connect_upstream(transport));
     let subscriber = server.accept_subscriber_with_claims_and_trust(
         server_transport,
@@ -440,25 +455,11 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
     );
     let writer_pump = block_on(upstream.lock()).io_pump();
     let server_pump = block_on(subscriber.lock()).io_pump();
-    let mut quiet_ticks = 0;
-    for _ in 0..10_000 {
-        block_on(writer.tick()).expect("ship W1 control frontier");
-        block_on(server.tick()).expect("ingest W1 control frontier");
-        pump_aux(&writer_pump, &server_pump);
-        quiet_ticks = if queues.is_empty() {
-            quiet_ticks + 1
-        } else {
-            0
-        };
-        if quiet_ticks == 2 {
-            break;
-        }
-    }
-    assert_eq!(quiet_ticks, 2, "W1 control uploads must settle");
+    pump_until_settled(writer, &server, &writer_pump, &server_pump, 10_000);
     assert!(writer.detach_connection(&upstream));
     assert!(server.detach_connection(&subscriber));
 
-    let (transport, server_transport, _) = byte_duplex(6);
+    let (transport, server_transport) = byte_duplex(6);
     let upstream = block_on(client.connect_upstream(transport));
     let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     let client_pump = block_on(upstream.lock()).io_pump();
@@ -921,13 +922,7 @@ fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db<
     .expect("open W1 resume database")
 }
 
-fn byte_duplex(
-    epoch: u64,
-) -> (
-    Box<dyn jazz::db::Transport>,
-    Box<dyn jazz::db::Transport>,
-    ByteQueues,
-) {
+fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
     let left_transport = ByteDuplexTransport {
@@ -947,10 +942,6 @@ fn byte_duplex(
         | FEATURE_SESSION_FRAME
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_MESSAGE_FRAGMENTATION;
-    let queues = ByteQueues {
-        left_to_right: left,
-        right_to_left: right,
-    };
     (
         Box::new(WireTransportAdapter::new(
             left_transport,
@@ -964,7 +955,6 @@ fn byte_duplex(
             features,
             Some(session),
         )),
-        queues,
     )
 }
 
