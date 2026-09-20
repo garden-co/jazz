@@ -83,6 +83,23 @@ layout metadata. Sharing topology therefore does not share readiness or bypass
 snapshot installation barriers. Runtime statistics expose layout builds and
 hits to distinguish topology reuse from semantic memo reuse.
 
+Frames capture root operator, arrangement, and evaluation metadata versions in
+the layout's dense slots. The installed payloads are shared immutably until the
+frame first mutates them; recursive arrangement scopes use an independently
+versioned sparse sidecar. Capture visits the reachable graph slice, not all
+retained runtime state. Cached projection/join metadata is read without marking
+it modified. Publication folds and installs changed entries only, dropping the
+previous installed owner before folding its payload overlays. Read-only captured
+versions cannot overwrite newer live state. Explicit removals are publishable
+edits; abandoning a failed node discards its edits instead of deleting the live
+failure-invalidated version. Cancellation drops private versions.
+
+Graph retainers remain live runtime ownership, outside all evaluation snapshots.
+A suspended frame cannot resurrect an unsubscribed owner or discard an owner
+added during suspension. Input generations still merge monotonically, and the
+existing temporal predecessor barriers continue to order overlapping evaluations.
+None of these in-memory versions is a storage or wire encoding.
+
 Hydration and incremental maintenance use the same owned evaluation session.
 Hydration is the initial delta from empty state; it is not a second evaluator
 or snapshot-shaped installation path. Incremental input can discover a newly

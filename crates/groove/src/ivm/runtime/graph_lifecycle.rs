@@ -57,9 +57,9 @@ impl IvmRuntime {
             .filter(|node| {
                 node.is_durable()
                     || self
-                        .node_meta
+                        .node_retainers
                         .get(&node.id)
-                        .is_some_and(|meta| !meta.retainers.is_empty())
+                        .is_some_and(|retainers| !retainers.is_empty())
             })
             .map(|node| node.id)
             .collect::<Vec<_>>();
@@ -153,7 +153,7 @@ impl IvmRuntime {
         }
         let meta = self.node_meta.entry(id).or_default();
         meta.last_used_tick = self.current_tick;
-        meta.retainers.insert(retainer)
+        self.node_retainers.entry(id).or_default().insert(retainer)
     }
 
     pub(super) fn remove_multisink_retainers(
@@ -177,9 +177,9 @@ impl IvmRuntime {
     }
 
     pub(super) fn remove_retainer(&mut self, id: NodeId, retainer: &Retainer) -> bool {
-        self.node_meta
+        self.node_retainers
             .get_mut(&id)
-            .map(|meta| meta.retainers.remove(retainer))
+            .map(|retainers| retainers.remove(retainer))
             .unwrap_or(false)
     }
 
@@ -231,6 +231,7 @@ impl IvmRuntime {
             for node in removed {
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);
+                self.node_retainers.remove(&node);
             }
         }
         if !self.pending_incremental.is_pending() {
