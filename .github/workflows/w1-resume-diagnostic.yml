@@ -48,6 +48,8 @@ jobs:
           name: w1-credit-class-probe-${{ runner.arch }}
           path: ${{ runner.temp }}/w1-credit-probe
 
+  # ChannelCredits impl restored exactly from d0159d52e3592b3138ee24826a3819ceae0db5a7.
+  # The diagnostic self-check stays outside the original implementation.
   production-credit-probe:
     runs-on: codspeed-macro
     timeout-minutes: 15
