@@ -9,7 +9,7 @@ Remove automatic reverse relationships, reference-name suffix restrictions, and 
 
 ### Migrating an existing app
 
-Every `s.table` now requires two arguments: stored columns and explicitly named relationships. Pass `{}` when there are no relationships. Replace `s.ref(target)` with `s.uuid()` and move the target information into a forward relationship declaration. Preserve the stored column name and its existing modifiers, defaults, optionality, and array shape.
+Every `s.table` now requires two arguments: stored columns and explicitly named relationships. Pass `{}` when there are no relationships. Replace `s.ref(target)` with `s.uuid()` and move the target information into a forward relationship declaration. **To keep the same schema identity and existing data, preserve every stored column name, modifier, default, optionality, array shape, and reference target.** Add a matching forward relationship for every former reference column, even if no query currently uses it. This conversion needs no data rewrite or database reset.
 
 Before:
 
@@ -20,15 +20,28 @@ const schema = s.defineSchema({
     title: s.string(),
     authorId: s.ref("users"),
     editorId: s.ref("users").optional(),
-    reviewerIds: s.array(s.ref("users")),
+    reviewerIds: s.array(s.ref("users")).default([]),
   }),
 });
 ```
 
-After:
+After, with the same schema identity:
 
 ```ts
 const schema = s.defineSchema({
+  posts: s.table(
+    {
+      title: s.string(),
+      authorId: s.uuid(),
+      editorId: s.uuid().optional(),
+      reviewerIds: s.array(s.uuid()).default([]),
+    },
+    {
+      author: s.rel("users", "authorId"),
+      editor: s.rel("users", "editorId"),
+      reviewers: s.rel("users", "reviewerIds"),
+    },
+  ),
   users: s.table(
     { name: s.string() },
     {
@@ -37,28 +50,21 @@ const schema = s.defineSchema({
       postsViaReviewers: s.reverse("posts", "reviewers"),
     },
   ),
-  posts: s.table(
-    {
-      title: s.string(),
-      authorId: s.uuid(),
-      editorId: s.uuid().optional(),
-      reviewerIds: s.array(s.uuid()),
-    },
-    {
-      author: s.rel("users", "authorId"),
-      editor: s.rel("users", "editorId"),
-      reviewers: s.rel("users", "reviewerIds"),
-    },
-  ),
 });
 ```
 
-- Declare a forward relation for **every former reference column**, including references not currently used by an include. Keeping the same column-to-target mapping preserves its core reference metadata.
+The required `authorId`, optional `editorId`, and array `reviewerIds` keep their names and still point to `users`. The array also keeps its `[]` default.
+
+- Declare a forward relation for **every former reference column**, including references not currently used by an include.
 - Declare reverse relations explicitly if your queries or permissions use them. The second argument to `s.reverse` is the **forward relationship name**, not its UUID column. No reverse navigation is added automatically.
-- You can keep previous navigation names, as above, or choose names such as `authoredPosts`. If you rename them, update includes, `hopTo`, relation-based filters, and permission traversals together, including names used in untyped query objects.
+- You can keep previous navigation names, as above, or choose names such as `authoredPosts`. For example, renaming `author` to `writer` keeps `authorId` unchanged, but requires `s.reverse("posts", "writer")` and `.include({ writer: true })` in place of the old names. Update `hopTo`, relation-based filters, and permission traversals too, including names used in untyped query objects.
 - Relationship names cannot shadow columns, `id`, reserved `$...` fields, or reserved prototype names. If an old include replaced a same-named UUID column, preserve that stored column and choose a distinct relationship name instead.
 - Keep `{}` on tables without relationships, including tables in test fixtures, migration schema witnesses, and dynamically generated schema source. Migration operations such as `s.add.ref(...)` and `s.drop.ref(...)` remain separate APIs; do not mechanically replace those operations.
 - Update schemas shared by browser, server, and React Native consumers, then run TypeScript checking and `jazz-tools validate --schema-dir <your-schema-directory>`. Republish permissions if you changed their authored traversals.
+
+### Migrating with an agent
+
+Point your coding agent at this guide and ask it to migrate the whole app while preserving schema identity. Have it check every schema consumer (browser, server, React Native, tests, and generated schema sources), preserve the column definitions and targets above, update query and permission traversals together, and run the app's TypeScript checks plus `jazz-tools validate --schema-dir <your-schema-directory>`. Keep existing stores and pending writes; do not reset data to make the migration pass.
 
 ### Schema identity and existing data
 
