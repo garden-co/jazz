@@ -13,7 +13,7 @@ A Jazz project has a small set of files at the app root:
 ```text
 app-root/
 ├── schema.ts            # Structural schema — tables and columns
-├── permissions.ts       # Optional row-level policies
+├── permissions.ts       # Explicit operation policies
 └── migrations/          # Reviewed migration edges
     └── 20260331-add-description-aaa-bbb.ts
 ```
@@ -78,6 +78,12 @@ on their target tables. You can preserve an old query name with
 `postsViaAuthor: s.reverse("posts", "author")`, or choose an intentional name such as
 `authoredPosts` and update callers. Add `{}` to tables with no relations.
 
+Declare a forward relation for **every former reference column**, including references not
+currently used by an include. Preserve the stored column name, modifiers, defaults, array
+shape, and target. Omitting a former forward declaration removes reference metadata;
+retargeting it changes that metadata. Those are real schema changes, not equivalent API
+conversions. Do not assume an empty migration can retarget references.
+
 Column names no longer determine relations. Renaming a relation does not rename its stored
 UUID column; forward declarations retain the same underlying column reference metadata.
 
@@ -87,7 +93,11 @@ UUID column; forward declarations retain the same underlying column reference me
 
 When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
 
-If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
+An equivalent conversion from inferred to explicit relationships preserves schema identity
+and stored data. Keep existing stores and pending writes; do not clear browser data or reset
+a database as an upgrade shortcut. Actual schema changes need the supported migration
+workflow above. The separate [storage reset guidance](/docs/auth/lifecycle#storage-reset)
+is for an intentional local-data reset, not relationship migration.
 
 ## Exporting the app
 
