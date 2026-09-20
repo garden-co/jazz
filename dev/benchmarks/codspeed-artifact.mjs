@@ -9,6 +9,9 @@ import { pathToFileURL } from "node:url";
 
 const workloads = ["todo", "permissioned-resources", "policy-scoped-documents"];
 const format = "jazz-codspeed-benchmark-artifact-v1";
+// Observed codspeed-macro checkout root. Relative DWARF paths still receive
+// origin=unknown; match the absolute repository root uploaded by the runner.
+export const measurementWorkspace = "/actions-runner/_work/jazz/jazz";
 const contract = {
   rust: "1.93.1",
   codspeed: "5.0.1",
@@ -17,8 +20,19 @@ const contract = {
   profile: "bench",
   features: "jazz-benchmark-guard/mimalloc",
   bench: "walltime",
-  sourcePaths: "workspace-relative",
+  sourcePaths: { kind: "measurement-workspace-absolute", root: measurementWorkspace },
 };
+
+export function sourcePathFlags(buildWorkspace) {
+  assert.ok(path.isAbsolute(buildWorkspace), "absolute build workspace required");
+  // RUSTFLAGS is whitespace-separated, and '=' separates remapping operands.
+  assert.doesNotMatch(buildWorkspace, /[\s=]/, "unsupported build workspace characters");
+  return `--remap-path-prefix=${path.resolve(buildWorkspace)}=${measurementWorkspace}`;
+}
+
+export function verifyMeasurementWorkspace(workspace) {
+  assert.equal(workspace, measurementWorkspace, "measurement checkout path changed");
+}
 
 function command(file, args) {
   return execFileSync(file, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }).trim();
@@ -122,12 +136,20 @@ async function checkExecutable(file, debug = false) {
   assert.match(header, /Machine:\s+AArch64/, "wrong executable architecture");
   const dependencies = command("ldd", [file]);
   assert.doesNotMatch(dependencies, /not found/, "missing dynamic dependency");
-  if (debug) assert.match(command("readelf", ["-S", file]), /\.debug_info/, "missing debug info");
+  if (debug) {
+    const sections = command("readelf", ["-S", file]);
+    assert.match(sections, /\.debug_info\s/, "missing embedded debug info");
+    assert.match(sections, /\.debug_line\s/, "missing embedded source line tables");
+  }
   console.log(`${file}\n${dependencies}`);
 }
 
 async function main() {
   const [action, workload] = process.argv.slice(2);
+  if (action === "rustflags") {
+    console.log(sourcePathFlags(process.cwd()));
+    return;
+  }
   const { binary, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
@@ -154,6 +176,8 @@ async function main() {
     const manifest = await seal(workload, identity, cli);
     console.log(JSON.stringify(manifest, null, 2));
   } else {
+    // Fail before executing the downloaded CLI if the runner's layout drifts.
+    verifyMeasurementWorkspace(process.cwd());
     await verify(workload, identity);
     // upload-artifact normalizes permissions. Restore only the two verified
     // executables, at fixed paths; never execute a path supplied by a manifest.

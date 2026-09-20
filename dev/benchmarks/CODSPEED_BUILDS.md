@@ -12,10 +12,15 @@ Build latency, cache behavior and acceptance receipts are tracked in
   debug info, allocator features and benchmark commands remain unchanged.
   `--locked` forbids dependency resolution drift. No `target-cpu=native`,
   optimization downgrade, debug stripping or fixture change. Rust's
-  `--remap-path-prefix=$PWD=.` makes source paths workspace-relative: otherwise
-  the profile has valid symbols but CodSpeed classifies Blacksmith's absolute
-  checkout paths as unknown instead of project code. This is the one intentional
-  debug-path flag difference; it is not a code-generation optimization.
+  `--remap-path-prefix=$PWD=/actions-runner/_work/jazz/jazz` maps source paths
+  to the measurement runner's observed absolute checkout root. Both the original
+  Blacksmith paths and the attempted relative `./crates/...` paths produced
+  valid symbols but `origin: unknown` in full GQL profiles. CodSpeed uploads its
+  absolute repository root; the new trial matches it rather than relying on
+  relative-path normalization. `codspeed-artifact.mjs rustflags` owns this mapping,
+  the artifact contract pins it, and installation rejects checkout-path drift.
+  This is the one intentional debug-path flag difference; it does not change
+  optimization settings. Hosted user-source attribution must still be verified.
 - Each workload builds separately to avoid feature unification. A 16-vCPU
   build host replaces four compile jobs on a measurement host. This does not
   change benchmark execution parallelism or the measurement machine.
@@ -37,6 +42,9 @@ Build latency, cache behavior and acceptance receipts are tracked in
   The receiver rejects a different source/run/compiler/contract, missing or
   modified files, symlinks, incompatible platform or missing ELF dependencies.
   It restores executable permissions lost by artifact upload only after hashing.
+- The executable must contain both `.debug_info` and `.debug_line`. The checkout
+  supplies source files at the same SHA; Cargo intermediates are not needed for
+  these embedded debug sections. This is not a split-debug-artifact protocol.
 - These are benchmark executables, **not** the native/WASM correctness artifact
   store. No correctness producer/consumer or Turbo caching boundaries change.
 

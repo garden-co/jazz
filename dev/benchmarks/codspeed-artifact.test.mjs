@@ -5,7 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { artifactPaths, seal, verify, verifyCodspeedVersion } from "./codspeed-artifact.mjs";
+import {
+  artifactPaths,
+  measurementWorkspace,
+  seal,
+  sourcePathFlags,
+  verify,
+  verifyCodspeedVersion,
+  verifyMeasurementWorkspace,
+} from "./codspeed-artifact.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const identity = {
@@ -30,6 +38,10 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
       assert.deepEqual(await verify("todo", identity), manifest);
       assert.equal(manifest.format, "jazz-codspeed-benchmark-artifact-v1");
       assert.equal(manifest.contract.profile, "bench");
+      assert.deepEqual(manifest.contract.sourcePaths, {
+        kind: "measurement-workspace-absolute",
+        root: measurementWorkspace,
+      });
       assert.equal(manifest.files.walltime.length, 64);
       assert.deepEqual(await verify("todo", identity), manifest);
     });
@@ -61,6 +73,12 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
         await assert.rejects(verify("todo", identity), /hash mismatch/);
       });
     }
+    await t.test("reject the previous relative-path artifact contract", async () => {
+      const manifest = await reset();
+      manifest.contract = { ...manifest.contract, sourcePaths: "workspace-relative" };
+      await writeFile(manifestFile, JSON.stringify(manifest));
+      await assert.rejects(verify("todo", identity), /build contract mismatch/);
+    });
     await t.test("reject extra, absent and symlinked files", async () => {
       await reset();
       await writeFile(path.join(bundle, "unexpected"), "extra");
@@ -78,6 +96,27 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
     process.chdir(previous);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("source remapping uses the exact measurement root and rejects checkout drift", () => {
+  assert.equal(
+    sourcePathFlags("/home/runner/_work/jazz/jazz"),
+    "--remap-path-prefix=/home/runner/_work/jazz/jazz=/actions-runner/_work/jazz/jazz",
+  );
+  verifyMeasurementWorkspace("/actions-runner/_work/jazz/jazz");
+  for (const wrong of [".", "/home/runner/_work/jazz/jazz", "/actions-runner/_work/other/other"]) {
+    assert.throws(() => verifyMeasurementWorkspace(wrong), /checkout path changed/);
+  }
+  for (const wrong of [".", "/workspace with spaces", "/workspace=other"]) {
+    assert.throws(() => sourcePathFlags(wrong));
+  }
+  assert.equal(
+    execFileSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), "rustflags"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim(),
+    sourcePathFlags(root),
+  );
 });
 
 test("timing shim adds only --timings to build, preserving all arguments", async () => {
@@ -142,7 +181,11 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
   assert.match(build, /cache-workspace-crates: true/);
   assert.match(build, /JAZZ_BENCHMARK_SOURCE: \$\{\{ github.sha \}\}/);
   assert.match(build, /env-vars: JAZZ_BENCHMARK_SOURCE/);
-  assert.ok(build.includes('export RUSTFLAGS="--remap-path-prefix=$PWD=."'));
+  assert.ok(
+    build.includes(
+      'RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"\n          export RUSTFLAGS',
+    ),
+  );
   assert.match(
     build,
     /cargo codspeed build -m walltime --package jazz-example-\$\{\{ matrix.workload \}\}-benchmark --bench walltime --features jazz-benchmark-guard\/mimalloc --locked/,
