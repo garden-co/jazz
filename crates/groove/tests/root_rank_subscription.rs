@@ -118,7 +118,8 @@ async fn mixed_root_edits_and_shared_subscribers_match_exact_sorted_rows() {
             );
             oracle.insert(id, (format!("item-{id}"), id * 10));
         }
-        db.commit_batch(seed).await.unwrap();
+        let persistence = db.apply_batch(seed).await.unwrap().persist().await;
+        db.finish_persistence(persistence).unwrap();
         apply(
             &mut visible,
             &subscription.try_recv().unwrap().terminal_sinks["rows"].operations,
@@ -144,7 +145,8 @@ async fn mixed_root_edits_and_shared_subscribers_match_exact_sorted_rows() {
             );
             oracle.insert(id, (format!("moved-{id}"), rank));
         }
-        db.commit_batch(crossing).await.unwrap();
+        let persistence = db.apply_batch(crossing).await.unwrap().persist().await;
+        db.finish_persistence(persistence).unwrap();
         apply(
             &mut visible,
             &subscription.try_recv().unwrap().terminal_sinks["rows"].operations,
@@ -182,7 +184,8 @@ async fn mixed_root_edits_and_shared_subscribers_match_exact_sorted_rows() {
                     oracle.insert(id, (title, rank));
                 }
             }
-            db.commit_batch(batch).await.unwrap();
+            let persistence = db.apply_batch(batch).await.unwrap().persist().await;
+            db.finish_persistence(persistence).unwrap();
             if let Ok(tick) = subscription.try_recv() {
                 apply(&mut visible, &tick.terminal_sinks["rows"].operations);
                 apply(
