@@ -1865,6 +1865,41 @@ where
             ] {
                 for row in rows {
                     if !tables.contains_key(&row.physical_table) {
+                        // Opt-in local diagnostics only. Rejections forwarded to peers
+                        // retain their generic text and carry no structural facts.
+                        if std::env::var_os("JAZZ_SCOPE_MEMBERSHIP_DIAGNOSTICS").is_some() {
+                            let mapping = self
+                                .query
+                                .registered_shapes
+                                .get(&update.subscription.shape_id)
+                                .and_then(|shape| {
+                                    self.catalogue
+                                        .physical_mappings
+                                        .get(&shape.schema_version())
+                                });
+                            let name_in_scope =
+                                tables.values().any(|name| name == &row.version_table);
+                            let physical_in_schema = mapping.is_some_and(|mapping| {
+                                mapping
+                                    .identities
+                                    .tables
+                                    .values()
+                                    .any(|table| table.id == row.physical_table)
+                            });
+                            let name_matches_physical = mapping
+                                .and_then(|mapping| {
+                                    mapping.identities.tables.get(row.version_table.as_str())
+                                })
+                                .is_some_and(|table| table.id == row.physical_table);
+                            let cached = state.is_some_and(|state| {
+                                state.compiled_covered_input_sources.is_some()
+                            });
+                            eprintln!(
+                                "JAZZ_SCOPE_MEMBERSHIP tables={} name_in_scope={name_in_scope} physical_in_schema={physical_in_schema} name_matches_physical={name_matches_physical} cached={cached} scoped_relay={}",
+                                tables.len().min(999_999),
+                                self.client_relay_scope().is_some(),
+                            );
+                        }
                         return Err(invalid(
                             "supporting physical table is outside compiled scope",
                         ));

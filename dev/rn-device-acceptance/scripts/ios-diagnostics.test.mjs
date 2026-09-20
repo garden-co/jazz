@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boundedDiagnostic,
+  scopeMembershipDiagnostic,
   foregroundWakeDiagnostic,
   parseLaunchProcessId,
   relevantAppLogs,
@@ -166,4 +167,19 @@ test("scope rejection category sanitizers agree across hosts and reject raw deta
         undefined,
       );
   }
+});
+
+test("scope membership stderr accepts only bounded structural records", () => {
+  const record =
+    "JAZZ_SCOPE_MEMBERSHIP tables=1 name_in_scope=true physical_in_schema=false name_matches_physical=false cached=true scoped_relay=false";
+  assert.equal(scopeMembershipDiagnostic(`private raw detail\n${record}\nunknown=value`), record);
+  for (const invalid of [
+    record + " private",
+    record.replace("tables=1", "tables=1000000"),
+    record.replace("true", "secret"),
+    "arbitrary private text",
+  ]) {
+    assert.equal(scopeMembershipDiagnostic(invalid), "[no recognized scope membership diagnostic]");
+  }
+  assert.equal(scopeMembershipDiagnostic(Array(20).fill(record).join("\n")).split("\n").length, 16);
 });

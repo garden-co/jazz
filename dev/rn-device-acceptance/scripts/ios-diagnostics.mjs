@@ -99,3 +99,16 @@ export const scopeWriterReadDiagnostic = (value) => {
     ? detail
     : "[no recognized scope writer read diagnostic]";
 };
+
+/** Opt-in local stderr records: never echo arbitrary process output. */
+export const scopeMembershipDiagnostic = (value) => {
+  const records = String(value)
+    .slice(-16 * 1024)
+    .split("\n")
+    .filter((line) =>
+      /^JAZZ_SCOPE_MEMBERSHIP tables=[0-9]{1,6} name_in_scope=(true|false) physical_in_schema=(true|false) name_matches_physical=(true|false) cached=(true|false) scoped_relay=(true|false)$/.test(
+        line,
+      ),
+    );
+  return records.slice(-16).join("\n") || "[no recognized scope membership diagnostic]";
+};

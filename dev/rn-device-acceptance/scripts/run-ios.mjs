@@ -2,7 +2,7 @@ import { startCoreObservationControl } from "./core-observation-control.mjs";
 import { boundedHarnessOutput, startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
 import {
@@ -12,6 +12,7 @@ import {
   foregroundWakeDiagnostic,
   safeDeviceDiagnostic,
   scopeWriterReadDiagnostic,
+  scopeMembershipDiagnostic,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
 import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
@@ -28,6 +29,7 @@ const simctl = (args) => {
   try {
     return execFileSync("xcrun", ["simctl", ...args], {
       encoding: "utf8",
+      env: { ...process.env, SIMCTL_CHILD_JAZZ_SCOPE_MEMBERSHIP_DIAGNOSTICS: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
@@ -72,6 +74,8 @@ try {
     const file = diagnosticFilePath();
     return existsSync(file) ? readFileSync(file, "utf8") : "";
   };
+  const scopeStderrPath = () =>
+    join(appDataContainer(), "Library", "Caches", "jazz-scope-stderr.txt");
   const diagnostics = (launchPid) =>
     [
       `simctl launch PID: ${launchPid}`,
@@ -83,6 +87,9 @@ try {
           const file = join(appDataContainer(), "Library", "Caches", "jazz-scope-writer-read.txt");
           return existsSync(file) ? readFileSync(file, "utf8") : "";
         })(),
+      )}`,
+      `scope membership:\n${scopeMembershipDiagnostic(
+        existsSync(scopeStderrPath()) ? readFileSync(scopeStderrPath(), "utf8") : "",
       )}`,
       `foreground wake trace:\n${foregroundWakeDiagnostic(
         trySimctl([
@@ -126,10 +133,12 @@ try {
     rmSync(join(appDataContainer(), "Library", "Caches", "jazz-scope-writer-read.txt"), {
       force: true,
     });
+    writeFileSync(scopeStderrPath(), "");
     const phaseStartedAt = Date.now();
     const launchPid = parseLaunchProcessId(
       simctl([
         "launch",
+        `--stderr=${scopeStderrPath()}`,
         udid,
         "dev.jazz.rndeviceacceptance",
         "-JazzDeviceRunNonce",

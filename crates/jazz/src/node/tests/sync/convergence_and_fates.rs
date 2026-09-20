@@ -1074,3 +1074,26 @@ fn fresh_delivery_generation_advances_after_catalogue_runtime_rebuild() {
         "a fresh delivery must release the read waiting across the rebuild"
     );
 }
+
+
+#[test]
+fn authority_outside_scope_diagnostic_distinguishes_mapping_from_compiled_membership() {
+    // Internal ingress and cache control are necessary to distinguish a bad
+    // physical coordinate from a missing compiler source before any mutation.
+    for empty_compiled_scope in [false, true] {
+        let (_dir, mut receiver, authority_result, _initial, mut successor) = covered_input_receiver_fixture();
+        let generation = receiver.applied_authority_result_generation(&authority_result);
+        if empty_compiled_scope {
+            receiver.query.authority_results.get_mut(&authority_result).unwrap()
+                .compiled_covered_input_sources = Some(BTreeMap::new());
+        } else {
+            successor.supporting_rows.added_rows_mut()[0].physical_table =
+                crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x7a; 16]));
+        }
+        let Error::InvalidAuthoritySourceClosure { transition, .. } = receiver
+            .apply_sync_message_settled(successor.into_view_update()).unwrap_err()
+        else { panic!("malformed scope must be rejected"); };
+        assert_eq!(transition, "supporting physical table is outside compiled scope");
+        assert_eq!(receiver.applied_authority_result_generation(&authority_result), generation);
+    }
+}
