@@ -48,4 +48,115 @@ export const historicalBackfills: HistoricalBackfill[] = [
       },
     ],
   },
+  {
+    releaseTag: "v2.0.0-alpha.55",
+    engineSha: "11738be1b2b442ffb0ea37c3c3891d538ec02251",
+    harnessSha: "59d2b7ea4902188d0167721256ca0a8e278bd023",
+    harnessSourceSha: "1a5add74c7da1509049ffedaf7f663b2cbd36c6e",
+    effectiveDate: "2026-09-15T22:33:17.491Z",
+    dateSource: "npm jazz-tools time[2.0.0-alpha.55]",
+    workflowUrl: "https://github.com/garden-co/jazz/actions/runs/35475965789",
+    receipts: [
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bd5",
+        benchmarkName: "owner_or_org_policy_org_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bd6",
+        benchmarkName: "owner_or_org_policy_org_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bd7",
+        benchmarkName: "owner_or_org_policy_owner_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bd8",
+        benchmarkName: "owner_or_org_policy_owner_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bd9",
+        benchmarkName: "owner_policy_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bda",
+        benchmarkName: "owner_policy_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bdb",
+        benchmarkName: "policy_free_org_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bdc",
+        benchmarkName: "policy_free_org_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bdd",
+        benchmarkName: "policy_free_owner_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bde",
+        benchmarkName: "policy_free_owner_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21bdf",
+        benchmarkName: "subscribe_owner_or_org_policy_org_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be0",
+        benchmarkName: "subscribe_owner_or_org_policy_org_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be1",
+        benchmarkName: "subscribe_owner_or_org_policy_owner_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be2",
+        benchmarkName: "subscribe_owner_or_org_policy_owner_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be3",
+        benchmarkName: "subscribe_owner_policy_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be4",
+        benchmarkName: "subscribe_owner_policy_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be5",
+        benchmarkName: "subscribe_policy_free_org_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be6",
+        benchmarkName: "subscribe_policy_free_org_page50[100000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be7",
+        benchmarkName: "subscribe_policy_free_owner_page50[10000]",
+      },
+      {
+        runId: "6aaf23470d0b1760bd3d7d04",
+        resultId: "6aaf2365ad9a6239bfb21be8",
+        benchmarkName: "subscribe_policy_free_owner_page50[100000]",
+      },
+    ],
+  },
 ];
