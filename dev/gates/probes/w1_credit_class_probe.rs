@@ -2,7 +2,11 @@
 //! No Jazz, storage, FFI, async runtime, or serialization code participates.
 use std::hint::black_box;
 
+#[cfg(feature = "codec")]
+mod w1_credit_codec_probe;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "codec", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 enum ChannelClass {
     Control = 0,
@@ -15,6 +19,7 @@ enum ChannelClass {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "codec", derive(serde::Serialize, serde::Deserialize))]
 enum WireCreditKind {
     Frames,
     Messages { count: u32, bulk: bool },
@@ -96,6 +101,8 @@ fn main() {
         pending[index] = black_box(721_647);
         let selected = select_grant(black_box(&[BufferCost::default(); 6]), black_box(&pending));
         println!("physical selection={selected:?}");
+        #[cfg(feature = "codec")]
+        w1_credit_codec_probe::check(selected.unwrap());
         assert_eq!(
             selected,
             Some((index, 721_647, expected, WireCreditKind::Frames))
@@ -116,6 +123,8 @@ fn main() {
             _ => unreachable!(),
         };
         println!("buffer selection={selected:?}");
+        #[cfg(feature = "codec")]
+        w1_credit_codec_probe::check(selected.unwrap());
         assert_eq!(
             selected,
             Some((

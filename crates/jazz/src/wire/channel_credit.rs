@@ -335,7 +335,13 @@ impl ChannelCredits {
             } else {
                 return Ok(None);
             };
-        let frame = encode_frame(&WireFrame::ChannelCredit(WireChannelCredit {
+        if std::env::var_os("JAZZ_WIRE_CREDIT_TRACE").is_some() {
+            eprintln!(
+                "credit selected sequence={} bucket={index} class={class:?} raw_class={} kind={kind:?} amount={amount}",
+                self.next_sent, class as u8
+            );
+        }
+        let grant = WireChannelCredit {
             protocol_version: self.context.expected_protocol_version(),
             features: self.context.negotiated_features(),
             session: self.context.expected_session().cloned(),
@@ -343,8 +349,15 @@ impl ChannelCredits {
             sequence: self.next_sent,
             consumed_bytes: amount as u64,
             kind,
-        }))
-        .map_err(|error| error.to_string())?;
+        };
+        if std::env::var_os("JAZZ_WIRE_CREDIT_TRACE").is_some() {
+            eprintln!(
+                "credit constructed sequence={} class={:?} raw_class={} kind={:?} amount={}",
+                grant.sequence, grant.class, grant.class as u8, grant.kind, grant.consumed_bytes
+            );
+        }
+        let frame =
+            encode_frame(&WireFrame::ChannelCredit(grant)).map_err(|error| error.to_string())?;
         if std::env::var_os("JAZZ_WIRE_CREDIT_TRACE").is_some() {
             let WireFrame::ChannelCredit(decoded) =
                 super::decode_frame(&frame).expect("diagnostic grant frame roundtrip")
@@ -352,8 +365,8 @@ impl ChannelCredits {
                 unreachable!()
             };
             eprintln!(
-                "credit emit sequence={} class={class:?} kind={kind:?} decoded_kind={:?} amount={amount} buffer_index={index}",
-                self.next_sent, decoded.kind
+                "credit emit sequence={} class={class:?} kind={kind:?} decoded_class={:?} decoded_raw_class={} decoded_kind={:?} amount={amount} buffer_index={index}",
+                self.next_sent, decoded.class, decoded.class as u8, decoded.kind
             );
         }
         self.pending = Some((frame.clone(), index, amount, kind));

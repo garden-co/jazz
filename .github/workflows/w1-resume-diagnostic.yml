@@ -35,6 +35,12 @@ jobs:
           rustc --edition 2024 -C opt-level=3 -C debuginfo=2 -C strip=none -C codegen-units=16 --emit asm,link --out-dir "$RUNNER_TEMP/w1-credit-probe" dev/gates/probes/w1_credit_class_probe.rs
       - name: Check every physical and decoded class selection
         run: '"$RUNNER_TEMP/w1-credit-probe/w1_credit_class_probe"'
+      - name: Compile and run isolated serde postcard roundtrip
+        run: |
+          RUSTFLAGS="-C debuginfo=2 -C strip=none" cargo rustc --locked --manifest-path dev/gates/probes/w1-credit-codec/Cargo.toml --release --target-dir "$RUNNER_TEMP/w1-credit-codec" -- --emit asm,link
+          "$RUNNER_TEMP/w1-credit-codec/release/w1-credit-codec-probe"
+          cp "$RUNNER_TEMP/w1-credit-codec/release/w1-credit-codec-probe" "$RUNNER_TEMP/w1-credit-probe/"
+          cp "$RUNNER_TEMP"/w1-credit-codec/release/deps/w1_credit_codec_probe-*.s "$RUNNER_TEMP/w1-credit-probe/"
       - name: Preserve optimized probe assembly and binary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -75,6 +81,43 @@ jobs:
       # This is a correctness diagnostic, not a published performance receipt.
       # Use the same walltime build and driver without an upload action or token.
       - name: Repeat only the two W1 resume sizes
+        id: codspeed
+        continue-on-error: true
         run: |
           ulimit -n 16384
           cargo codspeed run --measurement-mode walltime --package jazz-example-benchmark-w1 --bench reads_memory_walltime resume_one_task_update_scaling_memory -- --sample-count 10
+
+      - name: Run the same compiled artifact directly
+        id: direct
+        if: always() && steps.codspeed.outcome != 'skipped'
+        continue-on-error: true
+        working-directory: examples/benchmarks/w1
+        env:
+          CODSPEED_CARGO_WORKSPACE_ROOT: ${{ github.workspace }}
+        run: |
+          ulimit -n 16384
+          "$GITHUB_WORKSPACE/target/codspeed/walltime/jazz-example-benchmark-w1/reads_memory_walltime" --bench resume_one_task_update_scaling_memory --sample-count 10
+
+      - name: Preserve exact benchmark binary and disassembly
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/w1-benchmark-artifacts"
+          benchmark=target/codspeed/walltime/jazz-example-benchmark-w1/reads_memory_walltime
+          if test -f "$benchmark"; then
+            cp "$benchmark" "$RUNNER_TEMP/w1-benchmark-artifacts/"
+            objdump -Cd "$benchmark" > "$RUNNER_TEMP/w1-benchmark-artifacts/disassembly.txt"
+          fi
+
+      - name: Upload synthetic benchmark diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: w1-credit-benchmark-${{ runner.arch }}
+          path: ${{ runner.temp }}/w1-benchmark-artifacts
+
+      - name: Require both execution paths to pass
+        if: always()
+        env:
+          CODSPEED_OUTCOME: ${{ steps.codspeed.outcome }}
+          DIRECT_OUTCOME: ${{ steps.direct.outcome }}
+        run: test "$CODSPEED_OUTCOME" = success && test "$DIRECT_OUTCOME" = success
