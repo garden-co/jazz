@@ -21,6 +21,11 @@ static NSURL *JazzDeviceDiagnosticURL(void) {
   return [caches URLByAppendingPathComponent:@"jazz-device-diagnostic.txt"];
 }
 
+static NSURL *JazzScopeWriterReadDiagnosticURL(void) {
+  return [[JazzDeviceDiagnosticURL() URLByDeletingLastPathComponent]
+      URLByAppendingPathComponent:@"jazz-scope-writer-read.txt"];
+}
+
 static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
   return [NSSet setWithArray:@[
     @"fixture-metadata-failed",
@@ -204,6 +209,22 @@ RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:
   resolve(nil);
 }
 
+RCT_REMAP_METHOD(recordScopeWriterReadDiagnostic, recordScopeWriterReadDiagnostic:(NSString *)detail resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSString *pattern = @"^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)$";
+  NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  NSTextCheckingResult *match = [expression firstMatchInString:detail options:0 range:NSMakeRange(0, detail.length)];
+  if (!match || !NSEqualRanges(match.range, NSMakeRange(0, detail.length))) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Invalid scope writer read diagnostic", nil);
+    return;
+  }
+  NSError *error = nil;
+  if (![[detail dataUsingEncoding:NSUTF8StringEncoding] writeToURL:JazzScopeWriterReadDiagnosticURL() options:NSDataWritingAtomic error:&error]) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Failed to record scope writer read diagnostic", error);
+    return;
+  }
+  resolve(nil);
+}
+
 /** This boundary is acknowledged before the post-commit epoch, so a missing
  * marker is diagnosed explicitly rather than being mistaken for no wake. */
 RCT_REMAP_METHOD(recordSameRuntimeWakeBoundary, recordSameRuntimeWakeBoundaryWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
@@ -213,6 +234,12 @@ RCT_REMAP_METHOD(recordSameRuntimeWakeBoundary, recordSameRuntimeWakeBoundaryWit
 
 RCT_REMAP_METHOD(clearDiagnostic, clearDiagnosticWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
+  NSURL *scopeURL = JazzScopeWriterReadDiagnosticURL();
+  if ([[NSFileManager defaultManager] fileExistsAtPath:scopeURL.path] &&
+      ![[NSFileManager defaultManager] removeItemAtURL:scopeURL error:&error]) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Failed to clear scope writer read diagnostic", nil);
+    return;
+  }
   NSURL *url = JazzDeviceDiagnosticURL();
   if ([[NSFileManager defaultManager] fileExistsAtPath:url.path] &&
       ![[NSFileManager defaultManager] removeItemAtURL:url error:&error]) {

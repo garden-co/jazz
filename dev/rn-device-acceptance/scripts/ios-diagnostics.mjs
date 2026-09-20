@@ -89,3 +89,13 @@ export const parseLaunchProcessId = (value) => {
     throw new Error("simctl launch returned an unexpected bundle/process id");
   return processId;
 };
+
+/** Exact fixed counters only; never print arbitrary sandbox contents. */
+export const scopeWriterReadDiagnostic = (value) => {
+  const detail = String(value);
+  return /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/.test(
+    detail,
+  ) && !detail.endsWith("\n")
+    ? detail
+    : "[no recognized scope writer read diagnostic]";
+};

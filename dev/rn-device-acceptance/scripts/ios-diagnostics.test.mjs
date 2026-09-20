@@ -84,3 +84,20 @@ test("iOS launch parser accepts only the expected bundle and positive sole PID",
     assert.throws(() => parseLaunchProcessId(malformed), /unexpected bundle\/process id/);
   }
 });
+
+test("scope writer counters are exact and reject arbitrary or trailing data", async () => {
+  const { scopeWriterReadDiagnostic } = await import("./ios-diagnostics.mjs");
+  const detail =
+    "scope-isolation-writer-read-detail:last-pending-wakes-2-polls-1-row-responses-0-ready-no";
+  assert.equal(scopeWriterReadDiagnostic(detail), detail);
+  for (const invalid of [
+    "secret",
+    `${detail}\n`,
+    `${detail}-secret`,
+    detail.replace("wakes-2", "wakes-1234567"),
+  ])
+    assert.equal(
+      scopeWriterReadDiagnostic(invalid),
+      "[no recognized scope writer read diagnostic]",
+    );
+});

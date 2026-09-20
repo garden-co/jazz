@@ -157,9 +157,8 @@ export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promis
   await fixtureModule().recordDiagnostic(code);
 }
 
-/** Android-only, bounded counters for the scope writer read timeout. */
+/** Bounded counters for the scope writer read timeout on both device hosts. */
 export async function recordScopeWriterReadDiagnostic(detail: string): Promise<void> {
-  if (NativePlatform.OS !== "android") return;
   if (
     !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/.test(
       detail,

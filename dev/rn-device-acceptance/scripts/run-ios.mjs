@@ -11,6 +11,7 @@ import {
   relevantAppLogs,
   foregroundWakeDiagnostic,
   safeDeviceDiagnostic,
+  scopeWriterReadDiagnostic,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
 import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
@@ -77,6 +78,12 @@ try {
       `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
       `app receipt file:\n${boundedDiagnostic(receiptFile())}`,
       `app JavaScript/native diagnostic:\n${safeDeviceDiagnostic(diagnosticFile())}`,
+      `scope writer read:\n${scopeWriterReadDiagnostic(
+        (() => {
+          const file = join(appDataContainer(), "Library", "Caches", "jazz-scope-writer-read.txt");
+          return existsSync(file) ? readFileSync(file, "utf8") : "";
+        })(),
+      )}`,
       `foreground wake trace:\n${foregroundWakeDiagnostic(
         trySimctl([
           "spawn",
@@ -116,6 +123,9 @@ try {
   async function launchAndAssert(phase) {
     rmSync(receiptFilePath(), { force: true });
     rmSync(diagnosticFilePath(), { force: true });
+    rmSync(join(appDataContainer(), "Library", "Caches", "jazz-scope-writer-read.txt"), {
+      force: true,
+    });
     const phaseStartedAt = Date.now();
     const launchPid = parseLaunchProcessId(
       simctl([
