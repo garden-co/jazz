@@ -18,6 +18,7 @@ it("runs the device owner-scoped write/read receipt through the actual native ac
     let stored: string | null = null;
     const accounts = await createAccountManager({
       appId: "jazz-device-acceptance",
+      serverUrl: "https://core.example",
       store: {
         async read() {
           return stored;
