@@ -4056,6 +4056,53 @@ fn maintained_subscription_view_forget_query_binding_with_node_unsubscribes() {
 }
 
 #[test]
+fn maintained_footprint_inspection_is_subscription_specific_and_read_only() {
+    // Peer diagnostics are not exposed by Db. Exercise publication and teardown
+    // through PeerState's API rather than inspecting its retained representation.
+    let (_dir, mut core) = open_node_with_uuid(node(0x96));
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x52), 1_000).cells(title_cells("match")),
+        )
+        .unwrap();
+    accept_global(&mut core, tx_id, 1);
+    let (shape, matching) = title_shape_binding("match");
+    let (_, empty) = title_shape_binding("other");
+    let matching_key = subscription_key(&shape, &matching);
+    let empty_key = subscription_key(&shape, &empty);
+    let mut peer = PeerState::new();
+    assert_eq!(
+        peer.inspect_maintained_subscription_view_footprint(matching_key),
+        None,
+    );
+    peer.rehydrate_query(&mut core, &shape, &matching).unwrap();
+    peer.rehydrate_query(&mut core, &shape, &empty).unwrap();
+    let counters = peer.maintained_subscription_view_metrics();
+    let matching_footprint = peer
+        .inspect_maintained_subscription_view_footprint(matching_key)
+        .expect("matching subscription");
+    let empty_footprint = peer
+        .inspect_maintained_subscription_view_footprint(empty_key)
+        .expect("empty subscription is present, not absent");
+    assert_eq!(matching_footprint.result_rows, 1);
+    assert_eq!(empty_footprint.result_rows, 0);
+    assert_eq!(
+        peer.inspect_maintained_subscription_view_footprint(matching_key),
+        Some(matching_footprint),
+    );
+    assert_eq!(peer.maintained_subscription_view_metrics(), counters);
+    assert!(peer.forget_query_binding_with_node(&mut core, &shape, &matching));
+    assert_eq!(
+        peer.inspect_maintained_subscription_view_footprint(matching_key),
+        None,
+    );
+    assert_eq!(
+        peer.inspect_maintained_subscription_view_footprint(empty_key),
+        Some(empty_footprint),
+    );
+}
+
+#[test]
 fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_dir, mut core) = open_node_with_uuid(node(0x95));
@@ -4074,16 +4121,19 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     );
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
-    assert_eq!(metrics.footprint.result_rows, 1);
+    let footprint = peer
+        .inspect_maintained_subscription_view_footprint(subscription_key(&shape, &binding))
+        .expect("hydrated footprint");
+    assert_eq!(footprint.result_rows, 1);
     // The authority retains one exact source witness to construct the
     // receiver-local closure; rendered result members remain peer-local.
-    assert_eq!(metrics.footprint.structured_app_rows, 1);
-    assert!(metrics.footprint.structured_app_rows_bytes > 0);
+    assert_eq!(footprint.structured_app_rows, 1);
+    assert!(footprint.structured_app_rows_bytes > 0);
     // The source record itself owns its version identity; this publication
     // cache does not retain a duplicate version-index entry.
-    assert_eq!(metrics.footprint.version_identities, 0);
-    assert_eq!(metrics.footprint.version_tx_entries, 0);
-    assert_eq!(metrics.footprint.replacement_entries, 1);
+    assert_eq!(footprint.version_identities, 0);
+    assert_eq!(footprint.version_tx_entries, 0);
+    assert_eq!(footprint.replacement_entries, 1);
 
     // Flat and structured roots now share the collector terminal reducer, so
     // the authority retains the local collector state across later deltas.
@@ -4100,13 +4150,15 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
         vec![],
         vec![("todos", row(0x51), tx_id)],
     );
-    let metrics = peer.maintained_subscription_view_metrics();
+    let footprint = peer
+        .inspect_maintained_subscription_view_footprint(subscription_key(&shape, &binding))
+        .expect("retained empty view footprint");
     assert_eq!(
-        metrics.footprint.structured_app_rows, 0,
+        footprint.structured_app_rows, 0,
         "retaining the collector does not retain a row that left its result"
     );
-    assert_eq!(metrics.footprint.result_rows, 0);
-    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
+    assert_eq!(footprint.result_rows, 0);
+    assert_eq!(footprint.structured_app_rows_bytes, 0);
 
     let restored_tx = core
         .commit_mergeable_settled(
@@ -4120,9 +4172,11 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
         vec![("todos", row(0x51), restored_tx)],
         vec![],
     );
-    let metrics = peer.maintained_subscription_view_metrics();
-    assert_eq!(metrics.footprint.structured_app_rows, 1);
-    assert!(metrics.footprint.structured_app_rows_bytes > 0);
+    let footprint = peer
+        .inspect_maintained_subscription_view_footprint(subscription_key(&shape, &binding))
+        .expect("restored footprint");
+    assert_eq!(footprint.structured_app_rows, 1);
+    assert!(footprint.structured_app_rows_bytes > 0);
 
     // The storage-backed path never needs to read a newer content winner to
     // retract a deleted row. A restore re-enters through its exact original

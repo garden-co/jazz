@@ -497,7 +497,14 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     assert_eq!(group.subscribers.len(), 1);
     let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
-    assert_eq!(maintained_metrics.footprint.result_rows, 1);
+    let footprint = peer
+        .inspect_maintained_subscription_view_footprint(
+            crate::db::peer_connection::coverage_group_subscription_key(
+                coverage_groups.keys().next().expect("one coverage group"),
+            ),
+        )
+        .expect("maintained subscription footprint");
+    assert_eq!(footprint.result_rows, 1);
     assert_eq!(prepared_read(&client, &query).len(), 1);
     drop(subscriber_ref);
     client.detach_query(first_attachment);
