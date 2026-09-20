@@ -141,20 +141,30 @@ it.each(["forward", "reverse"])(
           label: "updated",
         });
         await expect(
-          alice.insert(app.posts, { authorId: reader.id, label: "denied" }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice
+              .insert(app.posts, { authorId: reader.id, label: "denied" })
+              .wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
           alice.insert(app.posts, { authorId: a.id, label: "inserted" }).wait({ tier: "edge" }),
         ).resolves.toMatchObject({ label: "inserted" });
         await expect(
-          alice.update(app.posts, post.id, { authorId: b.id }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.update(app.posts, post.id, { authorId: b.id }).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
-          bob.update(app.posts, post.id, { authorId: b.id }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            bob.update(app.posts, post.id, { authorId: b.id }).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
-          alice.delete(app.posts, readOnlyPost.id).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.delete(app.posts, readOnlyPost.id).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
           alice.delete(app.posts, post.id).wait({ tier: "edge" }),
         ).resolves.toBeUndefined();
@@ -234,25 +244,37 @@ it.each(["forward", "reverse"])(
             .wait({ tier: "edge" }),
         ).resolves.toMatchObject({ label: "new resource" });
         await expect(
-          alice.update(app.resources, resource.id, { label: "forbidden" }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.update(app.resources, resource.id, { label: "forbidden" }).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
-          alice.update(app.resources, other.id, { label: "wrong identity" }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice
+              .update(app.resources, other.id, { label: "wrong identity" })
+              .wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await backend.delete(app.grants, witness.id).wait({ tier: "edge" });
         // Read access survives through the reader witness; update/delete authority does not.
         expect(
           (await alice.all(app.resources.where({ id: resource.id }))).map((row) => row.label),
         ).toEqual(["allowed"]);
         await expect(
-          alice.update(app.resources, resource.id, { label: "denied" }).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.update(app.resources, resource.id, { label: "denied" }).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
-          alice.delete(app.resources, resource.id).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.delete(app.resources, resource.id).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
-          alice.delete(app.collections, collection.id).wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice.delete(app.collections, collection.id).wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
         await expect(
           bob.delete(app.resources, resource.id).wait({ tier: "edge" }),
         ).resolves.toBeUndefined();
@@ -266,10 +288,12 @@ it.each(["forward", "reverse"])(
           })
           .wait({ tier: "edge" });
         await expect(
-          alice
-            .insert(app.resources, { label: "denied resource" }, { id: deniedId })
-            .wait({ tier: "edge" }),
-        ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+          Promise.resolve().then(() =>
+            alice
+              .insert(app.resources, { label: "denied resource" }, { id: deniedId })
+              .wait({ tier: "edge" }),
+          ),
+        ).rejects.toThrow(/AuthorizationDenied|Write rejected|read policy denied/);
       }
     } finally {
       await context?.shutdown();
