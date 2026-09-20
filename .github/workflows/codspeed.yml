@@ -205,6 +205,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 16
       RUST_MIN_STACK: 4194304
+      JAZZ_BENCHMARK_SOURCE: ${{ github.sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -214,8 +215,10 @@ jobs:
         with:
           cache-bin: true
           cache-workspace-crates: true
-          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v1
-          key: ${{ github.sha }}
+          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v2
+          # shared-key takes precedence over key in this action. Hash the SHA
+          # as environment instead, retaining cross-revision restore prefixes.
+          env-vars: JAZZ_BENCHMARK_SOURCE
           workspaces: . -> target
       - name: Test benchmark artifact handoff
         run: node --test dev/benchmarks/codspeed-artifact.test.mjs
@@ -235,6 +238,9 @@ jobs:
         run: |
           export JAZZ_REAL_CARGO="$(command -v cargo)"
           export PATH="$PWD/dev/benchmarks/timed-cargo:$PATH"
+          # Preserve user-source classification after moving from Blacksmith's
+          # checkout path to CodSpeed's. No target/codegen optimization changes.
+          export RUSTFLAGS="--remap-path-prefix=$PWD=."
           /usr/bin/time -v cargo codspeed build -m walltime --package jazz-example-${{ matrix.workload }}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc --locked
       - name: Seal benchmark executables
         run: node dev/benchmarks/codspeed-artifact.mjs seal ${{ matrix.workload }}

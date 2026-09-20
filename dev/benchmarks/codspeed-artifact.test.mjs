@@ -140,6 +140,9 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
   assert.match(build, /runs-on: blacksmith-16vcpu-ubuntu-2204-arm/);
   assert.match(build, /CARGO_BUILD_JOBS: 16/);
   assert.match(build, /cache-workspace-crates: true/);
+  assert.match(build, /JAZZ_BENCHMARK_SOURCE: \$\{\{ github.sha \}\}/);
+  assert.match(build, /env-vars: JAZZ_BENCHMARK_SOURCE/);
+  assert.ok(build.includes('export RUSTFLAGS="--remap-path-prefix=$PWD=."'));
   assert.match(
     build,
     /cargo codspeed build -m walltime --package jazz-example-\$\{\{ matrix.workload \}\}-benchmark --bench walltime --features jazz-benchmark-guard\/mimalloc --locked/,

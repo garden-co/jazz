@@ -17,6 +17,7 @@ const contract = {
   profile: "bench",
   features: "jazz-benchmark-guard/mimalloc",
   bench: "walltime",
+  sourcePaths: "workspace-relative",
 };
 
 function command(file, args) {
