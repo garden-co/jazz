@@ -32,6 +32,48 @@ use crate::storage::StorageFuture;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
+/// Ready batches never allocate an async frame. Only operators which really
+/// need the general evaluator carry its boxed continuation.
+pub(super) enum ReadyNodeEvaluation<'a> {
+    Ready(std::future::Ready<Result<Arc<RecordDeltas>, IvmRuntimeError>>),
+    Deferred(StorageFuture<'a, Result<Arc<RecordDeltas>, IvmRuntimeError>>),
+}
+
+impl std::future::Future for ReadyNodeEvaluation<'_> {
+    type Output = Result<Arc<RecordDeltas>, IvmRuntimeError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Ready(value) => std::pin::Pin::new(value).poll(cx),
+            Self::Deferred(future) => future.as_mut().poll(cx),
+        }
+    }
+}
+
+impl ReadyNodeEvaluation<'_> {
+    fn ready(result: Result<Arc<RecordDeltas>, IvmRuntimeError>) -> Self {
+        Self::Ready(std::future::ready(result))
+    }
+}
+
+/// Frame-owned continuation: never installed as retained operator state.
+/// Completed prefixes remain private across CPU yields and are discarded on
+/// cancellation/failure. There is no borrowed evaluator or async stack here.
+pub(super) struct PendingUnaryBatch {
+    lookup: NodeMemoLookup,
+    input: Arc<RecordDeltas>,
+    next: usize,
+    output: RecordDeltas,
+    projection: Option<Arc<PreparedProjection>>,
+    #[cfg(feature = "cold-settle-attribution")]
+    elapsed_ns: u64,
+}
+
+const UNARY_ROWS_PER_POLL: usize = 256;
+
 #[derive(Clone, Debug)]
 pub(super) enum OperatorState {
     Stateless,
@@ -631,6 +673,7 @@ pub(super) struct RootOrderingWindows {
 /// Ephemeral lookup inputs, not a cached proof of producer readiness. A miss
 /// may reuse these only within the same node evaluation, never across the
 /// postorder traversal that can rebuild its input state.
+#[derive(Clone)]
 struct NodeMemoLookup {
     key: EvalMemoKey,
     input_watermark: u64,
@@ -878,6 +921,170 @@ impl GraphRuntimeView<'_> {
 }
 
 impl TickEvaluator<'_> {
+    pub(super) fn poll_ready_node(
+        &mut self,
+        node: NodeId,
+        pending: &mut HashMap<NodeId, PendingUnaryBatch>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        use std::task::Poll;
+        if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(node) {
+            let lookup = match self.prepare_memo_lookup(node) {
+                Ok(lookup) => lookup,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            match self.cached_node_records(&lookup) {
+                Ok(Some(records)) => return Poll::Ready(Ok(records)),
+                Err(error) => return Poll::Ready(Err(error)),
+                Ok(None) => {}
+            }
+            let input = match self.ready_unary_input(node, &lookup) {
+                Some(Ok(input)) => input,
+                Some(Err(error)) => return Poll::Ready(Err(error)),
+                None => return self.compute_node(node, lookup).as_mut().poll(cx),
+            };
+            match self.prepare_unary_batch(node, &lookup, &input) {
+                Ok(Some(batch)) => {
+                    entry.insert(batch);
+                }
+                Ok(None) => {
+                    let result = self.compute_unary_input(node, &input);
+                    return Poll::Ready(result.map(|result| self.memoize_result(&lookup, result)));
+                }
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+        let batch = pending.get_mut(&node).expect("prepared unary batch");
+        let graph_node = self.graph.node(node).expect("frame retains node");
+        let end = (batch.next + UNARY_ROWS_PER_POLL).min(batch.input.deltas.len());
+        let input = &batch.input.deltas[batch.next..end];
+        #[cfg(feature = "cold-settle-attribution")]
+        let started = std::time::Instant::now();
+        let result = match &graph_node.descriptor.operator {
+            OpType::MapProject(project) => NodeState::update_map_project_slice(
+                project,
+                batch.output.descriptor,
+                batch.input.descriptor,
+                input,
+                batch.projection.as_deref(),
+                false,
+            ),
+            OpType::Filter(filter) => {
+                let mut deltas = Vec::new();
+                let result = input.iter().try_for_each(|delta| {
+                    if filter
+                        .predicate
+                        .matches(delta.borrowed(&batch.input.descriptor), filter.comparison)?
+                    {
+                        deltas.push(delta.clone());
+                    }
+                    Ok::<_, IvmRuntimeError>(())
+                });
+                result.map(|()| RecordDeltas {
+                    descriptor: batch.output.descriptor,
+                    deltas,
+                })
+            }
+            _ => unreachable!("prepared unary operator"),
+        };
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            batch.elapsed_ns += started.elapsed().as_nanos() as u64;
+        }
+        match result {
+            Err(error) => {
+                pending.remove(&node);
+                Poll::Ready(Err(error))
+            }
+            Ok(result) => {
+                batch.output.deltas.extend(result.deltas);
+                batch.next = end;
+                if end < batch.input.deltas.len() {
+                    // The caller owns wakeup and distinguishes this from a
+                    // registered storage request, just like recursive yields.
+                    return Poll::Pending;
+                }
+                let batch = pending.remove(&node).expect("completed unary batch");
+                #[cfg(feature = "cold-settle-attribution")]
+                if let OpType::MapProject(project) = &graph_node.descriptor.operator {
+                    crate::cold_settle_attribution::record_map_node(
+                        node.0,
+                        self.context.eval_mode == EvalMode::Hydrate,
+                        batch.input.deltas.len(),
+                        batch.output.deltas.len(),
+                        batch.elapsed_ns,
+                        || {
+                            format!(
+                                "inputs={:?} projection={project:?}",
+                                graph_node.descriptor.inputs
+                            )
+                        },
+                    );
+                    crate::cold_settle_attribution::record_map(
+                        self.context.eval_mode == EvalMode::Hydrate,
+                        batch.input.deltas.len(),
+                        batch.output.deltas.len(),
+                    );
+                }
+                Poll::Ready(Ok(self.memoize_result(&batch.lookup, batch.output)))
+            }
+        }
+    }
+
+    fn prepare_unary_batch(
+        &mut self,
+        node: NodeId,
+        lookup: &NodeMemoLookup,
+        input: &Arc<RecordDeltas>,
+    ) -> Result<Option<PendingUnaryBatch>, IvmRuntimeError> {
+        if input.deltas.len() <= UNARY_ROWS_PER_POLL {
+            return Ok(None);
+        }
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        let output = graph_node.descriptor.output.records();
+        let projection = match &graph_node.descriptor.operator {
+            OpType::MapProject(project) => {
+                self.raw_projection_fields(node, project, &input.descriptor, output)?
+            }
+            OpType::Filter(filter) => {
+                let mut referenced = BTreeSet::new();
+                filter.predicate.referenced_fields(&mut referenced);
+                // Indirect fields have request/error ordering semantics. Keep
+                // them on the existing kernel until their resumable stages
+                // can retain both materialization and predicate cursors.
+                for field in referenced {
+                    let Some(index) = resolve_field_name(&input.descriptor, &field) else {
+                        return Ok(None);
+                    };
+                    if input.descriptor.fields()[index]
+                        .value_type
+                        .may_contain_stored_scalar()
+                    {
+                        return Ok(None);
+                    }
+                }
+                None
+            }
+            _ => unreachable!("checked unary operator"),
+        };
+        if self.context.eval_mode == EvalMode::Hydrate {
+            self.metrics.hydration_memo_computes += 1;
+            self.metrics.hydration_memo_computed_nodes.insert(node);
+        }
+        Ok(Some(PendingUnaryBatch {
+            lookup: lookup.clone(),
+            input: Arc::clone(input),
+            next: 0,
+            output: RecordDeltas::empty(output),
+            projection,
+            #[cfg(feature = "cold-settle-attribution")]
+            elapsed_ns: 0,
+        }))
+    }
+
     /// Evaluate one reachable graph slice in dependency order.
     ///
     /// `update_node` may ask for its direct inputs, but those calls are memo
@@ -1156,10 +1363,7 @@ impl TickEvaluator<'_> {
         Ok(true)
     }
 
-    pub(super) fn update_node(
-        &mut self,
-        node: NodeId,
-    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+    pub(super) fn update_node(&mut self, node: NodeId) -> ReadyNodeEvaluation<'_> {
         // The postorder driver has already evaluated ordinary inputs. Check
         // their memo before entering another evaluator future: even a cache
         // hit inside compute_node would recursively poll that wide future
@@ -1168,9 +1372,9 @@ impl TickEvaluator<'_> {
             .prepare_memo_lookup(node)
             .and_then(|lookup| self.cached_node_records(&lookup))
         {
-            Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
-            Err(error) => Box::pin(std::future::ready(Err(error))),
-            Ok(None) => Box::pin(self.update_subgraph(node)),
+            Ok(Some(records)) => ReadyNodeEvaluation::ready(Ok(records)),
+            Err(error) => ReadyNodeEvaluation::ready(Err(error)),
+            Ok(None) => ReadyNodeEvaluation::Deferred(Box::pin(self.update_subgraph(node))),
         }
     }
 
@@ -1250,19 +1454,189 @@ impl TickEvaluator<'_> {
     /// producer-index readiness: preserve the normal memo checks, and let an
     /// operator request an input rebuild through `update_node` when necessary.
     /// Recursive operators still own their frontier-scoped child evaluation.
-    pub(super) fn update_ready_node(
-        &mut self,
-        node: NodeId,
-    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+    pub(super) fn update_ready_node(&mut self, node: NodeId) -> ReadyNodeEvaluation<'_> {
         let lookup = match self.prepare_memo_lookup(node) {
             Ok(lookup) => lookup,
-            Err(error) => return Box::pin(std::future::ready(Err(error))),
+            Err(error) => return ReadyNodeEvaluation::ready(Err(error)),
         };
         match self.cached_node_records(&lookup) {
-            Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
-            Err(error) => Box::pin(std::future::ready(Err(error))),
-            Ok(None) => self.compute_node(node, lookup),
+            Ok(Some(records)) => ReadyNodeEvaluation::ready(Ok(records)),
+            Err(error) => ReadyNodeEvaluation::ready(Err(error)),
+            Ok(None) => {
+                if let Some(result) = self.compute_ready_unary(node, &lookup) {
+                    return ReadyNodeEvaluation::ready(result);
+                }
+                ReadyNodeEvaluation::Deferred(self.compute_node(node, lookup))
+            }
         }
+    }
+
+    /// Stateless batch kernels need no future when their input is resident.
+    /// Missing memo or producer state still uses the existing rebuild driver.
+    fn compute_ready_unary(
+        &mut self,
+        node: NodeId,
+        lookup: &NodeMemoLookup,
+    ) -> Option<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        let input = match self.ready_unary_input(node, lookup)? {
+            Ok(input) => input,
+            Err(error) => return Some(Err(error)),
+        };
+        let result = self.compute_unary_input(node, &input);
+        Some(result.map(|result| self.memoize_result(lookup, result)))
+    }
+
+    fn ready_unary_input(
+        &mut self,
+        node: NodeId,
+        lookup: &NodeMemoLookup,
+    ) -> Option<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        if self.context.sub_tick > 1 && !lookup.depends_on_context {
+            return None;
+        }
+        let graph_node = self.graph.node(node)?;
+        if !matches!(
+            graph_node.descriptor.operator,
+            OpType::Filter(_) | OpType::MapProject(_)
+        ) {
+            return None;
+        }
+        let [input] = graph_node.descriptor.inputs.as_slice() else {
+            return Some(Err(IvmRuntimeError::GraphInputArityMismatch(node)));
+        };
+        match self
+            .prepare_memo_lookup(*input)
+            .and_then(|key| self.cached_node_records(&key))
+        {
+            Ok(Some(input)) => Some(Ok(input)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    fn compute_unary_input(
+        &mut self,
+        node: NodeId,
+        input: &Arc<RecordDeltas>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let graph_node = self.graph.node(node).expect("checked unary node");
+        let output = graph_node.descriptor.output.records();
+        if self.context.eval_mode == EvalMode::Hydrate {
+            self.metrics.hydration_memo_computes += 1;
+            self.metrics.hydration_memo_computed_nodes.insert(node);
+        }
+        match &graph_node.descriptor.operator {
+            OpType::Filter(filter) => self.compute_filter(node, filter, output, input),
+            OpType::MapProject(project) => self.compute_projection(node, project, output, input),
+            _ => unreachable!("checked unary kernel"),
+        }
+    }
+
+    fn memoize_result(
+        &mut self,
+        lookup: &NodeMemoLookup,
+        result: RecordDeltas,
+    ) -> Arc<RecordDeltas> {
+        self.metrics.records_processed += result.deltas.len();
+        let result = Arc::new(result);
+        let payload_bytes = record_deltas_encoded_bytes(&result);
+        *self.memo_use_clock += 1;
+        if let Some(previous) = self.eval_memo.insert(
+            lookup.key.clone(),
+            EvalMemoEntry::new(
+                Arc::clone(&result),
+                lookup.input_watermark,
+                payload_bytes,
+                *self.memo_use_clock,
+            ),
+        ) {
+            *self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+        }
+        *self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
+        result
+    }
+
+    fn compute_filter(
+        &mut self,
+        node: NodeId,
+        filter: &FilterOp,
+        output_desc: RecordDescriptor,
+        input: &Arc<RecordDeltas>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if filter.predicate.supports_indirect_literal_attempt() && self.evaluation_inputs.is_some()
+        {
+            let inputs = self
+                .evaluation_inputs
+                .as_deref_mut()
+                .expect("checked evaluation inputs");
+            let mut deltas = Vec::new();
+            for delta in &input.deltas {
+                let record = delta.borrowed(&input.descriptor);
+                inputs.set_chunk_scope(Some(node));
+                let result = filter
+                    .predicate
+                    .matches_indirect_literal_attempt(record, inputs);
+                inputs.set_chunk_scope(None);
+                let matches = match result? {
+                    Some(matches) => matches,
+                    None => filter.predicate.matches(record, filter.comparison)?,
+                };
+                if matches {
+                    deltas.push(delta.clone());
+                }
+            }
+            Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            })
+        } else {
+            let mut referenced = BTreeSet::new();
+            filter.predicate.referenced_fields(&mut referenced);
+            let input = self.materialize_indirect_fields(input, &referenced)?;
+            NodeState::update_filter(filter, output_desc, &input)
+        }
+    }
+
+    fn compute_projection(
+        &mut self,
+        node: NodeId,
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        #[cfg(feature = "cold-settle-attribution")]
+        let projection_started = std::time::Instant::now();
+        let raw_projection =
+            self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
+        let result = NodeState::update_map_project(
+            project,
+            output_desc,
+            input,
+            raw_projection.as_deref(),
+            false,
+        );
+        #[cfg(feature = "cold-settle-attribution")]
+        if let Ok(output) = &result {
+            crate::cold_settle_attribution::record_map_node(
+                node.0,
+                self.context.eval_mode == EvalMode::Hydrate,
+                input.deltas.len(),
+                output.deltas.len(),
+                projection_started.elapsed().as_nanos() as u64,
+                || {
+                    format!(
+                        "inputs={:?} projection={project:?}",
+                        self.graph.node(node).unwrap().descriptor.inputs
+                    )
+                },
+            );
+            crate::cold_settle_attribution::record_map(
+                self.context.eval_mode == EvalMode::Hydrate,
+                input.deltas.len(),
+                output.deltas.len(),
+            );
+        }
+        result
     }
 
     /// Construct the large operator future only on a memo miss. Keep the
@@ -1410,75 +1784,11 @@ impl TickEvaluator<'_> {
                 }
                 OpType::Filter(filter) => {
                     let input = self.update_unary_input(graph_node, node).await?;
-                    if filter.predicate.supports_indirect_literal_attempt()
-                        && self.evaluation_inputs.is_some()
-                    {
-                        let inputs = self
-                            .evaluation_inputs
-                            .as_deref_mut()
-                            .expect("checked evaluation inputs");
-                        let mut deltas = Vec::new();
-                        for delta in &input.deltas {
-                            let record = delta.borrowed(&input.descriptor);
-                            inputs.set_chunk_scope(Some(node));
-                            let result = filter
-                                .predicate
-                                .matches_indirect_literal_attempt(record, inputs);
-                            inputs.set_chunk_scope(None);
-                            let matches = match result? {
-                                Some(matches) => matches,
-                                None => filter.predicate.matches(record, filter.comparison)?,
-                            };
-                            if matches {
-                                deltas.push(delta.clone());
-                            }
-                        }
-                        Ok(RecordDeltas {
-                            descriptor: output_desc,
-                            deltas,
-                        })
-                    } else {
-                        let mut referenced = BTreeSet::new();
-                        filter.predicate.referenced_fields(&mut referenced);
-                        let input = self.materialize_indirect_fields(&input, &referenced)?;
-                        NodeState::update_filter(filter, output_desc, &input)
-                    }
+                    self.compute_filter(node, filter, output_desc, &input)
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
-                    #[cfg(feature = "cold-settle-attribution")]
-                    let projection_started = std::time::Instant::now();
-                    let raw_projection =
-                        self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
-                    let result = NodeState::update_map_project(
-                        project,
-                        output_desc,
-                        &input,
-                        raw_projection.as_deref(),
-                        false,
-                    );
-                    #[cfg(feature = "cold-settle-attribution")]
-                    if let Ok(output) = &result {
-                        crate::cold_settle_attribution::record_map_node(
-                            node.0,
-                            self.context.eval_mode == EvalMode::Hydrate,
-                            input.deltas.len(),
-                            output.deltas.len(),
-                            projection_started.elapsed().as_nanos() as u64,
-                            || {
-                                format!(
-                                    "inputs={:?} projection={project:?}",
-                                    graph_node.descriptor.inputs
-                                )
-                            },
-                        );
-                        crate::cold_settle_attribution::record_map(
-                            self.context.eval_mode == EvalMode::Hydrate,
-                            input.deltas.len(),
-                            output.deltas.len(),
-                        );
-                    }
-                    result
+                    self.compute_projection(node, project, output_desc, &input)
                 }
                 OpType::StreamingChecksum(checksum) => {
                     let input = self.update_unary_input(graph_node, node).await?;

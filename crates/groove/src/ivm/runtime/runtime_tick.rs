@@ -327,6 +327,7 @@ enum EvaluationEntry {
 }
 
 struct EvaluationWorkQueue {
+    unary_batches: HashMap<NodeId, evaluator::PendingUnaryBatch>,
     layout: Arc<crate::ivm::execution_layout::ExecutionLayout>,
     entries: Vec<EvaluationEntry>,
     request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
@@ -345,6 +346,7 @@ impl EvaluationWorkQueue {
             .execution_layout(roots)
             .map_err(IvmRuntimeError::GraphNodeNotFound)?;
         let mut queue = Self {
+            unary_batches: HashMap::default(),
             entries: layout
                 .input_counts
                 .iter()
@@ -565,6 +567,7 @@ impl EvaluationWorkQueue {
     }
 
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
+        self.unary_batches.retain(|node, _| !nodes.contains(node));
         self.runnable.retain(|node| !nodes.contains(node));
         self.request_dependents
             .retain(|_, dependents| !dependents.iter().all(|node| nodes.contains(node)));
@@ -845,10 +848,7 @@ impl<'a> IncrementalEvaluation<'a> {
 
         let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
-            let result = {
-                let mut future = evaluator.update_ready_node(node);
-                Pin::new(&mut future).poll(cx)
-            };
+            let result = evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx);
             match result {
                 Poll::Ready(Ok(_)) => self.work_queue.complete(node),
                 Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)) => {
@@ -1407,9 +1407,8 @@ impl<'a> EvaluationSession<'a> {
                         terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
-                    let mut evaluation = evaluator.update_ready_node(node);
-                    let poll = Pin::new(&mut evaluation).poll(cx);
-                    drop(evaluation);
+                    let poll =
+                        evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx);
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                     match poll {
                         // A future which cooperatively yielded has not registered a

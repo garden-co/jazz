@@ -580,10 +580,28 @@ impl NodeState {
         raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        Self::update_map_project_slice(
+            project,
+            output_desc,
+            input.descriptor,
+            &input.deltas,
+            raw_projection,
+            omit_unrepresentable_enum_rows,
+        )
+    }
+
+    pub(super) fn update_map_project_slice(
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input_desc: RecordDescriptor,
+        input: &[RecordDelta],
+        raw_projection: Option<&PreparedProjection>,
+        omit_unrepresentable_enum_rows: bool,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         if raw_projection.is_some_and(|plan| plan.reuses_input) {
             return Ok(RecordDeltas {
                 descriptor: output_desc,
-                deltas: input.deltas.clone(),
+                deltas: input.to_vec(),
             });
         }
         let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
@@ -596,18 +614,14 @@ impl NodeState {
                     }
                 )
             });
-        let estimated_output_bytes = input
-            .deltas
-            .iter()
-            .map(|delta| delta.record.len())
-            .sum::<usize>();
+        let estimated_output_bytes = input.iter().map(|delta| delta.record.len()).sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
-        let mut spans = Vec::with_capacity(input.deltas.len());
-        for delta in &input.deltas {
+        let mut spans = Vec::with_capacity(input.len());
+        for delta in input {
             let span = if let Some(fields) = raw_projection {
                 let start = output.len();
                 let result = output_desc.project_raw_fields_into(
-                    &input.descriptor,
+                    &input_desc,
                     delta.raw(),
                     &fields.fields,
                     &mut output,
@@ -616,7 +630,7 @@ impl NodeState {
                             &project.expressions[index],
                             index,
                             output_desc,
-                            &input.descriptor,
+                            &input_desc,
                             delta.raw(),
                         )?;
                         let encoded = encode_projection_field_value(output_desc, index, value)?;
@@ -641,7 +655,7 @@ impl NodeState {
                     &project.expressions,
                     &project.mapping,
                     output_desc,
-                    &input.descriptor,
+                    &input_desc,
                     delta.raw(),
                 ) {
                     Ok(record) => record,
