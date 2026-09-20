@@ -12,6 +12,7 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
     pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,
+    pub(super) pipeline: Option<Arc<pipeline::PreparedPipeline>>,
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output_mapping: Option<Arc<[(usize, usize)]>>,
@@ -618,57 +619,17 @@ impl NodeState {
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
         let mut spans = Vec::with_capacity(input.len());
         for delta in input {
-            let span = if let Some(fields) = raw_projection {
-                let start = output.len();
-                let result = output_desc.project_raw_fields_into(
-                    &input_desc,
-                    delta.raw(),
-                    &fields.fields,
-                    &mut output,
-                    |index, output| {
-                        let value = project_field_value(
-                            &project.expressions[index],
-                            index,
-                            output_desc,
-                            &input_desc,
-                            delta.raw(),
-                        )?;
-                        let encoded = encode_projection_field_value(output_desc, index, value)?;
-                        output.extend_from_slice(&encoded);
-                        Ok::<_, IvmRuntimeError>(())
-                    },
-                );
-                match result {
-                    Ok(span) => span,
-                    Err(
-                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
-                        | IvmRuntimeError::EnumProjectionAbsent { .. },
-                    ) if omit_unrepresentable_enum_rows => {
-                        output.truncate(start);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                let start = output.len();
-                let record = match project_record(
-                    &project.expressions,
-                    &project.mapping,
-                    output_desc,
-                    &input_desc,
-                    delta.raw(),
-                ) {
-                    Ok(record) => record,
-                    Err(
-                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
-                        | IvmRuntimeError::EnumProjectionAbsent { .. },
-                    ) if omit_unrepresentable_enum_rows => continue,
-                    Err(error) => return Err(error),
-                };
-                output.extend_from_slice(&record);
-                start..output.len()
-            };
-            spans.push((span, delta.weight));
+            if let Some(span) = Self::project_row_into(
+                project,
+                output_desc,
+                input_desc,
+                delta.raw(),
+                raw_projection,
+                omit_unrepresentable_enum_rows,
+                &mut output,
+            )? {
+                spans.push((span, delta.weight));
+            }
         }
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_map_buffer(output.capacity(), output.len());
@@ -684,6 +645,68 @@ impl NodeState {
             descriptor: output_desc,
             deltas,
         })
+    }
+
+    pub(super) fn project_row_into(
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input_desc: RecordDescriptor,
+        raw: &[u8],
+        raw_projection: Option<&PreparedProjection>,
+        omit_unrepresentable_enum_rows: bool,
+        output: &mut BytesMut,
+    ) -> Result<Option<std::ops::Range<usize>>, IvmRuntimeError> {
+        let span = if let Some(fields) = raw_projection {
+            let start = output.len();
+            let result = output_desc.project_raw_fields_into(
+                &input_desc,
+                raw,
+                &fields.fields,
+                output,
+                |index, output| {
+                    let value = project_field_value(
+                        &project.expressions[index],
+                        index,
+                        output_desc,
+                        &input_desc,
+                        raw,
+                    )?;
+                    let encoded = encode_projection_field_value(output_desc, index, value)?;
+                    output.extend_from_slice(&encoded);
+                    Ok::<_, IvmRuntimeError>(())
+                },
+            );
+            match result {
+                Ok(span) => span,
+                Err(
+                    IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                    | IvmRuntimeError::EnumProjectionAbsent { .. },
+                ) if omit_unrepresentable_enum_rows => {
+                    output.truncate(start);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let start = output.len();
+            let record = match project_record(
+                &project.expressions,
+                &project.mapping,
+                output_desc,
+                &input_desc,
+                raw,
+            ) {
+                Ok(record) => record,
+                Err(
+                    IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                    | IvmRuntimeError::EnumProjectionAbsent { .. },
+                ) if omit_unrepresentable_enum_rows => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            output.extend_from_slice(&record);
+            start..output.len()
+        };
+        Ok(Some(span))
     }
 
     pub(super) fn update_variant_enum_project(

@@ -322,12 +322,16 @@ impl PendingIncrementalEvaluation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EvaluationEntry {
     Waiting(usize),
+    Fused,
     Runnable,
     Complete,
 }
 
 struct EvaluationWorkQueue {
     unary_batches: HashMap<NodeId, evaluator::PendingUnaryBatch>,
+    pipelines: HashMap<NodeId, Arc<[NodeId]>>,
+    pipeline_batches: HashMap<NodeId, pipeline::PendingPipeline>,
+    task_slots: Vec<usize>,
     layout: Arc<crate::ivm::execution_layout::ExecutionLayout>,
     entries: Vec<EvaluationEntry>,
     request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
@@ -339,6 +343,7 @@ struct EvaluationWorkQueue {
 impl EvaluationWorkQueue {
     fn discover(
         graph: &IvmGraph,
+        node_meta: &HashMap<NodeId, NodeRuntimeMeta>,
         roots: impl IntoIterator<Item = NodeId>,
         hydrate_sources: bool,
     ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
@@ -347,6 +352,9 @@ impl EvaluationWorkQueue {
             .map_err(IvmRuntimeError::GraphNodeNotFound)?;
         let mut queue = Self {
             unary_batches: HashMap::default(),
+            pipelines: HashMap::default(),
+            pipeline_batches: HashMap::default(),
+            task_slots: (0..layout.nodes.len()).collect(),
             entries: layout
                 .input_counts
                 .iter()
@@ -359,6 +367,45 @@ impl EvaluationWorkQueue {
             runnable: VecDeque::new(),
             completed_events: Vec::new(),
         };
+        // Contract physical tasks, not graph identity. A globally shared or
+        // explicitly retained intermediate remains independently executable.
+        let predecessors = queue
+            .layout
+            .pipeline_predecessors
+            .iter()
+            .map(|predecessor| {
+                predecessor.filter(|slot| {
+                    let id = queue.layout.nodes[*slot];
+                    let node = graph.node(id).expect("layout node");
+                    !node.is_durable()
+                        && node.children.len() == 1
+                        && node_meta
+                            .get(&id)
+                            .is_none_or(|meta| meta.retainers.is_empty())
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut interior = vec![false; queue.layout.nodes.len()];
+        for slot in predecessors.iter().flatten() {
+            interior[*slot] = true;
+        }
+        for tail in 0..queue.layout.nodes.len() {
+            if interior[tail] || predecessors[tail].is_none() {
+                continue;
+            }
+            let mut members = vec![queue.layout.nodes[tail]];
+            let mut cursor = tail;
+            while let Some(previous) = predecessors[cursor] {
+                queue.task_slots[previous] = tail;
+                queue.entries[previous] = EvaluationEntry::Fused;
+                members.push(queue.layout.nodes[previous]);
+                cursor = previous;
+            }
+            members.reverse();
+            queue
+                .pipelines
+                .insert(queue.layout.nodes[tail], members.into());
+        }
         if hydrate_sources {
             for &slot in &queue.layout.source_slots {
                 let node_id = queue.layout.nodes[slot];
@@ -400,6 +447,7 @@ impl EvaluationWorkQueue {
     }
 
     fn slot_dependency_ready(&mut self, slot: usize) {
+        let slot = self.task_slots[slot];
         let EvaluationEntry::Waiting(remaining) = &mut self.entries[slot] else {
             return;
         };
@@ -465,8 +513,17 @@ impl EvaluationWorkQueue {
 
     fn complete(&mut self, node: NodeId) {
         let slot = self.layout.slots[&node];
+        // Publish completion only after the entire task succeeds. In
+        // particular, temporal waiters must not observe an interior prefix.
+        if let Some(members) = self.pipelines.get(&node) {
+            for member in members.iter().copied() {
+                self.entries[self.layout.slots[&member]] = EvaluationEntry::Complete;
+                self.completed_events.push(member);
+            }
+        } else {
+            self.completed_events.push(node);
+        }
         self.entries[slot] = EvaluationEntry::Complete;
-        self.completed_events.push(node);
         // Read compact slots directly without cloning a dependent list or
         // changing the shared layout's reference count per completed node.
         for index in 0..self.layout.dependents(slot).len() {
@@ -568,11 +625,18 @@ impl EvaluationWorkQueue {
 
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
         self.unary_batches.retain(|node, _| !nodes.contains(node));
+        self.pipeline_batches
+            .retain(|node, _| !nodes.contains(node));
         self.runnable.retain(|node| !nodes.contains(node));
         self.request_dependents
             .retain(|_, dependents| !dependents.iter().all(|node| nodes.contains(node)));
         for node in nodes {
             if let Some(&slot) = self.layout.slots.get(node) {
+                if let Some(members) = self.pipelines.get(node) {
+                    for member in members.iter() {
+                        self.entries[self.layout.slots[member]] = EvaluationEntry::Complete;
+                    }
+                }
                 self.entries[slot] = EvaluationEntry::Complete;
                 self.temporal_waiting[slot] = 0;
             }
@@ -587,15 +651,18 @@ impl EvaluationWorkQueue {
                 continue;
             }
             self.temporal_waiting[slot] = count;
-            match self.entries[slot] {
+            let task_slot = self.task_slots[slot];
+            match self.entries[task_slot] {
                 EvaluationEntry::Runnable => {
-                    self.runnable.retain(|candidate| *candidate != node);
-                    self.entries[slot] = EvaluationEntry::Waiting(count);
+                    self.runnable
+                        .retain(|candidate| *candidate != self.layout.nodes[task_slot]);
+                    self.entries[task_slot] = EvaluationEntry::Waiting(count);
                 }
                 EvaluationEntry::Waiting(remaining) => {
-                    self.entries[slot] = EvaluationEntry::Waiting(remaining + count);
+                    self.entries[task_slot] = EvaluationEntry::Waiting(remaining + count);
                 }
                 EvaluationEntry::Complete => {}
+                EvaluationEntry::Fused => unreachable!("canonical task slot"),
             }
         }
     }
@@ -848,7 +915,11 @@ impl<'a> IncrementalEvaluation<'a> {
 
         let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
-            let result = evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx);
+            let result = if let Some(pipeline) = self.work_queue.pipelines.get(&node) {
+                evaluator.poll_pipeline(pipeline, &mut self.work_queue.pipeline_batches, cx)
+            } else {
+                evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx)
+            };
             match result {
                 Poll::Ready(Ok(_)) => self.work_queue.complete(node),
                 Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)) => {
@@ -1204,8 +1275,12 @@ impl<'a> EvaluationSession<'a> {
         roots: VecDeque<NodeId>,
         storage: OwnedStorage<'a>,
     ) -> Result<Self, IvmRuntimeError> {
-        let (relevant_nodes, mut work_queue) =
-            EvaluationWorkQueue::discover(&runtime.graph, roots.iter().copied(), true)?;
+        let (relevant_nodes, mut work_queue) = EvaluationWorkQueue::discover(
+            &runtime.graph,
+            &runtime.node_meta,
+            roots.iter().copied(),
+            true,
+        )?;
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -1407,8 +1482,11 @@ impl<'a> EvaluationSession<'a> {
                         terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
-                    let poll =
-                        evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx);
+                    let poll = if let Some(pipeline) = self.work_queue.pipelines.get(&node) {
+                        evaluator.poll_pipeline(pipeline, &mut self.work_queue.pipeline_batches, cx)
+                    } else {
+                        evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx)
+                    };
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                     match poll {
                         // A future which cooperatively yielded has not registered a
@@ -2552,7 +2630,8 @@ impl IvmRuntime {
         active_roots.dedup();
         let requests = EvaluationRequests::new();
         let evaluation_inputs = Some(EvaluationInputs::default());
-        let (_, work_queue) = EvaluationWorkQueue::discover(&self.graph, active_roots, false)?;
+        let (_, work_queue) =
+            EvaluationWorkQueue::discover(&self.graph, &self.node_meta, active_roots, false)?;
         Ok(IncrementalEvaluation {
             table_deltas,
             binding_deltas,
@@ -3009,6 +3088,61 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
     };
     use crate::storage::MemoryStorage;
+
+    // Internal mechanism receipt: identical public rows cannot prove that the
+    // queue removed intermediate tasks, or that live sharing invalidates that
+    // choice without invalidating immutable graph topology.
+    #[test]
+    fn physical_pipeline_contraction_respects_live_retained_and_shared_boundaries() {
+        let mut runtime = IvmRuntime::new(DatabaseSchema::new([])).unwrap();
+        let input = GraphBuilder::values(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            [vec![Value::U64(1)]],
+        )
+        .unwrap();
+        let prefix = input.filter(PredicateExpr::gt("id", Value::U64(0)));
+        let root = runtime
+            .add_dedup_graph(
+                &prefix
+                    .clone()
+                    .filter(PredicateExpr::gt("id", Value::U64(0))),
+            )
+            .unwrap()
+            .node;
+        let middle = runtime.graph.node(root).unwrap().descriptor.inputs[0];
+        let discover = |runtime: &IvmRuntime| {
+            EvaluationWorkQueue::discover(&runtime.graph, &runtime.node_meta, [root], false)
+                .unwrap()
+                .1
+        };
+        let mut queue = discover(&runtime);
+        assert_eq!(queue.pipelines[&root].as_ref(), &[middle, root]);
+        assert_eq!(
+            queue.entries[queue.layout.slots[&middle]],
+            EvaluationEntry::Fused
+        );
+        assert!(!queue.is_complete(middle));
+        queue.complete(root);
+        assert!(queue.is_complete(middle));
+        assert_eq!(queue.drain_completed_events(), [middle, root]);
+
+        runtime.add_retainer(middle, Retainer::PreparedShape("observer".into()));
+        assert!(discover(&runtime).pipelines.is_empty());
+        runtime.remove_retainer(middle, &Retainer::PreparedShape("observer".into()));
+        assert!(!discover(&runtime).pipelines.is_empty());
+        let old_layout = runtime.graph.execution_layout([root]).unwrap();
+        runtime
+            .add_dedup_graph(&prefix.filter(PredicateExpr::gt("id", Value::U64(2))))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &old_layout,
+            &runtime.graph.execution_layout([root]).unwrap()
+        ));
+        assert!(
+            discover(&runtime).pipelines.is_empty(),
+            "a consumer outside this layout still owns the intermediate"
+        );
+    }
 
     #[futures_test::test]
     async fn resumed_install_preserves_live_retainer_changes() {

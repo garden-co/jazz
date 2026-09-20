@@ -247,3 +247,98 @@ fn batched_retractions_crossing_filter_boundary_reach_both_subscribers_exactly()
         }
     }
 }
+
+#[test]
+fn fused_stages_preserve_upstream_error_precedence_across_rows_and_yields() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let tags = groove::records::ScalarEnumSchema::new("status", ["ok", "early", "late"]).unwrap();
+    let graph = GraphBuilder::values(
+        RecordDescriptor::new([
+            ("id", ValueType::U64),
+            ("upstream", ValueType::EnumTag(tags.clone())),
+            ("downstream", ValueType::EnumTag(tags)),
+        ]),
+        (0..2049).map(|id| {
+            vec![
+                Value::U64(id),
+                Value::EnumTag(if id == 2048 { 2 } else { 0 }),
+                Value::EnumTag(u8::from(id == 0)),
+            ]
+        }),
+    )
+    .unwrap()
+    .project_fields([
+        ProjectField::named("id"),
+        ProjectField::enum_tag_remap("upstream", "upstream", vec![Some(0), Some(1), None]),
+        ProjectField::named("downstream"),
+    ])
+    .filter(PredicateExpr::Or(vec![
+        PredicateExpr::gt("id", Value::U64(0)),
+        PredicateExpr::eq("id", Value::U64(0)),
+    ]))
+    .project_fields([
+        ProjectField::named("id"),
+        ProjectField::enum_tag_remap("downstream", "downstream", vec![Some(0), None, Some(2)]),
+    ]);
+    let waker = noop_waker();
+    let subscription = db
+        .subscribe_with_waker([("result", graph)], Some(&waker))
+        .unwrap();
+    let mut cx = Context::from_waker(&waker);
+    let mut yields = 0;
+    let error = loop {
+        match db.poll_multisink_subscription(&subscription, &mut cx) {
+            Poll::Pending => {
+                yields += 1;
+                assert!(yields < 40);
+                assert!(subscription.try_recv().is_err());
+            }
+            Poll::Ready(result) => break result.unwrap_err(),
+        }
+    };
+    assert!(yields > 1);
+    assert!(
+        error.to_string().contains("enum tag 2 is absent"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adding_an_observer_to_a_previously_private_prefix_preserves_both_outputs() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let prefix = rows().filter(PredicateExpr::gt("id", Value::U64(100)));
+    let tail = prefix.clone().project(["id"]);
+    let first = block_on(db.subscribe_one_sink(tail.clone())).unwrap();
+    assert_eq!(first.recv().unwrap().deltas.len(), 3995);
+    let observer = block_on(db.subscribe_one_sink(prefix)).unwrap();
+    let all = observer.recv().unwrap().to_values().unwrap();
+    assert_eq!(all.len(), 3995);
+    for (row, weight) in all {
+        let Value::U64(id) = row[0] else {
+            panic!("id");
+        };
+        assert_eq!(weight, 1);
+        assert!(id > 100);
+        assert_eq!(row[1], Value::String(format!("row-{id}")));
+    }
+    let again = block_on(db.subscribe_one_sink(tail)).unwrap();
+    let mut ids = again.recv().unwrap().to_values().unwrap();
+    ids.sort_by_key(|(row, _)| match row[0] {
+        Value::U64(id) => id,
+        _ => panic!("id"),
+    });
+    assert_eq!(
+        ids,
+        (101..4096)
+            .map(|id| (vec![Value::U64(id)], 1))
+            .collect::<Vec<_>>()
+    );
+}

@@ -50,6 +50,7 @@ mod aggregate;
 pub(crate) mod evaluation_session;
 mod join;
 mod persist;
+pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
 mod state;
