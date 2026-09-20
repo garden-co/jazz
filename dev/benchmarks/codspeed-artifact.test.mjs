@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { artifactPaths, seal, verify } from "./codspeed-artifact.mjs";
+import { artifactPaths, seal, verify, verifyCodspeedVersion } from "./codspeed-artifact.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const identity = {
@@ -101,6 +101,30 @@ test("timing shim adds only --timings to build, preserving all arguments", async
         }),
       );
       assert.deepEqual(actual, args[0] === "build" ? [...args, "--timings"] : args);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("version probe accepts the pinned CLI's exit-1 response, rejects real failures", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-version-"));
+  try {
+    const cli = path.join(dir, "cargo-codspeed");
+    for (const [status, output, accepted] of [
+      [1, "cargo-codspeed 5.0.1\n\n", true],
+      [0, "cargo-codspeed 5.0.1\n", true],
+      [1, "cargo-codspeed 5.0.2\n", false],
+      [1, "cargo-codspeed 5.0.1\nerror: broken\n", false],
+      [2, "cargo-codspeed 5.0.1\n", false],
+    ]) {
+      await writeFile(
+        cli,
+        `#!/usr/bin/env node\nprocess.stderr.write(${JSON.stringify(output)});process.exit(${status});\n`,
+        { mode: 0o755 },
+      );
+      if (accepted) verifyCodspeedVersion(cli);
+      else assert.throws(() => verifyCodspeedVersion(cli));
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

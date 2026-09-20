@@ -1,7 +1,7 @@
 // Benchmark-only handoff. These bundles are NOT correctness-artifact authority.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, lstat, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -21,6 +21,17 @@ const contract = {
 
 function command(file, args) {
   return execFileSync(file, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }).trim();
+}
+
+export function verifyCodspeedVersion(cli) {
+  // 5.0.1 propagates Clap's DisplayVersion through anyhow: exact version on
+  // stderr, exit 1. Accept only that known response (or conventional exit 0),
+  // not arbitrary nonzero commands whose error happens to mention the version.
+  const result = spawnSync(cli, ["--version"], { encoding: "utf8" });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.ok(result.status === 0 || result.status === 1, "version command failed");
+  assert.equal(`${result.stdout}${result.stderr}`.trim(), "cargo-codspeed 5.0.1");
 }
 
 function context() {
@@ -136,7 +147,7 @@ async function main() {
       assert.ok(!process.env[key], `unexpected build override: ${key}`);
     }
     const cli = command("which", ["cargo-codspeed"]);
-    assert.match(command(cli, ["--version"]), /\b5\.0\.1$/);
+    verifyCodspeedVersion(cli);
     await checkExecutable(binary, true);
     await checkExecutable(cli);
     const manifest = await seal(workload, identity, cli);
