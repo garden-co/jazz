@@ -49,10 +49,10 @@ repository:
   "cli": "/absolute/hash-verified/jazz-tools-linux-x64",
   "cliSha256": "<sha256>",
   "nativeFingerprint": "<nativeArtifactFingerprint-from-verified-manifest>",
-  "cliProducer": {
-    "path": "/absolute/producer-manifest.json",
-    "sha256": "<manifest-sha256>",
-    "artifact": "<CLI-artifact-file-in-manifest>"
+  "cliArtifact": {
+    "runId": 123456789,
+    "artifactId": 987654321,
+    "archivePath": "/absolute/original-cli-artifact.zip"
   },
   "output": "/absolute/new/private/receipt-directory",
   "packages": {
@@ -80,15 +80,41 @@ Linux additionally verifies the selected native producer manifest's
 source, release profile, fingerprint and binary digest. No same-version package
 substitution is accepted.
 
-Final modes require `cliProducer`, pointing to an authoritative producer manifest
-whose `git.head` is the candidate source and whose `artifacts` contains the CLI
-`file` and `sha256`. Its own digest is pinned in the input. Obtain it from the
-verified producer workflow, not a hand-authored reconstruction. If the publisher
-provides no such CLI source/digest receipt, final mode intentionally fails closed;
-resolve that provenance gap before final acceptance. Baseline permits its absence
-and does not claim a verified CLI source binding. Archive workflow/manifests and
-installation logs alongside private receipts. These checks detect accidental
-artifact substitution; they are not a hostile same-user filesystem boundary.
+Final modes require `cliArtifact`: the successful producer run ID, CLI artifact
+ID and **original** GitHub artifact ZIP. The runner uses `gh auth token` (or its
+`GH_TOKEN` configuration) only in memory to fetch fresh metadata from the fixed
+GitHub API repository `garden-co/jazz`. Caller-authored metadata is not accepted.
+No token is written to a receipt or passed on a command line.
+
+The source SHA must match both run and artifact metadata. Approved callers are
+`preview-build.yml` for same-repository pull requests (with the explicit PR head
+also matching), and `preview-jazz-tools-alpha-release.yml` or
+`publish-jazz-tools-alpha.yml` for push/workflow_dispatch. A merge revision is not
+silently substituted for the candidate head. The standalone reusable
+`build-jazz-packages.yml` has no independent run. `previewRun` must name this
+actual producer run ID or URL, including when packages came from a reused run.
+
+The API's `sha256:` artifact digest must match the original ZIP; it must contain
+exactly the expected platform CLI binary. Those bytes must equal both the
+configured executable and the already verified packed jazz-tools/bin/native
+binary. This uses the current publisher's evidence and requires no new producer
+manifest or workflow change. Save the original ZIP, for example:
+
+```bash
+# Root downloads the chosen artifact; do not replace it with a reconstructed ZIP.
+gh api --hostname github.com "/repos/garden-co/jazz/actions/artifacts/$ARTIFACT_ID/zip" > "$ARCHIVE_PATH"
+```
+
+`gh run download` extracts files and cannot supply the original ZIP digest proof.
+The runner requires `unzip`, bounds compressed/uncompressed sizes, and reads the
+single entry without extracting archive paths. It saves the authenticated API
+metadata and a sanitized digest/run/artifact summary in
+`cli-artifact-provenance.json`. The console provenance record contains that
+summary. Expired, failed, mismatched or unverifiable artifacts fail closed.
+Baseline permits absent `cliArtifact`, explicitly logs that CLI producer
+provenance was not verified, and makes no final source-binding claim. These
+checks detect artifact substitution; they are not a hostile same-user filesystem
+boundary.
 
 The output path must not already exist. The script generates private credentials,
 starts the real CLI with fresh persistent server storage, validates and deploys
@@ -144,7 +170,9 @@ of full network recovery. Do not replace device receipts with host/source tests.
 
 ## Focused harness contract tests
 
-Run `node --test dev/release-acceptance/harness.test.mjs`. Synthetic packed
+Run `node --test dev/release-acceptance/*.test.mjs`. Synthetic packed
 packages and an npm stub exercise nested dependency rejection, exact preview
 locators, and SIGINT/SIGTERM cleanup including TERM-resistant descendants. They
 make no network requests and do not count as package or Cloud acceptance.
+The CLI provenance tests inject API fixture responses and generated tiny ZIPs
+to check source/workflow/run/digest/entry binding and executable/package equality.

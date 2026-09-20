@@ -131,16 +131,11 @@ function packedFixture(t, nested) {
     `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({parent:process.pid}));process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`,
   );
   chmodSync(cli, 0o700);
-  const producer = join(root, "producer.json");
-  writeFileSync(
-    producer,
-    JSON.stringify({ git: { head: sha }, artifacts: [{ file: "cli", sha256: hash(cli) }] }),
-  );
   const config = join(root, "config.json");
   writeFileSync(
     config,
     JSON.stringify({
-      phase: "final-preview",
+      phase: "baseline",
       sourceSha: sha,
       packageVersion: version,
       previewRun: "synthetic",
@@ -150,7 +145,6 @@ function packedFixture(t, nested) {
       nativeFingerprint: fp,
       output: join(root, "receipt"),
       packages,
-      cliProducer: { path: producer, sha256: hash(producer), artifact: "cli" },
     }),
   );
   return { root, config, pidFile };
@@ -248,5 +242,22 @@ test(
       r = await run(t, "scaffold.mjs", f.config, f.env).exit;
     assert.equal(r.code, 0, r.stderr);
     assert(r.stdout.includes('"status":"PASS"'));
+  },
+);
+
+test(
+  "final runner rejects absent API artifact evidence before starting CLI",
+  { skip: process.platform !== "linux", timeout: 10000 },
+  async (t) => {
+    const f = packedFixture(t);
+    const config = JSON.parse(readFileSync(f.config, "utf8"));
+    config.phase = "final-preview";
+    // A caller-authored replacement manifest is not an alternative trust source.
+    config.cliProducer = { git: { head: sha }, artifacts: [] };
+    writeFileSync(f.config, JSON.stringify(config));
+    const result = await run(t, "run.mjs", f.config).exit;
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Final receipts require cliArtifact/);
+    assert(!existsSync(f.pidFile));
   },
 );

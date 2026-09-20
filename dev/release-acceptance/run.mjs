@@ -23,6 +23,7 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { verifyCliArtifact } from "./cli-artifact-provenance.mjs";
 import { createProcessOwner } from "./process-owner.mjs";
 import { verifyJazzResolutions } from "./dependency-resolution.mjs";
 const ownDir = dirname(fileURLToPath(import.meta.url));
@@ -45,25 +46,6 @@ assert.match(input.sourceSha, /^[0-9a-f]{40}$/);
 if (input.phase !== "baseline") assert.match(input.packageVersion, /alpha\.56$/);
 const hash = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 assert.equal(hash(input.cli), input.cliSha256, "CLI digest mismatch");
-if (input.phase !== "baseline") {
-  assert(
-    input.cliProducer,
-    "Final receipts require authoritative CLI producer manifest; no inferred source binding",
-  );
-  assert.equal(
-    hash(input.cliProducer.path),
-    input.cliProducer.sha256,
-    "CLI producer manifest digest",
-  );
-  const producer = JSON.parse(readFileSync(input.cliProducer.path, "utf8"));
-  assert.equal(producer.git?.head, input.sourceSha, "CLI producer source revision");
-  assert(
-    producer.artifacts?.some(
-      (a) => a.file === input.cliProducer.artifact && a.sha256 === input.cliSha256,
-    ),
-    "CLI not bound to producer artifact inventory",
-  );
-}
 const project = realpathSync(input.project),
   require = createRequire(join(project, "package.json"));
 for (const name of ["jazz-tools", "jazz-napi", "jazz-wasm"])
@@ -142,9 +124,19 @@ assert.equal(
   input.nativeFingerprint,
   "Installed native fingerprint mismatch",
 );
+const cliEvidence =
+  input.phase !== "baseline" || input.cliArtifact
+    ? await verifyCliArtifact(input, packageDirs.get("jazz-tools"))
+    : null;
 const output = resolve(input.output);
 assert(!existsSync(output), "Output must be new; never reset historical stores");
 mkdirSync(output, { recursive: true, mode: 0o700 });
+if (cliEvidence)
+  writeFileSync(
+    join(output, "cli-artifact-provenance.json"),
+    JSON.stringify(cliEvidence, null, 2),
+    { mode: 0o600 },
+  );
 const c = {
   ...input,
   project,
@@ -239,6 +231,7 @@ try {
     packageVersion: input.packageVersion,
     previewRun: input.previewRun,
     cliSha256: input.cliSha256,
+    cliArtifact: cliEvidence?.summary ?? "baseline: producer provenance not verified",
     nativeFingerprint: input.nativeFingerprint,
     packages: Object.fromEntries(
       Object.entries(input.packages).map(([name, p]) => [name, p.sha256]),

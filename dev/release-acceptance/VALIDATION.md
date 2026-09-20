@@ -17,8 +17,11 @@ workflow run `35476001415`, package manifests `2.0.0-alpha.55`.
 - Appending a newline to the installed package.json (version unchanged) is
   rejected before server startup by byte comparison against the pinned tarball.
   The exact original file bytes were restored afterward.
-- Final-preview mode without an authoritative CLI producer manifest is rejected
-  before server startup.
+- The initial manifest-based final gate was replaced by authenticated GitHub
+  run/artifact metadata, original ZIP digest and executable/packed-byte equality.
+  Missing final artifact evidence fails before server startup. Synthetic API
+  fixtures exercise the existing publisher adapter; no live final artifact has
+  been accepted by this preparation lane.
 - Node syntax checks and focused oxlint pass. No runtime source changed.
 
 Scaffold executable preparation was syntax-checked only: the exact create-jazz
@@ -29,8 +32,9 @@ device gates remain explicitly NOT_RUN. The runner prints these boundaries.
 Process friction: the prior baseline notes reported CLI artifacts unavailable,
 but the installed preview package contained them under bin/native. Inspect the
 packed package before scheduling another build. The repository uses oxfmt,
-not prettier. Final CLI source provenance must come from the producer; do not
-construct a manifest afterward merely to satisfy acceptance.
+not prettier. The publisher has no CLI producer manifest. Preserve the original GitHub
+artifact ZIP for the API digest adapter; do not invent a post-download manifest
+or recompress extracted files and claim the original artifact digest.
 
 Independent review follow-up adds reproducible synthetic contract tests for
 unchecked root/deep nested Jazz dependency overrides, exact scaffold locators
@@ -44,3 +48,11 @@ fails both nested-override cases; replacing exact-locator checks with tautologie
 fails both SHA-fragment cases; retaining signal exit codes but bypassing signal
 cleanup fails child-liveness assertions. These mutations run only in temporary
 copies, and the test fixtures kill owned synthetic groups even on failure.
+
+The API adapter's synthetic fixtures cover all three approved workflow callers,
+failed/incomplete/fork/wrong-head runs, incorrect artifact identity/platform,
+missing/wrong ZIP digest, duplicate/extra/path-traversal entries, and executable
+versus packed-byte mismatches. Removing the run-source check, ZIP-digest check,
+or packed-byte comparison in separate temporary copies each makes its focused
+negative test fail with `Missing expected rejection`. These prove test sensitivity
+without downloading or claiming a live final candidate artifact.
