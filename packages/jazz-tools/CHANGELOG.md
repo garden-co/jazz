@@ -1,5 +1,171 @@
 # jazz-tools
 
+## 2.0.0-alpha.56
+
+### Patch Changes
+
+- 87ae159: Wake queued publications and fail subsequent writes when an abandoned predecessor breaks publication order, preventing successors from waiting indefinitely.
+- 2e227c5: Avoid building a retained ArgMin/ArgMax candidate index for one-shot snapshot probes. Subscription hydration still seeds incremental state, including when a probe populated the shared result cache first.
+- 55f5d3b: Fix synchronization failures on optimized ARM64 builds by preserving the correct physical and decoded-message credit classes.
+- e43d5c1: Bound account registry and backend JWKS requests, including response bodies, to thirty seconds so stalled authentication cannot indefinitely block session teardown. Failed JWKS downloads remain immediately retryable without extending cached key trust.
+- 7f85f30: Fix subscriptions prepared before the first server catalogue arrives retaining temporary table identities. After adopting the server's identities, Jazz now refreshes the affected sync metadata while preserving pending writes and existing local query subscriptions, preventing intermittent permission-scoped reads from being rejected or remaining stuck during startup.
+- 05717bd: Order nullable Better Auth sort values consistently while preserving stable pagination.
+- 294d130: Preserve Better Auth custom stored-field mappings across adapter reads, sorting, and supported query paths.
+- 45fc515: Support bigint branch and base selectors in subscription query keys without collisions or input mutation.
+- 7451073: Avoid repeatedly cloning query operators and rediscovering immutable graph dependencies while checking hydrated query results for reuse.
+- dcbf905: Allow bounded compression overhead for valid large sync messages while independently enforcing decoded-size and staged encoded-byte limits.
+- eab8ef2: Bound latest-record storage lookups to one visible entry instead of collecting the entire matching history prefix, reducing repeated-update cost for rows with deep histories.
+- 4d12226: Remove the pluralize-esm dependency. The intermediate bounded automatic naming convention is superseded in this release by explicit table-local relationships: declare forward navigation with `s.rel` and reverse navigation with `s.reverse`; no automatic reverse names or pluralization remain. When changing navigation names, update includes, reverse declarations, relation filters, and permission hops together. Preserve stored column definitions and every column-to-target mapping when converting existing references; an equivalent conversion preserves schema identity and stored data. See the explicit-relationships migration guide in this changelog.
+- 26b2972: Release pending read ownership when native, WASM, or React Native consumers cancel or close. Preserve transaction read ordering and defer query coverage cleanup safely while storage work owns the node.
+- b825808: Load explicit CLI env files before dispatch and remove their flags from subcommand arguments.
+- 8df59fb: Reject missing or malformed values for CLI flags instead of falling back to unrelated arguments.
+- af80ba3: Fold uniquely owned join-bucket changes at tick commit, avoiding accumulated history copies on subsequent updates while preserving shared snapshots.
+- 60ca5ac: Avoid empty producer-transition allocations and redundant grouping of incremental join-index updates while preserving shared snapshots.
+- 818ff95: Use wire protocol v3 for deployment-aware catalogue policy snapshots. Wire v2 peers now fail the handshake explicitly; upgrade clients, native runtimes, and Edge/Core servers together. Hosted clients require a compatible server deployment. Storage formats are unchanged and legacy stored-data upgrade paths remain supported.
+- 8beadb3: Avoid redundant dependency-signature lookups while selecting evaluator memo and operator scopes.
+- 8f0812e: Document and verify directly inferred relation APIs across includes, required includes, row types, forward/reverse hops, typed app declarations, slices, and separately authored schema/app/permissions modules. No generated relation catalogue is needed.
+- b768f0c: Reject nested reference arrays during DSL schema construction.
+- 3ab43d3: Treat empty prepared IN predicates as false before late parameter binding.
+- 429f643: Reject enum defaults that do not match their declared variants during schema conversion.
+- 141dcc9: BREAKING CHANGE: Reads, inserts, updates, and deletes now require explicit policies. When no permissions are defined or a table has no policies, the server rejects writes and returns no data for reads.
+
+  This changes existing behavior: define policies for every table and operation your app needs before upgrading. Optimistic local writes remain possible, but the server will reject writes without a matching permission.
+
+- 326e00f: Replace inferred relationship names with explicit table-local declarations. `s.table(columns, relations)` now requires a relationship map (use `{}` when empty). Store references as `s.uuid()` or UUID arrays, declare forward navigation with `s.rel(targetTable, column)`, and declare reverse navigation with `s.reverse(sourceTable, forwardRelationName)`.
+
+  Remove automatic reverse relationships, reference-name suffix restrictions, and pluralization. Validate declarations in TypeScript and at runtime, including cross-table targets, reserved names, and conflicting reference targets. Preserve existing core reference metadata and storage identity when migrating equivalent declarations. Update examples, starters, permissions, and migration tooling to the explicit API.
+
+  ### Migrating an existing app
+
+  Every `s.table` now requires two arguments: stored columns and explicitly named relationships. Pass `{}` when there are no relationships. Replace `s.ref(target)` with `s.uuid()` and move the target information into a forward relationship declaration. **To keep the same schema identity and existing data, preserve every stored column name, modifier, default, optionality, array shape, and reference target.** Add a matching forward relationship for every former reference column, even if no query currently uses it. This conversion needs no data rewrite or database reset.
+
+  Before:
+
+  ```ts
+  const schema = s.defineSchema({
+    users: s.table({ name: s.string() }),
+    posts: s.table({
+      title: s.string(),
+      authorId: s.ref("users"),
+      editorId: s.ref("users").optional(),
+      reviewerIds: s.array(s.ref("users")).default([]),
+    }),
+  });
+  ```
+
+  After, with the same schema identity:
+
+  ```ts
+  const schema = s.defineSchema({
+    posts: s.table(
+      {
+        title: s.string(),
+        authorId: s.uuid(),
+        editorId: s.uuid().optional(),
+        reviewerIds: s.array(s.uuid()).default([]),
+      },
+      {
+        author: s.rel("users", "authorId"),
+        editor: s.rel("users", "editorId"),
+        reviewers: s.rel("users", "reviewerIds"),
+      },
+    ),
+    users: s.table(
+      { name: s.string() },
+      {
+        postsViaAuthor: s.reverse("posts", "author"),
+        postsViaEditor: s.reverse("posts", "editor"),
+        postsViaReviewers: s.reverse("posts", "reviewers"),
+      },
+    ),
+  });
+  ```
+
+  The required `authorId`, optional `editorId`, and array `reviewerIds` keep their names and still point to `users`. The array also keeps its `[]` default.
+  - Declare a forward relation for **every former reference column**, including references not currently used by an include.
+  - Declare reverse relations explicitly if your queries or permissions use them. The second argument to `s.reverse` is the **forward relationship name**, not its UUID column. No reverse navigation is added automatically.
+  - You can keep previous navigation names, as above, or choose names such as `authoredPosts`. For example, renaming `author` to `writer` keeps `authorId` unchanged, but requires `s.reverse("posts", "writer")` and `.include({ writer: true })` in place of the old names. Update `hopTo`, relation-based filters, and permission traversals too, including names used in untyped query objects.
+  - Relationship names cannot shadow columns, `id`, reserved `$...` fields, or reserved prototype names. If an old include replaced a same-named UUID column, preserve that stored column and choose a distinct relationship name instead.
+  - Keep `{}` on tables without relationships, including tables in test fixtures, migration schema witnesses, and dynamically generated schema source. Migration operations such as `s.add.ref(...)` and `s.drop.ref(...)` remain separate APIs; do not mechanically replace those operations.
+  - Update schemas shared by browser, server, and React Native consumers, then run TypeScript checking and `jazz-tools validate --schema-dir <your-schema-directory>`. Republish permissions if you changed their authored traversals.
+
+  ### Migrating with an agent
+
+  Point your coding agent at this guide and ask it to migrate the whole app while preserving schema identity. Have it check every schema consumer (browser, server, React Native, tests, and generated schema sources), preserve the column definitions and targets above, update query and permission traversals together, and run the app's TypeScript checks plus `jazz-tools validate --schema-dir <your-schema-directory>`. Keep existing stores and pending writes; do not reset data to make the migration pass.
+
+  ### Schema identity and existing data
+
+  The underlying mapping, for example `posts.authorId → users`, already participates in schema identity and is used by core query validation and indexing. Both the old `s.ref("users")` and the new `s.rel("users", "authorId")` produce that same mapping.
+
+  An equivalent conversion that preserves column definitions and all reference targets requires no stored-data rewrite or database reset. Keep existing stores and pending writes; do not clear browser data as an upgrade shortcut. Relationship aliases and reverse navigation declarations do not themselves enter the core schema hash: renaming `author` to `writer` only changes the authored query API, provided you also update reverse declarations and callers.
+
+  Replacing a former reference with a plain UUID **without** its forward declaration removes reference metadata; changing its target changes that metadata. Those are actual schema changes, not the API-only conversion described here. Do not use a database reset as a migration shortcut or assume an empty migration can retarget references.
+
+  The docs, maintained examples, starter templates, permission examples, and schema-export tooling have been updated to this API. Historical fixture producers pinned to older published packages intentionally retain their original API.
+
+- d682de3: Reuse safe startup ancestry checks and compiled subscription programs across repeated opens.
+- dcc8786: Preserve first-result consumer lifetime through shared query hydration, avoiding retained indexes for disposable reads without disturbing live subscriptions.
+- b1768f9: Shut down native servers gracefully on SIGINT and release their storage directories for immediate reuse.
+- c24cf42: Preserve transport backpressure and failure reporting, and drain pre-handoff messages before requesting fresh authority snapshots so fast confirmations can settle subscriptions safely.
+- c82bca7: Maintain ordered ArgMin/ArgMax candidates incrementally instead of rebuilding whole groups on each update, reducing repeated-update costs for deep row histories while preserving deterministic ties and retractions.
+- c85fc85: Fix standalone Inspector admin queries returning empty rows for policy-protected tables, including connections routed through Edge to Core.
+- 4dae482: Preserve exact BigInt values and explicit null mutations in Inspector while keeping untouched nullable Boolean inserts null.
+- Preserve Inspector BYTEA equality filters when restoring queries from a URL by retaining their exact byte values.
+- Release Inspector clients after failed setup or unmount, including clients that resolve after setup ends, while preserving ephemeral admin credentials.
+- 4b4dccc: Keep Inspector connections usable when persistence fails while removing legacy stored credentials if migration cannot rewrite them.
+- 3ab44b2: Build Linux native Node packages on an AL2023-compatible userspace and publish Linux ARM64 GNU bindings alongside x64. Keep native compiler provenance and build caches tied to the selected Linux baseline.
+- 8754346: Publish ready local subscription results after storage wakes the query runtime, even when another query has already completed its work. This prevents a cold subscription from remaining loading until an unrelated write.
+- 5c76456: Multiplex bounded, prioritized channels over each connection so large uploads and deliveries do not block independent small queries. Compression now retains history per ordered stream, while explicit message dependencies preserve catalogue, session and transaction ordering across streams.
+
+  Run immutable chunk requests and responses independently of suspended database operations, fixing large-value reads that could wait indefinitely (#3164). Retained partial messages have enforced deadlines and bounded memory; a stalled connection cannot prevent other connections from progressing.
+
+  Preserve transaction settlement when an older query delivery is replaced while waiting for missing row bodies. Discarded deliveries retain transaction identity without publishing obsolete rows, and later partial deliveries cannot regress an already-settled transaction.
+
+  This requires the wire v3 client/server update together. It does not change storage encoding.
+
+- 2b81ec5: Yield database owner ticks while a retained operation or external read holds the node lock, and wake the owner when an external read releases it. This prevents stalled owner queues without busy-loop scheduling or losing deferred cleanup.
+- a1087ff: Preserve nullable and defaulted payload-enum fields in inferred initialisation values.
+- ff6c4b0: Reject unsupported payload-enum query literals and bindings with structured query errors.
+- f6af418: Fix permission-scoped inserts and updates of JSON larger than 64 KiB. Policy candidates preserve JSON scalar types without loading large payloads that ownership checks do not inspect.
+- ebe9ffd: Borrow compiled evaluator signatures and reuse prepared memo lookup inputs within a node evaluation, preserving live readiness checks.
+- 062d00f: Maintain shared join indexes at their producer and consume read-only transitions, avoiding full-bucket publication snapshots and unchanged-row replay in semi/anti-joins.
+- 87e87eb: Reject raw storage writes whose supplied key differs from the record primary key before publishing physical or logical changes.
+- b2d1588: Recover pending local writes without blocking startup on incomplete or deeply nested causal history.
+- bc2e05b: Reject duplicate legacy table declarations during schema validation instead of silently replacing one declaration.
+- cca9fa6: Reject user-defined schema columns that use the reserved magic-column namespace.
+- b5c1168: Allow ordinary mutations on rows made visible again by a restore. A retained deletion-register history no longer causes a restored row to be rejected as already deleted; rows that remain deleted still reject ordinary writes. This includes deleting a row again after either a standalone or transactional restore, without changing branch-view rules or the stored history format.
+- 7f23ca3: Preserve authored schema and physical table identities when validating reads across migrations. Unchanged exclusive reads can commit after a table or column rename, while concurrent matching inserts and ambiguous reused table names still reject.
+- 8465b97: Explain schema catalogue HTTP 404 failures with guidance to check the server URL and app ID, and to wait for regional readiness before retrying a newly created Cloud app. Preserve the original HTTP status and single-request behavior; no automatic retries are added.
+- 400f09e: Reject reserved schema control names and collisions during generated schema construction.
+- 2ce7b6f: Use selective live query hydration for current reads and subscriptions, avoiding full-table work for supported indexed permissioned queries. Preserve validated enum parameter types when retained subscriptions and one-shot reads share a binding source.
+- 641e0d9: Require separate schema and permissions inputs for `startLocalJazzServer` and `createJazzSession` from `jazz-tools/backend`. Explicit permissions replace all embedded policies, including when the bundle is empty or omits tables. A local server can still start without a schema for a later `deploy`.
+
+  Remove the `mergePermissionsIntoWasmSchema` export from `jazz-tools/testing`. Pass the schema and permissions separately instead.
+
+- 9261ef7: Scope WebSocket connection limits and admission cleanup to each server instance, preventing independent servers in one process from evicting each other's clients.
+- cb3f156: Auto-attach the development inspector when using `JazzSessionProvider`, with an `autoAttachDevTools` opt-out.
+- 1319778: Configure matching JWT issuer and audience in Better Auth and hybrid starters so valid provider sessions can log in to Jazz.
+
+  Enable the embedded inspector in Next development through a loopback asset server and a rewrite that preserves application routes. Honor inspector opt-out and leave production configurations unchanged.
+
+- 868947d: Reduce subscription opening work by compiling only the executing local subscription program, preserving its authorization checks.
+- b21f0e6: Preserve structural column defaults in generated migration witnesses, including UUID-to-relation migrations. Validate each witness against its own canonical schema, while preserving ordinary default-only metadata changes without row transforms.
+
+  Correct CLI-computed schema hashes to match existing Rust/server identities for defaults, merge strategies, and branch bindings. Stored schema identities and wire formats do not change.
+
+- 41ba644: Drain transaction preparation and outstanding reads before committing, retain deferred failures for later waits, and prevent ordinary mutations from overtaking preparation. Preserve synchronous row results and reject deferred admission after rollback, shutdown, discard, or account changes.
+- 99630e1: BREAKING CHANGE: `deploy` is now the single operation for publishing schemas, permissions, and migrations, both through the CLI and programmatically. Deployment now requires explicit permissions and fails before publication when a required migration is missing. Empty permissions remain valid and deny all access. First deployments, unchanged schemas, and compatible transitions do not require a reviewed migration file. The `noVerify` / `--no-verify` bypass is no longer supported.
+
+  Removed the public `pushSchema`, `pushPermissions`, and `pushMigration` exports, the package-root `publishStoredSchema` and `publishStoredPermissions` exports, and the `migrations push` CLI command.
+
+- 7577382: Reject duplicate scalar enum variant names at every schema ingress boundary while preserving distinct case-sensitive names and declaration order.
+- a0bf500: Release unused subscriptions after their original cleanup deadline even when updates continue arriving, while preserving subscriptions with active listeners.
+- 2c20990: Generate executable identity migrations when existing UUID and UUID-array columns gain explicit relations, preserving stored values and including referenced tables in migration witnesses. Continue rejecting reference removal, retargeting, and unsupported simultaneous column changes.
+- 9cb4c40: Reject schema references to undeclared tables and references on non-UUID columns with source-specific diagnostics. References to declared tables may still point to rows that do not exist yet.
+- Updated dependencies [9462d65]
+  - jazz-rn@2.0.0-alpha.56
+  - jazz-wasm@2.0.0-alpha.56
+
 ## 2.0.0-alpha.55
 
 ### Patch Changes
