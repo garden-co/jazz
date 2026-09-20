@@ -202,7 +202,7 @@ Jazz also tracks row authorship and timestamps automatically:
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
 
-Jazz always tracks this metadata; select the columns explicitly to include them in query results. Backend writes that are not attributed to a user have an internal system identity and a null account.
+Jazz always tracks this metadata; select the columns explicitly to include them in query results. Backend writes that are not attributed to a user use the reserved system account and an internal system identity. See [System-authored rows](/docs/auth/sessions#system-authored-rows) for their account, issuer, and originating-node subject.
 
 ### Authorship-based policies
 
