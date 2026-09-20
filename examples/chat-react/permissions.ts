@@ -67,16 +67,16 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
     policy.profiles.exists.where({ id: message.senderId, userId: session.user.account }),
   );
 
-  policy.reactions.allowRead.where(allowedTo.read("messageId"));
+  policy.reactions.allowRead.where(allowedTo.read("message"));
   policy.reactions.allowInsert.where({ userId: session.user.account });
   policy.reactions.allowDelete.where({ userId: session.user.account });
 
-  policy.canvases.allowRead.where(allowedTo.read("chatId"));
+  policy.canvases.allowRead.where(allowedTo.read("chat"));
   policy.canvases.allowInsert.where((canvas) =>
     policy.chatMembers.exists.where({ chatId: canvas.chatId, userId: session.user.account }),
   );
 
-  policy.strokes.allowRead.where(allowedTo.read("canvasId"));
-  policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
+  policy.strokes.allowRead.where(allowedTo.read("canvas"));
+  policy.strokes.allowInsert.where(allowedTo.read("canvas"));
   policy.strokes.allowDelete.where({ "$createdBy.account": session.user.account });
 });

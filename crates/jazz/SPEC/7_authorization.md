@@ -450,14 +450,34 @@ updateability evaluated against whereOld only. The parent row is not changed by
 inserting the child, so parent whereNew/update-check clauses are not evaluated
 for that child insert decision.
 
-`allowedTo.<op>Referencing(sourcePolicy, viaColumn)` is reverse operation
-inheritance. It grants access to a target row only when there exists at least one
+The TypeScript `allowedTo.read/insert/update/delete(relationName)` helpers resolve
+only explicit relationship names declared on the protected table, matching
+`hopTo(name)`. A forward name lowers to the existing `Inherits` atom using its
+stored reference column; a reverse name lowers to `InheritsReferencing` using
+its source table and that source's declared forward reference column. Raw column
+names and convention-derived aliases are not accepted by these helpers. The
+`raw(...)` IR escape hatch retains its column-based contract. This is authoring
+resolution only; it does not change schema, wire, or storage encodings.
+
+`allowedTo.<op>Referencing(sourcePolicy, forwardRelationName)` is the explicit
+source-table form of reverse operation inheritance. It requires a named forward
+relationship on the source table that targets the protected table. In the
+following semantics, `viaColumn` denotes that relationship's stored column.
+Reverse operation inheritance It grants access to a target row only when there exists at least one
 row in the source table whose `viaColumn` references the target row and that
 source row is allowed for the same `<op>` operation. It does not fall back to
 source read visibility, insert/update policy, ownership, or mere existence of a
-referencing row. For `deleteReferencing`, the source table's `delete_using`
+referencing row. Nullable references contribute no match; reference arrays use membership. For `deleteReferencing`, the source table's `delete_using`
 clause is the authority; if no source delete policy exists, enforcing/server
 authorization fails closed.
+
+Forward helpers preserve their existing `maxDepth` semantics. Reverse helpers
+reject an explicit `maxDepth`, because the current reverse expansion does not
+implement bounded recursion; cyclic reverse expansions are rejected during
+schema validation. The global `allowedTo` context constrains typed names to the
+app's declared relationships; rule compilation additionally validates the
+particular protected table and, for `*Referencing`, the source direction and
+target. Update `whereOld` and `whereNew` remain separate row-image checks.
 
 _Further invariants._ `INV-RLS-8` — a deletion-register version is readable to a
 non-system identity only when the row has a global content winner that satisfies
