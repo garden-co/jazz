@@ -709,5 +709,33 @@ pub fn diagnostic_credit_self_check() {
         receiver.accept_grant().unwrap();
         assert!(receiver.peek_grant().unwrap().is_none());
     }
+    for (index, class, bulk) in [
+        (0, ChannelClass::Control, false),
+        (1, ChannelClass::Requests, false),
+        (2, ChannelClass::Writes, true),
+        (3, ChannelClass::Auxiliary, false),
+        (4, ChannelClass::Control, true),
+        (5, ChannelClass::Progress, false),
+    ] {
+        let mut receiver = ChannelCredits::new(WireInboundContext::new(
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_SYNC_MESSAGE_PAYLOAD,
+            None,
+        ));
+        receiver.buffer_grants[index] = BufferCost {
+            bytes: 65_573,
+            count: 1,
+        };
+        let bytes = receiver.peek_grant().unwrap().unwrap();
+        let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+            panic!("expected diagnostic decoded-resource credit");
+        };
+        assert_eq!(grant.class, class, "pre-DB decoded resource bucket={index}");
+        assert_eq!(grant.kind, WireCreditKind::Messages { count: 1, bulk });
+        assert_eq!(grant.consumed_bytes, 65_573);
+        receiver.accept_grant().unwrap();
+        assert!(receiver.peek_grant().unwrap().is_none());
+        eprintln!("W1 pre-DB decoded resource bucket={index} class={class:?} bulk={bulk} passed");
+    }
     eprintln!("W1 pre-DB credit self-check passed");
 }

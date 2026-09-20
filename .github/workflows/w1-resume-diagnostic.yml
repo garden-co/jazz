@@ -48,7 +48,7 @@ jobs:
           name: w1-credit-class-probe-${{ runner.arch }}
           path: ${{ runner.temp }}/w1-credit-probe
 
-  # ChannelCredits impl restored exactly from d0159d52e3592b3138ee24826a3819ceae0db5a7.
+  # Original ChannelCredits impl preserved in 2bd0c671; test the current candidate.
   # The diagnostic self-check stays outside the original implementation.
   production-credit-probe:
     runs-on: codspeed-macro
@@ -153,4 +153,7 @@ jobs:
         env:
           CODSPEED_OUTCOME: ${{ steps.codspeed.outcome }}
           DIRECT_OUTCOME: ${{ steps.direct.outcome }}
-        run: test "$CODSPEED_OUTCOME" = success && test "$DIRECT_OUTCOME" = success
+        run: |
+          echo "CodSpeed execution outcome: $CODSPEED_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          echo "Direct execution outcome: $DIRECT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          test "$CODSPEED_OUTCOME" = success && test "$DIRECT_OUTCOME" = success
