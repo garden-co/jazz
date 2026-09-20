@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: w1-resume-credit-diagnostic-${{ github.ref }}
+  group: w1-resume-credit-diagnostic-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -47,6 +47,37 @@ jobs:
         with:
           name: w1-credit-class-probe-${{ runner.arch }}
           path: ${{ runner.temp }}/w1-credit-probe
+
+  production-credit-probe:
+    runs-on: codspeed-macro
+    timeout-minutes: 15
+    env:
+      JAZZ_WIRE_CREDIT_TRACE: "1"
+      RUST_MIN_STACK: "4194304"
+      RUSTFLAGS: "-C debuginfo=2 -C strip=none"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - name: Run actual optimized credit path without W1 or RocksDB
+        run: |
+          ulimit -n 16384
+          cargo run --locked --manifest-path dev/gates/probes/w1-credit-core/Cargo.toml --release --target-dir "$RUNNER_TEMP/w1-credit-core"
+      - name: Preserve production probe binary and disassembly
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/w1-credit-core-artifacts"
+          probe="$RUNNER_TEMP/w1-credit-core/release/w1-credit-core-probe"
+          if test -f "$probe"; then
+            cp "$probe" "$RUNNER_TEMP/w1-credit-core-artifacts/"
+            objdump -Cd "$probe" > "$RUNNER_TEMP/w1-credit-core-artifacts/disassembly.txt"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: w1-credit-core-probe-${{ runner.arch }}
+          path: ${{ runner.temp }}/w1-credit-core-artifacts
 
   resume-credit:
     if: github.event_name == 'workflow_dispatch' && inputs.run_full_benchmark
