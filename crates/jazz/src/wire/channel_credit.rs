@@ -465,6 +465,48 @@ mod tests {
         assert!(credits.lock().unwrap().peek_grant().unwrap().is_none());
     }
 
+    // Internal coverage is necessary because row results do not expose which
+    // physical receive window a serialized credit grant replenishes.
+    #[test]
+    fn physical_grants_replenish_their_original_class_windows() {
+        const BYTES: usize = 65_573;
+        for class in [
+            ChannelClass::Control,
+            ChannelClass::Requests,
+            ChannelClass::Delivery,
+            ChannelClass::Writes,
+            ChannelClass::LargeValue,
+            ChannelClass::Auxiliary,
+            ChannelClass::Progress,
+        ] {
+            let mut sender = ChannelCredits::new(context());
+            let mut receiver = ChannelCredits::new(context());
+            sender.charge(class, BYTES).unwrap();
+            receiver.consumed(class, BYTES).unwrap();
+            let bytes = receiver.peek_grant().unwrap().unwrap();
+            let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+                panic!("expected a credit frame");
+            };
+            let expected_class = match class {
+                ChannelClass::LargeValue => ChannelClass::Writes,
+                other => other,
+            };
+            assert_eq!(grant.class, expected_class, "charged class={class:?}");
+            assert_eq!(grant.kind, WireCreditKind::Frames);
+            assert_eq!(grant.consumed_bytes, BYTES as u64);
+            if expected_class != ChannelClass::Control {
+                let mut wrong_class = grant.clone();
+                wrong_class.class = ChannelClass::Control;
+                assert!(sender.receive_credit(wrong_class).is_err());
+            }
+            sender
+                .receive_credit(grant)
+                .expect("replenish the charged window");
+            receiver.accept_grant().unwrap();
+            assert!(receiver.peek_grant().unwrap().is_none());
+        }
+    }
+
     #[test]
     fn credit_byte_fixture_retry_sequence_and_unearned_grants_are_checked() {
         let mut sender = ChannelCredits::new(context());
