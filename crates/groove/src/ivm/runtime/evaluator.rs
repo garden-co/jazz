@@ -633,15 +633,16 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) binding_deltas: &'a [BindingDelta],
     pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
-    pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
-    pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    pub(super) operator_states: &'a mut FrameState<OperatorStateKey, OperatorState>,
+    pub(super) arrangement_states:
+        &'a mut FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
     pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
-    pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
+    pub(super) node_meta: &'a mut FrameState<NodeId, NodeRuntimeMeta>,
     pub(super) storage: Option<&'a dyn OrderedKvStorage>,
     pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) context: EvalContext,
@@ -663,15 +664,16 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) binding_deltas: &'a [BindingDelta],
     pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
-    pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
-    pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    pub(super) operator_states: &'a mut FrameState<OperatorStateKey, OperatorState>,
+    pub(super) arrangement_states:
+        &'a mut FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
     pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
-    pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
+    pub(super) node_meta: &'a mut FrameState<NodeId, NodeRuntimeMeta>,
     pub(super) storage: &'a dyn OrderedKvStorage,
     pub(super) evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     pub(super) scope: ScopeId,
@@ -687,15 +689,15 @@ fn graph_runtime_view<'a>(
     binding_deltas: &'a [BindingDelta],
     binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     current_tick: u64,
-    operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
-    arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    operator_states: &'a mut FrameState<OperatorStateKey, OperatorState>,
+    arrangement_states: &'a mut FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
     binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     memo_use_clock: &'a mut u64,
-    node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
+    node_meta: &'a mut FrameState<NodeId, NodeRuntimeMeta>,
     storage: &'a dyn OrderedKvStorage,
     evaluation_inputs: Option<&'a mut super::evaluation_session::EvaluationInputs>,
     scope: ScopeId,
@@ -2680,6 +2682,11 @@ impl TickEvaluator<'_> {
     }
 
     fn join_field_names(&mut self, node: NodeId, join: &JoinOp) -> (Arc<[String]>, Arc<[String]>) {
+        if let Some(meta) = self.node_meta.get(&node)
+            && let (Some(left), Some(right)) = (&meta.join_left_fields, &meta.join_right_fields)
+        {
+            return (Arc::clone(left), Arc::clone(right));
+        }
         let meta = self.node_meta.entry(node).or_default();
         let left = meta
             .join_left_fields
@@ -2699,7 +2706,11 @@ impl TickEvaluator<'_> {
         right_descriptor: RecordDescriptor,
         output_descriptor: RecordDescriptor,
     ) -> Result<Arc<[(usize, usize)]>, IvmRuntimeError> {
-        if let Some(mapping) = &self.node_meta.entry(node).or_default().join_output_mapping {
+        if let Some(mapping) = self
+            .node_meta
+            .get(&node)
+            .and_then(|meta| meta.join_output_mapping.as_ref())
+        {
             return Ok(mapping.clone());
         }
         let mapping = super::join::join_output_mapping(
@@ -2717,6 +2728,13 @@ impl TickEvaluator<'_> {
         node: NodeId,
         aggregate: &AggregateOp,
     ) -> Arc<[String]> {
+        if let Some(fields) = self
+            .node_meta
+            .get(&node)
+            .and_then(|meta| meta.aggregate_group_fields.as_ref())
+        {
+            return Arc::clone(fields);
+        }
         self.node_meta
             .entry(node)
             .or_default()
@@ -2768,10 +2786,14 @@ impl TickEvaluator<'_> {
     }
 
     fn insert_arrangement(&mut self, key: ArrangementKey, state: AsOf<ArrangementState, SubTick>) {
-        self.arrangement_keys_by_input
-            .entry(key.input)
-            .or_default()
-            .insert(key.clone());
+        // Root arrangements have a direct dense slot; only recursive scopes
+        // need an auxiliary capture index.
+        if key.scope != ScopeId::root() {
+            self.arrangement_keys_by_input
+                .entry(key.input)
+                .or_default()
+                .insert(key.clone());
+        }
         self.arrangement_states.insert(key, state);
     }
 

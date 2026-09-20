@@ -48,6 +48,7 @@ use thiserror::Error;
 
 mod aggregate;
 pub(crate) mod evaluation_session;
+mod frame_state;
 mod join;
 mod persist;
 mod recursion;
@@ -55,6 +56,7 @@ mod state;
 mod terminal;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use frame_state::FrameState;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
@@ -195,11 +197,11 @@ pub struct IvmRuntime {
     persistence_indeterminate: Rc<Cell<bool>>,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
-    operator_states: HashMap<OperatorStateKey, OperatorState>,
+    operator_states: FrameState<OperatorStateKey, OperatorState>,
     /// Reusable indexed multisets for join inputs. These are keyed by input
     /// fragment, key fields, descriptor, and scope so similar queries can share
     /// expensive context-independent arrangements.
-    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_states: FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
@@ -212,9 +214,10 @@ pub struct IvmRuntime {
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
     hydration_memo_computed_nodes: HashSet<NodeId>,
-    /// Retainers and GC age live outside operator state so stateless leaf nodes
-    /// can be retained without allocating fake operator state.
-    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    /// Live graph ownership must never be captured or restored by a frame.
+    node_retainers: HashMap<NodeId, HashSet<Retainer>>,
+    /// Evaluation metadata is snapshotted independently of lifecycle ownership.
+    node_meta: FrameState<NodeId, NodeRuntimeMeta>,
     current_tick: u64,
     next_subscription_id: u64,
     next_shape_id: u64,
@@ -266,8 +269,8 @@ impl IvmRuntime {
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
             ephemeral_graph_gc_pending: false,
-            operator_states: HashMap::default(),
-            arrangement_states: HashMap::default(),
+            operator_states: FrameState::default(),
+            arrangement_states: FrameState::default(),
             arrangement_keys_by_input: HashMap::default(),
             eval_memo: HashMap::default(),
             table_frontiers: HashMap::default(),
@@ -277,7 +280,8 @@ impl IvmRuntime {
             hydration_memo_hits: 0,
             hydration_memo_computes: 0,
             hydration_memo_computed_nodes: HashSet::default(),
-            node_meta: HashMap::default(),
+            node_meta: FrameState::default(),
+            node_retainers: HashMap::default(),
             current_tick: 0,
             next_subscription_id: 1,
             next_shape_id: 1,

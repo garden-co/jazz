@@ -286,6 +286,80 @@ fn shared_hydrations_wait_for_the_predecessor_without_failing() {
 }
 
 #[test]
+fn shared_aggregate_frames_survive_owner_replacement_and_subsequent_writes() {
+    let (storage, control) = TestStorage::controlled(&["left_metrics", "right_metrics"]);
+    let mut database = block_on(Database::new(two_metrics_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "left_metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U64(7)],
+    );
+    block_on(database.commit_batch(seed)).unwrap();
+
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let first = block_on(database.subscribe_one_sink(metric_aggregate("left_metrics"))).unwrap();
+    let survivor = block_on(database.subscribe_one_sink(metric_aggregate("left_metrics"))).unwrap();
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut progress = Box::pin(database.drive_progress());
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(progress);
+    assert!(database.unsubscribe(first.id()));
+    drop(first);
+    let replacement =
+        block_on(database.subscribe_one_sink(metric_aggregate("left_metrics"))).unwrap();
+    control.resume_operation(TestStorageOperation::ScanOpen);
+
+    let row = |sum| {
+        vec![
+            Value::U64(10),
+            Value::Nullable(Some(Box::new(Value::U64(sum)))),
+        ]
+    };
+    for subscription in [&survivor, &replacement] {
+        let initial = block_on(database.next_subscription(subscription))
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(initial, vec![(row(7), 1)]);
+    }
+    let mut next = database.open_batch();
+    next.insert(
+        "left_metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U64(11)],
+    );
+    block_on(database.commit_batch(next)).unwrap();
+    for subscription in [&survivor, &replacement] {
+        let delta = block_on(database.next_subscription(subscription))
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(delta.len(), 2);
+        assert!(delta.contains(&(row(7), -1)));
+        assert!(delta.contains(&(row(18), 1)));
+    }
+    assert!(database.unsubscribe(survivor.id()));
+    let mut next = database.open_batch();
+    next.insert(
+        "left_metrics",
+        vec![Value::U64(3), Value::U64(10), Value::U64(13)],
+    );
+    block_on(database.commit_batch(next)).unwrap();
+    let delta = block_on(database.next_subscription(&replacement))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(delta.len(), 2);
+    assert!(delta.contains(&(row(18), -1)));
+    assert!(delta.contains(&(row(31), 1)));
+    assert!(database.unsubscribe(replacement.id()));
+    assert_eq!(database.runtime_stats().active_subscriptions, 0);
+}
+
+#[test]
 fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();

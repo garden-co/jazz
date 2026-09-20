@@ -2140,9 +2140,9 @@ async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     assert_eq!(runtime.retained_node_ids().len(), 1);
     assert!(
         runtime
-            .node_meta
+            .node_retainers
             .get(&output)
-            .is_some_and(|meta| !meta.retainers.is_empty())
+            .is_some_and(|retainers| !retainers.is_empty())
     );
 
     assert!(runtime.unsubscribe(subscription.id()));
@@ -2169,20 +2169,14 @@ async fn identical_subscriptions_share_one_node_with_multiple_retainers() {
 
     assert_eq!(Some(output), runtime.subscription_output_node(second.id()));
     assert_eq!(
-        runtime
-            .node_meta
-            .get(&output)
-            .map(|meta| meta.retainers.len()),
+        runtime.node_retainers.get(&output).map(HashSet::len),
         Some(2)
     );
 
     assert!(runtime.unsubscribe(first.id()));
     assert!(runtime.graph().node(output).is_some());
     assert_eq!(
-        runtime
-            .node_meta
-            .get(&output)
-            .map(|meta| meta.retainers.len()),
+        runtime.node_retainers.get(&output).map(HashSet::len),
         Some(1)
     );
 

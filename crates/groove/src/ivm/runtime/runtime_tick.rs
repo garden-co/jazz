@@ -47,13 +47,13 @@ struct EvaluationSession<'a> {
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
     pending_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
-    operator_states: HashMap<OperatorStateKey, OperatorState>,
-    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    operator_states: FrameState<OperatorStateKey, OperatorState>,
+    arrangement_states: FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
-    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    node_meta: FrameState<NodeId, NodeRuntimeMeta>,
     /// Collector operations produced while hydrating the exact initial
     /// snapshot. These are the authoritative terminal-tree seed for a new
     /// subscription, not an incremental side channel.
@@ -95,13 +95,13 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// All evaluator-owned state is prepared here and installed only after the
     /// complete direct tick reaches Ready. This keeps failed ticks atomic while
     /// allowing a suspended evaluation to retain its exact continuation.
-    operator_states: HashMap<OperatorStateKey, OperatorState>,
-    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    operator_states: FrameState<OperatorStateKey, OperatorState>,
+    arrangement_states: FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
-    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    node_meta: FrameState<NodeId, NodeRuntimeMeta>,
     pending_binding_retractions: usize,
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
     /// Derived writes use the same sparse overlay as their evaluation reads.
@@ -671,8 +671,13 @@ impl<'a> IncrementalEvaluation<'a> {
                 .and_modify(|live| *live = (*live).max(*frontier))
                 .or_insert(*frontier);
         }
-        for (node, staged) in &self.node_meta {
-            if let Some(live) = runtime.node_meta.get_mut(node) {
+        for (node, staged) in self.node_meta.iter() {
+            if runtime
+                .node_meta
+                .get(node)
+                .is_some_and(|live| live.input_generation < staged.input_generation)
+                && let Some(live) = runtime.node_meta.get_mut(node)
+            {
                 live.input_generation = live.input_generation.max(staged.input_generation);
             }
         }
@@ -724,38 +729,34 @@ impl<'a> IncrementalEvaluation<'a> {
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
-        for (key, state) in &mut self.operator_states {
-            runtime.operator_states.remove(key);
-            if let OperatorState::Recursive(recursive) = state {
-                recursive.value_mut().commit_staged_positive();
-            }
-            if let OperatorState::TopBy(top_by) = state {
-                top_by.value_mut().commit_overlays();
-            }
-            if let OperatorState::ArgBy(arg_by) = state {
-                arg_by.value_mut().commit_overlay();
-            }
-            if let OperatorState::SemiJoin(semi_join) = state {
-                semi_join.commit_published_overlay();
-            }
-            if let OperatorState::AntiJoin(anti_join) = state {
-                anti_join.commit_published_overlay();
-            }
-            if let OperatorState::CollectBy(collect_by) = state {
-                collect_by.groups.commit_overlay();
-            }
-        }
         runtime
             .operator_states
-            .extend(std::mem::take(&mut self.operator_states));
+            .install(&mut self.operator_states, |state| {
+                if let OperatorState::Recursive(recursive) = state {
+                    recursive.value_mut().commit_staged_positive();
+                }
+                if let OperatorState::TopBy(top_by) = state {
+                    top_by.value_mut().commit_overlays();
+                }
+                if let OperatorState::ArgBy(arg_by) = state {
+                    arg_by.value_mut().commit_overlay();
+                }
+                if let OperatorState::SemiJoin(semi_join) = state {
+                    semi_join.commit_published_overlay();
+                }
+                if let OperatorState::AntiJoin(anti_join) = state {
+                    anti_join.commit_published_overlay();
+                }
+                if let OperatorState::CollectBy(collect_by) = state {
+                    collect_by.groups.commit_overlay();
+                }
+            });
 
-        for (key, state) in &mut self.arrangement_states {
-            runtime.arrangement_states.remove(key);
-            state.value_mut().commit_overlay();
-        }
         runtime
             .arrangement_states
-            .extend(std::mem::take(&mut self.arrangement_states));
+            .install(&mut self.arrangement_states, |state| {
+                state.value_mut().commit_overlay();
+            });
         for node in self.arrangement_keys_by_input.keys() {
             runtime.arrangement_keys_by_input.remove(node);
         }
@@ -768,24 +769,14 @@ impl<'a> IncrementalEvaluation<'a> {
             .extend(std::mem::take(&mut self.eval_memo));
         runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
-        // Retainers are owned by graph lifecycle operations, not by this
-        // evaluation snapshot. Preserve their current live value when a
-        // suspended continuation resumes after lifecycle activity.
-        for node in &self.relevant_nodes {
-            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
-                (Some(meta), Some(live)) => {
-                    meta.retainers = live.retainers.clone();
-                    meta.input_generation = meta.input_generation.max(live.input_generation);
-                }
-                (None, Some(live)) => {
-                    self.node_meta.insert(*node, live.clone());
-                }
-                _ => {}
+        // Frontier publication can run ahead of suspended evaluation. Only
+        // merge changed metadata; live retainers are never part of this state.
+        for (node, meta) in self.node_meta.changed_mut() {
+            if let Some(live) = runtime.node_meta.get(node) {
+                meta.input_generation = meta.input_generation.max(live.input_generation);
             }
         }
-        runtime
-            .node_meta
-            .extend(std::mem::take(&mut self.node_meta));
+        runtime.node_meta.install(&mut self.node_meta, |_| {});
         self.install_input_frontiers(runtime);
         runtime.current_tick = runtime.current_tick.max(self.current_tick);
         runtime
@@ -1210,29 +1201,20 @@ impl<'a> EvaluationSession<'a> {
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
         // graphs.
-        let operator_states = relevant_nodes
-            .iter()
-            .filter_map(|node| {
-                let key = OperatorStateKey {
-                    scope: ScopeId::root(),
-                    node: *node,
-                };
-                runtime
-                    .operator_states
-                    .get(&key)
-                    .cloned()
-                    .map(|state| (key, state))
-            })
-            .collect();
-        let mut arrangement_states = HashMap::default();
+        let operator_states = runtime
+            .operator_states
+            .snapshot(Arc::clone(&work_queue.layout));
+        let mut arrangement_states = runtime
+            .arrangement_states
+            .snapshot(Arc::clone(&work_queue.layout));
         let mut arrangement_keys_by_input = HashMap::default();
         for input in &relevant_nodes {
             let Some(keys) = runtime.arrangement_keys_by_input.get(input) else {
                 continue;
             };
             for key in keys {
-                if let Some(state) = runtime.arrangement_states.get(key) {
-                    arrangement_states.insert(key.clone(), state.clone());
+                if runtime.arrangement_states.contains_key(key) {
+                    arrangement_states.capture_scoped(&runtime.arrangement_states, key);
                     arrangement_keys_by_input
                         .entry(*input)
                         .or_insert_with(HashSet::default)
@@ -1247,16 +1229,7 @@ impl<'a> EvaluationSession<'a> {
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect::<HashMap<_, _>>();
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
-        let node_meta = relevant_nodes
-            .iter()
-            .filter_map(|node| {
-                runtime
-                    .node_meta
-                    .get(node)
-                    .cloned()
-                    .map(|meta| (*node, meta))
-            })
-            .collect::<HashMap<_, _>>();
+        let node_meta = runtime.node_meta.snapshot(Arc::clone(&work_queue.layout));
         // Recursive hydration rebuilds internal arrangements from complete
         // source snapshots, so a leaf memo alone cannot satisfy those inputs.
         // Walk all recursive inputs together to keep classification linear in
@@ -1544,47 +1517,36 @@ impl<'a> EvaluationSession<'a> {
     }
 
     fn install(mut self, runtime: &mut IvmRuntime) {
-        for node in &self.relevant_nodes {
-            runtime.operator_states.remove(&OperatorStateKey {
-                scope: ScopeId::root(),
-                node: *node,
-            });
-        }
         // Session hydration also establishes long-lived collector state. Fold
         // its initially populated sparse groups now, otherwise the first
         // incremental edit would COW-clone the entire hydration overlay.
-        for state in self.operator_states.values_mut() {
-            if let OperatorState::TopBy(top_by) = state {
-                top_by.value_mut().commit_overlays();
-            }
-            if let OperatorState::ArgBy(arg_by) = state {
-                arg_by.value_mut().commit_overlay();
-            }
-            if let OperatorState::SemiJoin(semi_join) = state {
-                semi_join.commit_published_overlay();
-            }
-            if let OperatorState::AntiJoin(anti_join) = state {
-                anti_join.commit_published_overlay();
-            }
-            if let OperatorState::CollectBy(collect_by) = state {
-                collect_by.groups.commit_overlay();
-            }
-        }
-        runtime.operator_states.extend(self.operator_states);
-        for node in &self.relevant_nodes {
-            if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
-                for key in keys {
-                    runtime.arrangement_states.remove(key);
+        runtime
+            .operator_states
+            .install(&mut self.operator_states, |state| {
+                if let OperatorState::TopBy(top_by) = state {
+                    top_by.value_mut().commit_overlays();
                 }
-            }
-        }
+                if let OperatorState::ArgBy(arg_by) = state {
+                    arg_by.value_mut().commit_overlay();
+                }
+                if let OperatorState::SemiJoin(semi_join) = state {
+                    semi_join.commit_published_overlay();
+                }
+                if let OperatorState::AntiJoin(anti_join) = state {
+                    anti_join.commit_published_overlay();
+                }
+                if let OperatorState::CollectBy(collect_by) = state {
+                    collect_by.groups.commit_overlay();
+                }
+            });
         // Hydration-created arrangements are the immutable bases for the
         // next staged tick. Fold their initial overlays after removing the
         // old live entries, just as incremental installation does.
-        for state in self.arrangement_states.values_mut() {
-            state.value_mut().commit_overlay();
-        }
-        runtime.arrangement_states.extend(self.arrangement_states);
+        runtime
+            .arrangement_states
+            .install(&mut self.arrangement_states, |state| {
+                state.value_mut().commit_overlay();
+            });
         for node in &self.relevant_nodes {
             runtime.arrangement_keys_by_input.remove(node);
         }
@@ -1601,10 +1563,12 @@ impl<'a> EvaluationSession<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
-        for node in &self.relevant_nodes {
-            runtime.node_meta.remove(node);
+        for (node, meta) in self.node_meta.changed_mut() {
+            if let Some(live) = runtime.node_meta.get(node) {
+                meta.input_generation = meta.input_generation.max(live.input_generation);
+            }
         }
-        runtime.node_meta.extend(self.node_meta);
+        runtime.node_meta.install(&mut self.node_meta, |_| {});
     }
 }
 
@@ -1680,6 +1644,10 @@ impl IvmRuntime {
             .map(|entry| entry.payload_bytes)
             .sum();
         for node in &failure.affected_nodes {
+            self.arrangement_states.remove(&ArrangementKey {
+                scope: ScopeId::root(),
+                input: *node,
+            });
             if let Some(keys) = self.arrangement_keys_by_input.remove(node) {
                 for key in keys {
                     self.arrangement_states.remove(&key);
@@ -2384,39 +2352,24 @@ impl IvmRuntime {
         // evaluator may need unchanged sibling inputs (for example the other
         // side of a join), so discovery walks ancestors of every affected
         // node, while unrelated graph state remains in the live runtime.
-        let relevant_nodes = self
+        let layout = self
             .graph
             .execution_layout(affected_nodes.iter().copied())
-            .map_err(IvmRuntimeError::GraphNodeNotFound)?
-            .nodes
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>();
-        // Capture by graph key, never by filtering global retained maps. Root
-        // state is the only durable evaluator state; recursive child scopes
-        // are scratch and are removed before publication.
-        let mut operator_states = relevant_nodes
-            .iter()
-            .filter_map(|node| {
-                let key = OperatorStateKey {
-                    scope: ScopeId::root(),
-                    node: *node,
-                };
-                self.operator_states
-                    .get(&key)
-                    .cloned()
-                    .map(|state| (key, state))
-            })
-            .collect::<HashMap<_, _>>();
-        let mut arrangement_states = HashMap::default();
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let relevant_nodes = layout.nodes.iter().copied().collect::<HashSet<_>>();
+        // Capture by graph key, never by filtering global retained maps.
+        // Operator state survives only at root scope; scoped arrangements
+        // also survive publication and are captured through their input index.
+        let mut operator_states = self.operator_states.snapshot(Arc::clone(&layout));
+        let mut arrangement_states = self.arrangement_states.snapshot(Arc::clone(&layout));
         let mut arrangement_keys_by_input = HashMap::default();
         for input in &relevant_nodes {
             let Some(keys) = self.arrangement_keys_by_input.get(input) else {
                 continue;
             };
             for key in keys {
-                if let Some(state) = self.arrangement_states.get(key) {
-                    arrangement_states.insert(key.clone(), state.clone());
+                if self.arrangement_states.contains_key(key) {
+                    arrangement_states.capture_scoped(&self.arrangement_states, key);
                     arrangement_keys_by_input
                         .entry(*input)
                         .or_insert_with(HashSet::default)
@@ -2429,10 +2382,7 @@ impl IvmRuntime {
         let mut eval_memo = HashMap::default();
         let mut eval_memo_bytes = 0;
         let mut memo_use_clock = self.memo_use_clock;
-        let mut node_meta = relevant_nodes
-            .iter()
-            .filter_map(|node| self.node_meta.get(node).cloned().map(|meta| (*node, meta)))
-            .collect::<HashMap<_, _>>();
+        let mut node_meta = self.node_meta.snapshot(layout);
         let mut table_frontiers = HashMap::default();
         let mut binding_frontiers = HashMap::default();
         for node in &relevant_nodes {
@@ -2522,8 +2472,8 @@ impl IvmRuntime {
         let mut retained_roots = affected_nodes
             .iter()
             .filter(|node| {
-                self.node_meta.get(node).is_some_and(|meta| {
-                    meta.retainers
+                self.node_retainers.get(node).is_some_and(|retainers| {
+                    retainers
                         .iter()
                         .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
                 }) && self
@@ -2805,13 +2755,13 @@ impl IvmRuntime {
         affected_nodes: &std::collections::HashSet<NodeId>,
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
-        operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
-        arrangement_states: &mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+        operator_states: &mut FrameState<OperatorStateKey, OperatorState>,
+        arrangement_states: &mut FrameState<ArrangementKey, AsOf<ArrangementState, SubTick>>,
         arrangement_keys_by_input: &mut HashMap<NodeId, HashSet<ArrangementKey>>,
         eval_memo: &mut HashMap<EvalMemoKey, EvalMemoEntry>,
         eval_memo_bytes: &mut usize,
         memo_use_clock: &mut u64,
-        node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+        node_meta: &mut FrameState<NodeId, NodeRuntimeMeta>,
         table_frontiers: &HashMap<String, u64>,
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
         durable_writes: &RefCell<StagedWriteState>,
@@ -2976,7 +2926,7 @@ fn bump_input_frontiers_staged(
     binding_deltas: &[BindingDelta],
     table_frontiers: &mut HashMap<String, u64>,
     binding_frontiers: &mut HashMap<BindingSourceKey, u64>,
-    node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+    node_meta: &mut FrameState<NodeId, NodeRuntimeMeta>,
 ) {
     let mut changed_tables = Vec::new();
     for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
@@ -3055,7 +3005,7 @@ mod tests {
         runtime.add_retainer(output, Retainer::Subscription("new".to_owned()));
         evaluation.install(&mut runtime);
 
-        let retainers = &runtime.node_meta.get(&output).unwrap().retainers;
+        let retainers = runtime.node_retainers.get(&output).unwrap();
         assert!(retainers.contains(&Retainer::PreparedShape("old".to_owned())));
         assert!(retainers.contains(&Retainer::Subscription("new".to_owned())));
     }
