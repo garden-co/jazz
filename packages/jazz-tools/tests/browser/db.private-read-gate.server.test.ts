@@ -237,7 +237,7 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
       }),
     ),
 
-    policy.reactions.allowRead.where(allowedTo.read("messageId")),
+    policy.reactions.allowRead.where(allowedTo.read("message")),
     policy.reactions.allowInsert.where({ userId: session.user.identity.subject }),
     policy.reactions.allowDelete.where({ userId: session.user.identity.subject }),
   ],

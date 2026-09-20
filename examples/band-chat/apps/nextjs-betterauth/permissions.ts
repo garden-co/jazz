@@ -35,12 +35,12 @@ const bandChatPermissions = definePermissions(
       .whereNew({ "$createdBy.account": session.user.account });
     policy.rooms.allowDelete.where({ "$createdBy.account": session.user.account });
 
-    policy.roomMembers.allowRead.where(allowedTo.read("roomId"));
+    policy.roomMembers.allowRead.where(allowedTo.read("room"));
     // Only an editor of a room (its creator here) can admit or remove members.
     // In particular, no rule permits an identity to insert its own membership.
-    policy.roomMembers.allowInsert.where(allowedTo.update("roomId"));
+    policy.roomMembers.allowInsert.where(allowedTo.update("room"));
     policy.roomMembers.allowUpdate.never();
-    policy.roomMembers.allowDelete.where(allowedTo.update("roomId"));
+    policy.roomMembers.allowDelete.where(allowedTo.update("room"));
 
     policy.messages.allowRead.where((message) =>
       policy.roomMembers.exists.where({
@@ -62,7 +62,7 @@ const bandChatPermissions = definePermissions(
       policy.profiles.exists.where({ id: message.senderId, author: session.user.account }),
     );
 
-    policy.reactions.allowRead.where(allowedTo.read("messageId"));
+    policy.reactions.allowRead.where(allowedTo.read("message"));
     // `roomId` is a denormalized authorization carrier: matching it against
     // both the referenced message and current membership is equivalent to the
     // message read policy without trusting a caller-supplied room id alone.
