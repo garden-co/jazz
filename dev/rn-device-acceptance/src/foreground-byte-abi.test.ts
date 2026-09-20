@@ -1627,6 +1627,82 @@ test("queries and owner cells match the Rust-generated fixture", async () => {
 test("scope rejection diagnostics retain only fixed categories, never native detail", async () => {
   const { scopeReadRejectionCategory } = await import("./foreground-byte-abi.ts");
   for (const [reason, expected] of [
+    [
+      'InvalidAuthoritySourceClosure { transition: "invalid supporting-set revision or predecessor" }',
+      "closure-revision",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "invalid or duplicate supporting physical row coordinate" }',
+      "closure-coordinate",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "opening-pending marker carries source data" }',
+      "closure-opening-data",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority view update carries retired result members" }',
+      "closure-retired-members",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "invalid or duplicate supporting physical row version" }',
+      "closure-row-version",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "supporting physical table is outside compiled scope" }',
+      "closure-outside-scope",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "scope addition duplicates a retained physical coordinate" }',
+      "closure-duplicate-add",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "scope removal is absent from exact predecessor" }',
+      "closure-absent-remove",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "covered input is not witnessed by admitted payload" }',
+      "closure-unwitnessed-body",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: malformed version-bundle run" }',
+      "closure-payload-bundle-run",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: version bundle count does not match its declared scope payload" }',
+      "closure-payload-count",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: global timestamp requires Global durability" }',
+      "closure-payload-durability",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: row version names an unknown authored schema" }',
+      "closure-payload-schema",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: row version table is absent from its authored schema" }',
+      "closure-payload-table",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema" }',
+      "closure-payload-descriptor",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: row version provenance exceeds packed HLC physical-millisecond range" }',
+      "closure-payload-hlc",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: row version does not carry a valid authored branch key" }',
+      "closure-payload-branch",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: malformed version receipt" }',
+      "closure-payload-receipt",
+    ],
+    [
+      'InvalidAuthoritySourceClosure { transition: "authority source-closure payload failed validation: current row receipt does not match requested coordinates" }',
+      "closure-payload-coordinates",
+    ],
     ["ShapeRegistrationPendingCatalogueAdmission", "catalogue-pending"],
     ["ServerFailure { code: TableNotFound }", "table-not-found"],
     ["ServerFailure { code: SchemaResolution }", "schema-resolution"],

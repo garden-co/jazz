@@ -312,7 +312,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
 
   @ReactMethod fun recordScopeWriterReadDiagnostic(detail: String, promise: Promise) {
     try {
-      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|unknown))?$").matches(detail)) { "invalid scope writer read diagnostic" }
+      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|closure-revision|closure-coordinate|closure-opening-data|closure-retired-members|closure-row-version|closure-outside-scope|closure-duplicate-add|closure-absent-remove|closure-unwitnessed-body|closure-payload-bundle-run|closure-payload-count|closure-payload-durability|closure-payload-schema|closure-payload-table|closure-payload-descriptor|closure-payload-hlc|closure-payload-branch|closure-payload-receipt|closure-payload-coordinates|unknown))?$").matches(detail)) { "invalid scope writer read diagnostic" }
       Log.e("JazzScopeWriterRead", detail)
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }

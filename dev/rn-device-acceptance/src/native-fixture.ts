@@ -160,7 +160,7 @@ export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promis
 /** Bounded counters for the scope writer read timeout on both device hosts. */
 export async function recordScopeWriterReadDiagnostic(detail: string): Promise<void> {
   if (
-    !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|unknown))?$/.test(
+    !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|closure-revision|closure-coordinate|closure-opening-data|closure-retired-members|closure-row-version|closure-outside-scope|closure-duplicate-add|closure-absent-remove|closure-unwitnessed-body|closure-payload-bundle-run|closure-payload-count|closure-payload-durability|closure-payload-schema|closure-payload-table|closure-payload-descriptor|closure-payload-hlc|closure-payload-branch|closure-payload-receipt|closure-payload-coordinates|unknown))?$/.test(
       detail,
     )
   )
