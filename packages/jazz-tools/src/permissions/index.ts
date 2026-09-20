@@ -353,7 +353,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.kind === "union") {
       throw new Error("hopTo(...) does not support union(...) relations in MVP.");
     }
-    const relationName = relation.trim();
+    const relationName = relation;
     if (!relationName) {
       throw new Error("hopTo(...) requires a non-empty relation name.");
     }

@@ -60,6 +60,32 @@ describe("declared relationships in permissions", () => {
     });
   });
 
+  it("resolves exact whitespace-containing forward and reverse names in hopTo and allowedTo", () => {
+    const compile = (forward: string, reverse: string) => {
+      const exact = s.defineApp({
+        roots: s.table({}, { [reverse]: s.reverse("leaves", forward) }),
+        leaves: s.table({ rootId: s.uuid() }, { [forward]: s.rel("roots", "rootId") }),
+      });
+      return s.definePermissions(exact, ({ policy, allowedTo }) => {
+        policy.leaves.allowRead.where(policy.exists(policy.leaves.hopTo(forward)));
+        policy.roots.allowRead.where(policy.exists(policy.roots.hopTo(reverse)));
+        policy.leaves.allowInsert.where(allowedTo.insert(forward));
+        policy.roots.allowInsert.where(allowedTo.insert(reverse));
+      });
+    };
+    expect(compile(" linked ", " incoming ")).toEqual(compile("linked", "incoming"));
+  });
+
+  it("rejects empty and undeclared padded hop names without normalizing them", () => {
+    for (const name of ["", " writer "]) {
+      expect(() =>
+        s.definePermissions(app, ({ policy }) => {
+          policy.posts.allowRead.where(policy.exists(policy.posts.hopTo(name)));
+        }),
+      ).toThrow(name === "" ? /non-empty relation name/ : /Unknown relation/);
+    }
+  });
+
   it("resolves reusable names per rule table without mutating the expression", () => {
     const reused = s.defineApp({
       roots: s.table({}, { linked: s.reverse("leaves", "linked") }),
