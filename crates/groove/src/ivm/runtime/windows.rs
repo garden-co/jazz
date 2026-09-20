@@ -605,35 +605,6 @@ fn update_collect_by_root_terminal_state(
         return collect_by_root_payload_updates(input_desc, output_desc, collect_by, state, before);
     }
 
-    // Capture the actual public sequence once before replacing changed sort
-    // keys below. Terminal edits are applied sequentially, so final ranks
-    // alone are insufficient for a batch that mixes moves and inserts.
-    let mut public_sequence = state
-        .emitted_root_order
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-
-    // `groups` also retains join-maintenance state that may never be exposed
-    // as a root terminal. Keep the public rank index in sync only for roots
-    // which were actually materialized, so an internal group cannot shift a
-    // subscriber-visible Insert or Move position.
-    for (root_key, before_key) in &before_order {
-        if !state.emitted_root_keys.contains(root_key) {
-            continue;
-        }
-        let after_key = state.groups.get(root_key).and_then(order_key);
-        if *before_key != after_key {
-            let order = Rc::make_mut(&mut state.emitted_root_order);
-            if let Some(before_key) = before_key {
-                order.remove(before_key);
-            }
-            if let Some(after_key) = after_key {
-                order.insert(after_key, root_key.clone());
-            }
-        }
-    }
-
     let mut operations = Vec::new();
     // Remove first so the later positional inserts/moves index the final
     // retained sequence rather than an opaque-key snapshot. A group with no
@@ -642,7 +613,7 @@ fn update_collect_by_root_terminal_state(
     // hydration replaces that state. In particular, do not leave a previously
     // emitted facade occurrence live merely because its internal group is
     // non-empty.
-    for root_key in before_order.keys() {
+    for (root_key, before_key) in &before_order {
         if state.emitted_root_keys.contains(root_key)
             && state.groups.get(root_key).and_then(order_key).is_none()
         {
@@ -654,30 +625,19 @@ fn update_collect_by_root_terminal_state(
                     key: root_key.clone(),
                 },
             });
+            if let Some(before_key) = before_key {
+                Rc::make_mut(&mut state.emitted_root_order).remove(before_key);
+            }
             Rc::make_mut(&mut state.emitted_root_keys).remove(root_key);
-            public_sequence.retain(|key| key != root_key);
         }
     }
 
-    // `emitted_root_order` is already the compiled total order. Snapshot its
-    // retained entries once per batch so changed roots can find their target
-    // positions without re-scanning the whole result for every Move or
-    // Insert.
-    let retained_final_order = state
-        .emitted_root_order
-        .iter()
-        .filter(|(_, root_key)| state.emitted_root_keys.contains(*root_key))
-        .map(|(order_key, root_key)| (order_key.clone(), root_key.clone()))
-        .collect::<Vec<_>>();
-    let retained_final_positions = retained_final_order
-        .iter()
-        .enumerate()
-        .map(|(index, (_, root_key))| (root_key.clone(), index))
-        .collect::<BTreeMap<_, _>>();
-
-    // Reposition retained occurrences before inserting new ones. Their target
-    // index is their rank among retained public roots only; inserting first
-    // would make a final absolute rank address the wrong mutable sequence.
+    // The rank index describes the actual public sequence after each emitted
+    // edit. Unprocessed moves retain their OLD keys; processed moves have NEW
+    // keys. Removing one old key and ranking its replacement therefore gives
+    // the correct intermediate position, not an independently computed final
+    // rank. Every intermediate sequence stays sorted by these transient keys.
+    // Only touched paths detach from the immutable predecessor.
     let mut moves = Vec::new();
     for (root_key, before_key) in &before_order {
         let Some(before_key) = before_key else {
@@ -692,23 +652,19 @@ fn update_collect_by_root_terminal_state(
             continue;
         };
         if *before_key != after_key {
-            moves.push((after_key, root_key.clone()));
+            moves.push((after_key, before_key.clone(), root_key.clone()));
         }
     }
-    moves.sort_by(|(left, _), (right, _)| left.cmp(right));
-    for (_, root_key) in moves {
-        let index = *retained_final_positions
-            .get(&root_key)
-            .expect("moved root has a final retained position");
-        let current_index = public_sequence
-            .iter()
-            .position(|key| key == &root_key)
-            .expect("emitted root is present in the public sequence");
+    moves.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    for (after_key, before_key, root_key) in moves {
+        let order = Rc::make_mut(&mut state.emitted_root_order);
+        let current_index = order.rank(&before_key);
+        order.remove(&before_key);
+        let index = order.rank(&after_key);
+        order.insert(after_key, root_key.clone());
         if current_index == index {
             continue;
         }
-        let root_key = public_sequence.remove(current_index);
-        public_sequence.insert(index, root_key.clone());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
             root_key: root_key.clone(),
@@ -752,16 +708,13 @@ fn update_collect_by_root_terminal_state(
         inserts.push((order_key, root_key.clone(), record));
     }
     inserts.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-    for (new_roots_before, (order_key, root_key, record)) in inserts.into_iter().enumerate() {
-        // Insert lower-ranked new occurrences first. Each insertion joins the
-        // mutable sequence before the next rank is computed. Existing roots
-        // come from the one batch snapshot above; earlier new roots all sort
-        // before this one because `inserts` is ordered by the same total key.
-        let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
-            + new_roots_before;
-        Rc::make_mut(&mut state.emitted_root_order).insert(order_key, root_key.clone());
-        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone());
-        public_sequence.insert(index, root_key.clone());
+    for (order_key, root_key, record) in inserts {
+        // Earlier inserts already belong to the rank index. No complete
+        // retained-sequence snapshot or per-batch position map is needed.
+        let order = Rc::make_mut(&mut state.emitted_root_order);
+        let index = order.rank(&order_key);
+        order.insert(order_key, root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone(), ());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
             root_key: root_key.clone(),
@@ -2028,10 +1981,21 @@ mod root_terminal_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(moves.len(), 2);
-        assert_eq!(moves[0].1, 0);
-        assert_eq!(moves[1].1, 2);
         assert_ne!(moves[0].0, moves[1].0);
         assert!(moves.iter().all(|(key, _)| key.len() > 17));
+        // Positions address the sequence after each preceding edit, not the
+        // final ranks in isolation. Different valid move sequences are allowed.
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &opened);
+        apply_root_operations(&mut roots, &moved);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xa1, 0x11), "yyyy".to_owned()),
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xc1, 0x33), "aaaa".to_owned()),
+            ]
+        );
     }
 
     #[test]

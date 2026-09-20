@@ -58,10 +58,10 @@ pub(super) struct CollectByIncrementalPayload {
     /// Ordered public root-collector occurrence index. Unlike `groups`, whose
     /// key is the opaque output identity, this follows the compiled TopBy key
     /// and excludes maintenance-only groups that never reached a terminal.
-    pub(super) emitted_root_order: Rc<BTreeMap<CollectByOrderKey, Vec<u8>>>,
+    pub(super) emitted_root_order: Rc<RankIndex<CollectByOrderKey, Vec<u8>>>,
     /// Root terminal groups that have actually been emitted to a subscriber.
     /// Some join-maintenance rows share a sort key but are not facade roots.
-    pub(super) emitted_root_keys: Rc<BTreeSet<Vec<u8>>>,
+    pub(super) emitted_root_keys: Rc<RankIndex<Vec<u8>, ()>>,
 }
 
 impl Deref for CollectByIncrementalState {
