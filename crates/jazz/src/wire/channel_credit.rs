@@ -241,6 +241,12 @@ impl ChannelCredits {
     /// Validate authenticated context, exact grant sequence and outstanding
     /// balance before making another outbound channel extent eligible.
     pub fn receive_credit(&mut self, grant: WireChannelCredit) -> Result<(), String> {
+        if std::env::var_os("JAZZ_WIRE_CREDIT_TRACE").is_some() {
+            eprintln!(
+                "credit receive sequence={} class={:?} kind={:?} amount={} outstanding={:?}",
+                grant.sequence, grant.class, grant.kind, grant.consumed_bytes, self.outstanding
+            );
+        }
         self.context
             .validate_envelope_metadata(&WireEnvelope {
                 protocol_version: grant.protocol_version,
@@ -339,6 +345,17 @@ impl ChannelCredits {
             kind,
         }))
         .map_err(|error| error.to_string())?;
+        if std::env::var_os("JAZZ_WIRE_CREDIT_TRACE").is_some() {
+            let WireFrame::ChannelCredit(decoded) =
+                super::decode_frame(&frame).expect("diagnostic grant frame roundtrip")
+            else {
+                unreachable!()
+            };
+            eprintln!(
+                "credit emit sequence={} class={class:?} kind={kind:?} decoded_kind={:?} amount={amount} buffer_index={index}",
+                self.next_sent, decoded.kind
+            );
+        }
         self.pending = Some((frame.clone(), index, amount, kind));
         Ok(Some(frame))
     }

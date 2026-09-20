@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 35
     env:
       JAZZ_W1_TRACE: "1"
+      JAZZ_WIRE_CREDIT_TRACE: "1"
       RUST_BACKTRACE: "1"
       RUST_MIN_STACK: "4194304"
     steps:
