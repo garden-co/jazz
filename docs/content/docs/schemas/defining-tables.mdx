@@ -73,35 +73,11 @@ Targets and local columns must exist, forward columns must have supported UUID s
 reverse declarations must resolve to a forward relation pointing back to their table.
 Relation names must not collide with stored column names.
 
-### Migrating from inferred relations
-
-Replace each `s.ref("users")` column builder with `s.uuid()`, preserving modifiers such as
-`.optional()` and `s.array(...)`. Add `author: s.rel("users", "authorId")` in the table's
-second argument to preserve an existing `author` include. Add reverse relations explicitly
-on their target tables. You can preserve an old query name with
-`postsViaAuthor: s.reverse("posts", "author")`, or choose an intentional name such as
-`authoredPosts` and update callers. Add `{}` to tables with no relations.
-
-Declare a forward relation for **every former reference column**, including references not
-currently used by an include. Preserve the stored column name, modifiers, defaults, array
-shape, and target. Omitting a former forward declaration removes reference metadata;
-retargeting it changes that metadata. Those are real schema changes, not equivalent API
-conversions. Do not assume an empty migration can retarget references.
-
-Column names no longer determine relations. Renaming a relation does not rename its stored
-UUID column; forward declarations retain the same underlying column reference metadata.
-
 ## Validate locally
 
 <SchemaSetup />
 
 When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
-
-An equivalent conversion from inferred to explicit relationships preserves schema identity
-and stored data. Keep existing stores and pending writes; do not clear browser data or reset
-a database as an upgrade shortcut. Actual schema changes need the supported migration
-workflow above. The separate [storage reset guidance](/docs/auth/lifecycle#storage-reset)
-is for an intentional local-data reset, not relationship migration.
 
 ## Exporting the app
 
