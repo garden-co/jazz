@@ -83,6 +83,22 @@ layout metadata. Sharing topology therefore does not share readiness or bypass
 snapshot installation barriers. Runtime statistics expose layout builds and
 hits to distinguish topology reuse from semantic memo reuse.
 
+Physical tasks may contract private synchronous filter/projection chains without
+changing graph identity. The cached topology contains only structural candidates;
+each frame checks global consumers, live retainers and its observable roots before
+contracting an edge. Shared, retained, durable and stateful boundaries remain
+independently materialized. Filters requiring indirect-field I/O remain ordinary
+tasks. Recursive child evaluators retain their scoped execution path.
+
+A contracted task owns its source batch, row/stage cursor, two reusable encoded
+row scratch buffers and private final output. Only its terminal batch enters the
+memo. Yield budgets count row-stage work, including deep chains over few rows.
+No intermediate completion or partial output is published before the entire task
+succeeds. Error precedence remains stage-major, then input-row order: after an
+error in a later stage, remaining rows still execute preceding stages so an
+earlier-stage error wins. Cancellation drops all task-local work. These physical
+plans and continuations have no storage or wire encoding.
+
 Hydration and incremental maintenance use the same owned evaluation session.
 Hydration is the initial delta from empty state; it is not a second evaluator
 or snapshot-shaped installation path. Incremental input can discover a newly

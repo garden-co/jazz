@@ -18,6 +18,9 @@ pub(crate) struct ExecutionLayout {
     pub roots: Vec<NodeId>,
     pub input_counts: Vec<usize>,
     pub source_slots: Vec<usize>,
+    /// Structural unary edges only. Live sharing/retainers are checked when a
+    /// frame contracts them; those mutable facts never enter this cache.
+    pub pipeline_predecessors: Vec<Option<usize>>,
     dependent_offsets: Vec<usize>,
     dependent_slots: Vec<usize>,
 }
@@ -67,12 +70,32 @@ impl ExecutionLayout {
                 *position += 1;
             }
         }
+        let unary = nodes
+            .iter()
+            .map(|id| super::runtime::pipeline::supports_node(graph, *id))
+            .collect::<Vec<_>>();
+        let pipeline_predecessors = nodes
+            .iter()
+            .enumerate()
+            .map(|(slot, id)| {
+                if !unary[slot] {
+                    return None;
+                }
+                let input = graph.node(*id)?.descriptor.inputs.first()?;
+                let predecessor = slots[input];
+                (unary[predecessor]
+                    && roots.binary_search(input).is_err()
+                    && dependent_offsets[predecessor + 1] - dependent_offsets[predecessor] == 1)
+                    .then_some(predecessor)
+            })
+            .collect();
         Ok(Self {
             nodes,
             slots,
             roots,
             input_counts,
             source_slots,
+            pipeline_predecessors,
             dependent_offsets,
             dependent_slots,
         })
