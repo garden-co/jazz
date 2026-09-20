@@ -97,11 +97,16 @@ test("transport loss preserves a locally saved delete", async ({ page, browser }
     await expect(status).not.toContainText("Deleted");
     await expect(status).not.toContainText("Deleting…");
     await control("DELETE");
-    // Prove the exact deletion reaches another replica after transport recovery.
-    await expect(observer.getByText(todo, { exact: true })).not.toBeVisible({ timeout: TIMEOUT });
-    await expect(observer.getByText(retainedTodo, { exact: true })).toBeVisible({
-      timeout: TIMEOUT,
-    });
+    // Prove exact convergence; an empty observer or a restored target must not pass.
+    await expect
+      .poll(
+        async () => ({
+          target: await observer.getByText(todo, { exact: true }).count(),
+          retained: await observer.getByText(retainedTodo, { exact: true }).count(),
+        }),
+        { timeout: TIMEOUT },
+      )
+      .toEqual({ target: 0, retained: 1 });
     await expect(page.getByText(todo, { exact: true })).not.toBeVisible();
     await expect(status).toHaveText("Saved locally");
   } finally {
