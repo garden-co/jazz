@@ -40,14 +40,17 @@ fn bucket(class: ChannelClass) -> usize {
     }
 }
 fn bucket_class(index: usize) -> ChannelClass {
-    [
-        ChannelClass::Control,
-        ChannelClass::Requests,
-        ChannelClass::Delivery,
-        ChannelClass::Writes,
-        ChannelClass::Auxiliary,
-        ChannelClass::Progress,
-    ][index]
+    // Keep the mapping scalar: optimized ARM64 code for a temporary indexed
+    // enum array has been observed loading a stack slot before initializing it.
+    match index {
+        0 => ChannelClass::Control,
+        1 => ChannelClass::Requests,
+        2 => ChannelClass::Delivery,
+        3 => ChannelClass::Writes,
+        4 => ChannelClass::Auxiliary,
+        5 => ChannelClass::Progress,
+        _ => unreachable!("physical credit bucket out of range"),
+    }
 }
 
 fn buffer_bucket(class: ChannelClass, bytes: usize) -> usize {
@@ -300,14 +303,14 @@ impl ChannelCredits {
                 (
                     index,
                     cost.bytes,
-                    [
-                        ChannelClass::Control,
-                        ChannelClass::Requests,
-                        ChannelClass::Writes,
-                        ChannelClass::Auxiliary,
-                        ChannelClass::Control,
-                        ChannelClass::Progress,
-                    ][index],
+                    match index {
+                        0 | 4 => ChannelClass::Control,
+                        1 => ChannelClass::Requests,
+                        2 => ChannelClass::Writes,
+                        3 => ChannelClass::Auxiliary,
+                        5 => ChannelClass::Progress,
+                        _ => unreachable!("message credit bucket out of range"),
+                    },
                     WireCreditKind::Messages {
                         count: cost.count as u32,
                         bulk: index == 2 || index == 4,
@@ -444,6 +447,33 @@ mod tests {
 
     // Internal coverage is necessary because row results do not expose which
     // physical receive window a serialized credit grant replenishes.
+    #[test]
+    fn decoded_grants_preserve_every_resource_bucket() {
+        for (index, class, bulk) in [
+            (0, ChannelClass::Control, false),
+            (1, ChannelClass::Requests, false),
+            (2, ChannelClass::Writes, true),
+            (3, ChannelClass::Auxiliary, false),
+            (4, ChannelClass::Control, true),
+            (5, ChannelClass::Progress, false),
+        ] {
+            let mut receiver = ChannelCredits::new(context());
+            receiver.buffer_grants[index] = BufferCost {
+                bytes: 65_573,
+                count: 1,
+            };
+            let bytes = receiver.peek_grant().unwrap().unwrap();
+            let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+                panic!("expected decoded-resource credit");
+            };
+            assert_eq!(grant.class, class, "resource bucket={index}");
+            assert_eq!(grant.kind, WireCreditKind::Messages { count: 1, bulk });
+            assert_eq!(grant.consumed_bytes, 65_573);
+            receiver.accept_grant().unwrap();
+            assert!(receiver.peek_grant().unwrap().is_none());
+        }
+    }
+
     #[test]
     fn physical_grants_replenish_their_original_class_windows() {
         const BYTES: usize = 65_573;
