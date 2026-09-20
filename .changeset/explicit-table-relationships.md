@@ -3,11 +3,20 @@
 "create-jazz": patch
 ---
 
-Replace inferred relationship names with explicit table-local declarations. `s.table(columns, relations)` now requires a relationship map (use `{}` when empty). Store references as `s.uuid()` or UUID arrays, declare forward navigation with `s.rel(targetTable, column)`, and declare reverse navigation with `s.reverse(sourceTable, forwardRelationName)`.
+Jazz now uses explicit table-local relationship declarations instead of inferred relationship names. `s.table(columns, relations)` now requires a relationship map (use `{}` when empty). Store references as `s.uuid()` or UUID arrays, declare forward navigation with `s.rel(targetTable, column)`, and declare reverse navigation with `s.reverse(sourceTable, forwardRelationName)`.
 
-Remove automatic reverse relationships, reference-name suffix restrictions, and pluralization. Validate declarations in TypeScript and at runtime, including cross-table targets, reserved names, and conflicting reference targets. Preserve existing core reference metadata and storage identity when migrating equivalent declarations. Update examples, starters, permissions, and migration tooling to the explicit API.
+Jazz no longer adds automatic reverse relationships or derives relationship names from reference-name suffixes and pluralization. Declarations are validated in TypeScript and at runtime, including cross-table targets, reserved names, and conflicting reference targets. Equivalent declarations preserve existing core reference metadata and storage identity. The examples, starters, permissions, and migration tooling now use the explicit API.
 
 ### Migrating an existing app
+
+Follow this order when upgrading from alpha.55 to alpha.56:
+
+1. **Before upgrading Jazz packages**, run `pnpm exec jazz-tools schema hash --schema-dir src` with the existing alpha.55 packages and schema, and record the hash.
+2. Upgrade the app's Jazz packages together to alpha.56, then convert the whole app to the schema form below. Preserve the underlying schema identity and update query and permission callers together.
+3. Run `pnpm exec jazz-tools schema hash --schema-dir src` again with the upgraded packages and converted schema. Confirm the displayed hash is unchanged. If it changes unexpectedly, stop before deploying and inspect the conversion; **do not reset existing data**.
+4. Run the app's TypeScript checks (for example, `pnpm exec tsc --noEmit` where that is the app's check command) and `pnpm exec jazz-tools validate --schema-dir src`. Exercise the app's queries and permissions against its existing data before deploying. Republish permissions if you changed their authored traversals.
+
+Run these commands from the app package directory. The examples assume its schema is in `src`; replace `src` with the actual schema directory in **both** hash commands and the validation command. Repeat the checks for each independently defined app schema. The CLI displays a 12-character short hash: matching output is a useful conversion check, not a comparison of the full hash or proof that every query and permission caller is correct.
 
 Every `s.table` now requires two arguments: stored columns and explicitly named relationships. Pass `{}` when there are no relationships. Replace `s.ref(target)` with `s.uuid()` and move the target information into a forward relationship declaration. **To keep the same schema identity and existing data, preserve every stored column name, modifier, default, optionality, array shape, and reference target.** Add a matching forward relationship for every former reference column, even if no query currently uses it. This conversion needs no data rewrite or database reset.
 
@@ -60,11 +69,15 @@ The required `authorId`, optional `editorId`, and array `reviewerIds` keep their
 - You can keep previous navigation names, as above, or choose names such as `authoredPosts`. For example, renaming `author` to `writer` keeps `authorId` unchanged, but requires `s.reverse("posts", "writer")` and `.include({ writer: true })` in place of the old names. Update `hopTo`, relation-based filters, and permission traversals too, including names used in untyped query objects.
 - Relationship names cannot shadow columns, `id`, reserved `$...` fields, or reserved prototype names. If an old include replaced a same-named UUID column, preserve that stored column and choose a distinct relationship name instead.
 - Keep `{}` on tables without relationships, including tables in test fixtures, migration schema witnesses, and dynamically generated schema source. Migration operations such as `s.add.ref(...)` and `s.drop.ref(...)` remain separate APIs; do not mechanically replace those operations.
-- Update schemas shared by browser, server, and React Native consumers, then run TypeScript checking and `jazz-tools validate --schema-dir <your-schema-directory>`. Republish permissions if you changed their authored traversals.
+- Update schemas shared by browser, server, and React Native consumers. Complete the hash, TypeScript, validation, and app checks above before deploying.
 
 ### Migrating with an agent
 
-Point your coding agent at this guide and ask it to migrate the whole app while preserving schema identity. Have it check every schema consumer (browser, server, React Native, tests, and generated schema sources), preserve the column definitions and targets above, update query and permission traversals together, and run the app's TypeScript checks plus `jazz-tools validate --schema-dir <your-schema-directory>`. Keep existing stores and pending writes; do not reset data to make the migration pass.
+Point your coding agent at this guide and the release notes, and give it this instruction:
+
+> Before upgrading Jazz packages, run `pnpm exec jazz-tools schema hash --schema-dir src` and record the hash. Switch the whole app to the new schema form, preserving underlying schema identity and updating query and permission callers. Run the same command afterward and confirm the hash is unchanged. Run TypeScript checks and `pnpm exec jazz-tools validate --schema-dir src`. If the hash changes unexpectedly, stop before deploying; don’t reset existing data.
+
+Have it use the actual app schema directory as described above, check every schema consumer (browser, server, React Native, tests, migration schema witnesses, and generated schema sources), and preserve all column definitions and reference targets. It must capture the alpha.55 hash before upgrading packages, then compare it with the converted alpha.56 schema. Keep existing stores and pending writes; do not reset data to make the migration pass.
 
 ### Schema identity and existing data
 
