@@ -724,7 +724,13 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   } finally {
-    if (transportProxy) await transportProxy.stop();
+    if (transportProxy) {
+      try {
+        await transportProxy.stop();
+      } catch {
+        // Continue cleaning up the underlying server and temporary project.
+      }
+    }
     if (server) {
       try {
         await server.stop();

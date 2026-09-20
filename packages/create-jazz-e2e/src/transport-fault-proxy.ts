@@ -1,11 +1,24 @@
 import { createServer as createHttpServer } from "node:http";
-import { createServer, connect, type Socket } from "node:net";
+import { createServer, connect, type Socket, type Server } from "node:net";
 import { randomBytes } from "node:crypto";
+
+async function listenOnLoopback(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
 
 /** Test-only byte proxy: works for transports owned by either a page or a worker. */
 export async function startTransportFaultProxy(upstreamUrl: string) {
   const upstream = new URL(upstreamUrl);
-  if (upstream.protocol !== "ws:" && upstream.protocol !== "http:") {
+  if (
+    (upstream.protocol !== "ws:" && upstream.protocol !== "http:") ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(upstream.hostname)
+  ) {
     throw new Error("Transport fault proxy requires a plaintext local test server");
   }
   const sockets = new Set<Socket>();
@@ -60,8 +73,25 @@ export async function startTransportFaultProxy(upstreamUrl: string) {
     response.setHeader("Content-Type", "application/json");
     response.end(JSON.stringify({ blocked, droppedBytes, receivedBytes }));
   });
-  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
-  await new Promise<void>((resolve) => control.listen(0, "127.0.0.1", resolve));
+  const stop = async () => {
+    for (const socket of sockets) socket.destroy();
+    await Promise.all(
+      [proxy, control].map(
+        (server) =>
+          new Promise<void>((resolve, reject) => {
+            if (!server.listening) return resolve();
+            server.close((error) => (error ? reject(error) : resolve()));
+          }),
+      ),
+    );
+  };
+  try {
+    await listenOnLoopback(proxy);
+    await listenOnLoopback(control);
+  } catch (error) {
+    await stop();
+    throw error;
+  }
   const proxyAddress = proxy.address();
   const controlAddress = control.address();
   if (
@@ -78,16 +108,6 @@ export async function startTransportFaultProxy(upstreamUrl: string) {
   return {
     url: proxyUrl.href,
     controlUrl: `http://127.0.0.1:${controlAddress.port}/${token}`,
-    async stop() {
-      for (const socket of sockets) socket.destroy();
-      await Promise.all(
-        [proxy, control].map(
-          (server) =>
-            new Promise<void>((resolve, reject) => {
-              server.close((error) => (error ? reject(error) : resolve()));
-            }),
-        ),
-      );
-    },
+    stop,
   };
 }
