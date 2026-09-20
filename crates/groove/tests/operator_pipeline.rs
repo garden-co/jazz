@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use groove::db::{Database, GraphBuilder, PredicateExpr};
+use groove::ivm::ProjectField;
 use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -119,6 +120,60 @@ fn cancelling_a_yielded_projection_does_not_publish_its_partial_prefix() {
         (0..4096)
             .map(|id| (vec![Value::U64(id)], 1))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_late_projection_error_discards_the_completed_prefix_even_if_later_filtered_out() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        (
+            "tag",
+            ValueType::EnumTag(
+                groove::records::ScalarEnumSchema::new("status", ["kept", "absent"]).unwrap(),
+            ),
+        ),
+    ]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        (0..2049).map(|id| vec![Value::U64(id), Value::EnumTag(u8::from(id == 2048))]),
+    )
+    .unwrap()
+    .project_fields([
+        ProjectField::named("id"),
+        ProjectField::enum_tag_remap("tag", "tag", vec![Some(0), None]),
+    ])
+    .filter(PredicateExpr::Lt {
+        field: "id".into(),
+        value: Value::U64(2048).into(),
+    });
+    let waker = noop_waker();
+    let subscription = db
+        .subscribe_with_waker([("result", graph)], Some(&waker))
+        .unwrap();
+    let mut cx = Context::from_waker(&waker);
+    let mut yields = 0;
+    let error = loop {
+        match db.poll_multisink_subscription(&subscription, &mut cx) {
+            Poll::Pending => {
+                yields += 1;
+                assert!(yields < 30);
+                assert!(subscription.try_recv().is_err());
+            }
+            Poll::Ready(result) => break result.unwrap_err(),
+        }
+    };
+    assert!(yields > 1);
+    assert!(
+        error
+            .to_string()
+            .contains("enum tag 1 is absent from this projection target"),
+        "{error}"
     );
 }
 

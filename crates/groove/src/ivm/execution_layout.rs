@@ -67,7 +67,7 @@ impl ExecutionLayout {
                 *position += 1;
             }
         }
-        let layout = Self {
+        Ok(Self {
             nodes,
             slots,
             roots,
@@ -75,60 +75,7 @@ impl ExecutionLayout {
             source_slots,
             dependent_offsets,
             dependent_slots,
-        };
-        #[cfg(feature = "cold-settle-attribution")]
-        layout.trace_pipeline_candidates(graph);
-        Ok(layout)
-    }
-
-    /// Diagnostic census only; these are topological candidates, not proof
-    /// that predicates/projections are safe to execute without a boundary.
-    #[cfg(feature = "cold-settle-attribution")]
-    fn trace_pipeline_candidates(&self, graph: &IvmGraph) {
-        let kind = |slot: usize| match &graph.node(self.nodes[slot]).unwrap().descriptor.operator {
-            OpType::Filter(_) => Some("filter"),
-            OpType::MapProject(_) => Some("project"),
-            _ => None,
-        };
-        let mut visited = std::collections::HashSet::new();
-        for slot in 0..self.nodes.len() {
-            if kind(slot).is_none() {
-                continue;
-            }
-            let mut first = slot;
-            while let [input] = graph
-                .node(self.nodes[first])
-                .unwrap()
-                .descriptor
-                .inputs
-                .as_slice()
-            {
-                let previous = self.slots[input];
-                if kind(previous).is_none()
-                    || self.dependents(previous).len() != 1
-                    || self.roots.contains(input)
-                {
-                    break;
-                }
-                first = previous;
-            }
-            if !visited.insert(first) {
-                continue;
-            }
-            let mut chain = vec![kind(first).unwrap()];
-            let mut end = first;
-            while !self.roots.contains(&self.nodes[end]) {
-                let [next] = self.dependents(end) else { break };
-                let Some(next_kind) = kind(*next) else { break };
-                chain.push(next_kind);
-                end = *next;
-            }
-            eprintln!(
-                "GROOVE_PIPELINE_CANDIDATE nodes={} chain={}",
-                self.nodes.len(),
-                chain.join(",")
-            );
-        }
+        })
     }
 
     pub fn dependents(&self, slot: usize) -> &[usize] {
