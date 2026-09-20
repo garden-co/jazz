@@ -5,6 +5,11 @@ on:
   push:
     branches: [fix/alpha56-w1-channel-credit]
   workflow_dispatch:
+    inputs:
+      run_full_benchmark:
+        description: Also rebuild and run the instrumented W1 benchmark
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,7 +19,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  class-selection-probe:
+    runs-on: codspeed-macro
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - name: Compile original class selection with walltime optimization flags
+        run: |
+          rustc --version --verbose
+          uname -m
+          mkdir -p "$RUNNER_TEMP/w1-credit-probe"
+          rustc --edition 2024 -C opt-level=3 -C debuginfo=2 -C strip=none -C codegen-units=16 --emit asm,link --out-dir "$RUNNER_TEMP/w1-credit-probe" dev/gates/probes/w1_credit_class_probe.rs
+      - name: Check every physical and decoded class selection
+        run: '"$RUNNER_TEMP/w1-credit-probe/w1_credit_class_probe"'
+      - name: Preserve optimized probe assembly and binary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: w1-credit-class-probe-${{ runner.arch }}
+          path: ${{ runner.temp }}/w1-credit-probe
+
   resume-credit:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_full_benchmark
     runs-on: codspeed-macro
     timeout-minutes: 35
     env:
