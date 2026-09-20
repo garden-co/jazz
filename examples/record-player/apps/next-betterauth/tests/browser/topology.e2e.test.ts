@@ -30,7 +30,7 @@ const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
 const acknowledgementApp = s.defineApp({
-  receipts: s.table({ label: s.string() }),
+  receipts: s.table({ label: s.string() }, {}),
 });
 const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ policy }) => {
   policy.receipts.allowRead.always();
@@ -41,7 +41,7 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
 const recipientApp = s.defineApp({
-  invitations: s.table({ subject: s.uuid(), label: s.string() }),
+  invitations: s.table({ subject: s.uuid(), label: s.string() }, {}),
 });
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
@@ -55,40 +55,66 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 const relationalRecipientApp = s.defineApp({
   ...betterAuthSchema,
   albums: s
-    .table({
-      title: s.string(),
-      artist: s.string(),
-      cover_locator: s.string().optional(),
-    })
+    .table(
+      {
+        title: s.string(),
+        artist: s.string(),
+        cover_locator: s.string().optional(),
+      },
+      { tracksViaAlbum: s.reverse("tracks", "album") },
+    )
     .indexOnly(["title"]),
   tracks: s
-    .table({
-      album_id: s.ref("albums"),
-      title: s.string(),
-      ordinal: s.int(),
-      duration_ms: s.int(),
-      audio_bytes: s.bytes().optional(),
-    })
+    .table(
+      {
+        album_id: s.uuid(),
+        title: s.string(),
+        ordinal: s.int(),
+        duration_ms: s.int(),
+        audio_bytes: s.bytes().optional(),
+      },
+      {
+        album: s.rel("albums", "album_id"),
+        playlist_entriesViaTrack: s.reverse("playlist_entries", "track"),
+        playback_positionsViaTrack: s.reverse("playback_positions", "track"),
+      },
+    )
     .indexOnly(["album_id", "ordinal"]),
-  playlists: s.table({ name: s.string() }),
+  playlists: s.table(
+    { name: s.string() },
+    {
+      playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
+      invitationsViaPlaylist: s.reverse("invitations", "playlist"),
+      playback_positionsViaPlaylist: s.reverse("playback_positions", "playlist"),
+    },
+  ),
   playlist_entries: s
-    .table({
-      playlist_id: s.ref("playlists"),
-      track_id: s.ref("tracks"),
-      position: s.float(),
-    })
+    .table(
+      {
+        playlist_id: s.uuid(),
+        track_id: s.uuid(),
+        position: s.float(),
+      },
+      { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
+    )
     .indexOnly(["playlist_id", "position"]),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.uuid(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted", "revoked"),
-  }),
-  playback_positions: s.table({
-    playlist_id: s.ref("playlists"),
-    track_id: s.ref("tracks"),
-    position_ms: s.int(),
-  }),
+  invitations: s.table(
+    {
+      playlist_id: s.uuid(),
+      subject: s.uuid(),
+      role: s.enum("listener", "editor"),
+      status: s.enum("pending", "accepted", "revoked"),
+    },
+    { playlist: s.rel("playlists", "playlist_id") },
+  ),
+  playback_positions: s.table(
+    {
+      playlist_id: s.uuid(),
+      track_id: s.uuid(),
+      position_ms: s.int(),
+    },
+    { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
+  ),
 });
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,

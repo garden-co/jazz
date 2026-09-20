@@ -1,37 +1,46 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  players: s.table({
-    playerId: s.string(),
-    name: s.string(),
-    color: s.string(),
-    mode: s.string(),
-    online: s.boolean(),
-    lastSeen: s.int(),
-    positionX: s.int(),
-    positionY: s.int(),
-    velocityX: s.int(),
-    velocityY: s.int(),
-    requiredFuelType: s.string(),
-    landerFuelLevel: s.int(),
-    landerSpawnX: s.int(),
-    thrusting: s.boolean(),
-  }),
-  fuel_deposits: s.table({
-    fuelType: s.string(),
-    positionX: s.int(),
-    // Simulation event time, in seconds; unlike Jazz's row-creation `$createdAt`,
-    // this survives the delete/reinsert flow used to release a deposit.
-    spawnedAtSeconds: s.int(),
-    collected: s.boolean(),
-    collectedBy: s.string(),
-  }),
-  chat_messages: s.table({
-    playerId: s.string(),
-    message: s.string(),
-    // Sender device event time drives bubble expiry, independently of sync arrival.
-    sentAtSeconds: s.int(),
-  }),
+  players: s.table(
+    {
+      playerId: s.string(),
+      name: s.string(),
+      color: s.string(),
+      mode: s.string(),
+      online: s.boolean(),
+      lastSeen: s.int(),
+      positionX: s.int(),
+      positionY: s.int(),
+      velocityX: s.int(),
+      velocityY: s.int(),
+      requiredFuelType: s.string(),
+      landerFuelLevel: s.int(),
+      landerSpawnX: s.int(),
+      thrusting: s.boolean(),
+    },
+    {},
+  ),
+  fuel_deposits: s.table(
+    {
+      fuelType: s.string(),
+      positionX: s.int(),
+      // Simulation event time, in seconds; unlike Jazz's row-creation `$createdAt`,
+      // this survives the delete/reinsert flow used to release a deposit.
+      spawnedAtSeconds: s.int(),
+      collected: s.boolean(),
+      collectedBy: s.string(),
+    },
+    {},
+  ),
+  chat_messages: s.table(
+    {
+      playerId: s.string(),
+      message: s.string(),
+      // Sender device event time drives bubble expiry, independently of sync arrival.
+      sentAtSeconds: s.int(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

@@ -1,3 +1,4 @@
+import { rel, reverse } from "./relationships.js";
 // DSL for defining schemas and migrations
 
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
@@ -18,6 +19,7 @@ import type {
   RenameOp,
   ScalarSqlType,
   TSTypeFromSqlType,
+  TSInitFromSqlType,
 } from "./schema.js";
 import {
   assertUserColumnNameAllowed,
@@ -116,7 +118,7 @@ type AllowedColumnMergeStrategy<
         }[keyof MergeStrategyColumnType];
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
-  : TSTypeFromSqlType<Sql>;
+  : TSInitFromSqlType<Sql>;
 
 export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
@@ -124,12 +126,14 @@ export type TypedColumnBuilder<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
+  Init = TSInitFromSqlType<Sql>,
 > = Omit<ColumnBuilder, "optional" | "default" | "merge" | "transform"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
   readonly __jazzHasDefault: HasDefault;
   readonly __jazzValue: Value;
+  readonly __jazzInitValue: Init;
   /**
    * Set the default value for the column.
    *
@@ -138,13 +142,13 @@ export type TypedColumnBuilder<
    */
   default(
     value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, true, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, true, Value, Init>;
   /**
    * Set the merge strategy for the column (defaults to LWW)
    */
   merge(
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
    * Transform stored column values at the TypeScript boundary.
    *
@@ -153,11 +157,11 @@ export type TypedColumnBuilder<
   transform<TransformedValue>(transform: {
     from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
     to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue>;
+  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue, TransformedValue>;
   /**
    * Make the column nullable
    */
-  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
+  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Init>;
 };
 
 // This is a constraint for builder input positions, not a public builder
@@ -172,6 +176,7 @@ export type AnyTypedColumnBuilder = Omit<
   readonly __jazzReferences: string | undefined;
   readonly __jazzHasDefault: boolean;
   readonly __jazzValue: unknown;
+  readonly __jazzInitValue: unknown;
 };
 
 /**
@@ -199,6 +204,10 @@ export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzHasDefault"];
 export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
 
+/** Input values are explicit so even same-shape transforms retain their contract. */
+export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzInitValue"];
+
 export interface ColumnTransform<Stored = unknown, View = unknown> {
   from(value: Stored): View;
   to(value: View): Stored;
@@ -208,54 +217,64 @@ export type StringColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value, Init>;
 /** UUID value without an application-table foreign key, e.g. an account ID. */
 export type UuidColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"UUID", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"UUID", Optional, undefined, HasDefault, Value, Init>;
 export type BooleanColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = boolean,
-> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value, Init>;
 export type IntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value, Init>;
 export type BigIntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = bigint,
-> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value, Init>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Date,
-> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value, Init>;
 export type FloatColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value, Init>;
 export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Uint8Array,
-> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value, Init>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Output,
-> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value, Init>;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Variants[number],
+  Init = Value,
 > = TypedColumnBuilder<
   {
     kind: "ENUM";
@@ -264,26 +283,37 @@ export type EnumColumn<
   Optional,
   undefined,
   HasDefault,
-  Value
+  Value,
+  Init
 >;
 export type EnumCasesColumn<
   Cases extends readonly EnumCaseSqlType[] = readonly EnumCaseSqlType[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = TSTypeFromSqlType<{ kind: "ENUM"; cases: Cases }>,
-> = TypedColumnBuilder<{ kind: "ENUM"; cases: Cases }, Optional, undefined, HasDefault, Value>;
+  Init = TSInitFromSqlType<{ kind: "ENUM"; cases: Cases }>,
+> = TypedColumnBuilder<
+  { kind: "ENUM"; cases: Cases },
+  Optional,
+  undefined,
+  HasDefault,
+  Value,
+  Init
+>;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value, Init>;
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
   Ref extends string | undefined = undefined,
   HasDefault extends boolean = false,
   Value = TSTypeFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
+  Init = TSInitFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
@@ -292,7 +322,8 @@ export type ArrayColumn<
   Optional,
   Ref,
   HasDefault,
-  Value
+  Value,
+  Init
 >;
 export type ColumnAlias<
   Sql extends SqlType = SqlType,
@@ -300,70 +331,41 @@ export type ColumnAlias<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
+  Init = TSInitFromSqlType<Sql>,
 > = Sql extends {
   kind: "ARRAY";
   element: infer ElementSql extends SqlType;
 }
-  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value>
+  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value, Init>
   : Ref extends string
-    ? RefColumn<Ref, Optional, HasDefault, Value>
+    ? RefColumn<Ref, Optional, HasDefault, Value, Init>
     : Sql extends "TEXT"
-      ? StringColumn<Optional, HasDefault, Value>
+      ? StringColumn<Optional, HasDefault, Value, Init>
       : Sql extends "BOOLEAN"
-        ? BooleanColumn<Optional, HasDefault, Value>
+        ? BooleanColumn<Optional, HasDefault, Value, Init>
         : Sql extends "INTEGER"
-          ? IntColumn<Optional, HasDefault, Value>
+          ? IntColumn<Optional, HasDefault, Value, Init>
           : Sql extends "BIGINT"
-            ? BigIntColumn<Optional, HasDefault, Value>
+            ? BigIntColumn<Optional, HasDefault, Value, Init>
             : Sql extends "TIMESTAMP"
-              ? TimestampColumn<Optional, HasDefault, Value>
+              ? TimestampColumn<Optional, HasDefault, Value, Init>
               : Sql extends "REAL"
-                ? FloatColumn<Optional, HasDefault, Value>
+                ? FloatColumn<Optional, HasDefault, Value, Init>
                 : Sql extends "BYTEA"
-                  ? BytesColumn<Optional, HasDefault, Value>
+                  ? BytesColumn<Optional, HasDefault, Value, Init>
                   : Sql extends JsonSqlType<infer Output>
-                    ? JsonColumn<Output, Optional, HasDefault, Value>
+                    ? JsonColumn<Output, Optional, HasDefault, Value, Init>
                     : Sql extends {
                           kind: "ENUM";
                           variants: infer Variants extends readonly string[];
                         }
-                      ? EnumColumn<Variants, Optional, HasDefault, Value>
+                      ? EnumColumn<Variants, Optional, HasDefault, Value, Init>
                       : Sql extends {
                             kind: "ENUM";
                             cases: infer Cases extends readonly EnumCaseSqlType[];
                           }
-                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
-                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
-
-type RefColumnKey = `${string}Id` | `${string}_id`;
-type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
-
-function isValidRefColumnKey(name: string): name is RefColumnKey {
-  return name.endsWith("Id") || name.endsWith("_id");
-}
-
-function isValidRefArrayColumnKey(name: string): name is RefArrayColumnKey {
-  return name.endsWith("Ids") || name.endsWith("_ids");
-}
-
-function validateReferenceColumnName(name: string, builder: ColumnBuilder): void {
-  if (!builder._references) {
-    return;
-  }
-
-  if (builder instanceof ArrayBuilder) {
-    if (!isValidRefArrayColumnKey(name)) {
-      throw new Error(
-        `Invalid array reference key '${name}'. Rename it to '${name}_ids' or '${name}Ids'.`,
-      );
-    }
-    return;
-  }
-
-  if (!isValidRefColumnKey(name)) {
-    throw new Error(`Invalid reference key '${name}'. Rename it to '${name}_id' or '${name}Id'.`);
-  }
-}
+                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value, Init>
+                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value, Init>;
 
 function normalizeColumnMergeStrategy(
   strategy: ColumnMergeStrategyName,
@@ -529,6 +531,16 @@ function containsReference(sqlType: SqlType): boolean {
   );
 }
 
+function isUuidArrayReference(builder: ColumnBuilder): boolean {
+  const sqlType = builder._sqlType;
+  return (
+    typeof sqlType === "object" &&
+    sqlType.kind === "ARRAY" &&
+    sqlType.element === "UUID" &&
+    builder._references !== undefined
+  );
+}
+
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
@@ -582,70 +594,19 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   }
 }
 
-// ============================================================================
-// Ref Builder (for foreign key references in schema context)
-// ============================================================================
-
-class RefBuilder implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
-
-  constructor(private _targetTable: string) {}
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-      references: this._references,
-    };
-  }
-
-  get _sqlType(): SqlType {
-    return "UUID";
-  }
-
-  get _references(): string | undefined {
-    return this._targetTable;
-  }
-}
-
 class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
 
-  constructor(public _element: T) {}
+  constructor(public _element: T) {
+    if (isUuidArrayReference(_element)) {
+      throw new Error(
+        "Nested reference arrays are not supported; use a direct array(ref(...)) column.",
+      );
+    }
+  }
 
   optional(): this {
     if (this._mergeStrategy === "g-set") {
@@ -947,14 +908,16 @@ export const col = {
             [Field in keyof Cases[Name] & string]: Column & {
               name: Field;
               sqlType: ColumnBuilderSqlType<Cases[Name][Field]>;
+              nullable: ColumnBuilderOptional<Cases[Name][Field]>;
+              __jazzHasDefault: ColumnBuilderHasDefault<Cases[Name][Field]>;
             };
           }[keyof Cases[Name] & string][];
         };
       }[keyof Cases & string][]
     >;
   },
-  ref: <const TargetTable extends string>(targetTable: TargetTable) =>
-    new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
+  rel,
+  reverse,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
     new ArrayBuilder(element as unknown as ColumnBuilder) as unknown as ArrayColumn<
       ColumnBuilderSqlType<Builder>,
@@ -987,27 +950,9 @@ export const col = {
 
 let collectedTables: Table[] = [];
 
-type ScalarIdColumnError<K extends string> =
-  `Invalid reference key '${K}'. Rename it to '${K}_id' or '${K}Id'`;
-
-type ArrayIdColumnError<K extends string> =
-  `Invalid array reference key '${K}'. Rename it to '${K}_ids' or '${K}Ids'`;
-
-type EnforceReferenceColumnNames<T extends Record<string, ColumnBuilder>> = {
-  [K in keyof T & string]: T[K] extends RefBuilder
-    ? K extends RefColumnKey
-      ? T[K]
-      : ScalarIdColumnError<K>
-    : T[K] extends ArrayBuilder<RefBuilder>
-      ? K extends RefArrayColumnKey
-        ? T[K]
-        : ArrayIdColumnError<K>
-      : T[K];
-};
-
 export function table<const T extends Record<string, ColumnBuilder>>(
   name: string,
-  columns: EnforceReferenceColumnNames<T> & NoExplicitIdColumn,
+  columns: T & NoExplicitIdColumn,
 ): void {
   if (arguments.length > 2) {
     throw new Error(
@@ -1018,7 +963,6 @@ export function table<const T extends Record<string, ColumnBuilder>>(
 
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
-    validateReferenceColumnName(colName, builder);
     assertUserTableColumnNameAllowed(colName);
     const column = builder._build(colName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;

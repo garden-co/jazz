@@ -2,7 +2,8 @@ use super::*;
 use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
 use crate::tools::public_api::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+    ProjectExpr, RecursionBound, RelExpr, RowIdRef, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,16 +88,10 @@ impl TablePolicies {
     }
 
     /// Set the DELETE policy (USING only).
-    /// If not set, defaults to UPDATE's USING policy.
+    /// For a table with policies, omitting DELETE grants no delete permission.
     pub fn with_delete(mut self, using: PolicyExpr) -> Self {
         self.delete = OperationPolicy::using(using);
         self
-    }
-
-    /// Get the effective DELETE USING policy.
-    /// Falls back to UPDATE's USING if DELETE has none.
-    pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
-        self.delete.using.as_ref().or(self.update.using.as_ref())
     }
 
     pub fn has_any_explicit_policy(&self) -> bool {
@@ -624,6 +619,14 @@ pub mod policy_expr {
     }
 
     impl Table {
+        /// Name this source occurrence for scoped predicates and joins.
+        pub fn alias(self, alias: impl Into<String>) -> Relation {
+            Relation::new(RelExpr::TableScan {
+                table: self.table,
+                alias: Some(alias.into()),
+            })
+        }
+
         pub fn where_<W: IntoTableWhere>(self, condition: W) -> W::Output {
             condition.into_table_where(self.table)
         }
@@ -661,6 +664,58 @@ pub mod policy_expr {
     }
 
     impl Relation {
+        /// Recursively expand projected `id` keys, including the seed and at
+        /// most `max_depth` steps. The step may compare columns to the frontier
+        /// with `rel::eq_frontier` and must project its next key as `id`.
+        pub fn gather(self, step: Relation, max_depth: usize) -> Self {
+            Self::new(RelExpr::Gather {
+                seed: Box::new(self.rel),
+                step: Box::new(step.rel),
+                frontier_key: KeyRef::RowId(RowIdRef::Current),
+                bound: RecursionBound::MaxDepth(max_depth),
+                dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+            })
+        }
+
+        /// Project named columns from this relation.
+        pub fn select(
+            self,
+            columns: impl IntoIterator<Item = (impl Into<String>, impl Into<ColumnRef>)>,
+        ) -> Self {
+            Self::new(RelExpr::Project {
+                input: Box::new(self.rel),
+                columns: columns
+                    .into_iter()
+                    .map(|(alias, column)| ProjectColumn {
+                        alias: alias.into(),
+                        expr: ProjectExpr::Column(column.into()),
+                    })
+                    .collect(),
+            })
+        }
+
+        /// Join another relation on one column equality.
+        /// Scoped left columns may refer to any source already joined into this
+        /// relation. The right column must refer to the right relation's root
+        /// source; other right-hand scopes are rejected during schema conversion.
+        /// Unscoped columns refer to the root of their respective relation.
+        pub fn join(
+            self,
+            right: Relation,
+            left_column: impl Into<ColumnRef>,
+            right_column: impl Into<ColumnRef>,
+        ) -> Self {
+            Self::new(RelExpr::Join {
+                left: Box::new(self.rel),
+                right: Box::new(right.rel),
+                on: vec![JoinCondition {
+                    left: left_column.into(),
+                    right: right_column.into(),
+                }],
+                join_kind: JoinKind::Inner,
+            })
+        }
+
         fn new(rel: RelExpr) -> Self {
             Self { rel }
         }
@@ -776,7 +831,27 @@ pub mod policy_expr {
     pub mod rel {
         use super::*;
 
-        pub fn eq_session(column: impl Into<String>, path: impl IntoSessionPath) -> PredicateExpr {
+        /// Match a recursive step's column against the current frontier key.
+        pub fn eq_frontier(column: impl Into<ColumnRef>) -> PredicateExpr {
+            cmp(
+                column,
+                PredicateCmpOp::Eq,
+                ValueRef::RowId(RowIdRef::Frontier),
+            )
+        }
+
+        /// Refer to a column in a named table or alias.
+        pub fn column(scope: impl Into<String>, column: impl Into<String>) -> ColumnRef {
+            ColumnRef {
+                scope: Some(scope.into()),
+                column: column.into(),
+            }
+        }
+
+        pub fn eq_session(
+            column: impl Into<ColumnRef>,
+            path: impl IntoSessionPath,
+        ) -> PredicateExpr {
             cmp(
                 column,
                 PredicateCmpOp::Eq,
@@ -785,7 +860,7 @@ pub mod policy_expr {
         }
 
         pub fn eq_outer(
-            column: impl Into<String>,
+            column: impl Into<ColumnRef>,
             outer_column: impl Into<String>,
         ) -> PredicateExpr {
             cmp(
@@ -795,13 +870,13 @@ pub mod policy_expr {
             )
         }
 
-        pub fn eq_literal(column: impl Into<String>, value: impl Into<Value>) -> PredicateExpr {
+        pub fn eq_literal(column: impl Into<ColumnRef>, value: impl Into<Value>) -> PredicateExpr {
             cmp(column, PredicateCmpOp::Eq, ValueRef::Literal(value.into()))
         }
 
-        pub fn is_null(column: impl Into<String>) -> PredicateExpr {
+        pub fn is_null(column: impl Into<ColumnRef>) -> PredicateExpr {
             PredicateExpr::IsNull {
-                column: ColumnRef::unscoped(column),
+                column: column.into(),
             }
         }
 
@@ -824,12 +899,12 @@ pub mod policy_expr {
         }
 
         pub fn cmp(
-            column: impl Into<String>,
+            column: impl Into<ColumnRef>,
             op: PredicateCmpOp,
             right: ValueRef,
         ) -> PredicateExpr {
             PredicateExpr::Cmp {
-                left: ColumnRef::unscoped(column),
+                left: column.into(),
                 op,
                 right,
             }

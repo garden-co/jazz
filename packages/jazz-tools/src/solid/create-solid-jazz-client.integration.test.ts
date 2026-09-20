@@ -11,10 +11,13 @@ import {
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 const app = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 function makeAppId(scope: string): string {

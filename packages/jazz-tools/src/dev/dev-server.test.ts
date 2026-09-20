@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "undici";
 import { schema as s } from "../index.js";
 import { JazzClient } from "../runtime/client.js";
-import { encodeSchema } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { getAvailablePort } from "./test-helpers.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
@@ -24,9 +24,9 @@ describe("dev-server re-export compatibility", () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
-    expect(typeof dev.pushSchema).toBe("function");
-    expect(typeof dev.pushPermissions).toBe("function");
-    expect(typeof dev.pushMigration).toBe("function");
+    expect(dev).not.toHaveProperty("pushSchema");
+    expect(dev).not.toHaveProperty("pushPermissions");
+    expect(dev).not.toHaveProperty("pushMigration");
     expect(typeof dev.deploy).toBe("function");
   });
 
@@ -95,17 +95,24 @@ describe("startLocalJazzServer via JazzServer", () => {
   }, 30_000);
 
   maybeIt(
-    "boots a client with app, query, raw, and encoded schema sources",
+    "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
       const app = s.defineApp({
-        todos: s.table({ title: s.string(), done: s.boolean() }),
+        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+      });
+      const permissions = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.always();
+        policy.todos.allowInsert.always();
+      });
+      const embeddedDenial = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.never();
+        policy.todos.allowInsert.never();
       });
       const sources = [
         app,
         app.todos.where({ done: { eq: false } }),
-        app.wasmSchema,
-        encodeSchema(app.wasmSchema),
+        mergePermissionsIntoWasmSchema(app.wasmSchema, embeddedDenial),
       ] as const;
 
       try {
@@ -119,6 +126,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               inMemory: true,
               allowLocalFirstAuth: true,
               schema: source,
+              permissions,
             });
             const runtime = await createWasmRuntime(app.wasmSchema, {
               appId: server.appId,

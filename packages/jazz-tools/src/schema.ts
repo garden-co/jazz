@@ -83,15 +83,20 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
                 ? Uint8Array
                 : never;
 
-export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
+export type TSTypeFromSqlType<T extends SqlType> = SqlTypeValue<T, false>;
+
+/** Write inputs may omit nullable/defaulted payload fields; reads are materialized. */
+export type TSInitFromSqlType<T extends SqlType> = SqlTypeValue<T, true>;
+
+type SqlTypeValue<T extends SqlType, Init extends boolean> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
   : T extends ArraySqlType
-    ? TSTypeFromSqlType<T["element"]>[]
+    ? SqlTypeValue<T["element"], Init>[]
     : T extends EnumSqlType
       ? T["variants"] extends readonly string[]
         ? T["variants"][number]
         : T["cases"] extends readonly EnumCaseSqlType[]
-          ? EnumValueFromCases<T["cases"]>
+          ? EnumValueFromCases<T["cases"], Init>
           : never
       : T extends JsonSqlType<infer Output>
         ? Output
@@ -108,10 +113,36 @@ export interface Column {
   allowExternalProvenanceName?: true;
 }
 
-export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {
-  [Case in Cases[number] as Case["name"]]: { type: Case["name"] } & {
-    [Field in Case["fields"][number] as Field["name"]]: TSTypeFromSqlType<Field["sqlType"]>;
-  };
+type EnumCaseFieldValue<Field extends Column, Init extends boolean> =
+  | SqlTypeValue<Field["sqlType"], Init>
+  | (Field["nullable"] extends true ? null : never);
+
+type EnumCaseFieldIsOptional<Field extends Column> = Field["nullable"] extends true
+  ? true
+  : Field extends { __jazzHasDefault: true }
+    ? true
+    : false;
+
+type EnumCasePayload<Fields extends readonly Column[], Init extends boolean> = Init extends false
+  ? { [Field in Fields[number] as Field["name"]]: EnumCaseFieldValue<Field, false> }
+  : {
+      [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+        ? never
+        : Field["name"]]: EnumCaseFieldValue<Field, true>;
+    } & {
+      [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+        ? Field["name"]
+        : never]?: EnumCaseFieldValue<Field, true>;
+    };
+
+export type EnumValueFromCases<
+  Cases extends readonly EnumCaseSqlType[],
+  Init extends boolean = false,
+> = {
+  [Case in Cases[number] as Case["name"]]: { type: Case["name"] } & EnumCasePayload<
+    Case["fields"],
+    Init
+  >;
 }[Cases[number]["name"]];
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
@@ -237,6 +268,8 @@ export interface TablePolicies {
 }
 
 export interface Table {
+  /** Authoring metadata; excluded from storage schema identity. */
+  relations?: import("./relationships.js").Relationships;
   name: string;
   columns: Column[];
   indexedColumns?: string[];

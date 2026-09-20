@@ -3,12 +3,12 @@ import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  documents: schema.table({ title: schema.string(), done: schema.boolean() }),
+  documents: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 describe("React Native public mutations through the real foreground C ABI", () => {
   it("keeps omitted cells, rejects tombstone upserts, and restores replacement content", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const row = await db
         .insert(app.documents, { title: "original", done: false })
@@ -88,7 +88,7 @@ describe("React Native public mutations through the real foreground C ABI", () =
   });
 
   it("preserves caller timestamps across insert, update, upsert, and restore", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const start = 1_704_067_200_123;
       const row = await db
@@ -114,7 +114,7 @@ describe("React Native public mutations through the real foreground C ABI", () =
 });
 
 it("streams inserts, updates, and upserts through the core upload sink", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const inserted = await db.insertStreaming(app.documents, {
       title: (async function* () {
@@ -152,7 +152,7 @@ it("streams inserts, updates, and upserts through the core upload sink", async (
 });
 
 it("aborts a failed stream without publishing partial rows and allows the next upload", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     await expect(
       db.insertStreaming(app.documents, {
@@ -179,14 +179,17 @@ it("aborts a failed stream without publishing partial rows and allows the next u
 
 it("applies typed text, bytes, and JSON diffs atomically with replacement cells", async () => {
   const rich = schema.defineApp({
-    documents: schema.table({
-      body: schema.string(),
-      payload: schema.bytes(),
-      metadata: schema.json(),
-      done: schema.boolean(),
-    }),
+    documents: schema.table(
+      {
+        body: schema.string(),
+        payload: schema.bytes(),
+        metadata: schema.json(),
+        done: schema.boolean(),
+      },
+      {},
+    ),
   });
-  await withNativeRelayFixture(rich, async (fixture) => {
+  await withNativeRelayFixture(rich, {}, async (fixture) => {
     const db = await fixture.createDb();
     const prefix = "a".repeat(70_000);
     const payload = new Uint8Array(70_006).fill(7);
@@ -253,7 +256,7 @@ it("applies typed text, bytes, and JSON diffs atomically with replacement cells"
 });
 
 it("settles an empty standalone update without changing the row", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db
       .insert(app.documents, { title: "unchanged", done: false })
@@ -267,10 +270,10 @@ it("settles an empty standalone update without changing the row", async () => {
 it("preserves branch head/base targets and restores only the selected head", async () => {
   const branches = schema.defineApp({
     documents: schema
-      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() })
+      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
       .branchBy("branch"),
   });
-  await withNativeRelayFixture(branches, async (fixture) => {
+  await withNativeRelayFixture(branches, {}, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db
       .insert(

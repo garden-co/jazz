@@ -670,6 +670,132 @@ describe("jazzAdapter", () => {
       ).resolves.toBeNull();
     });
 
+    it("projects custom stored fields through findOne and findMany", async () => {
+      const atomicAdapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })(atomicAdapterOptions);
+      const low = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-low",
+          email: "mapped-low@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 2,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      const high = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-high",
+          email: "mapped-high@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 8,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      await expect(
+        atomicAdapter.findOne({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: low.id, connector: "AND" }],
+          select: ["id", "name", "loginCount"],
+        }),
+      ).resolves.toMatchObject({
+        id: low.id,
+        name: "mapped-low",
+        loginCount: 2,
+      });
+
+      const selected = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "in",
+            value: [low.id, high.id],
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+      });
+      expect(
+        selected
+          .map(({ id, name, loginCount }) => ({ id, name, loginCount }))
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      ).toEqual(
+        [
+          { id: low.id, name: "mapped-low", loginCount: 2 },
+          { id: high.id, name: "mapped-high", loginCount: 8 },
+        ].sort((left, right) => left.id.localeCompare(right.id)),
+      );
+    });
+
+    it("sorts custom stored fields descending in supported and fallback findMany paths", async () => {
+      const atomicAdapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })(atomicAdapterOptions);
+      const low = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-sort-low",
+          email: "mapped-sort-low@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 2,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      const high = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-sort-high",
+          email: "mapped-sort-high@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 8,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+
+      const supportedRows = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "in",
+            value: [low.id, high.id],
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+        sortBy: { field: "loginCount", direction: "desc" },
+      });
+      expect(supportedRows.map((row) => row.id)).toEqual([high.id, low.id]);
+
+      const fallbackRows = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "name",
+            operator: "starts_with",
+            value: "mapped-sort-",
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+        sortBy: { field: "loginCount", direction: "desc" },
+      });
+      expect(fallbackRows.map((row) => row.id)).toEqual([high.id, low.id]);
+    });
+
     it("supports client-side-only where operators", async () => {
       const prefixUser = await adapter.create<any>({
         model: "user",

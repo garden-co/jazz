@@ -1479,7 +1479,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each(["query", "subscription"] as const)(
     "installs client correlation claims before opening a %s without preparing a native plan",
     async (kind) => {
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
       let releaseClaims!: () => void;
       const installed = new Promise<void>((resolve) => {
         releaseClaims = resolve;
@@ -2340,7 +2340,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               close,
             };
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2388,7 +2388,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
             });
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
       const handle = runtime.createSubscription(app.todos._build());
       const replacement = vi.fn();
       const callback = vi.fn(() => {
@@ -2435,7 +2435,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       const runtime = runtimeWithSubscriptionSource({
         getReader: () => ({ read: () => pending, cancel }),
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -3747,6 +3747,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => ({
               poll: () => (++polls < 2 ? null : encodeRows([])),
+              cancel: () => {},
             }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -3816,7 +3817,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => ({ poll: () => null }),
+            all: () => ({ poll: () => null, cancel: () => {} }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),
@@ -5468,7 +5469,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
   const query = app.todos.where({ title: "lifecycle" })._build();
   const openRuntime = (overrides: Partial<NativeDbForTest>) =>
     new NativeRuntimeAdapter(
@@ -6286,10 +6287,13 @@ const testSchema = {
 } satisfies WasmSchema;
 
 const bigintQuerySchema = s.defineApp({
-  metrics: s.table({
-    largeCount: s.bigint(),
-    largeCounts: s.array(s.bigint()),
-  }),
+  metrics: s.table(
+    {
+      largeCount: s.bigint(),
+      largeCounts: s.array(s.bigint()),
+    },
+    {},
+  ),
 }).wasmSchema;
 
 // Capture native bytes for valid queries through the serialized adapter interface.
@@ -7892,7 +7896,7 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
   const rows = [
     { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
     { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },

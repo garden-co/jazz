@@ -1105,7 +1105,7 @@ where
             )
             .await?;
         }
-        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+        let (staged_versions, fate, global_time) = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
@@ -1348,7 +1348,7 @@ where
                     tx_node_alias,
                     schema_version_alias,
                     tx.tx_id.time,
-                    (author_schema != self.catalogue.current_schema_version_id)
+                    (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;

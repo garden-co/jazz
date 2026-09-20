@@ -1555,7 +1555,7 @@ fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
         &v("write tests")
     );
     let history = node
-        .physical_history_source_graph(node.catalogue.current_schema_version_id, "todos")
+        .physical_history_source_graph(node.catalogue.local_schema_version_id, "todos")
         .unwrap();
     let mut database = node.into_database();
     assert!(
@@ -1691,7 +1691,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
             .is_err());
         assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
         let table_id = reopened
-            .physical_table_id_for_schema(reopened.catalogue.current_schema_version_id, "todos")
+            .physical_table_id_for_schema(reopened.catalogue.local_schema_version_id, "todos")
             .unwrap();
         assert!(reopened
             .database
@@ -2385,7 +2385,7 @@ fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
     let todos = core
         .catalogue
         .catalogue_schemas
-        .get(&core.catalogue.current_schema_version_id)
+        .get(&core.catalogue.local_schema_version_id)
         .expect("current schema")
         .schema
         .tables
@@ -2395,7 +2395,7 @@ fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
         .clone();
     let parent_version = VersionRecord::from_cells(
         &todos,
-        core.catalogue.current_schema_version_id,
+        core.catalogue.local_schema_version_id,
         row_uuid,
         Vec::new(),
         AuthorSubject::system_at(node(1)),

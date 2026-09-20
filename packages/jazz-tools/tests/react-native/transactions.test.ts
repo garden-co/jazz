@@ -4,7 +4,7 @@ import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged
@@ -12,7 +12,7 @@ const app = schema.defineApp({
 describe("React Native transaction reads through the native C ABI", () => {
   for (const kind of ["mergeable", "exclusive"] as const) {
     it(`${kind} isolates simultaneous staged writes and restores the base after rollback`, async () => {
-      await withNativeRelayFixture(app, async (fixture) => {
+      await withNativeRelayFixture(app, {}, async (fixture) => {
         const db = await fixture.createDb();
         const base = db.insert(app.todos, { title: "base", done: false }).value;
         await expect(db.all(app.todos)).resolves.toEqual([base]);
@@ -39,7 +39,7 @@ describe("React Native transaction reads through the native C ABI", () => {
   }
 
   it("rejects staging against a deleted row without reviving it", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const row = db.insert(app.todos, { title: "deleted", done: false }).value;
       await db.all(app.todos);
@@ -54,7 +54,7 @@ describe("React Native transaction reads through the native C ABI", () => {
   });
 
   it("anchors an exclusive snapshot at begin while ordinary reads advance", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const before = db.insert(app.todos, { title: "before", done: false }).value;
       await db.all(app.todos);
@@ -67,7 +67,7 @@ describe("React Native transaction reads through the native C ABI", () => {
   });
 
   it("publishes a mergeable staged update only after commit", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const base = db.insert(app.todos, { title: "before", done: false }).value;
       await db.all(app.todos);
@@ -83,7 +83,7 @@ describe("React Native transaction reads through the native C ABI", () => {
 });
 
 it("waits for native upstream authority before accepting an exclusive commit", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -106,7 +106,8 @@ it("waits for native upstream authority before accepting an exclusive commit", a
       permissions,
     });
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const openForeground = vi.spyOn(fixture.nativeHost, "openAttached");
         const db = await fixture.createDb();

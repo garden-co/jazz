@@ -37,8 +37,11 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 
 ### Reverse relations
 
-When table A has a ref column pointing to table B, Jazz auto-derives a reverse relation on B that returns all matching A rows as an array. The naming convention is `{sourceTable}Via{RelationName}`&hairsp;—&hairsp;for example, if `todos` has `projectId: s.ref("projects")`,
-then `projects` gets a `todosViaProject` reverse relation.
+Declare reverse relations explicitly on the target table. For example, if `todos` declares
+`project: s.rel("projects", "projectId")`, `projects` can declare
+`todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
+The reverse relation returns matching source rows as an array. Its name is your choice;
+Jazz does not generate an inverse or infer names from UUID columns.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -151,7 +154,7 @@ a source row if one of those required targets is unavailable.
 </Tabs>
 
 `requireIncludes()` only filters non-nullable forward references (FK &rarr; row). Nullable forward
-references and reverse relations (`todosViaOwner`, etc.) are unaffected. When used inside a nested
+references and reverse relations (such as `authoredPosts`) are unaffected. When used inside a nested
 `include`, it applies at that nesting level only.
 
 In Rust, set the corresponding correlated `ArraySubquery` to
@@ -161,7 +164,7 @@ to keep the parent and return an empty array.
 
 ## Magic columns
 
-Jazz exposes computed columns for permission introspection (`$canRead`, `$canEdit`, `$canDelete`) and edit metadata (`$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`). See [Magic columns](/docs/reading/queries#magic-columns) for details and examples.
+Jazz exposes computed columns for edit metadata (`$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`). See [Magic columns](/docs/reading/queries#magic-columns) for details and examples.
 
 ## Recursive queries with `gather` and `hopTo`
 

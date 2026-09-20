@@ -1,3 +1,4 @@
+import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { AccountIdentity } from "./state.js";
 
 export class AccountAuthError extends Error {
@@ -15,18 +16,21 @@ export async function requestAccountRegistry(
   body?: unknown,
   fetcher: typeof fetch = globalThis.fetch,
 ): Promise<unknown> {
-  const response = await fetcher(`${registry}/${path}`, {
-    method: "POST",
-    credentials: "omit",
-    redirect: "error",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const code = await response.text();
-    throw new AccountAuthError(/^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed");
-  }
-  return response.json();
+  return withAuthRequestDeadline(async (signal) => {
+    const response = await fetcher(`${registry}/${path}`, {
+      signal,
+      method: "POST",
+      credentials: "omit",
+      redirect: "error",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const code = await response.text();
+      throw new AccountAuthError(/^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed");
+    }
+    return response.json();
+  }, new AccountAuthError("account_request_timeout"));
 }
 
 export function readAccountAssignment(value: unknown, expected: AccountIdentity): string {

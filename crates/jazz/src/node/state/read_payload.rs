@@ -35,6 +35,11 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<&TableSchema, Error> {
+        if schema_version == self.catalogue.active_schema.schema {
+            return self.catalogue.active_schema.compiled.tables.iter()
+                .find(|candidate| candidate.name == table)
+                .ok_or_else(|| Error::TableNotFound(table.to_owned()));
+        }
         self.catalogue
             .catalogue_schemas
             .get(&schema_version)
@@ -46,46 +51,40 @@ where
                     .find(|candidate| candidate.name == table)
             })
             .or_else(|| {
-                (schema_version == self.catalogue.current_schema_version_id)
+                (schema_version == self.catalogue.local_schema_version_id)
                     .then(|| self.table(table).ok())
                     .flatten()
             })
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
-    pub(super) fn shortest_lens_path_ids_cached(
+    pub(super) fn shortest_lens_path_cached(
         &mut self,
         source: SchemaVersionId,
         target: SchemaVersionId,
-        direction: LensPathDirection,
-    ) -> Option<Vec<MigrationLensId>> {
-        let key = LensPathCacheKey {
-            source,
-            target,
-            direction,
-        };
+    ) -> Option<Vec<(MigrationLensId, LensPathDirection)>> {
+        let key = LensPathCacheKey { source, target };
         if let Some(path) = self.catalogue.lens_path_cache.get(&key) {
             return path.clone();
         }
-        let path = self.shortest_lens_path_ids(source, target, direction);
+        let path = self.shortest_lens_path(source, target);
         self.catalogue.lens_path_cache.insert(key, path.clone());
         path
     }
 
-    fn shortest_lens_path_ids(
+    fn shortest_lens_path(
         &self,
         source: SchemaVersionId,
         target: SchemaVersionId,
-        direction: LensPathDirection,
-    ) -> Option<Vec<MigrationLensId>> {
+    ) -> Option<Vec<(MigrationLensId, LensPathDirection)>> {
         if source == target {
             return Some(Vec::new());
         }
 
         let mut seen = BTreeSet::from([source]);
-        let mut queue = VecDeque::from([(source, Vec::<MigrationLensId>::new())]);
+        let mut queue = VecDeque::from([(source, Vec::new())]);
         while let Some((schema, path)) = queue.pop_front() {
-            for lens in self.ordered_lens_edges(schema, direction) {
+            for (lens, direction) in self.ordered_lens_edges(schema) {
                 let next = match direction {
                     LensPathDirection::Forward => lens.target,
                     LensPathDirection::Reverse => lens.source,
@@ -94,7 +93,7 @@ where
                     continue;
                 }
                 let mut next_path = path.clone();
-                next_path.push(lens.id);
+                next_path.push((lens.id, direction));
                 if next == target {
                     return Some(next_path);
                 }
@@ -109,26 +108,24 @@ where
         &mut self,
         source: SchemaVersionId,
         target: SchemaVersionId,
-        direction: LensPathDirection,
         table: &str,
     ) -> Result<Option<CompiledLensPath>, Error> {
         let key = CompiledLensCacheKey {
             source,
             target,
-            direction,
             table: table.to_owned(),
         };
         if let Some(path) = self.catalogue.compiled_lens_cache.get(&key) {
             return Ok(path.clone());
         }
 
-        let Some(lens_ids) = self.shortest_lens_path_ids_cached(source, target, direction) else {
+        let Some(steps) = self.shortest_lens_path_cached(source, target) else {
             self.catalogue.compiled_lens_cache.insert(key, None);
             return Ok(None);
         };
         let mut current_table = table.to_owned();
         let mut ops = Vec::new();
-        for lens_id in lens_ids {
+        for (lens_id, direction) in steps {
             let lens = self
                 .catalogue
                 .catalogue_lenses
@@ -174,29 +171,27 @@ where
     fn ordered_lens_edges(
         &self,
         schema: SchemaVersionId,
-        direction: LensPathDirection,
-    ) -> Vec<&MigrationLens> {
+    ) -> Vec<(&MigrationLens, LensPathDirection)> {
         let mut edges = self
             .catalogue
             .catalogue_lenses
             .values()
-            .filter(|lens| match direction {
-                LensPathDirection::Forward => lens.source == schema,
-                LensPathDirection::Reverse => lens.target == schema,
+            .filter_map(|lens| {
+                if lens.source == schema {
+                    Some((lens, LensPathDirection::Forward))
+                } else if lens.target == schema {
+                    Some((lens, LensPathDirection::Reverse))
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>();
-        edges.sort_by(|left, right| {
-            let left_next = match direction {
-                LensPathDirection::Forward => left.target,
-                LensPathDirection::Reverse => left.source,
+        edges.sort_by_key(|(lens, direction)| {
+            let next = match direction {
+                LensPathDirection::Forward => lens.target,
+                LensPathDirection::Reverse => lens.source,
             };
-            let right_next = match direction {
-                LensPathDirection::Forward => right.target,
-                LensPathDirection::Reverse => right.source,
-            };
-            left_next
-                .cmp(&right_next)
-                .then_with(|| left.id.cmp(&right.id))
+            (next, lens.id)
         });
         edges
     }
@@ -295,7 +290,7 @@ where
                 "repair coordinate has no unique current lineage",
             ));
         };
-        let name = self.catalogue.physical_mappings[&self.catalogue.current_schema_version_id]
+        let name = self.catalogue.physical_mappings[&self.catalogue.local_schema_version_id]
             .tables
             .iter()
             .find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
@@ -391,8 +386,8 @@ where
                     ));
                 };
                 let request_schema = [
-                    self.catalogue.current_write_schema.schema,
-                    self.catalogue.current_schema_version_id,
+                    self.catalogue.active_schema.schema,
+                    self.catalogue.local_schema_version_id,
                 ]
                 .into_iter()
                 .find(|schema_version| {

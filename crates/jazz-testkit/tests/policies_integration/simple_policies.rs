@@ -11,7 +11,7 @@ use super::support::{
 use super::{pe, permissions};
 use jazz::tools::public_schema::CmpOp;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
+    ColumnType, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
     TableSchemaBuilder, Value,
 };
 use jazz_server::JazzServer;
@@ -71,24 +71,51 @@ async fn create_row(
     client.insert(table_name, values).expect("create row").0
 }
 
-async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
+async fn update_document_title(
+    client: &JazzClient,
+    table_name: &str,
+    document_id: ObjectId,
+    title: &str,
+) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())])
+        .update(
+            table_name,
+            document_id,
+            vec![("title".to_string(), title.into())],
+        )
         .expect("update document title");
 }
 
-async fn update_document_archived(client: &JazzClient, document_id: ObjectId, archived: bool) {
+async fn update_document_archived(
+    client: &JazzClient,
+    table_name: &str,
+    document_id: ObjectId,
+    archived: bool,
+) {
     client
-        .update(document_id, vec![("archived".to_string(), archived.into())])
+        .update(
+            table_name,
+            document_id,
+            vec![("archived".to_string(), archived.into())],
+        )
         .expect("update document archived");
 }
 
-async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+async fn update_row(
+    client: &JazzClient,
+    table_name: &str,
+    row_id: ObjectId,
+    changes: Vec<(String, Value)>,
+) {
+    client
+        .update(table_name, row_id, changes)
+        .expect("update row");
 }
 
-async fn delete_document(client: &JazzClient, document_id: ObjectId) {
-    client.delete(document_id).expect("delete document");
+async fn delete_document(client: &JazzClient, table_name: &str, document_id: ObjectId) {
+    client
+        .delete(table_name, document_id)
+        .expect("delete document");
 }
 
 fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
@@ -353,22 +380,17 @@ async fn select_policies_boolean_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that the rows needed to validate a query's permissions are synced
-/// with the query result itself.
-///
-/// `protected_records` is readable when the current user has an active
-/// `access_grants` row. A fresh reader queries only `protected_records`; the
-/// query must still return the protected row without a prior explicit grant
-/// query.
+/// An ordinary reader can query protected records without first fetching the
+/// grants used by their EXISTS policy. Even readable grants are not implicitly
+/// delivered: Alice fetches hers only through an explicit remote grant query.
 #[tokio::test]
-#[ignore = "#1759: server schema conversion requires the SELECT EXISTS dependency to include an outer-row equality"]
-async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
+async fn select_exists_policy_does_not_implicitly_fetch_readable_grants() {
     tokio::task::LocalSet::new()
-        .run_until(select_policy_dependency_data_is_retrieved_as_part_of_query_inner())
+        .run_until(select_exists_policy_does_not_implicitly_fetch_readable_grants_inner())
         .await;
 }
 
-async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
+async fn select_exists_policy_does_not_implicitly_fetch_readable_grants_inner() {
     let active_grant = pe::all_of([
         pe::eq("principal_id", pe::session(vec!["claims", "sub"])),
         pe::eq("active", true),
@@ -422,19 +444,23 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
     )
     .await;
 
-    let reader =
-        jazz_testkit::connect(server.make_client_context_for_user(schema, super::ALICE_ID))
-            .await
-            .expect("connect reader");
+    let reader = jazz_testkit::TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .connect()
+        .await;
 
     let protected_rows = reader
         .query(
             Query::from("protected_records")
                 .filter(eq(col("id"), lit(*record_id.uuid())))
                 .select(["body"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query protected records");
 
     assert_eq!(
@@ -448,18 +474,34 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
             Query::from("access_grants")
                 .filter(eq(col("id"), lit(*grant_id.uuid())))
                 .select(["principal_id", "active"]),
-            Some(DurabilityTier::Local),
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query access grants locally");
 
+    assert!(
+        local_grant_rows.is_empty(),
+        "the protected-record query must not implicitly fetch readable grants"
+    );
+
+    let remote_grant_rows = reader
+        .query(
+            Query::from("access_grants")
+                .filter(eq(col("id"), lit(*grant_id.uuid())))
+                .select(["principal_id", "active"]),
+            jazz::tools::ReadTier::Remote,
+        )
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("explicitly query readable access grants");
     assert_eq!(
-        local_grant_rows,
+        remote_grant_rows,
         vec![(
             grant_id,
             vec![Value::Text(super::ALICE_ID.into()), Value::Boolean(true)]
         )],
-        "access grant should have been fetched with the protected record query"
+        "Alice can explicitly fetch her readable grant"
     );
 
     writer.shutdown().await.expect("shutdown writer");
@@ -625,7 +667,7 @@ async fn update_policies_boolean_inner() {
     })
     .await;
 
-    update_document_title(&alice, update_true_id, "updated").await;
+    update_document_title(&alice, "documents_update_true", update_true_id, "updated").await;
     let query = Query::from("documents_update_true");
     let bob_rows = wait_for_rows(&bob, query, "bob sees accepted update", |rows| {
         rows.iter()
@@ -641,7 +683,7 @@ async fn update_policies_boolean_inner() {
             && *values == boolean_policy_document_values(super::ALICE_ID, "updated", false)
     }));
 
-    update_document_title(&alice, update_false_id, "blocked").await;
+    update_document_title(&alice, "documents_update_false", update_false_id, "blocked").await;
     let query = Query::from("documents_update_false");
     let bob_rows = wait_for_rows(&bob, query, "bob still sees original row", |rows| {
         rows.iter()
@@ -755,7 +797,7 @@ async fn delete_policies_boolean_inner() {
     })
     .await;
 
-    delete_document(&alice, delete_true_id).await;
+    delete_document(&alice, "documents_delete_true", delete_true_id).await;
     let query = Query::from("documents_delete_true");
     let bob_rows = wait_for_rows(&bob, query, "bob no longer sees deleted row", |rows| {
         rows.iter()
@@ -768,7 +810,7 @@ async fn delete_policies_boolean_inner() {
         "delete allowed by true policy should remove the row"
     );
 
-    delete_document(&alice, delete_false_id).await;
+    delete_document(&alice, "documents_delete_false", delete_false_id).await;
     let query = Query::from("documents_delete_false");
     let bob_rows = wait_for_rows(&bob, query, "bob still sees undeleted row", |rows| {
         rows.iter()
@@ -874,7 +916,7 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
 
     // This optimistic local delete should be rejected because DELETE requires
     // archived=true on the current row.
-    delete_document(&bob, active_id).await;
+    delete_document(&bob, table_name, active_id).await;
 
     let observer = connect_ready_user(
         &server,
@@ -908,7 +950,7 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
     // Alice's successful archive update is the causal barrier for bob's
     // earlier rejected delete: it can only apply if the incomplete row still
     // exists server-side.
-    update_document_archived(&alice, active_id, true).await;
+    update_document_archived(&alice, table_name, active_id, true).await;
     let observer_rows = wait_for_rows(
         &observer,
         query.clone(),
@@ -931,11 +973,11 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
 
     // This optimistic local update should be rejected because UPDATE USING is
     // checked against the old row, which is already archived=true.
-    update_document_archived(&alice, active_id, false).await;
+    update_document_archived(&alice, table_name, active_id, false).await;
 
     // Observer's delete is the causal barrier for the rejected reopen attempt: it is
     // only allowed if the row still exists server-side with archived=true.
-    delete_document(&observer, active_id).await;
+    delete_document(&observer, table_name, active_id).await;
     let observer_rows = wait_for_rows(
         &observer,
         query,
@@ -1439,12 +1481,14 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes_inner() {
 
     update_row(
         &alice,
+        "documents_update_is_null",
         update_is_null_allowed,
         row_changes([("reviewer_id", Value::Null)]),
     )
     .await;
     update_row(
         &alice,
+        "documents_update_is_null",
         update_is_null_rejected,
         row_changes([("reviewer_id", super::BOB_ID.into())]),
     )
@@ -1629,30 +1673,18 @@ async fn row_level_contains_and_in_list_policies_filter_rows_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that read and write policies remain independent:
-/// readable rows can still reject writes, and writable rows can remain hidden.
-///
-/// Actors: alice performs the allowed write, bob reads and attempts the
-/// rejected write, and admin verifies the persisted state.
-///
-/// ```text
-/// bob ──query read_only──────────────► sees row
-/// bob ──update read_only─────────────► server rejects, row stays original
-///
-/// bob ──query write_only─────────────► sees nothing
-/// alice ──update hidden write_only──► server accepts
-/// admin ──query write_only───────────► sees persisted update
-/// bob ──query write_only─────────────► sees row once it satisfies SELECT
-/// ```
+/// Verifies that updating an existing row requires both read and UPDATE permission.
+/// Bob can read a row but lacks UPDATE permission; Alice has UPDATE permission
+/// but cannot read the archived row she inserted. Both updates must be rejected
+/// by the server, and admin must observe the original data afterward.
 #[tokio::test]
-#[ignore = "#1762: the Rust client rejects UPDATE on a write-authorized but read-hidden row with `read policy denied UPSERT`"]
-async fn read_and_write_policies_remain_independent() {
+async fn updates_require_read_and_update_permissions() {
     tokio::task::LocalSet::new()
-        .run_until(read_and_write_policies_remain_independent_inner())
+        .run_until(updates_require_read_and_update_permissions_inner())
         .await;
 }
 
-async fn read_and_write_policies_remain_independent_inner() {
+async fn updates_require_read_and_update_permissions_inner() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_read_only",
@@ -1713,8 +1745,7 @@ async fn read_and_write_policies_remain_independent_inner() {
     )
     .await;
     let read_only_values = boolean_policy_document_values("owner", "original", false);
-    let revealed_write_only_values =
-        boolean_policy_document_values(super::ALICE_ID, "hidden", false);
+    let write_only_values = boolean_policy_document_values(super::ALICE_ID, "hidden", true);
 
     let read_only_rows = wait_for_rows(
         &bob,
@@ -1725,7 +1756,25 @@ async fn read_and_write_policies_remain_independent_inner() {
     .await;
     assert_eq!(read_only_rows.len(), 1);
 
-    update_document_title(&bob, read_only_id, "blocked").await;
+    let transaction = bob
+        .update(
+            "documents_read_only",
+            read_only_id,
+            vec![("title".to_owned(), "blocked".into())],
+        )
+        .expect("stage update to readable row")
+        .expect("update commits immediately");
+    let error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        bob.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("server decides the read-only update")
+    .expect_err("read permission alone must not authorize UPDATE");
+    assert!(
+        error.to_string().ends_with("authorization_denied"),
+        "unexpected rejection: {error}"
+    );
     let read_only_after = wait_for_rows(
         &admin,
         Query::from("documents_read_only"),
@@ -1746,58 +1795,65 @@ async fn read_and_write_policies_remain_independent_inner() {
     let write_only_before = wait_for_query(
         &alice_hidden_reader,
         Query::from("documents_write_only"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
-        "write-only row stays hidden before reveal",
+        "write-only row is hidden before the attempted update",
         Some,
     )
     .await;
     assert!(write_only_before.is_empty());
-    alice_hidden_reader
-        .shutdown()
-        .await
-        .expect("shutdown alice_hidden_reader");
-
-    update_document_archived(&alice, write_only_id, false).await;
-    let alice_visible_reader = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents_write_only",
-        READY_TIMEOUT,
+    let persisted_before = wait_for_rows(
+        &admin,
+        Query::from("documents_write_only"),
+        "hidden insert is persisted before the update",
+        |rows| has_row(&rows, write_only_id, &write_only_values).then_some(rows),
     )
     .await;
-    let alice_rows = wait_for_rows(
-        &alice_visible_reader,
+    assert_eq!(persisted_before.len(), 1);
+
+    let transaction = alice
+        .update(
+            "documents_write_only",
+            write_only_id,
+            vec![("archived".to_owned(), false.into())],
+        )
+        .expect("stage optimistic update to the row Alice inserted")
+        .expect("update commits immediately");
+    let error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("server decides the hidden-row update")
+    .expect_err("UPDATE permission alone must not authorize updating a hidden row");
+    assert!(
+        error.to_string().ends_with("authorization_denied"),
+        "unexpected rejection: {error}"
+    );
+
+    let persisted_after = wait_for_rows(
+        &admin,
         Query::from("documents_write_only"),
-        "same session can reveal a row it was allowed to write before it could read",
-        |rows| has_row(&rows, write_only_id, &revealed_write_only_values).then_some(rows),
+        "rejected update leaves the hidden row unchanged",
+        |rows| has_row(&rows, write_only_id, &write_only_values).then_some(rows),
     )
     .await;
-    assert!(has_row(
-        &alice_rows,
-        write_only_id,
-        &revealed_write_only_values,
-    ));
-    alice_visible_reader
-        .shutdown()
-        .await
-        .expect("shutdown alice_visible_reader");
+    assert_eq!(persisted_after, persisted_before);
 
-    let write_only_after = wait_for_query(
-        &bob,
+    let hidden_after = wait_for_query(
+        &alice_hidden_reader,
         Query::from("documents_write_only"),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(3),
-        "row becomes readable once the update makes it satisfy SELECT",
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "rejected update does not reveal the row",
         Some,
     )
     .await;
-    assert!(has_row(
-        &write_only_after,
-        write_only_id,
-        &revealed_write_only_values,
-    ));
+    assert!(hidden_after.is_empty());
+    alice_hidden_reader
+        .shutdown()
+        .await
+        .expect("shutdown hidden reader");
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
@@ -1805,8 +1861,8 @@ async fn read_and_write_policies_remain_independent_inner() {
     server.shutdown().await;
 }
 
-/// Verifies the subscription-side visibility lifecycle for a simple
-/// `SELECT archived = false` policy.
+/// Verifies subscription visibility when owners can read their own archived
+/// rows, while other readers can see only rows with `archived = false`.
 ///
 /// Actors: alice mutates rows, observer holds the live subscription, and fresh
 /// verifier clients query EdgeServer state after each step.
@@ -1819,7 +1875,6 @@ async fn read_and_write_policies_remain_independent_inner() {
 /// alice ──update true→false──────► observer stream (add ✓)
 /// ```
 #[tokio::test]
-#[ignore = "#1762: updating a row from visible to hidden is rejected locally with `read policy denied UPSERT` before removal-delta behavior can be tested"]
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     tokio::task::LocalSet::new()
         .run_until(authorized_mutations_emit_visibility_scoped_subscription_deltas_inner())
@@ -1827,13 +1882,18 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 }
 
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner() {
+    use jazz_testkit::wait_for_edge_txs;
+
     let table_name = "documents_visibility_deltas";
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read().where_(pe::eq("archived", false));
+                p.allow_read().where_(pe::any_of([
+                    pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
+                    pe::eq("archived", false),
+                ]));
                 p.allow_update().always();
             }),
         ))
@@ -1867,7 +1927,13 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("subscribe observer");
     let mut observer_log = Vec::new();
 
-    let visible_id = seed_document(&alice, table_name, super::ALICE_ID, "visible", false).await;
+    let (visible_id, _, transaction) = alice
+        .insert(
+            table_name,
+            boolean_policy_document_input(super::ALICE_ID, "visible", false),
+        )
+        .expect("insert visible document");
+    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1877,7 +1943,13 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
 
-    let hidden_id = seed_document(&alice, table_name, super::ALICE_ID, "hidden", true).await;
+    let (hidden_id, _, transaction) = alice
+        .insert(
+            table_name,
+            boolean_policy_document_input(super::ALICE_ID, "hidden", true),
+        )
+        .expect("insert hidden document");
+    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     let verifier_after_hidden_insert = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1887,8 +1959,9 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
     let rows_after_hidden_insert = verifier_after_hidden_insert
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after hidden insert");
     assert!(
         has_row(&rows_after_hidden_insert, visible_id, &visible_values),
@@ -1896,7 +1969,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     );
     assert!(
         lacks_row(&rows_after_hidden_insert, hidden_id),
-        "authorized insert that fails SELECT must stay hidden: rows={rows_after_hidden_insert:?}"
+        "insert hidden by the reader's SELECT policy must stay hidden: rows={rows_after_hidden_insert:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -1909,7 +1982,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hidden_insert");
 
     observer_log.clear();
-    update_document_title(&alice, visible_id, "visible renamed").await;
+    let transaction = alice
+        .update(
+            table_name,
+            visible_id,
+            row_changes([("title", "visible renamed".into())]),
+        )
+        .expect("rename visible document")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_visible_update = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1951,7 +2032,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
     observer_log.clear();
-    update_document_archived(&alice, visible_id, true).await;
+    let transaction = alice
+        .update(
+            table_name,
+            visible_id,
+            row_changes([("archived", true.into())]),
+        )
+        .expect("hide document from other readers")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_hide = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1972,7 +2061,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         &mut observer_stream,
         &mut observer_log,
         QUERY_TIMEOUT,
-        "visible-to-hidden scope shrink does not emit ObjectOutOfScope/remove deltas, so observer receives remove delta after row becomes hidden",
+        "observer receives remove delta after row becomes hidden",
         |log| has_removed(log, visible_id),
     )
     .await;
@@ -1990,7 +2079,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hide");
 
     observer_log.clear();
-    update_document_archived(&alice, hidden_id, false).await;
+    let transaction = alice
+        .update(
+            table_name,
+            hidden_id,
+            row_changes([("archived", false.into())]),
+        )
+        .expect("reveal owned archived document")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_reveal = connect_ready_user(
         &server,
         &verifier_schema,
@@ -2090,7 +2187,7 @@ async fn admin_secret_ws_client_bypasses_row_select_policies_inner() {
     let observer_rows = wait_for_query(
         &observer,
         Query::from(table_name),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "ordinary observer stays filtered by select policy",
         Some,

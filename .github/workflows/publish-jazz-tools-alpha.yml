@@ -503,6 +503,7 @@ jobs:
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
+          test -f crates/jazz-napi/npm/linux-arm64-gnu/jazz-napi.linux-arm64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
           test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node

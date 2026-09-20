@@ -9,7 +9,7 @@ There are a number of column types available which cover most common use cases:
 | `s.float()`           | `number`             | `REAL`          |
 | `s.timestamp()`       | `Date`               | `TIMESTAMP`     |
 | `s.bytes()`           | `Uint8Array`         | `BYTEA`         |
-| `s.ref("table")`      | `string` (row ID)    | `UUID` (FK)     |
+| `s.uuid()`            | `string` (row ID)    | `UUID`          |
 | `s.array(s.string())` | `string[]`           | `TEXT[]`        |
 | `s.enum("a", "b")`    | `"a" \| "b"`         | `ENUM('a','b')` |
 | `s.json()`            | `JsonValue`          | `JSON`          |
@@ -23,4 +23,4 @@ native engine. Use `s.float()` when a wider or fractional numeric range is requi
 
 > **JSON columns are atomic.** The entire value is replaced on every write. Use `s.json()` for untyped JSON, or `s.json(schema)` with a [Zod](https://zod.dev)-compatible schema for typed validation. For structured data that needs per-field updates, use separate columns or a related table instead.
 
-> **Ref naming convention:** `s.ref()` columns must have a name ending in `Id` or `_id`. For `s.array(s.ref())`, the name must end in `Ids` or `_ids`. The runtime will throw if a ref column does not follow this convention.
+> Declare relationships separately in the second argument to `s.table`, using `s.rel("targetTable", "localUuidColumn")` and `s.reverse("sourceTable", "forwardRelationName")`. UUID columns have no naming convention.

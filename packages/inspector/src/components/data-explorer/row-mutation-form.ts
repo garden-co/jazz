@@ -1,5 +1,6 @@
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 import { parseSignedBigInt64 } from "./parse-signed-bigint.js";
+import { stringifyForPresentation } from "../../utility/presentation-serialization.js";
 
 export type MutationFormMode = "edit" | "insert";
 
@@ -95,26 +96,28 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
     case "Bytea":
       throw new Error("Binary fields are read-only in the inspector.");
     case "Array": {
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (!Array.isArray(parsed)) {
-          throw new Error();
-        }
-        return parsed;
+        parsed = JSON.parse(trimmed) as unknown;
       } catch {
         throw new Error("Array must be valid JSON array.");
       }
+      if (!Array.isArray(parsed)) {
+        throw new Error("Array must be valid JSON array.");
+      }
+      return parseStructuredMutationValue(columnType, parsed);
     }
     case "Row": {
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-          throw new Error();
-        }
-        return parsed;
+        parsed = JSON.parse(trimmed) as unknown;
       } catch {
         throw new Error("Row value must be valid JSON object.");
       }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("Row value must be valid JSON object.");
+      }
+      return parseStructuredMutationValue(columnType, parsed);
     }
     case "Enum":
       if (!columnType.variants.includes(valueText)) {
@@ -128,9 +131,44 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
   }
 }
 
+function parseStructuredMutationValue(columnType: ColumnType, value: unknown): unknown {
+  switch (columnType.type) {
+    case "BigInt":
+      if (typeof value === "string") {
+        return parseSignedBigInt64(value);
+      }
+      if (typeof value === "number" && Number.isSafeInteger(value)) {
+        return parseSignedBigInt64(String(value));
+      }
+      throw new Error("BigInt values must be decimal strings.");
+    case "Array":
+      if (!Array.isArray(value)) {
+        throw new Error("Array value must be an array.");
+      }
+      return value.map((entry) => parseStructuredMutationValue(columnType.element, entry));
+    case "Row":
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Row value must be an object.");
+      }
+      const row = { ...(value as Record<string, unknown>) };
+      for (const column of columnType.columns) {
+        if (Object.hasOwn(row, column.name)) {
+          const columnValue = row[column.name];
+          row[column.name] =
+            columnValue === null && column.nullable
+              ? null
+              : parseStructuredMutationValue(column.column_type, columnValue);
+        }
+      }
+      return row;
+    default:
+      return value;
+  }
+}
+
 export function formatMutationFieldValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (value instanceof Uint8Array) return `(${value.length} bytes)`;
-  if (typeof value === "object") return JSON.stringify(value);
+  if (typeof value === "object") return stringifyForPresentation(value);
   return String(value);
 }

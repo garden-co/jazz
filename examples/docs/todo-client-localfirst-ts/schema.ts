@@ -2,18 +2,28 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   // #region schema-todo-client-ts
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    priority: s.int().optional(),
-    description: s.string().optional(),
-    owner_id: s.uuid().optional(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      priority: s.int().optional(),
+      description: s.string().optional(),
+      owner_id: s.uuid().optional(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      project: s.rel("projects", "projectId"),
+      children: s.reverse("todos", "parent"),
+    },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
   // #endregion schema-todo-client-ts
 };
 

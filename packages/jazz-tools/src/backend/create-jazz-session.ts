@@ -50,7 +50,7 @@ export type JazzSessionConfig = Omit<
   | "serverUrl"
 > & {
   app: BackendSchemaInput;
-  permissions?: BackendContextConfig["permissions"];
+  permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
@@ -94,13 +94,13 @@ class NodeUserRuntimeSource extends RuntimeSource {
   }
   override createClient({ config, schema, onAuthFailure }: RuntimeClientContext): RuntimeClient {
     const declaredSchema = resolveSchemaSource(this.host.app);
-    if (serializeRuntimeSchema(declaredSchema) !== serializeRuntimeSchema(schema)) {
+    if (
+      serializeRuntimeSchema(mergePermissionsIntoWasmSchema(declaredSchema, {})) !==
+      serializeRuntimeSchema(mergePermissionsIntoWasmSchema(schema, {}))
+    ) {
       throw new Error("Node session query schema does not match its configured app");
     }
-    const runtimeSchema =
-      this.host.permissions && !Object.values(schema).some((table) => table.policies !== undefined)
-        ? mergePermissionsIntoWasmSchema(schema, this.host.permissions)
-        : schema;
+    const runtimeSchema = mergePermissionsIntoWasmSchema(schema, this.host.permissions);
     const trustedReservedSession = getTrustedReservedSession(config);
     const session = resolveClientInternalSessionSync({ ...config, trustedReservedSession });
     if (!session) throw new Error("Node user runtime requires an admitted account");
@@ -165,6 +165,11 @@ export async function createJazzSession(
       throw new Error(`Use session account actions instead of ${key}`);
   }
   if (!config.app) throw new Error("Node createJazzSession requires app");
+  if (config.permissions == null) {
+    throw new Error(
+      "createJazzSession requires an explicit permissions bundle. Pass {} to deny all access.",
+    );
+  }
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
   const memoryClocks = new WeakMap<AccountHandle, bigint | undefined>();
   const accounts = await prepareAccountManager({

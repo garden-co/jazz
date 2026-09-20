@@ -173,13 +173,8 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.table(table)?;
-        self.tx_read_unchecked(
-            tx_id,
-            self.catalogue.current_write_schema.schema,
-            table,
-            row_uuid,
-        )
-        .await
+        self.tx_read_unchecked(tx_id, self.catalogue.active_schema.schema, table, row_uuid)
+            .await
     }
 
     /// Read a row through an explicit registered schema view.
@@ -250,7 +245,7 @@ where
         tx_id: OpenTransactionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table(table)?.clone();
         self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
             .await
@@ -291,20 +286,20 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let rows = self
-            .query_table_versions(table)
+        let mut rows = BTreeSet::new();
+        for version in self
+            .query_versions_in_schema(schema_version, table, None)
             .await?
-            .iter()
-            .filter(|version| version.table() == table)
-            .map(|version| version.row_uuid())
-            .chain(
-                self.open_tx(tx_id)?
-                    .writes
-                    .iter()
-                    .filter(|write| write.table == table)
-                    .map(|write| write.row_uuid),
-            )
-            .collect::<BTreeSet<_>>();
+        {
+            rows.insert(version.row_uuid());
+        }
+        rows.extend(
+            self.open_tx(tx_id)?
+                .writes
+                .iter()
+                .filter(|write| write.table == table)
+                .map(|write| write.row_uuid),
+        );
         let mut current = Vec::new();
         for row_uuid in rows {
             let snapshot_row = self
@@ -406,7 +401,7 @@ where
     ) -> Result<(), Error> {
         self.tx_write_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
@@ -528,7 +523,7 @@ where
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
@@ -666,7 +661,7 @@ where
     ) -> Result<(), Error> {
         self.tx_patch_mergeable_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             patch,
@@ -1010,6 +1005,7 @@ where
         for write in open_tx.writes {
             let snapshot_content = self
                 .snapshot_layer_winner(
+                    write.schema_version,
                     &write.table,
                     write.row_uuid,
                     VersionLayer::Content,
@@ -1578,10 +1574,22 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Content,
+                snapshot,
+            )
             .await;
         let deletion = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Deletion, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Deletion,
+                snapshot,
+            )
             .await;
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
@@ -1654,6 +1662,7 @@ where
 
     pub(super) async fn snapshot_layer_winner(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
@@ -1663,7 +1672,10 @@ where
         // Intervals can REOPEN when a late arrival shifts the DAG winner, so
         // they cannot serve snapshot reads; domination over the fixed member
         // set depends only on immutable payload and is stable by construction.
-        let versions = self.query_row_versions(table, row_uuid).await.ok()?;
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await
+            .ok()?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             let tx_id = self.version_tx_id(version).ok()?;
@@ -1677,12 +1689,19 @@ where
 
     pub(super) async fn snapshot_content_witness(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         snapshot: &Snapshot,
     ) -> Option<TxId> {
         let version = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Content,
+                snapshot,
+            )
             .await?;
         self.version_tx_id(&version).ok()
     }

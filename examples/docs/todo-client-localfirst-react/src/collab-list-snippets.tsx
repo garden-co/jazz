@@ -3,19 +3,31 @@ import { useAll, useDb } from "jazz-tools/react";
 
 // #region collab-schema
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  tasks: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    assignee_id: s.uuid().optional(),
-    projectId: s.ref("projects"),
-  }),
-  projectMembers: s.table({
-    projectId: s.ref("projects"),
-    user_id: s.uuid(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      tasks: s.reverse("tasks", "project"),
+      members: s.reverse("projectMembers", "project"),
+    },
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      assignee_id: s.uuid().optional(),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
+  projectMembers: s.table(
+    {
+      projectId: s.uuid(),
+      user_id: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

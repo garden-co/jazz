@@ -334,8 +334,8 @@ self.database.finish_persistence(persisted)?;
         self.catalogue
             .schema_version_aliases
             .insert(schema_version, alias);
-        if schema_version == self.catalogue.current_schema_version_id {
-            self.catalogue.current_schema_version_alias = Some(alias);
+        if schema_version == self.catalogue.local_schema_version_id {
+            self.catalogue.local_schema_version_alias = Some(alias);
         }
         self.catalogue
             .physical_mappings
@@ -1037,39 +1037,190 @@ self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    async fn persist_catalogue_pointer(
-        &mut self,
-        pointer: CurrentWriteSchema,
+    fn write_active_schema_to_batch(
+        batch: &mut DatabaseBatch,
+        active: &ActiveSchema,
     ) -> Result<(), Error> {
-        let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue_pointer",
-            vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
+            vec![Value::U64(active.revision), Value::Uuid(active.schema.0)],
         );
-        let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-self.database.finish_persistence(persisted)?;
-        Ok(())
-    }
-
-    async fn persist_pending_catalogue_pointer(
-        &mut self,
-        pointer: CurrentWriteSchema,
-    ) -> Result<(), Error> {
-        let id = codec::catalogue_write_pointer_id(pointer);
-        let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::U64(codec::CatalogueRecordKind::WritePointerPending.key()),
-                Value::Uuid(id),
-                Value::Bytes(codec::encode_catalogue_write_pointer(pointer)),
+                Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
+                Value::Uuid(uuid::Uuid::nil()),
+                Value::Bytes(codec::encode_active_schema(active)?),
+            ],
+        );
+        Ok(())
+    }
+
+    async fn write_active_schema_bootstrap_to_batch(
+        &self,
+        batch: &mut DatabaseBatch,
+        active: &ActiveSchema,
+    ) -> Result<(), Error> {
+        if self.catalogue_bootstrap_marker {
+            let genesis = self
+                .database
+                .primary_key_scan_raw(
+                    "jazz_catalogue",
+                    &[Value::U64(codec::CatalogueRecordKind::Genesis.key())],
+                )
+                .await?
+                .into_iter()
+                .next()
+                .ok_or(Error::InvalidStoredValue("catalogue genesis missing"))?;
+            let ready = CatalogueBootstrapReady {
+                genesis: SchemaVersionId(
+                    genesis
+                        .record()
+                        .get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?,
+                ),
+                current_write_schema: active.wire_pointer(),
+                active_catalogue_seq: self.catalogue.active_catalogue_seq,
+            };
+            batch.update(
+                "jazz_catalogue",
+                vec![
+                    Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
+                    Value::Uuid(ready.genesis.0),
+                    Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    async fn persist_active_schema(&mut self, active: &ActiveSchema) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        Self::write_active_schema_to_batch(&mut batch, active)?;
+        self.write_active_schema_bootstrap_to_batch(&mut batch, active)
+            .await?;
+        // Migrate a legacy policy-bearing catalogue payload on first activation.
+        let structural = SchemaVersion::new(active.compiled.without_permissions());
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::U64(codec::CatalogueRecordKind::Schema.key()),
+                Value::Uuid(structural.id.0),
+                Value::Bytes(codec::encode_catalogue_schema(&structural)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-self.database.finish_persistence(persisted)?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
         Ok(())
+    }
+
+    /// Internal fixture utility for native integration tests and simulation harnesses.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn activate_schema_for_test(
+        &mut self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), Error> {
+        self.activate_schema(revision, schema).await
+    }
+
+    pub(crate) async fn activate_schema(
+        &mut self,
+        revision: u64,
+        compiled: JazzSchema,
+    ) -> Result<(), Error> {
+        let active = self.prepare_active_schema(revision, compiled)?;
+        if active == self.catalogue.active_schema {
+            return Ok(());
+        }
+        self.persist_active_schema(&active).await?;
+        self.install_active_schema(active);
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn validate_schema_activation(
+        &self,
+        revision: u64,
+        compiled: JazzSchema,
+    ) -> Result<(), Error> {
+        self.prepare_active_schema(revision, compiled).map(|_| ())
+    }
+
+    fn prepare_active_schema(
+        &self,
+        revision: u64,
+        compiled: JazzSchema,
+    ) -> Result<ActiveSchema, Error> {
+        self.require_catalogue_ready()?;
+        if self.catalogue_activation_failed {
+            return Err(Error::CatalogueActivationFailed);
+        }
+        if revision == 0 {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema revision must be positive",
+            ));
+        }
+        let pointer = CurrentWriteSchema {
+            revision,
+            schema: compiled.version_id(),
+        };
+        if !self
+            .catalogue
+            .catalogue_schemas
+            .contains_key(&pointer.schema)
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema requires admitted structural lineage",
+            ));
+        }
+        if self
+            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema)
+            .is_none()
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema requires a complete migration path",
+            ));
+        }
+        let active = ActiveSchema::new(pointer, compiled)?;
+        if revision < self.catalogue.active_schema.revision {
+            return Err(Error::InvalidCatalogueUpdate(
+                "stale active schema revision",
+            ));
+        }
+        if revision == self.catalogue.active_schema.revision
+            && active != self.catalogue.active_schema
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "conflicting active schema revision",
+            ));
+        }
+        Ok(active)
+    }
+
+    fn install_active_schema(&mut self, active: ActiveSchema) {
+        let authorization_source_changed =
+            !active.same_authorization_source(
+                &self.catalogue.active_schema,
+                self.catalogue.physical_mappings.get(&active.schema),
+                self.catalogue.physical_mappings.get(&self.catalogue.active_schema.schema),
+            );
+        self.catalogue.catalogue_schemas.insert(
+            active.schema,
+            SchemaVersion::new(active.compiled.without_permissions()),
+        );
+        if active.schema == self.catalogue.local_schema_version_id {
+            self.catalogue.schema = active.compiled.clone();
+        }
+        self.catalogue.active_schema = active;
+        self.query.version_storage_sources_cache.clear();
+        self.query.compiled_query_program_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
+        if authorization_source_changed {
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
     }
 
     async fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
@@ -1143,8 +1294,8 @@ self.database.finish_persistence(persisted)?;
             .schema_version_aliases
             .get(&schema_version_id)
         {
-            if schema_version_id == self.catalogue.current_schema_version_id {
-                self.catalogue.current_schema_version_alias = Some(*alias);
+            if schema_version_id == self.catalogue.local_schema_version_id {
+                self.catalogue.local_schema_version_alias = Some(*alias);
             }
             return Ok(*alias);
         }

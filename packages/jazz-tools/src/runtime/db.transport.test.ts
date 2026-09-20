@@ -63,9 +63,12 @@ function makeSchema(): WasmSchema {
 
 function makeTodosApp() {
   return s.defineApp({
-    todos: s.table({
-      title: s.string(),
-    }),
+    todos: s.table(
+      {
+        title: s.string(),
+      },
+      {},
+    ),
   });
 }
 

@@ -24,22 +24,26 @@ use support::{
 use tempfile::TempDir;
 
 fn todo_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 
 fn ranked_todo_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("rank", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -134,7 +138,11 @@ async fn subscription_orders_by_unprojected_field() {
             );
 
             let tx = client
-                .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
+                .update(
+                    "todos",
+                    ids[0],
+                    vec![("rank".to_owned(), Value::Integer(0))],
+                )
                 .expect("change only the unprojected ordering field");
             support::wait_for_edge_txs(
                 &client,
@@ -260,8 +268,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 
             let default_query = jazz::query::Query::from("todos");
             let one_shot = client
-                .query(default_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(default_query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("default-ordered one-shot query");
             assert_eq!(
                 one_shot.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
@@ -359,8 +368,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             let tie_query =
                 jazz::query::Query::from("todos").order_by("title", OrderDirection::Asc);
             let tied_rows = client
-                .query(tie_query, Some(DurabilityTier::EdgeServer))
+                .query(tie_query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query tied rows");
             assert_eq!(
                 tied_rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
@@ -407,6 +417,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             let promoted = tied[2];
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
                 )
@@ -451,6 +462,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
 
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
                 )
@@ -841,7 +853,7 @@ async fn connect_user_after_catalogue_bootstrap(
 
 async fn wait_for_row(
     client: &JazzClient,
-    tier: DurabilityTier,
+    tier: jazz::tools::ReadTier,
     row_id: ObjectId,
     expected: Vec<Value>,
     description: &str,
@@ -849,7 +861,7 @@ async fn wait_for_row(
     wait_for_query(
         client,
         todo_query(),
-        Some(tier),
+        tier,
         Duration::from_secs(30),
         description,
         |rows| {
@@ -954,7 +966,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     let member_rows = wait_for_query(
         member,
         jazz::query::Query::from("resources"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees resource through seeded recursive access policy",
         |query_rows| {
@@ -969,7 +981,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("data_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees data entry through seeded recursive access policy",
         |query_rows| {
@@ -980,7 +992,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("mapping_rules"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees sibling mapping rule through same seeded recursive access policy",
         |query_rows| {
@@ -991,7 +1003,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("data_entry_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees grandchild through inherits over seeded access policy",
         |query_rows| {
@@ -1003,7 +1015,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("mapping_rule_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees mapping rule child through inherits over sibling seeded access policy",
         |query_rows| {
@@ -1075,7 +1087,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             wait_for_query(
                 &spy,
                 jazz::query::Query::from("resources"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(30),
                 "spy sees no resources through seeded recursive access policy",
                 |rows| rows.is_empty().then_some(rows),
@@ -1084,7 +1096,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             wait_for_query(
                 &spy,
                 jazz::query::Query::from("data_entries"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(30),
                 "spy sees no inherited data entries through seeded recursive access policy",
                 |rows| rows.is_empty().then_some(rows),
@@ -1397,7 +1409,7 @@ async fn core_write_reaches_clients_on_both_edges() {
             .await;
             wait_for_row(
                 &alice,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected.clone(),
                 "alice's edge query contains the core write",
@@ -1405,7 +1417,7 @@ async fn core_write_reaches_clients_on_both_edges() {
             .await;
             wait_for_row(
                 &bob,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected,
                 "bob's edge query contains the core write",
@@ -1493,7 +1505,7 @@ async fn edge_write_reaches_client_on_peer_edge() {
             .await;
             wait_for_row(
                 &bob,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected,
                 "bob's edge query contains the peer-edge write",

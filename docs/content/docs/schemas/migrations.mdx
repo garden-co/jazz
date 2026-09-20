@@ -1,6 +1,6 @@
 ---
 title: Migrations
-description: Structural schema evolution workflow and reviewed migration edges.
+description: Change your schema while keeping older clients working.
 reviewedAt: "b29b48d1a"
 ---
 
@@ -54,24 +54,28 @@ In practice, this lets you:
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
-6. **Publish**&hairsp;—&hairsp;push the migration to the server:
-
-   ```bash
-   pnpm dlx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
-   ```
-
-   If you also want to publish the current schema, the migration and permissions in one step, you can run:
+6. **Deploy**&hairsp;—&hairsp;publish the schema, permissions, and required migrations:
 
    ```bash
    pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
-   `deploy` walks through the publish pipeline in one go:
-   1. Publishes the current schema if the server does not already have it.
-   2. If your previous `permissions.ts` was tied to an older schema hash, asks the server whether
-      it already has a migration path between the two hashes. If not, pushes the local migration
-      file that closes the gap (and fails with a helpful message if you haven't created one yet).
-   3. Publishes the current permissions, attached to the current schema hash.
+   Both `schema.ts` and `permissions.ts` must be present. First deployments and
+   permission-only changes need no migration; compatible schema changes can use an
+   inferred migration. Changes requiring row transformations need a reviewed migration path.
+
+   `deploy` handles the release in this order:
+   1. Loads and validates the schema and permissions, then checks the migration path from
+      the currently deployed schema. Missing required migrations fail before publication.
+   2. Stores any missing schemas and migrations. A reviewed local chain can span multiple
+      schema versions; an existing server path or an inferred compatible migration can also
+      satisfy the transition.
+   3. Publishes the permissions for the target schema last, checking that another deploy
+      has not changed the permissions head in the meantime.
+
+   A network failure can leave schemas or migrations stored without advancing the permissions
+   head. Retrying reuses stored artifacts. If another deploy wins the permissions-head check,
+   review that release before retrying yours.
 
 Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
@@ -121,14 +125,19 @@ When a newer schema drops a column that older clients still expect, define a bac
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
+### Adding relations to existing UUID columns
+
+To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged.
+
 ## Migrating historical schemas
 
-Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
-Existing data will still be stored in the database, but you will not be able to read it until you create a migration.
+If your database already contains rows under a historical schema that is disconnected from
+other schema versions, those rows remain stored but cannot be read through a schema with no
+migration path to them. Create a migration to connect that historical schema to the schema
+your app uses.
 
-This is particularly useful when you are iterating on a feature that is not yet ready to be released.
-
-The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
+This is a recovery workflow for existing disconnected schemas. `deploy` requires a complete
+migration path when changing the deployed schema; it does not let you skip a required migration.
 
 To do so, you'll need to **create the migration using explicit to/from schema hashes**:
 

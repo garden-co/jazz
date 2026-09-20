@@ -400,6 +400,45 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
         .await;
 }
 
+/// The native socket pump may observe the server's close before its owner
+/// decodes the queued catalogue. The real connector must retain the credit
+/// path through that decode, including the last physical consumption grant.
+#[tokio::test]
+async fn native_catalogue_bootstrap_retains_credit_path_until_snapshot_is_decoded() {
+    let app_id = AppId::from_name("native-bootstrap-credit-lifetime");
+    let core = ServerBuilder::new(app_id)
+        .with_schema(schema())
+        .with_auth_config(auth("bootstrap-secret"))
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .expect("build authority core");
+    let (url, state, task) = serve_built(core).await;
+    let expected = state
+        .trusted_catalogue_snapshot_for_test()
+        .await
+        .expect("read authority catalogue");
+    for _ in 0..3 {
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(3),
+            WebSocketTransport::connect_catalogue_bootstrap(
+                &url,
+                app_id,
+                jazz::ids::AuthorSubject::SYSTEM,
+                transport_auth("bootstrap-secret"),
+            ),
+        )
+        .await
+        .expect("native bootstrap remains bounded")
+        .expect("complete snapshot survives its consumption-credit send");
+        assert_eq!(
+            snapshot, expected,
+            "bootstrap preserves the complete catalogue"
+        );
+    }
+    task.abort();
+}
+
 /// A core authority bootstraps the edge's complete catalogue before Alice's
 /// first ordinary client websocket is admitted.
 ///
@@ -441,7 +480,12 @@ async fn dynamic_edge_bootstraps_authenticated_catalogue_before_first_client() {
         }
     })
     .await
-    .expect("edge becomes ready from idle bootstrap");
+    .unwrap_or_else(|error| {
+        panic!(
+            "edge becomes ready from idle bootstrap: {error}; health: {:?}",
+            edge_state.edge_upstream_health()
+        )
+    });
     assert_eq!(
         edge_state
             .trusted_catalogue_snapshot_for_test()

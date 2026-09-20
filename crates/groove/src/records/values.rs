@@ -180,7 +180,7 @@ impl From<Option<Value>> for Value {
 ///
 /// Declaration order is sort order. Appending variants is compatible with
 /// existing stored rows; reordering or removing variants changes meaning.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct ScalarEnumSchema {
     /// Durable identity of this enum occurrence. The enclosing table stamps
     /// unstamped schemas from their physical field path before persistence.
@@ -188,6 +188,25 @@ pub struct ScalarEnumSchema {
     registry_id: u64,
     pub name: String,
     pub variants: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScalarEnumSchemaSerde {
+    #[serde(default)]
+    registry_id: u64,
+    name: String,
+    variants: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for ScalarEnumSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let schema = <ScalarEnumSchemaSerde as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_parts(schema.registry_id, schema.name, schema.variants)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Opaque token for an engine-owned enum registry shared at an explicitly
@@ -334,19 +353,45 @@ impl ScalarEnumSchema {
         name: impl Into<String>,
         variants: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, Error> {
-        let name = name.into();
-        let variants = variants.into_iter().map(Into::into).collect::<Vec<_>>();
-        if variants.len() > 256 {
-            return Err(Error::EnumTooManyVariants {
-                name,
-                variants: variants.len(),
-            });
-        }
+        Self::from_parts(
+            0,
+            name.into(),
+            variants.into_iter().map(Into::into).collect::<Vec<_>>(),
+        )
+    }
+
+    fn from_parts(registry_id: u64, name: String, variants: Vec<String>) -> Result<Self, Error> {
+        Self::validate_variants(&name, &variants)?;
         Ok(Self {
-            registry_id: 0,
+            registry_id,
             name,
             variants,
         })
+    }
+
+    fn validate_variants(name: &str, variants: &[String]) -> Result<(), Error> {
+        if variants.len() > 256 {
+            return Err(Error::EnumTooManyVariants {
+                name: name.to_owned(),
+                variants: variants.len(),
+            });
+        }
+        for (index, variant) in variants.iter().enumerate() {
+            if variants[..index]
+                .iter()
+                .any(|candidate| candidate == variant)
+            {
+                return Err(Error::DuplicateEnumVariantName {
+                    enum_name: name.to_owned(),
+                    variant: variant.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        Self::validate_variants(&self.name, &self.variants)
     }
 
     pub fn with_registry_id(mut self, registry_id: u64) -> Self {
@@ -898,17 +943,12 @@ fn descriptor_codec_decode_value_type(
             {
                 return Err(Error::NonCanonicalRecord);
             }
-            if node.strings.len() > 256 {
-                return Err(Error::EnumTooManyVariants {
-                    name: node.name.clone().expect("checked"),
-                    variants: node.strings.len(),
-                });
-            }
-            Ok(ValueType::EnumTag(ScalarEnumSchema {
-                registry_id: node.registry_id,
-                name: node.name.clone().expect("checked"),
-                variants: node.strings.clone(),
-            }))
+            let schema = ScalarEnumSchema::from_parts(
+                node.registry_id,
+                node.name.clone().expect("checked"),
+                node.strings.clone(),
+            )?;
+            Ok(ValueType::EnumTag(schema))
         }
         DESCRIPTOR_NODE_TUPLE => {
             if node.name.is_some()
@@ -2386,6 +2426,7 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
             }
             Ok(())
         }
+        ValueType::EnumTag(schema) => schema.validate(),
         ValueType::Enum(schema) => {
             schema.validate()?;
             for case in &schema.cases {

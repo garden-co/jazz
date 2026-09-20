@@ -658,6 +658,7 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   const root = fixture();
   const platforms = {
     "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+    "linux-arm64-gnu": "aarch64-unknown-linux-gnu",
     "darwin-x64": "x86_64-apple-darwin",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64-msvc": "x86_64-pc-windows-msvc",
@@ -681,6 +682,22 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     );
   }
   stageNapiManifests(root);
+  for (const [platform, target] of Object.entries(platforms)) {
+    const directory = join(root, "crates/jazz-napi/npm", platform);
+    const filename = `jazz-napi.${platform}.manifest.json`;
+    const receipt = JSON.parse(readFileSync(join(directory, filename), "utf8"));
+    assert.equal(
+      verifyPublishedNapiManifest(receipt, target, join(directory, `jazz-napi.${platform}.node`)),
+      null,
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, "crates/jazz-napi/provenance", filename), "utf8")),
+      receipt,
+    );
+    assert.ok(
+      JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).files.includes(filename),
+    );
+  }
   const node = join(root, "crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node");
   const manifest = JSON.parse(
     readFileSync(
@@ -781,6 +798,41 @@ test("RN test bridge recipe changes NAPI provenance and fingerprint only", () =>
   } finally {
     if (previous === undefined) delete process.env.JAZZ_RN_TEST_BRIDGE;
     else process.env.JAZZ_RN_TEST_BRIDGE = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("excluded vendored path dependencies remain source-bound", () => {
+  const root = fixture();
+  try {
+    const vendor = "vendor/codec";
+    const workspaceManifest = join(root, "Cargo.toml");
+    writeFileSync(
+      workspaceManifest,
+      readFileSync(workspaceManifest, "utf8").replace(
+        "[workspace]",
+        '[workspace]\nexclude = ["vendor/codec"]',
+      ),
+    );
+    mkdirSync(join(root, vendor, "src"), { recursive: true });
+    writeFileSync(
+      join(root, vendor, "Cargo.toml"),
+      '[package]\nname = "fixture-codec"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n',
+    );
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn codec() {}\n");
+    const manifest = join(root, "crates/jazz-compression/Cargo.toml");
+    writeFileSync(
+      manifest,
+      readFileSync(manifest, "utf8").replace(
+        "[dependencies]",
+        '[dependencies]\nfixture-codec = { path = "../../vendor/codec" }',
+      ),
+    );
+    assert.ok(workspaceDependencyInputs(root, "crates/jazz-wasm/Cargo.toml").includes(vendor));
+    const before = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn changed_codec() {}\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), before);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

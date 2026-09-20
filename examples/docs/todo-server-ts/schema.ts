@@ -1,17 +1,27 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-    owner_id: s.uuid(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+      owner_id: s.uuid(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      children: s.reverse("todos", "parent"),
+      project: s.rel("projects", "projectId"),
+    },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

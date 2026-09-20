@@ -11,7 +11,10 @@ import { createJazzSession } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
 
-export default async function runServer({ port = TEST_PORT }: { port?: number } = {}) {
+export default async function runServer({
+  port = TEST_PORT,
+  serverPermissions = permissions,
+}: { port?: number; serverPermissions?: typeof permissions } = {}) {
   const serverHandle = await startLocalJazzServer({
     appId: APP_ID,
     port,
@@ -26,13 +29,13 @@ export default async function runServer({ port = TEST_PORT }: { port?: number } 
       appId: serverHandle.appId,
       adminSecret: serverHandle.adminSecret,
       schema: app,
-      permissions,
+      permissions: serverPermissions,
     });
 
     session = await createJazzSession({
       appId: serverHandle.appId,
       app: app,
-      permissions,
+      permissions: serverPermissions,
       driver: { type: "memory" },
       serverUrl: serverHandle.url,
       initial: { backendSecret: serverHandle.backendSecret },

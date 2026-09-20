@@ -17,10 +17,13 @@ import {
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

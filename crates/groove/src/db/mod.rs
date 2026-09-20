@@ -1342,7 +1342,7 @@ pub use crate::ivm::{
     CollectByField, GraphBuilder, InputSourceDelta, InputSourceId, InputSourceReplacement,
     IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr, PreparedShapeId,
     ProjectField, PublicationUpdate, RoutedMultisinkTerminal, Subscription, SubscriptionError,
-    SubscriptionEvent, SubscriptionId,
+    SubscriptionEvent, SubscriptionId, SubscriptionLifetime,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -1576,17 +1576,13 @@ impl Drop for PersistenceAttempt {
             if self.write_started {
                 self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
                 self.abandoned_application.set(true);
-                let waiters = {
-                    let mut order = self.order.borrow_mut();
-                    order.failure = Some(format!(
+                fail_publication_order(
+                    &self.order,
+                    format!(
                         "publication {:?} persistence was cancelled after its atomic write started",
                         self.publication
-                    ));
-                    std::mem::take(&mut order.waiters)
-                };
-                for (_, waiter) in waiters {
-                    waiter.wake();
-                }
+                    ),
+                );
                 wake_publication_owner(&self.order);
             } else {
                 self.lifecycle.set(AppliedBatchLifecycle::Applied);
@@ -1600,6 +1596,13 @@ impl Drop for AppliedBatch {
         if self.lifecycle.get() == AppliedBatchLifecycle::Applied {
             self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
             self.abandoned_application.set(true);
+            fail_publication_order(
+                &self.order,
+                format!(
+                    "publication {:?} application was abandoned before persistence",
+                    self.publication
+                ),
+            );
             wake_publication_owner(&self.order);
         }
     }
@@ -1637,6 +1640,17 @@ struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,
     failure: Option<String>,
+}
+
+fn fail_publication_order(order: &Rc<RefCell<PersistenceOrder>>, message: String) {
+    let waiters = {
+        let mut order = order.borrow_mut();
+        order.failure = Some(message);
+        std::mem::take(&mut order.waiters)
+    };
+    for (_, waiter) in waiters {
+        waiter.wake();
+    }
 }
 
 fn wake_publication_owner(order: &Rc<RefCell<PersistenceOrder>>) {

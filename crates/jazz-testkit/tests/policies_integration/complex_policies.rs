@@ -4,18 +4,12 @@ use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
-    has_added_id, has_removed, has_updated, wait_for_query, wait_for_rows,
+    has_added_id, has_removed, has_updated, wait_for_query, wait_for_query_results, wait_for_rows,
     wait_for_subscription_update,
 };
 use super::{pe, permissions};
 use jazz::tools::PolicyExpr;
-use jazz::tools::TableName;
-use jazz::tools::public_schema::{
-    RelColumnRef as ColumnRef, RelExpr, RelJoinCondition as JoinCondition, RelJoinKind as JoinKind,
-    RelPredicateCmpOp as PredicateCmpOp, RelPredicateExpr as PredicateExpr,
-    RelProjectColumn as ProjectColumn, RelProjectExpr as ProjectExpr, RelValueRef as ValueRef,
-    RowIdRef,
-};
+use jazz::tools::public_schema::RelPredicateExpr as PredicateExpr;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
     TableSchema, TableSchemaBuilder, Value,
@@ -100,85 +94,41 @@ fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
     ])))
 }
 
-fn scoped_column(scope: &str, column: &str) -> ColumnRef {
-    ColumnRef {
-        scope: Some(scope.to_owned()),
-        column: column.to_owned(),
-    }
-}
-
-fn join_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::TableScan {
-                    table: TableName::new("document_grants"),
-                    alias: None,
-                }),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("group_memberships"),
-                    alias: None,
-                }),
-                on: vec![JoinCondition {
-                    left: scoped_column("document_grants", "group_slug"),
-                    right: scoped_column("group_memberships", "group_slug"),
-                }],
-                join_kind: JoinKind::Inner,
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: scoped_column("document_grants", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-                PredicateExpr::Cmp {
-                    left: scoped_column("group_memberships", "user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
-                },
-            ]),
-        },
-    }
+fn join_membership_select_policy(member_filter: PredicateExpr) -> PolicyExpr {
+    pe::exists(
+        pe::table("document_grants")
+            .alias("grants")
+            .join(
+                pe::table("group_memberships").alias("memberships"),
+                pe::rel::column("grants", "group_slug"),
+                pe::rel::column("memberships", "group_slug"),
+            )
+            .where_(pe::rel::all_of([
+                pe::rel::eq_outer(pe::rel::column("grants", "document_id"), "id"),
+                member_filter,
+            ])),
+    )
 }
 
 fn hop_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Project {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
-                            table: TableName::new("group_memberships"),
-                            alias: None,
-                        }),
-                        predicate: PredicateExpr::Cmp {
-                            left: scoped_column("group_memberships", "user_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user".to_owned()]),
-                        },
-                    }),
-                    right: Box::new(RelExpr::TableScan {
-                        table: TableName::new("document_grants"),
-                        alias: Some("__hop_0".to_owned()),
-                    }),
-                    on: vec![JoinCondition {
-                        left: scoped_column("group_memberships", "group_slug"),
-                        right: scoped_column("__hop_0", "group_slug"),
-                    }],
-                    join_kind: JoinKind::Inner,
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: scoped_column("__hop_0", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-            }),
-            columns: vec![ProjectColumn {
-                alias: "document_id".to_string(),
-                expr: ProjectExpr::Column(scoped_column("__hop_0", "document_id")),
-            }],
-        },
-    }
+    pe::exists(
+        pe::table("group_memberships")
+            .alias("memberships")
+            .where_(pe::rel::eq_session(
+                pe::rel::column("memberships", "user_id"),
+                "claims.sub",
+            ))
+            .join(
+                pe::table("document_grants").alias("grants"),
+                pe::rel::column("memberships", "group_slug"),
+                pe::rel::column("grants", "group_slug"),
+            )
+            .where_(pe::rel::eq_outer(
+                pe::rel::column("grants", "document_id"),
+                "id",
+            ))
+            .select([("document_id", pe::rel::column("grants", "document_id"))]),
+    )
 }
 
 fn mixed_complex_select_policy() -> PolicyExpr {
@@ -216,13 +166,13 @@ fn exists_share_policy_schema() -> Schema {
         .build()
 }
 
-fn exists_join_policy_schema() -> Schema {
+fn exists_join_policy_schema(select_policy: PolicyExpr) -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read().where_(join_membership_select_policy());
+                p.allow_read().where_(select_policy);
             }),
         ))
         .table(
@@ -443,7 +393,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let initial_bob = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob initially sees no shared documents",
         Some,
@@ -452,7 +402,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let initial_dave = wait_for_query(
         &dave,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave initially sees no shared documents",
         Some,
@@ -491,7 +441,11 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     assert_eq!(bob_rows.len(), 1);
 
     admin
-        .update(share_id, row_changes([("user_id", super::DAVE_ID.into())]))
+        .update(
+            "document_shares",
+            share_id,
+            row_changes([("user_id", super::DAVE_ID.into())]),
+        )
         .expect("update document share user");
     wait_for_subscription_update(
         &mut bob_stream,
@@ -510,7 +464,9 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     )
     .await;
 
-    admin.delete(share_id).expect("delete share row");
+    admin
+        .delete("document_shares", share_id)
+        .expect("delete share row");
     wait_for_subscription_update(
         &mut dave_stream,
         &mut dave_log,
@@ -523,7 +479,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let final_bob = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob ends with no shared documents",
         Some,
@@ -532,7 +488,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let final_dave = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave ends with no shared documents",
         Some,
@@ -559,15 +515,70 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
 /// dave ──membership sales─────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1761: read-side ExistsRel join grants never become visible in integration"]
 async fn exists_rel_join_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
-        .run_until(exists_rel_join_grants_and_denies_correctly_inner())
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ))
         .await;
 }
 
-async fn exists_rel_join_grants_and_denies_correctly_inner() {
-    let schema = exists_join_policy_schema();
+/// A post-join OR belongs to the membership source as a whole. Splitting it
+/// into independent filters would deny Bob; losing its scope can overgrant Dave.
+#[tokio::test]
+async fn exists_rel_join_preserves_same_source_or() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::any_of([
+                pe::rel::eq_literal(pe::rel::column("memberships", "user_id"), "absent-user"),
+                pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+            ]),
+        ))
+        .await;
+}
+
+/// A misspelled alias must fail validation instead of binding to a same-named
+/// column on the root source.
+#[tokio::test]
+async fn exists_rel_join_rejects_unknown_filter_scope() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::eq_literal(
+            pe::rel::column("missing", "group_slug"),
+            "eng",
+        )),
+        "unknown scope 'missing'",
+    )
+    .await;
+}
+
+/// An OR across sources cannot be pushed into separate existence joins.
+#[tokio::test]
+async fn exists_rel_join_rejects_cross_source_or() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::any_of([
+            pe::rel::eq_literal(pe::rel::column("grants", "group_slug"), "eng"),
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ])),
+        "Boolean filters spanning multiple sources are not supported",
+    )
+    .await;
+}
+
+async fn assert_join_policy_rejected(policy: PolicyExpr, expected: &str) {
+    match JazzServer::start_with_schema(exists_join_policy_schema(policy)).await {
+        Err(error) => assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error}"
+        ),
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("invalid scoped policy must be rejected: {expected}");
+        }
+    }
+}
+
+async fn exists_rel_join_grants_and_denies_correctly_inner(member_filter: PredicateExpr) {
+    let schema = exists_join_policy_schema(join_membership_select_policy(member_filter));
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
@@ -596,7 +607,7 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave does not see joined grant without matching membership",
         Some,
@@ -610,10 +621,197 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
     server.shutdown().await;
 }
 
+/// A chained equality must read B.code, not the same-named A.code.
+/// Bob matches B and may read; Dave matches only A and must remain denied.
+#[tokio::test]
+async fn exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            true,
+        ))
+        .await;
+}
+
+/// The same source routing must work without an outer-row correlation.
+#[tokio::test]
+async fn uncorrelated_exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            false,
+        ))
+        .await;
+}
+
+async fn exists_rel_chained_join_preserves_operand_sources_inner(correlated: bool) {
+    let relation = pe::table("grants")
+        .alias("a")
+        .join(
+            pe::table("links").alias("b"),
+            pe::rel::column("a", "group_slug"),
+            pe::rel::column("b", "group_slug"),
+        )
+        .join(
+            pe::table("members").alias("c"),
+            pe::rel::column("b", "code"),
+            pe::rel::column("c", "code"),
+        )
+        .where_(pe::rel::eq_session(
+            pe::rel::column("c", "user_id"),
+            "claims.sub",
+        ));
+    let relation = if correlated {
+        relation.where_(pe::rel::eq_outer(pe::rel::column("a", "document_id"), "id"))
+    } else {
+        relation
+    };
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_read().where_(pe::exists(relation));
+                p.allow_insert().always();
+            }),
+        ))
+        .table(
+            TableSchema::builder("grants")
+                .fk_column("document_id", "documents")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("links")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("members")
+                .column("code", ColumnType::Text)
+                .column("user_id", ColumnType::Text),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let doc = create_title_document(&admin, "Scoped chain").await;
+    admin
+        .insert(
+            "grants",
+            jazz::row_input!("document_id" => doc, "group_slug" => "eng", "code" => "wrong"),
+        )
+        .expect("insert grant");
+    admin
+        .insert(
+            "links",
+            jazz::row_input!("group_slug" => "eng", "code" => "correct"),
+        )
+        .expect("insert link");
+    admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "correct", "user_id" => super::BOB_ID),
+        )
+        .expect("insert bob");
+    let (_, _, tx) = admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "wrong", "user_id" => super::DAVE_ID),
+        )
+        .expect("insert dave");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx.expect("committed insert")]).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+    let rows = wait_for_rows(
+        &bob,
+        Query::from("documents"),
+        "Bob matches the joined source",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == doc
+                && rows[0].1 == title_document_values("Scoped chain"))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    let rows = wait_for_query(
+        &dave,
+        Query::from("documents"),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "matching only the root code must not grant access",
+        Some,
+    )
+    .await;
+    assert!(rows.is_empty());
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Invalid join scopes must be rejected before executing authorization queries.
+#[tokio::test]
+async fn exists_rel_join_rejects_invalid_operand_scopes() {
+    for (left, right, expected) in [
+        ("missing", "memberships", "unknown scope 'missing'"),
+        ("grants", "missing", "unknown scope 'missing'"),
+    ] {
+        assert_join_policy_rejected(
+            pe::exists(
+                pe::table("document_grants")
+                    .alias("grants")
+                    .join(
+                        pe::table("group_memberships").alias("memberships"),
+                        pe::rel::column(left, "group_slug"),
+                        pe::rel::column(right, "group_slug"),
+                    )
+                    .where_(pe::rel::eq_outer(
+                        pe::rel::column("grants", "document_id"),
+                        "id",
+                    )),
+            ),
+            expected,
+        )
+        .await;
+    }
+    assert_join_policy_rejected(
+        pe::exists(pe::table("document_grants").alias("grants").join(
+            pe::table("group_memberships").alias("first").join(
+                pe::table("group_memberships").alias("second"),
+                pe::rel::column("first", "group_slug"),
+                pe::rel::column("second", "group_slug"),
+            ),
+            pe::rel::column("grants", "group_slug"),
+            pe::rel::column("second", "group_slug"),
+        )),
+        "join target must be the right relation's root source",
+    )
+    .await;
+    assert_join_policy_rejected(
+        pe::exists(
+            pe::table("document_grants")
+                .alias("same")
+                .join(
+                    pe::table("group_memberships").alias("same"),
+                    "group_slug",
+                    "group_slug",
+                )
+                .join(
+                    pe::table("group_memberships").alias("third"),
+                    pe::rel::column("same", "group_slug"),
+                    pe::rel::column("third", "group_slug"),
+                ),
+        ),
+        "scope 'same' is ambiguous",
+    )
+    .await;
+}
+
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]
-#[ignore = "#1761: flat-join policy filtering hangs for more than 45 seconds without returning results"]
 async fn join_query_applies_policy_filter_on_joined_table() {
     tokio::task::LocalSet::new()
         .run_until(join_query_applies_policy_filter_on_joined_table_inner())
@@ -639,8 +837,8 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
     let bob =
         connect_ready_user(&server, &schema, super::BOB_ID, "join_users", READY_TIMEOUT).await;
 
-    let alice_user = create_join_policy_user(&admin, super::ALICE_ID).await;
-    let bob_user = create_join_policy_user(&admin, super::BOB_ID).await;
+    create_join_policy_user(&admin, super::ALICE_ID).await;
+    create_join_policy_user(&admin, super::BOB_ID).await;
     create_join_policy_post(&admin, super::ALICE_ID, "Alice post").await;
     create_join_policy_post(&admin, super::BOB_ID, "Bob post").await;
 
@@ -650,37 +848,32 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
         "join_posts.owner_name",
     );
 
-    let alice_rows = wait_for_rows(
-        &alice,
-        query.clone(),
-        "alice sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == alice_user).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        alice_rows[0].1,
-        vec![
-            Value::Text(super::ALICE_ID.to_string()),
-            Value::Text(super::ALICE_ID.to_string()),
-            Value::Text("Alice post".to_string()),
-        ]
-    );
-
-    let bob_rows = wait_for_rows(
-        &bob,
-        query,
-        "bob sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == bob_user).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        bob_rows[0].1,
-        vec![
-            Value::Text(super::BOB_ID.to_string()),
-            Value::Text(super::BOB_ID.to_string()),
-            Value::Text("Bob post".to_string()),
-        ]
-    );
+    for (client, owner, title) in [
+        (&alice, super::ALICE_ID, "Alice post"),
+        (&bob, super::BOB_ID, "Bob post"),
+    ] {
+        let rows = wait_for_query_results(
+            client,
+            query.clone(),
+            jazz::tools::ReadTier::Remote,
+            QUERY_TIMEOUT,
+            "reader sees only the joined row allowed by the posts policy",
+            |rows| (rows.len() == 1).then_some(rows),
+        )
+        .await;
+        assert_eq!(
+            rows[0].get("join_users.name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.owner_name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.title"),
+            Some(&Value::Text(title.into()))
+        );
+    }
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
@@ -700,7 +893,6 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
 /// dave ──hop via sales─────────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1761: read-side ExistsRel hop grants never become visible in integration"]
 async fn exists_rel_hop_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_hop_grants_and_denies_correctly_inner())
@@ -720,6 +912,8 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
         connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
 
     let doc_id = create_title_document(&admin, "Hop Visible").await;
+    // A membership in the granted group must not expose unrelated documents.
+    create_title_document(&admin, "No Grant").await;
     create_group_membership(&admin, super::BOB_ID, "eng").await;
     create_group_membership(&admin, super::DAVE_ID, "sales").await;
     create_document_grant(&admin, doc_id, "eng").await;
@@ -737,7 +931,7 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave does not see hop grant without matching membership",
         Some,
@@ -968,7 +1162,11 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     .await;
 
     let transaction_id = alice
-        .update(chat_id, row_changes([("name", "Project Room".into())]))
+        .update(
+            "chats",
+            chat_id,
+            row_changes([("name", "Project Room".into())]),
+        )
         .expect("chat name update should satisfy same-table EXISTS with_check")
         .expect("chat name update should commit immediately");
     jazz_testkit::wait_for_edge_txs(&alice, &[transaction_id]).await;
@@ -987,7 +1185,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
-    let transaction_id = alice.update(chat_id, row_changes([("is_public", true.into())]));
+    let transaction_id = alice.update("chats", chat_id, row_changes([("is_public", true.into())]));
     let protected_update = match transaction_id {
         Ok(Some(transaction_id)) => {
             alice
@@ -1005,7 +1203,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     let rows_after_rejection = wait_for_query(
         &observer,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees unchanged protected fields after rejected update",
         |rows| {
@@ -1109,12 +1307,17 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     )
     .await;
 
-    bob.update(doc_id, row_changes([("title", "Hacked".into())]))
-        .expect("optimistic local exists update");
+    bob.update(
+        "documents",
+        doc_id,
+        row_changes([("title", "Hacked".into())]),
+    )
+    .expect("optimistic local exists update");
 
     let rows_after_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected exists update");
     assert!(
         rows_after_update

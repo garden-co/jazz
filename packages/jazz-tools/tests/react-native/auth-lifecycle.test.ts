@@ -1,13 +1,12 @@
 import { expect, it } from "vitest";
-import { mergePermissionsIntoWasmSchema } from "../../src/schema-permissions.js";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
 
 it("rejects caller credentials and requires an enrolled account handle", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     await expect(
       fixture.createDb({
         ...fixture.config,
@@ -32,7 +31,7 @@ it("rejects caller credentials and requires an enrolled account handle", async (
 });
 
 it("logout retires old contexts before opening an independently registered identity", async () => {
-  await withNativeRelayFixture(app, async (first) => {
+  await withNativeRelayFixture(app, {}, async (first) => {
     const old = await first.createDb();
     await old.insert(app.notes, { title: "first identity private row" }).wait({ tier: "local" });
     const pending = old.all(app.notes, { tier: ReadTier.Remote });
@@ -63,7 +62,7 @@ it("logout retires old contexts before opening an independently registered ident
 });
 
 it("logout and repeated shutdown retire the public foreground", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     await db.insert(app.notes, { title: "retained on logout" }).wait({ tier: "local" });
     await fixture.manager.logout();
@@ -82,7 +81,7 @@ it("logout and repeated shutdown retire the public foreground", async () => {
 });
 
 it("rejects auth replacement before and after first query without changing public identity", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const admitted = db.getAuthState();
     for (const materialized of [false, true]) {
@@ -102,7 +101,7 @@ it("rejects auth replacement before and after first query without changing publi
 });
 
 it("rejects operations once shutdown starts even before a runtime was materialized", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const closing = db.shutdown();
     await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
@@ -117,7 +116,7 @@ it("rejects operations once shutdown starts even before a runtime was materializ
 // A typed native liveness receipt cannot be requested through a public data
 // query: this boundary check uses the real host lease, never a mocked runtime.
 it("distinguishes a live native foreground from a revoked native handle", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const runtime = fixture.nativeHost.openAttached(fixture.capability);
     try {
       expect(runtime.isClosed?.()).toBe(false);
@@ -130,7 +129,7 @@ it("distinguishes a live native foreground from a revoked native handle", async 
 });
 
 it("caller config mutation cannot replace the handle behind an existing context", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const supplied = { ...fixture.config };
     const first = await fixture.createDb(supplied);
     const secondConfig = await fixture.registerIdentity("review-second");
@@ -151,13 +150,14 @@ it("caller config mutation cannot replace the handle behind an existing context"
 
 it("retains external provider claims when borrowing an admitted native account", async () => {
   const scopedApp = schema.defineApp({
-    notes: schema.table({ title: schema.string(), role: schema.string() }),
+    notes: schema.table({ title: schema.string(), role: schema.string() }, {}),
   });
   const permissions = schema.definePermissions(scopedApp, ({ policy, session }) => {
     policy.notes.allowRead.where({ role: session.claims["role"] });
   });
   await withNativeRelayFixture(
-    { wasmSchema: mergePermissionsIntoWasmSchema(scopedApp.wasmSchema, permissions) },
+    scopedApp,
+    permissions,
     async (fixture) => {
       const db = await fixture.createDb({
         ...fixture.config,

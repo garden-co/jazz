@@ -118,7 +118,7 @@ function configuredCargoInputs(definition) {
     .map((path) => `$TURBO_ROOT$/${path}/**`)
     .sort();
   const actual = turbo.tasks[config].inputs
-    .filter((input) => /^\$TURBO_ROOT\$\/crates\/[^/]+\/\*\*$/.test(input))
+    .filter((input) => /^\$TURBO_ROOT\$\/(?:crates|vendor)\/[^/]+\/\*\*$/.test(input))
     .sort();
   assert.deepEqual(actual, expected, `${config} diverges from its Cargo dependency closure`);
 }

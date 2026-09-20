@@ -1,3 +1,5 @@
+import { schema as s } from "../index.js";
+import { wasmSchemasEqual } from "../dev/schema-utils.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchSchemaConnectivity,
@@ -205,6 +207,54 @@ describe("schema-fetch", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
       schema: { tables: { users: { columns: [] } } },
     });
+  });
+
+  it("publishes lossless human-JSON schema defaults", async () => {
+    const schema = s.defineApp({
+      records: s.table(
+        {
+          big: s.bigint().default(9223372036854775807n),
+          bytes: s.bytes().default(new Uint8Array([0, 128, 255])),
+          nested: s.array(s.array(s.bigint())).default([[-9223372036854775808n]]),
+          nestedBytes: s.array(s.bytes()).default([new Uint8Array([1, 2])]),
+          time: s.timestamp().default(new Date(1234)),
+          json: s.json().default({ value: "literal" }),
+        },
+        {},
+      ),
+    }).wasmSchema;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        Response.json(
+          { objectId: "11111111-1111-4111-8111-111111111111", hash: "a".repeat(64) },
+          { status: 201 },
+        ),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await publishStoredSchema("http://localhost:1625", {
+      appId: "test-app",
+      adminSecret: "admin-secret",
+      schema,
+    });
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body));
+    const defaults = Object.fromEntries(
+      body.schema.tables.records.columns.map((column: { name: string; default: unknown }) => [
+        column.name,
+        column.default,
+      ]),
+    );
+    expect(defaults.big).toEqual({ type: "BigInt", value: "9223372036854775807" });
+    expect(defaults.bytes).toEqual({ type: "Bytea", value: [0, 128, 255] });
+    expect(defaults.nested).toEqual({
+      type: "Array",
+      value: [{ type: "Array", value: [{ type: "BigInt", value: "-9223372036854775808" }] }],
+    });
+    expect(defaults.nestedBytes).toEqual({
+      type: "Array",
+      value: [{ type: "Bytea", value: [1, 2] }],
+    });
+    expect(wasmSchemasEqual(schema, body.schema.tables)).toBe(true);
   });
 
   it("publishes nested relation literals as tagged wire values", async () => {

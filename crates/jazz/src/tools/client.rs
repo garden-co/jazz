@@ -20,6 +20,7 @@ use crate::db::{
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
+    WriteIdentity as CoreWriteIdentity,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -67,6 +68,202 @@ use crate::tools::{
 type CoreClientDb = CoreDb<CoreStorage>;
 type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
 
+// Credit windows bound protocol ingress; charge tiny frames as one physical slot
+// too, so a peer cannot turn the byte limit into an unbounded allocation count.
+const CLIENT_WIRE_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+fn client_wire_frame_charge(frame: &[u8]) -> usize {
+    crate::wire::channel_credit::channel_frame_credit_cost(frame.len())
+}
+
+#[derive(Default)]
+struct ClientWireQueues {
+    inbound: VecDeque<Vec<u8>>,
+    outbound: VecDeque<Vec<u8>>,
+    inbound_bytes: usize,
+    outbound_bytes: usize,
+    closed: bool,
+}
+
+#[derive(Clone)]
+struct ClientQueuedWire {
+    queues: Rc<RefCell<ClientWireQueues>>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl crate::wire::WireTransport for ClientQueuedWire {
+    fn send_frame(
+        &mut self,
+        frame: Vec<u8>,
+    ) -> std::result::Result<(), crate::wire::TransportError> {
+        let mut queues = self.queues.borrow_mut();
+        if queues.closed {
+            return Err(crate::wire::TransportError::Failed(
+                "native client wire retired".to_owned(),
+            ));
+        }
+        let charge = client_wire_frame_charge(&frame);
+        if queues.outbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+            return Err(crate::wire::TransportError::Backpressure);
+        }
+        queues.outbound_bytes += charge;
+        queues.outbound.push_back(frame);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        let mut queues = self.queues.borrow_mut();
+        let frame = queues.inbound.pop_front()?;
+        queues.inbound_bytes -= client_wire_frame_charge(&frame);
+        Some(frame)
+    }
+}
+
+struct ClientNativeIo {
+    pump: crate::db::PeerIoPump,
+    transport: ClientQueuedWire,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ClientNativeIo {
+    fn drop(&mut self) {
+        self.pump.disconnect();
+        self.transport.queues.borrow_mut().closed = true;
+        self.task.abort();
+    }
+}
+
+// This owns physical I/O independently of Db::tick: evaluating a received row
+// may await chunks while holding the semantic node. Only canonical frames enter
+// its adapter; auxiliary replies and credit grants never need that node lock.
+async fn drive_native_client_wire(
+    mut wire: Box<dyn crate::wire::WireTransport + Send>,
+    mut terminal: NativeTransportTerminalFuture,
+    transport: ClientQueuedWire,
+    pump: crate::db::PeerIoPump,
+    scheduler: Rc<TickSchedulerImpl>,
+) -> NativeTransportTerminal {
+    use crate::tools::native_transport_connector::NativeTransportError;
+    use crate::wire::TransportError;
+    let failed =
+        |error: String| NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
+    let result = async {
+        loop {
+            if let Err(error) = pump.expire_incomplete_receive() {
+                return failed(error);
+            }
+            let mut received = false;
+            // Bounded turns keep cancellation and other connections runnable.
+            for _ in 0..64 {
+                let Some(frame) = wire.try_recv_frame() else {
+                    break;
+                };
+                let routed = tokio::select! {
+                    biased;
+                    _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                    stopped = &mut terminal => return stopped,
+                    routed = pump.route_incoming_wire_frame(frame) => routed,
+                };
+                match routed {
+                    Ok(Some(frame)) => {
+                        let mut queues = transport.queues.borrow_mut();
+                        let charge = client_wire_frame_charge(&frame);
+                        if queues.inbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+                            return failed(
+                                "native client canonical ingress exceeded its credit budget"
+                                    .to_owned(),
+                            );
+                        }
+                        queues.inbound_bytes += charge;
+                        queues.inbound.push_back(frame);
+                        scheduler.wake(TickUrgency::Immediate);
+                    }
+                    Ok(None) => {
+                        if pump.take_canonical_credit_progress() {
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                    }
+                    Err(error) => return failed(error.to_string()),
+                }
+                received = true;
+            }
+            let mut backpressured = false;
+            for _ in 0..16 {
+                let frame = transport.queues.borrow().outbound.front().cloned();
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame) {
+                        Ok(()) => {
+                            let mut queues = transport.queues.borrow_mut();
+                            let frame = queues
+                                .outbound
+                                .pop_front()
+                                .expect("retained canonical frame");
+                            queues.outbound_bytes -= client_wire_frame_charge(&frame);
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                let reservation = match pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return failed(error.to_string()),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !backpressured
+                && (received
+                    || !transport.queues.borrow().outbound.is_empty()
+                    || pump.outbound_is_ready())
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            tokio::select! {
+                biased;
+                _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                stopped = &mut terminal => return stopped,
+                _ = transport.wake.notified() => {},
+                _ = async {
+                    match pump.incomplete_receive_timeout_ms() {
+                        Some(delay) => tokio::time::sleep(Duration::from_millis(delay)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if let Err(error) = pump.expire_incomplete_receive() { return failed(error); }
+                },
+                _ = async {
+                    if backpressured { std::future::pending::<()>().await; }
+                    pump.outbound_ready().await;
+                } => {
+                    if pump.is_disconnected() { return NativeTransportTerminal::OwnerDropped; }
+                }
+            }
+        }
+    }
+    .await;
+    pump.disconnect();
+    transport.queues.borrow_mut().closed = true;
+    result
+}
+
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
@@ -110,8 +307,6 @@ struct UnverifiedJwtClaims {
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
-    /// Session inferred from client auth context for user-scoped operations.
-    default_session: Option<Session>,
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
     /// Shared core database handle backing the public client facade.
@@ -121,7 +316,6 @@ pub struct JazzClient {
 impl Clone for JazzClient {
     fn clone(&self) -> Self {
         Self {
-            default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
             db: self.db.clone(),
         }
@@ -148,12 +342,12 @@ struct ClientDbInner {
     scheduler: Rc<TickSchedulerImpl>,
     tick_driver: Option<tokio::task::JoinHandle<()>>,
     upstream: Option<BackendConnection>,
+    upstream_io: Option<ClientNativeIo>,
     upstream_generation: u64,
     native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
     upstream_recovery_generation: Option<u64>,
     upstream_state_notify: Arc<tokio::sync::Notify>,
     write_map: HashMap<TransactionId, CoreTxId>,
-    row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
@@ -411,11 +605,19 @@ impl Backend {
         storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
-        Ok(Self(Rc::new(
-            StackSafeFuture::new(CoreDb::open(CoreDbConfig::new(schema, storage, identity)))
-                .await
-                .map_err(|error| JazzError::Connection(error.to_string()))?,
-        )))
+        let config = CoreDbConfig::new(schema, storage, identity);
+        let db = if identity.author == CoreAuthorSubject::SYSTEM {
+            // SAFETY: core_identity selects SYSTEM only for a host-provided
+            // backend/admin credential. Online connect authenticates that
+            // credential before exposing the client; ordinary sessions cannot
+            // select this capability.
+            StackSafeFuture::new(unsafe { CoreDb::open_with_backend_attribution(config) }).await
+        } else {
+            StackSafeFuture::new(CoreDb::open(config)).await
+        };
+        Ok(Self(Rc::new(db.map_err(|error| {
+            JazzError::Connection(error.to_string())
+        })?)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -459,7 +661,7 @@ impl Backend {
 
     fn insert_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
@@ -467,7 +669,7 @@ impl Backend {
             table,
             cells,
             crate::db::InsertOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?;
@@ -493,7 +695,7 @@ impl Backend {
 
     fn insert_with_id_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -503,7 +705,7 @@ impl Backend {
             cells,
             crate::db::InsertOptions {
                 row_id: Some(row_id),
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?
@@ -531,7 +733,7 @@ impl Backend {
 
     fn upsert_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -542,7 +744,7 @@ impl Backend {
             row_id,
             cells,
             crate::db::UpsertOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 updated_at_ms,
                 ..Default::default()
             },
@@ -571,7 +773,7 @@ impl Backend {
 
     fn delete_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -579,7 +781,7 @@ impl Backend {
             table,
             row_id,
             crate::db::DeleteOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?
@@ -669,9 +871,9 @@ impl Backend {
     fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
-        author: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive_for_identity(id, author))
+        crate::db::block_on(self.0.begin_exclusive_with_identity(id, identity))
     }
 
     fn exclusive_write(
@@ -738,12 +940,7 @@ impl Backend {
 
 struct ExclusiveTransactionState {
     author: Option<CoreAuthorSubject>,
-    writes: Vec<ExclusiveTransactionWrite>,
-}
-
-struct ExclusiveTransactionWrite {
-    table: String,
-    row_id: ObjectId,
+    has_writes: bool,
 }
 
 #[derive(Default)]
@@ -756,7 +953,7 @@ struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     after_current_turn: AtomicBool,
-    delayed: AtomicBool,
+    delayed: std::sync::Mutex<Option<(tokio::time::Instant, tokio::task::AbortHandle)>>,
     cancelled: AtomicBool,
     cancel_notify: tokio::sync::Notify,
     notify: tokio::sync::Notify,
@@ -774,6 +971,9 @@ impl TickState {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        if let Some((_, task)) = self.delayed.lock().unwrap().take() {
+            task.abort();
+        }
         self.cancel_notify.notify_waiters();
     }
 }
@@ -837,23 +1037,32 @@ impl TickSchedulerImpl {
     }
 
     fn wake_after(&self, delay_ms: u64) {
-        // One delayed wake is enough to service all currently rate-limited
-        // uploads. The protocol has no receiver-supplied retry-after, so every
-        // caller uses the same bounded default admission window.
-        if self.state.delayed.swap(true, Ordering::AcqRel) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
             return;
         }
+        if let Some((_, task)) = pending.take() {
+            task.abort();
+        }
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_local(async move {
+        let task = tokio::task::spawn_local(async move {
             tokio::select! {
                 _ = state.cancelled() => {}
-                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
-                    state.delayed.store(false, Ordering::Release);
+                _ = tokio::time::sleep_until(deadline) => {
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending.as_ref().is_none_or(|(current, _)| *current != deadline) { return; }
+                    pending.take();
+                    drop(pending);
                     state.deferred.store(true, Ordering::Release);
                     state.notify.notify_one();
                 }
             }
         });
+        *pending = Some((deadline, task.abort_handle()));
     }
 }
 
@@ -996,12 +1205,11 @@ impl ClientDb {
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage, scope).await
+        ClientDbInner::handle_query(&self.inner, query, opts, wait_for_coverage, scope).await
     }
 
     async fn query_transaction_rows(
@@ -1009,7 +1217,6 @@ impl ClientDb {
         query: crate::query::Query,
         opts: CoreReadOpts,
         transaction_id: OpenTransactionId,
-        table: String,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
@@ -1028,7 +1235,6 @@ impl ClientDb {
             .transaction_all_for_identity(transaction_id, &prepared, author, opts)
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
-        self.inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
@@ -1036,7 +1242,6 @@ impl ClientDb {
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
@@ -1047,7 +1252,6 @@ impl ClientDb {
             self.query_decoder.clone(),
             query,
             opts,
-            table,
             tx,
             cancellation,
             scope,
@@ -1060,7 +1264,7 @@ impl ClientDb {
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
         let (row_uuid, tx_id) = match row_id {
@@ -1091,7 +1295,7 @@ impl ClientDb {
         };
         JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
-        inner.remember_write(object_id, &table, tx_id);
+        inner.remember_write(tx_id);
         Ok((object_id, tx_id))
     }
 
@@ -1114,11 +1318,7 @@ impl ClientDb {
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table: table.clone(),
-            row_id,
-        });
-        inner.row_tables.insert(row_id, table);
+        tx.has_writes = true;
         Ok(row_id)
     }
 
@@ -1127,7 +1327,7 @@ impl ClientDb {
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
@@ -1145,8 +1345,7 @@ impl ClientDb {
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        let object_id = ObjectId::from_uuid(row_id);
-        inner.remember_write(object_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
@@ -1159,7 +1358,6 @@ impl ClientDb {
         cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let object_id = ObjectId::from_uuid(row_id);
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
@@ -1170,29 +1368,23 @@ impl ClientDb {
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table: table.clone(),
-            row_id: object_id,
-        });
-        inner.row_tables.insert(object_id, table);
+        tx.has_writes = true;
         Ok(())
     }
 
     fn update(
         &self,
+        table: &str,
         row_id: ObjectId,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("update requires a row created or observed by this client".to_string())
-        })?;
         let write = match identity {
             Some(identity) => inner.backend()?.upsert_for_identity(
                 identity,
-                &table,
+                table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
                 updated_at_ms,
@@ -1200,80 +1392,82 @@ impl ClientDb {
             None => {
                 inner
                     .backend()?
-                    .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms)
+                    .update(table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms)
             }
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        inner.remember_write(row_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
 
     fn stage_update(
         &self,
+        table: &str,
         transaction_id: OpenTransactionId,
         row_id: ObjectId,
         cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("update requires a row created or observed by this client".to_string())
-        })?;
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .exclusive_update(tx_id, table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
+        tx.has_writes = true;
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorSubject>) -> Result<CoreTxId> {
+    fn delete(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        identity: Option<CoreWriteIdentity>,
+    ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("delete requires a row created or observed by this client".to_string())
-        })?;
         let write = match identity {
             Some(identity) => {
                 inner
                     .backend()?
-                    .delete_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()))
+                    .delete_for_identity(identity, table, CoreRowUuid(*row_id.uuid()))
             }
-            None => inner.backend()?.delete(&table, CoreRowUuid(*row_id.uuid())),
+            None => inner.backend()?.delete(table, CoreRowUuid(*row_id.uuid())),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        inner.remember_write(row_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
 
-    fn stage_delete(&self, transaction_id: OpenTransactionId, row_id: ObjectId) -> Result<()> {
+    fn stage_delete(
+        &self,
+        table: &str,
+        transaction_id: OpenTransactionId,
+        row_id: ObjectId,
+    ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("delete requires a row created or observed by this client".to_string())
-        })?;
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
+            .exclusive_delete(tx_id, table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
+        tx.has_writes = true;
         Ok(())
     }
 
-    fn begin_transaction(&self, author: Option<CoreAuthorSubject>) -> Result<OpenTransactionId> {
+    fn begin_transaction(&self, identity: Option<CoreWriteIdentity>) -> Result<OpenTransactionId> {
         let mut inner = self.inner.borrow_mut();
         let mut transaction_id = OpenTransactionId::new();
         while inner.transactions.contains_key(&transaction_id)
@@ -1281,18 +1475,24 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        match author {
-            Some(author) => inner
+        match identity {
+            Some(identity) => inner
                 .backend()?
-                .begin_exclusive_for_identity(transaction_id, author),
+                .begin_exclusive_for_identity(transaction_id, identity),
             None => inner.backend()?.begin_exclusive(transaction_id),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
+        // Explicit sessions bind commit identity; attributed transactions use
+        // the core's bound commit path to retain their separate provenance.
+        let author = identity.and_then(|identity| match identity {
+            CoreWriteIdentity::Session(author) => Some(author),
+            CoreWriteIdentity::Attribution(_) | CoreWriteIdentity::Database => None,
+        });
         inner.transactions.insert(
             transaction_id,
             ExclusiveTransactionState {
                 author,
-                writes: Vec::new(),
+                has_writes: false,
             },
         );
         Ok(transaction_id)
@@ -1301,12 +1501,11 @@ impl ClientDb {
     fn commit_transaction(&self, transaction_id: OpenTransactionId) -> Result<TransactionId> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(transaction_id)?;
-        if inner
+        if !inner
             .transactions
             .get(&transaction_id)
             .expect("transaction open checked above")
-            .writes
-            .is_empty()
+            .has_writes
         {
             return Err(JazzError::Write(
                 "transaction cannot commit without writes".to_string(),
@@ -1325,9 +1524,6 @@ impl ClientDb {
         .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
         inner.write_map.insert(committed_id, tx_id);
-        for write in state.writes {
-            inner.row_tables.insert(write.row_id, write.table);
-        }
         inner
             .closed_transactions
             .insert(transaction_id, ClosedTransactionState::Committed);
@@ -1380,8 +1576,8 @@ impl ClientDb {
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
         generation: u64,
-        terminal: NativeTransportTerminalFuture,
-    ) {
+        terminal: impl Future<Output = NativeTransportTerminal> + 'static,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let terminal = terminal.await;
             let Some(inner) = inner.upgrade() else {
@@ -1392,7 +1588,7 @@ impl ClientDb {
                 .native_terminal_events
                 .push_back((generation, terminal));
             scheduler.wake(TickUrgency::Immediate);
-        });
+        })
     }
 
     async fn handle_native_terminal(
@@ -1535,6 +1731,7 @@ impl ClientDbInner {
     }
 
     fn disconnect_upstream(&mut self) -> bool {
+        self.upstream_io.take();
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
@@ -1628,12 +1825,12 @@ impl ClientDbInner {
             scheduler,
             tick_driver: None,
             upstream: None,
+            upstream_io: None,
             upstream_generation: 0,
             native_terminal_events: VecDeque::new(),
             upstream_recovery_generation: None,
             upstream_state_notify: Arc::new(tokio::sync::Notify::new()),
             write_map: HashMap::new(),
-            row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
             tick_driver_error: None,
@@ -1797,6 +1994,7 @@ impl ClientDbInner {
             )
         };
 
+        let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,
             expected_generation,
@@ -1804,6 +2002,7 @@ impl ClientDbInner {
             Rc::clone(&scheduler),
             config,
             state_notify,
+            Arc::clone(&wire_wake),
         )
         .await?;
         let Some(connected) = connected else {
@@ -1821,10 +2020,14 @@ impl ClientDbInner {
             permits_delegated_sessions,
             terminal,
         } = connected;
+        let queued_wire = ClientQueuedWire {
+            queues: Rc::new(RefCell::new(ClientWireQueues::default())),
+            wake: wire_wake,
+        };
         let connection = db
             .connect_upstream(Box::new(
                 WireTransportAdapter::new_with_session_context_and_delegated_sessions(
-                    transport,
+                    queued_wire.clone(),
                     protocol_version,
                     features,
                     None,
@@ -1834,7 +2037,9 @@ impl ClientDbInner {
             ))
             .await;
 
+        let pump = connection.lock().await.io_pump();
         let Some(inner) = inner.upgrade() else {
+            pump.disconnect();
             db.detach_connection(&connection);
             return Ok(false);
         };
@@ -1857,12 +2062,23 @@ impl ClientDbInner {
             inner_state.upstream_state_notify.notify_waiters();
             inner_state.upstream_generation
         };
-        ClientDb::spawn_native_terminal_watcher(
+        let task = ClientDb::spawn_native_terminal_watcher(
             Rc::downgrade(&inner),
-            scheduler,
+            Rc::clone(&scheduler),
             generation,
-            terminal,
+            drive_native_client_wire(
+                transport,
+                terminal,
+                queued_wire.clone(),
+                pump.clone(),
+                scheduler,
+            ),
         );
+        inner.borrow_mut().upstream_io = Some(ClientNativeIo {
+            pump,
+            transport: queued_wire,
+            task,
+        });
         Ok(true)
     }
 
@@ -1873,6 +2089,7 @@ impl ClientDbInner {
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
         state_notify: Arc<tokio::sync::Notify>,
+        wire_wake: Arc<tokio::sync::Notify>,
     ) -> Result<Option<ConnectedNativeTransport>> {
         let wake = scheduler.wake_handle();
         let admission = config.connector.connect(NativeTransportRequest {
@@ -1883,6 +2100,7 @@ impl ClientDbInner {
             peer_identity: identity.author,
             auth: config.auth,
             wake: Arc::new(move || {
+                wire_wake.notify_one();
                 wake.immediate.store(true, Ordering::Release);
                 wake.notify.notify_one();
             }),
@@ -1942,7 +2160,6 @@ impl ClientDbInner {
         inner: &Rc<RefCell<Self>>,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
@@ -1967,7 +2184,6 @@ impl ClientDbInner {
                 .await
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
@@ -2075,11 +2291,11 @@ impl ClientDbInner {
         query_decoder: PublicQueryDecoder,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
+        let table = query.table.clone();
         // Register before cloning the backend or awaiting core admission. A
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
@@ -2102,7 +2318,6 @@ impl ClientDbInner {
             stream = db.subscribe(&prepared, opts) => stream
                 .map_err(|error| JazzError::Query(error.to_string()))?,
         };
-        let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let _completion = completion;
             let mut stream = stream;
@@ -2286,11 +2501,6 @@ impl ClientDbInner {
                             &effective_updated,
                             &removed,
                         );
-                        let rows_for_cache = current_rows
-                            .iter()
-                            .map(|row| row.row.clone())
-                            .collect::<Vec<_>>();
-                        inner.borrow_mut().remember_rows(&table, &rows_for_cache);
                         let delta = change_delta;
                         let Ok(delta) = delta else {
                             break;
@@ -2410,16 +2620,8 @@ impl ClientDbInner {
         }
     }
 
-    fn remember_write(&mut self, row_id: ObjectId, table: &str, tx_id: CoreTxId) {
+    fn remember_write(&mut self, tx_id: CoreTxId) {
         self.write_map.insert(core_batch_id(tx_id), tx_id);
-        self.row_tables.insert(row_id, table.to_string());
-    }
-
-    fn remember_rows(&mut self, table: &str, rows: &[crate::node::CurrentRow]) {
-        for row in rows {
-            self.row_tables
-                .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
-        }
     }
 }
 
@@ -3081,12 +3283,37 @@ impl JazzClient {
         )))
     }
 
-    fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
+    fn write_identity(&self) -> Result<Option<CoreWriteIdentity>> {
+        if let Some(context) = &self.write_context
+            && let Some(attribution) = &context.attribution
+        {
+            if context.session.is_some() {
+                return Err(JazzError::Write(
+                    "attribution cannot override the permission session".into(),
+                ));
+            }
+            let author = CoreAuthorSubject::from_untrusted_canonical(attribution)
+                .map_err(|error| JazzError::Write(error.to_string()))?;
+            if author.account_id().is_none() {
+                return Err(JazzError::Write(
+                    "attribution requires an admitted account identity".into(),
+                ));
+            }
+            return Ok(Some(CoreWriteIdentity::Attribution(author)));
+        }
+        Ok(self
+            .explicit_session_write_identity()?
+            .map(CoreWriteIdentity::Session))
+    }
+
+    // The authenticated client identity and claims are installed when opening
+    // the database. Only a per-write session selects backend impersonation and
+    // its local authorization checks; ordinary replica writes use Database.
+    fn explicit_session_write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         let session = self
             .write_context
             .as_ref()
-            .and_then(|context| context.session())
-            .or(self.default_session.as_ref());
+            .and_then(|context| context.session());
         let Some(session) = session else {
             return Ok(None);
         };
@@ -3644,7 +3871,6 @@ impl JazzClient {
                     .set_identity_claims(identity.author, claims);
             }
             let client = Self {
-                default_session,
                 write_context: None,
                 db,
             };
@@ -3679,109 +3905,36 @@ impl JazzClient {
         query: Query,
         opts: CoreReadOpts,
     ) -> Result<SubscriptionStream> {
-        let table = query.table.clone();
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
         let (cancellation, cancellation_rx) = oneshot::channel();
         self.db
-            .subscribe(query, opts, table, tx, cancellation_rx, self.read_scope()?)
+            .subscribe(query, opts, tx, cancellation_rx, self.read_scope()?)
             .await?;
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query using a product-level read tier.
-    ///
-    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
-    pub async fn query_with_read_tier(
-        &self,
-        query: Query,
-        tier: ReadTier,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+    /// One-shot query with read tier.
+    pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
         self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
             .await
     }
 
-    /// One-shot query, optionally waiting for a legacy durability tier.
-    ///
-    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
-    #[deprecated(
-        note = "read APIs should use query_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
-    )]
-    pub async fn query(
-        &self,
-        query: Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        self.query_with_opts(query, Self::core_read_opts(durability_tier))
-            .await
-    }
-
-    /// Execute a row-id query using the canonical core read options.
+    /// Execute a query providing all read options.
     pub async fn query_with_opts(
         &self,
         query: Query,
         opts: CoreReadOpts,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        if query.flat_join.is_some() {
-            return Err(JazzError::Query(
-                "joined results require query_results(), which returns stable ResultKey values"
-                    .to_owned(),
-            ));
-        }
-        let results = self.query_results_with_opts(query, opts).await?;
-        results
-            .into_iter()
-            .map(|result| {
-                let row_id = result.key.row_id().ok_or_else(|| {
-                    JazzError::Query(
-                        "joined result cannot be represented by the legacy row-id query API"
-                            .to_owned(),
-                    )
-                })?;
-                Ok((row_id, result.into_values()))
-            })
-            .collect()
-    }
-
-    /// One-shot query with stable result keys using a product-level read tier.
-    pub async fn query_results_with_read_tier(
-        &self,
-        query: Query,
-        tier: ReadTier,
     ) -> Result<Vec<QueryResult>> {
-        self.query_results_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-            .await
-    }
-
-    /// One-shot query with stable keys using a legacy durability tier.
-    #[deprecated(
-        note = "read APIs should use query_results_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
-    )]
-    pub async fn query_results(
-        &self,
-        query: Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<QueryResult>> {
-        self.query_results_with_opts(query, Self::core_read_opts(durability_tier))
-            .await
-    }
-
-    /// Execute a query using the canonical core read options.
-    pub async fn query_results_with_opts(
-        &self,
-        query: Query,
-        opts: CoreReadOpts,
-    ) -> Result<Vec<QueryResult>> {
-        let table = query.table.clone();
         let rows = if let Some(transaction_id) = self
             .write_context
             .as_ref()
             .and_then(|ctx| ctx.transaction_id)
         {
             let author = self
-                .write_identity()?
+                .explicit_session_write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
-                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
+                .query_transaction_rows(query.clone(), opts, transaction_id, author)
                 .await?
         } else {
             // A product `Remote` read lowers to the legacy Edge tier. Both
@@ -3790,13 +3943,7 @@ impl JazzClient {
             // local maintained graph has settled that exact coverage.
             let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
             self.db
-                .query_rows(
-                    query.clone(),
-                    opts,
-                    table,
-                    wait_for_coverage,
-                    self.read_scope()?,
-                )
+                .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
         };
         self.db
@@ -3880,45 +4027,41 @@ impl JazzClient {
         }
     }
 
-    /// Update a row.
+    /// Update a row in the named table.
+    ///
+    /// The row need not have appeared in a previous query result. The table and
+    /// ID identify the target; the database still applies write policies.
     pub fn update(
         &self,
+        table: &str,
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
     ) -> Result<Option<TransactionId>> {
         {
-            let table = self
-                .db
-                .inner
-                .borrow()
-                .row_tables
-                .get(&object_id)
-                .cloned()
-                .ok_or_else(|| {
-                    JazzError::Write(
-                        "update requires a row created or observed by this client".to_string(),
-                    )
-                })?;
-            let cells = self.core_cells(&table, updates.into_iter().collect())?;
+            let cells = self.core_cells(table, updates.into_iter().collect())?;
             let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_update(transaction_id, object_id, cells)?;
+                self.db
+                    .stage_update(table, transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self
-                    .db
-                    .update(object_id, cells, self.write_identity()?, updated_at)?;
+                let tx_id =
+                    self.db
+                        .update(table, object_id, cells, self.write_identity()?, updated_at)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
 
-    /// Delete a row.
-    pub fn delete(&self, object_id: ObjectId) -> Result<Option<TransactionId>> {
+    /// Delete a row in the named table.
+    ///
+    /// The row need not have appeared in a previous query result. The table and
+    /// ID identify the target; the database still applies write policies.
+    pub fn delete(&self, table: &str, object_id: ObjectId) -> Result<Option<TransactionId>> {
         {
             self.reject_updated_at_override("deletes")?;
             if let Some(transaction_id) = self
@@ -3926,10 +4069,10 @@ impl JazzClient {
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_delete(transaction_id, object_id)?;
+                self.db.stage_delete(table, transaction_id, object_id)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.delete(object_id, self.write_identity()?)?;
+                let tx_id = self.db.delete(table, object_id, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3941,8 +4084,8 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        let author = self.write_identity()?;
-        let transaction_id = self.db.begin_transaction(author)?;
+        let identity = self.write_identity()?;
+        let transaction_id = self.db.begin_transaction(identity)?;
         // Keep an explicit session/attribution context when adding the
         // transaction id. In particular, a backend connection is SYSTEM by
         // default, but `for_session(..).begin_transaction()` must continue to
@@ -3997,7 +4140,6 @@ impl JazzClient {
     /// Create a client that uses the given write context for mutations.
     pub fn with_write_context(&self, write_context: WriteContext) -> JazzClient {
         JazzClient {
-            default_session: self.default_session.clone(),
             write_context: Some(write_context),
             db: self.db.clone(),
         }
@@ -4476,6 +4618,32 @@ mod tests {
     // spawn_local task and a late connection installation have no direct
     // public observation once the client has consumed its core facade.
 
+    // Scheduler deadlines belong to different peers and upload retries. An
+    // already armed long receive timeout must not suppress an earlier wake.
+    #[tokio::test(flavor = "current_thread")]
+    async fn earlier_client_deadline_replaces_pending_later_wake() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let scheduler = TickSchedulerImpl::default();
+                scheduler.wake_after(30_000);
+                scheduler.wake_after(5);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                // A host tick services every peer and rearms remaining deadlines.
+                scheduler.wake_after(10);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                scheduler.wake_after(30_000);
+                scheduler.cancel();
+                assert!(scheduler.state.delayed.lock().unwrap().is_none());
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_shutdown_aborts_owned_tick_driver() {
         struct DropMarker(Rc<Cell<bool>>);
@@ -4831,7 +4999,7 @@ mod tests {
     }
 
     #[test]
-    fn client_session_claim_projection_matches_admission_and_omits_recursive_values() {
+    fn client_session_claim_projection_matches_admission_and_preserves_nested_values() {
         assert_eq!(
             crate::tools::policy_claims::json_value_to_policy_claim(
                 json!(7),
@@ -4862,7 +5030,10 @@ mod tests {
                 crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
-            None
+            Some(CoreValue::Tuple(vec![CoreValue::Tuple(vec![
+                CoreValue::String("role".into()),
+                CoreValue::String("admin".into()),
+            ])]))
         );
     }
 
@@ -5154,7 +5325,7 @@ mod tests {
     // These internal tests are necessary because the distinction is made while
     // decoding the unverified JWT, before a client connection can expose it.
     #[test]
-    fn session_from_unverified_jwt_projects_flat_claims_and_omits_recursive_policy_values() {
+    fn session_from_unverified_jwt_projects_flat_and_nested_policy_claims() {
         let session = session_from_unverified_jwt(&make_test_jwt_without_claims("alice"))
             .expect("derive session from jwt without application claims");
 
@@ -5176,8 +5347,8 @@ mod tests {
             policy.get(&crate::query::provider_claim_key("role")),
             Some(&CoreValue::String("editor".to_owned()))
         );
-        assert!(!policy.contains_key(&crate::query::provider_claim_key("profile")));
-        assert!(!policy.contains_key(&crate::query::provider_claim_key("mixed")));
+        assert!(policy.contains_key(&crate::query::provider_claim_key("profile")));
+        assert!(policy.contains_key(&crate::query::provider_claim_key("mixed")));
         assert_eq!(
             policy.get(&crate::query::provider_claim_key("__proto__")),
             Some(&CoreValue::String("safe".to_owned()))
@@ -5242,8 +5413,7 @@ mod tests {
             )
             .expect("write local row");
 
-        let mut query =
-            Box::pin(client.query_with_read_tier(Query::from("todos"), ReadTier::Remote));
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::Remote));
         let waker = std::task::Waker::noop();
         let mut context = std::task::Context::from_waker(waker);
         assert!(
@@ -5306,7 +5476,7 @@ mod tests {
             .record_tick_driver_failure(error.to_string());
 
         let error = client
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("a stopped tick driver must be visible to the caller");
         assert!(
@@ -5348,17 +5518,17 @@ mod tests {
             .await
             .expect("reconnect offline persistent client");
         let rows = restarted
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect("query rehydrated rows");
 
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, row_id);
         assert_eq!(
-            rows,
-            vec![(
-                row_id,
-                vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
-            )]
+            rows[0].get("title"),
+            Some(&Value::Text("rehydrated".to_string()))
         );
+        assert_eq!(rows[0].get("completed"), Some(&Value::Boolean(false)));
     }
 
     /// A retained public subscription must become terminal during shutdown so
@@ -6096,7 +6266,7 @@ mod tests {
         );
 
         let error = retained_clone
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("retained clone must not operate after shared shutdown");
         assert!(
@@ -6276,12 +6446,12 @@ mod tests {
             ("user_title", "first by user_title"),
         ] {
             let rows = client
-                .query_results(
+                .query(
                     Query::from("items")
                         .order_by(column, OrderDirection::Asc)
                         .limit(1)
                         .select(["label"]),
-                    Some(DurabilityTier::Local),
+                    crate::tools::ReadTier::LocalFirst,
                 )
                 .await
                 .expect("evaluate projected window");
@@ -6313,7 +6483,7 @@ mod tests {
                 .expect("insert with explicit row UUID");
         }
         let rows = alice
-            .query_results_with_read_tier(
+            .query(
                 Query::from("items")
                     .order_by("id", OrderDirection::Desc)
                     .select(["id", "label"]),
@@ -6331,7 +6501,7 @@ mod tests {
         assert_eq!(rows[0].get("label"), Some(&Value::Text("a".to_owned())));
         assert_eq!(rows[1].get("label"), Some(&Value::Text("z".to_owned())));
         let selected = alice
-            .query_results_with_read_tier(
+            .query(
                 Query::from("items")
                     .filter(eq(col("id"), lit(Uuid::from_u128(1))))
                     .select(["id", "label"]),
@@ -6383,11 +6553,11 @@ mod tests {
             ("_app_score", [12, 9, 1, 18, 24]),
         ] {
             let rows = client
-                .query_results(
+                .query(
                     Query::from("items")
                         .order_by(order, OrderDirection::Asc)
                         .limit(1),
-                    Some(DurabilityTier::Local),
+                    crate::tools::ReadTier::LocalFirst,
                 )
                 .await
                 .unwrap();
@@ -6446,7 +6616,7 @@ mod tests {
                 ),
             ] {
                 let rows = client
-                    .query_results(query, Some(DurabilityTier::Local))
+                    .query(query, crate::tools::ReadTier::LocalFirst)
                     .await
                     .unwrap();
                 assert_eq!(rows.len(), 1);
@@ -6482,12 +6652,12 @@ mod tests {
                 .unwrap();
         }
         let rows = client
-            .query_results(
+            .query(
                 Query::from("items")
                     .count()
                     .group_by("state")
                     .order_by("state", OrderDirection::Asc),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6501,9 +6671,9 @@ mod tests {
         assert_eq!(rows[1].get("state"), Some(&Value::Text("beta".into())));
         assert_eq!(rows[1].get("count"), Some(&Value::Timestamp(1)));
         let rows = client
-            .query_results(
+            .query(
                 Query::from("items").count().group_by("user_state"),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6541,13 +6711,13 @@ mod tests {
                 .unwrap();
         }
         let rows = client
-            .query_results(
+            .query(
                 Query::from("people")
                     .join_via_column("tasks", "owner", "id", [])
                     .order_by("name", OrderDirection::Desc)
                     .offset(1)
                     .limit(3),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6613,7 +6783,7 @@ mod tests {
             .filter(gte(col("$updatedAt"), lit(updated_at_ms)))
             .select(["$updatedAt"]);
         let results = client
-            .query_results(query, Some(DurabilityTier::Local))
+            .query(query, crate::tools::ReadTier::LocalFirst)
             .await
             .expect("query with physical-ms provenance predicate");
         assert_eq!(results.len(), 1);

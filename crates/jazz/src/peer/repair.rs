@@ -319,7 +319,7 @@ impl PeerState {
         // support subscription at all and must not become an implicit grant.
         for version in versions {
             if !node
-                .version_satisfies_write_policy(version, writer, candidate_tx_id)
+                .version_satisfies_write_policy(version, writer, candidate_tx_id, versions)
                 .await?
             {
                 return Ok(false);

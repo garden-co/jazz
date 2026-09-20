@@ -217,6 +217,15 @@ where
         &self.catalogue.catalogue_schemas
     }
 
+    pub(crate) fn schema_with_active_permissions(&self, id: SchemaVersionId) -> Option<&JazzSchema> {
+        if id == self.catalogue.active_schema.schema {
+            Some(&self.catalogue.active_schema.compiled)
+        } else {
+            self.catalogue.catalogue_schemas.get(&id).map(|schema| &schema.schema)
+        }
+    }
+
+
     /// Highest contiguously activated authoritative catalogue position.
     pub fn active_catalogue_seq(&self) -> u64 {
         self.catalogue.active_catalogue_seq
@@ -246,7 +255,7 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.require_catalogue_ready()?;
-        Ok(self.catalogue.current_write_schema)
+        Ok(self.catalogue.active_schema.wire_pointer())
     }
 
     /// Return the active read-schema only after an authority catalogue has
@@ -269,9 +278,12 @@ where
         let mut schema = self.catalogue.schema.clone();
         mutate(schema.runtime_mut_for_testing());
         self.catalogue.schema = schema.clone();
+        if self.catalogue.active_schema.schema == self.catalogue.local_schema_version_id {
+            self.catalogue.active_schema.compiled = schema.clone();
+        }
         self.catalogue
             .catalogue_schemas
-            .get_mut(&self.catalogue.current_schema_version_id)
+            .get_mut(&self.catalogue.local_schema_version_id)
             .expect("current schema is present in the test catalogue")
             .schema = schema;
     }
@@ -300,6 +312,9 @@ where
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        if let Some(schema) = schemas.iter_mut().find(|schema| schema.id == self.catalogue.active_schema.schema) {
+            schema.schema = self.catalogue.active_schema.compiled.clone();
+        }
         schemas.sort_by_key(|schema| schema.id);
         let mut lineages = self
             .catalogue
@@ -353,7 +368,7 @@ where
             genesis_physical_identities,
             schemas,
             lineages,
-            current_write_schema: self.catalogue.current_write_schema,
+            current_write_schema: self.catalogue.active_schema.wire_pointer(),
         })
     }
 
@@ -970,6 +985,10 @@ where
         waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
         Ok(self.database.wait_for_publication_settlement(waker)?)
+    }
+
+    pub(crate) fn physical_identity_generation(&self) -> u64 {
+        self.physical_identity_generation
     }
 
     pub(crate) fn groove_runtime_token(&self) -> u64 {

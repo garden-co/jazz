@@ -2111,8 +2111,8 @@ dependencies = [
 name = "jazz-compression"
 version = "0.1.0"
 dependencies = [
+ "jazz-ruzstd",
  "lz4_flex 0.11.6",
- "ruzstd",
  "zstd",
 ]
 
@@ -2192,6 +2192,19 @@ dependencies = [
  "tracing",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "jazz-example-policy-scoped-documents-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -2336,6 +2349,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "jazz-ruzstd"
+version = "0.8.3"
 
 [[package]]
 name = "jazz-server"
@@ -4038,12 +4055,6 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
-
-[[package]]
-name = "ruzstd"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
 
 [[package]]
 name = "ryu"

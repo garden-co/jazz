@@ -28,6 +28,12 @@ pnpm add jazz-tools@alpha jazz-napi@alpha hono @hono/node-server
 pnpm add -D typescript tsx
 ```
 
+On Linux, GNU native bindings support x64 and ARM64 with glibc ≥ 2.34 and
+libstdc++ providing `GLIBCXX_3.4.29` / `CXXABI_1.3.13`, including AL2023.
+Alpine/musl is not a GNU NAPI target. Standalone CLI binaries have a separate
+support matrix. See the [Linux native package requirements](https://github.com/garden-co/jazz/blob/main/dev/artifacts/linux-napi/README.md)
+for the build baseline and verification details.
+
 ## Define your schema
 
 Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
@@ -46,7 +52,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 ### Add permissions
 
-A table with no [permission](/docs/auth/permissions) declarations is open to reads and writes. Once a table declares any policy, omitted operations are denied. For this quickstart, explicitly allow all four operations:
+Every operation requires an explicit [permission](/docs/auth/permissions) grant. Omitted operations are denied, including on tables with no policy declarations. For this quickstart, explicitly allow all four operations:
 
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";

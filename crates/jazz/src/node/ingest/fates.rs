@@ -243,6 +243,46 @@ where
         let Some(base_snapshot) = &tx.base_snapshot else {
             return Ok(false);
         };
+        // Point-read records carry names, not schema IDs. A retained alias is
+        // usable only when every mapping agrees on its physical identity.
+        // ponytail: scans retained schemas per distinct read table; index alias
+        // agreement at catalogue activation if this becomes a measured cost.
+        let mut read_schemas = BTreeMap::new();
+        for table in tx
+            .row_read_set
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|read| read.table.as_str())
+            .chain(
+                tx.absent_read_set
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|read| read.table.as_str()),
+            )
+        {
+            if read_schemas.contains_key(table) {
+                continue;
+            }
+            let mut mappings =
+                self.catalogue
+                    .physical_mappings
+                    .iter()
+                    .filter_map(|(schema, mapping)| {
+                        mapping
+                            .tables
+                            .get(table)
+                            .map(|table| (*schema, table.table_id))
+                    });
+            let Some((schema, table_id)) = mappings.next() else {
+                return Ok(false);
+            };
+            if mappings.any(|(_, candidate)| candidate != table_id) {
+                return Ok(false);
+            }
+            read_schemas.insert(table, schema);
+        }
         // Read sets validate the visible row state (a current deletion hides
         // content); write CAS validates only the register being written.
         let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
@@ -250,6 +290,7 @@ where
             BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
         for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
             let current = self.visible_global_row_tx_id_now_memoized(
+                read_schemas[read.table.as_str()],
                 &read.table,
                 read.row_uuid,
                 &mut visible_row_memo,
@@ -260,6 +301,7 @@ where
         }
         for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
             let current = self.visible_global_row_tx_id_now_memoized(
+                read_schemas[absent.table.as_str()],
                 &absent.table,
                 absent.row_uuid,
                 &mut visible_row_memo,
@@ -308,6 +350,7 @@ where
 
     async fn visible_global_row_tx_id_now_memoized(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         memo: &mut BTreeMap<(String, RowUuid), Option<TxId>>,
@@ -315,7 +358,9 @@ where
         if let Some(current) = memo.get(&(table.to_owned(), row_uuid)) {
             return *current;
         }
-        let current = self.visible_global_row_tx_id_now(table, row_uuid).await;
+        let current = self
+            .visible_global_row_tx_id_now(schema_version, table, row_uuid)
+            .await;
         memo.insert((table.to_owned(), row_uuid), current);
         current
     }
@@ -341,7 +386,11 @@ where
         &self,
         predicate: &PredicateRead,
     ) -> Result<bool, Error> {
-        let shape = crate::query::Query::from(&predicate.table).validate(&self.catalogue.schema)?;
+        let Ok(shape) =
+            crate::query::Query::from(&predicate.table).validate(&self.catalogue.schema)
+        else {
+            return Ok(false);
+        };
         let binding = shape.bind(BTreeMap::new())?;
         Ok(predicate.shape_id == shape.shape_id() && predicate.binding_id == binding.binding_id())
     }
@@ -351,10 +400,30 @@ where
         predicate: &PredicateRead,
         snapshot: &Snapshot,
     ) -> Result<bool, Error> {
-        let shape = predicate.shape.validate(&self.catalogue.schema)?;
-        if shape.shape_id() != predicate.shape_id {
+        // Shape IDs include the authoring schema. A migration must not make an
+        // unchanged read conflict merely because this authority uses another view.
+        let shape = predicate
+            .shape
+            .validate(&self.catalogue.schema)
+            .ok()
+            .filter(|shape| shape.shape_id() == predicate.shape_id)
+            .or_else(|| {
+                // ponytail: only mismatched views scan schema history; carry an
+                // explicit schema ID if large catalogues make this measurable.
+                self.catalogue
+                    .catalogue_schemas
+                    .values()
+                    .find_map(|schema| {
+                        predicate
+                            .shape
+                            .validate(&schema.schema)
+                            .ok()
+                            .filter(|shape| shape.shape_id() == predicate.shape_id)
+                    })
+            });
+        let Some(shape) = shape else {
             return Ok(true);
-        }
+        };
         let binding = shape.bind(predicate.binding_values.clone())?;
         if binding.binding_id() != predicate.binding_id {
             return Ok(true);
@@ -412,7 +481,14 @@ where
             .query_rows(shape, binding, DurabilityTier::Global)
             .await?
         {
-            if let Some(tx_id) = self.visible_global_content_tx_id_now(&table, row.row_uuid()).await {
+            if let Some(tx_id) = self
+                .visible_global_content_tx_id_in_schema_now(
+                    shape.schema_version(),
+                    &table,
+                    row.row_uuid(),
+                )
+                .await
+            {
                 set.insert((row.row_uuid(), tx_id));
             }
         }
@@ -444,7 +520,7 @@ where
         for row in rows {
             let row_uuid = row.row_uuid();
             let Some(tx_id) = self
-                .snapshot_content_witness(&table, row_uuid, snapshot)
+                .snapshot_content_witness(shape.schema_version(), &table, row_uuid, snapshot)
                 .await
             else {
                     return Err(Error::InvalidStoredValue(
@@ -597,7 +673,7 @@ where
                 return Ok(false);
             }
             if !self
-                .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
+                .version_satisfies_write_policy(version, permission_subject, tx.tx_id, versions)
                 .await?
             {
                 return Ok(false);
@@ -614,9 +690,15 @@ where
         version: &VersionRecord,
         author: AuthorSubject,
         candidate_tx_id: TxId,
+        candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author, Some(candidate_tx_id))
-            .await
+        self.write_policy_allows_version_record(
+            version,
+            author,
+            Some(candidate_tx_id),
+            candidate_versions,
+        )
+        .await
     }
 
     pub(super) async fn cascade_root_for_versions(
@@ -978,6 +1060,7 @@ where
         if rejected.is_empty() {
             return Ok(None);
         }
+        self.clear_content_version_reachability_cache();
         let affected = rejected
             .iter()
             .map(|version| (version.table, version.row_uuid(), version.layer()))
@@ -1064,6 +1147,7 @@ where
             )
             .await?;
         }
+        self.clear_content_version_reachability_cache();
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

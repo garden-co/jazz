@@ -6890,23 +6890,6 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    #[derive(Default)]
-    struct TestWireTransport {
-        inbound: VecDeque<Vec<u8>>,
-        outbound: Vec<Vec<u8>>,
-    }
-
-    impl WireTransport for TestWireTransport {
-        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.outbound.push(frame);
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            self.inbound.pop_front()
-        }
-    }
-
     struct IdleWire;
 
     impl WireTransport for IdleWire {
@@ -8199,7 +8182,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_strict_read_crosses_edge_and_core() {
         let issuer = TestJwtIssuer::start().await;
-        let schema = schema();
+        let schema = permissive_schema();
         let public_schema = schema.public_schema().clone();
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())
@@ -8294,7 +8277,7 @@ mod tests {
 
     async fn private_session_restart_receipt(offline: bool) {
         let issuer = TestJwtIssuer::start().await;
-        let schema = schema();
+        let schema = permissive_schema();
         let public_schema = schema.public_schema().clone();
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())
@@ -12871,24 +12854,38 @@ mod tests {
         // A peer adapter produces a real framed network payload. The relay
         // bridge receives that frame only through another adapter; it cannot
         // accidentally accept an unframed postcard message as a second wire.
-        let mut peer = WireTransportAdapter::current(TestWireTransport::default());
-        peer.send(inbound.clone()).unwrap();
-        let peer_wire = peer.into_inner();
-        let mut upstream = WireTransportAdapter::current(TestWireTransport {
-            inbound: peer_wire.outbound.into(),
-            outbound: Vec::new(),
+        struct DuplexWire {
+            inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+            outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        }
+        impl WireTransport for DuplexWire {
+            fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+                self.outbound.lock().unwrap().push_back(frame);
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.lock().unwrap().pop_front()
+            }
+        }
+        let to_relay = Arc::new(Mutex::new(VecDeque::new()));
+        let to_peer = Arc::new(Mutex::new(VecDeque::new()));
+        let mut peer = WireTransportAdapter::current(DuplexWire {
+            inbound: Arc::clone(&to_peer),
+            outbound: Arc::clone(&to_relay),
         });
-
+        let mut upstream = WireTransportAdapter::current(DuplexWire {
+            inbound: to_relay,
+            outbound: to_peer,
+        });
+        peer.send(inbound.clone()).unwrap();
         assert!(bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
         assert_eq!(relay_wire.inbound.lock().unwrap().pop(), Some(inbound));
-
-        let sent_to_edge = upstream.into_inner().outbound;
-        assert_eq!(sent_to_edge.len(), 1);
-        let mut edge = WireTransportAdapter::current(TestWireTransport {
-            inbound: sent_to_edge.into(),
-            outbound: Vec::new(),
-        });
-        assert_eq!(edge.try_recv(), Some(outbound));
+        assert_eq!(peer.try_recv_strict().unwrap(), Some(outbound));
+        assert_eq!(
+            peer.try_recv_strict().unwrap(),
+            None,
+            "credits are not semantic messages"
+        );
     }
 
     // Internal queue seam: a host cannot deliberately block the relay owner.
@@ -14000,18 +13997,19 @@ mod tests {
         let tx = client
             .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
             .unwrap();
-        let release = relay
+        let (release, pending_read) = relay
             .run(move |worker| {
                 let (db, transaction) = worker.foreground_transaction(id, tx)?;
                 let (release, released) = futures::channel::oneshot::channel::<()>();
                 let held = Rc::clone(&db);
-                let _read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
+                let read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
                     let hold = Box::pin(held.hold_node_owner_for_test());
                     let _ = futures::future::select(released, hold).await;
                     Ok(())
                 });
                 db.drive_queued_mutation_once();
-                Ok(release)
+                // Dropping the receiver cancels the queued read and releases contention.
+                Ok((release, read))
             })
             .unwrap();
         client
@@ -14038,6 +14036,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(relay.run(|worker| Ok(worker.closing.is_empty())).unwrap());
+        drop(pending_read);
         assert!(host.close_foreground(next).unwrap());
         assert!(host.close_foreground(keeper).unwrap());
     }

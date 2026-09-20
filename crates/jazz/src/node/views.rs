@@ -320,7 +320,7 @@ where
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         let global = self
             .visible_global_layer_tx_id_for_physical_table_now(
                 table_id,
@@ -523,7 +523,7 @@ where
     /// Subscribe to the raw history storage table.
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
-        let schema_version = self.catalogue.current_schema_version_id;
+        let schema_version = self.catalogue.local_schema_version_id;
         let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
             .subscribe_one_sink(source)
@@ -976,7 +976,7 @@ where
             && allow_authoritative_scalar_exit_refresh
             && !exit_candidates.is_empty()
             && has_default_read_view
-            && shape.schema_version() == self.catalogue.current_schema_version_id
+            && shape.schema_version() == self.catalogue.local_schema_version_id
             && simple_scalar_exit_query(shape.query())
         {
             let (read_shape, read_binding) =
@@ -1669,6 +1669,60 @@ where
                 .all(|state| !state.initial_hydration)
         {
             self.finish_initial_sync_flush_cadence().await?;
+        }
+        Ok(())
+    }
+
+    /// Preserve a discarded Pending carrier's transaction identity for its
+    /// already-registered fate observer, without publishing any row version or
+    /// accepting the discarded view's supporting set. A later ordinary carrier
+    /// extends this existing zero-body, view-scoped fragment.
+    pub(crate) async fn remember_discarded_pending_view_transactions(
+        &mut self,
+        carriers: &[VersionCarrier],
+    ) -> Result<(), Error> {
+        let mut headers = BTreeMap::new();
+        for carrier in carriers {
+            for bundle in carrier
+                .bundle_refs()
+                .map_err(|_| Error::MalformedViewUpdate("malformed version-bundle run"))?
+            {
+                if !matches!(bundle.fate, Fate::Pending) {
+                    continue;
+                }
+                let mut tx = transaction_without_permission_subject(bundle.tx);
+                tx.n_total_writes = 0;
+                self.admit_contribution_merge_for_storage(&tx)?;
+                if headers
+                    .get(&tx.tx_id)
+                    .is_some_and(|previous| !known_transaction_payload_matches(previous, &tx))
+                {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                headers.insert(tx.tx_id, tx);
+            }
+        }
+        let mut missing = Vec::new();
+        for (tx_id, tx) in headers {
+            if let Some(stored) = self.query_transaction(tx_id).await? {
+                let mut identity = transaction_without_permission_subject(&stored.tx);
+                identity.n_total_writes = 0;
+                if !known_transaction_payload_matches(&identity, &tx) {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+            } else {
+                missing.push(tx);
+            }
+        }
+        for tx in missing {
+            self.ingest_transaction_fragment_without_current_indexes(
+                tx,
+                Vec::new(),
+                Fate::Pending,
+                None,
+                DurabilityTier::Local,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -2578,10 +2632,10 @@ where
         let (schema, schema_version) = if self.table(table).is_ok() {
             (
                 &self.catalogue.schema,
-                self.catalogue.current_schema_version_id,
+                self.catalogue.local_schema_version_id,
             )
         } else {
-            let schema_version = self.catalogue.current_write_schema.schema;
+            let schema_version = self.catalogue.active_schema.schema;
             (
                 &self
                     .catalogue
@@ -2859,9 +2913,10 @@ where
             else {
                 continue;
             };
-            if canonical.schema_version_alias() == version.schema_version_alias()
-                && self.physical_table_id_for_version(&canonical)? == projected_table_id
-            {
+            // The read projection may change the schema alias even when the
+            // table layout is unchanged. This exact history key identifies the
+            // authored version; never replace its identity with the projection.
+            if self.physical_table_id_for_version(&canonical)? == projected_table_id {
                 return Ok(canonical);
             }
         }

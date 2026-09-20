@@ -3,18 +3,27 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 
 // #region nested-schema
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  tasks: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    projectId: s.ref("projects"),
-  }),
-  comments: s.table({
-    body: s.string(),
-    taskId: s.ref("tasks"),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { tasks: s.reverse("tasks", "project") },
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId"), comments: s.reverse("comments", "task") },
+  ),
+  comments: s.table(
+    {
+      body: s.string(),
+      taskId: s.uuid(),
+    },
+    { task: s.rel("tasks", "taskId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

@@ -3,6 +3,7 @@ import type { DBAdapterSchemaCreation } from "better-auth";
 import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { assertUserColumnNameAllowed } from "../magic-columns.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
 const JS_IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -47,7 +48,7 @@ function toJazzReferenceColumn(args: {
   field: DBFieldAttribute;
   getModelName: (model: string) => string;
 }): { columnType: ColumnType; references: string } {
-  const { modelName, fieldName, storedFieldName, field, getModelName } = args;
+  const { modelName, fieldName, field, getModelName } = args;
   const reference = field.references;
 
   if (!reference) {
@@ -64,23 +65,11 @@ function toJazzReferenceColumn(args: {
 
   switch (field.type) {
     case "string":
-      if (!isScalarReferenceFieldName(storedFieldName)) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" resolves to "${storedFieldName}", but Jazz reference keys must end with "Id" or "_id".`,
-        );
-      }
-
       return {
         columnType: { type: "Uuid" },
         references,
       };
     case "string[]":
-      if (!isArrayReferenceFieldName(storedFieldName)) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" resolves to "${storedFieldName}", but Jazz array reference keys must end with "Ids" or "_ids".`,
-        );
-      }
-
       return {
         columnType: {
           type: "Array",
@@ -114,14 +103,6 @@ function assertStoredFieldNameAllowed(args: {
   assertUserColumnNameAllowed(storedFieldName);
 }
 
-function isScalarReferenceFieldName(fieldName: string): boolean {
-  return fieldName.endsWith("Id") || fieldName.endsWith("_id");
-}
-
-function isArrayReferenceFieldName(fieldName: string): boolean {
-  return fieldName.endsWith("Ids") || fieldName.endsWith("_ids");
-}
-
 function formatStringLiteral(value: string): string {
   return JSON.stringify(value);
 }
@@ -147,7 +128,7 @@ function toJazzSchemaReferenceExpression(args: {
   field: DBFieldAttribute;
   getModelName: (model: string) => string;
 }): string {
-  const { modelName, fieldName, storedFieldName, field, getModelName } = args;
+  const { modelName, fieldName, field } = args;
   const reference = field.references;
 
   if (!reference) {
@@ -162,24 +143,10 @@ function toJazzSchemaReferenceExpression(args: {
 
   switch (field.type) {
     case "string": {
-      if (!isScalarReferenceFieldName(storedFieldName)) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" resolves to "${storedFieldName}", but Jazz reference keys must end with "Id" or "_id".`,
-        );
-      }
-
-      const targetTableName = getModelName(reference.model);
-      return withOptionalSuffix(`s.ref(${formatStringLiteral(targetTableName)})`, field);
+      return withOptionalSuffix("s.uuid()", field);
     }
     case "string[]": {
-      if (!isArrayReferenceFieldName(storedFieldName)) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" resolves to "${storedFieldName}", but Jazz array reference keys must end with "Ids" or "_ids".`,
-        );
-      }
-
-      const targetTableName = getModelName(reference.model);
-      return withOptionalSuffix(`s.array(s.ref(${formatStringLiteral(targetTableName)}))`, field);
+      return withOptionalSuffix("s.array(s.uuid())", field);
     }
     case "number":
     case "number[]":
@@ -277,7 +244,9 @@ export function buildJazzSchema(args: {
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
+    assertSchemaNameAllowed(tableName);
     const columns: WasmSchema[string]["columns"] = [];
+    const relations: NonNullable<WasmSchema[string]["relations"]> = {};
 
     for (const [fieldName, field] of Object.entries(model.fields)) {
       if (fieldName === "id") {
@@ -296,6 +265,11 @@ export function buildJazzSchema(args: {
           getModelName,
         });
 
+        relations[`${storedFieldName}Relation`] = {
+          kind: "forward",
+          table: referenceColumn.references,
+          column: storedFieldName,
+        };
         columns.push({
           name: storedFieldName,
           column_type: referenceColumn.columnType,
@@ -312,7 +286,11 @@ export function buildJazzSchema(args: {
       });
     }
 
-    wasmSchema[tableName] = { columns };
+    for (const name of Object.keys(relations)) {
+      if (columns.some((c) => c.name === name))
+        throw new Error(`Generated relationship "${tableName}.${name}" collides with a column.`);
+    }
+    wasmSchema[tableName] = { columns, relations };
   }
 
   return wasmSchema;
@@ -343,7 +321,9 @@ export function buildJazzSchemaSourceText(args: {
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
+    assertSchemaNameAllowed(tableName);
     const lines = [`  ${formatObjectKey(tableName)}: s.table({`];
+    const relations: string[] = [];
 
     for (const [fieldName, field] of Object.entries(model.fields)) {
       if (fieldName === "id") {
@@ -353,6 +333,18 @@ export function buildJazzSchemaSourceText(args: {
       const storedFieldName = getFieldName({ model: modelName, field: fieldName });
       assertStoredFieldNameAllowed({ modelName, fieldName, storedFieldName });
 
+      if (field.references) {
+        const alias = `${storedFieldName}Relation`;
+        if (
+          Object.keys(model.fields).some(
+            (f) => getFieldName({ model: modelName, field: f }) === alias,
+          )
+        )
+          throw new Error(`Generated relationship "${tableName}.${alias}" collides with a column.`);
+        relations.push(
+          `    ${formatObjectKey(alias)}: s.rel(${formatStringLiteral(getModelName(field.references.model))}, ${formatStringLiteral(storedFieldName)}),`,
+        );
+      }
       const expression = toJazzSchemaColumnExpression({
         modelName,
         fieldName,
@@ -372,7 +364,7 @@ export function buildJazzSchemaSourceText(args: {
       );
     }
 
-    lines.push("  }),");
+    lines.push("  }, {", ...relations, "  }),");
     blocks.push(lines.join("\n"));
 
     const policy = formatPropertyAccess("policy", tableName);

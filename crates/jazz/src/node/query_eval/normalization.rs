@@ -1664,6 +1664,7 @@ fn reachable_access_key(
 fn normalize_join_via_right(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
+    nested_contributions: &mut Vec<JoinContribution>,
     schema: &RuntimeSchema,
     join: &JoinVia,
     path: &str,
@@ -1739,8 +1740,25 @@ fn normalize_join_via_right(
 
     for (nested_index, nested) in join.nested_joins.iter().enumerate() {
         let nested_path = format!("{path}:nested:{nested_index}");
-        let (nested_right, nested_source) =
-            normalize_join_via_right(nodes, auxiliary_sources, schema, nested, &nested_path)?;
+        let mut descendants = Vec::new();
+        let (nested_right, nested_source) = normalize_join_via_right(
+            nodes,
+            auxiliary_sources,
+            &mut descendants,
+            schema,
+            nested,
+            &nested_path,
+        )?;
+        // Publish parents before descendants so each nested source can be
+        // constrained to parent rows that actually contribute to visible roots.
+        nested_contributions.push(JoinContribution {
+            parent: Some(join_source.clone()),
+            id: nested_path.clone(),
+            source: nested_source.clone(),
+            input: nested_right.clone(),
+            membership: join_via_predicate(&join_source, &nested_source, nested),
+        });
+        nested_contributions.extend(descendants);
         let nested_join_node = RowSetNodeId(format!("{nested_path}:join"));
         nodes.insert(
             nested_join_node.clone(),
@@ -2336,16 +2354,25 @@ fn normalize_filter_join_chain(
         } else {
             format!("{prefix}:join_via:{index}")
         };
-        let (right, join_source) =
-            normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
+        let mut nested_contributions = Vec::new();
+        let (right, join_source) = normalize_join_via_right(
+            nodes,
+            auxiliary_sources,
+            &mut nested_contributions,
+            schema,
+            join,
+            &path,
+        )?;
         let join_predicate = join_via_predicate(root_source, &join_source, join);
         if record_join_contributions {
             join_contributions.push(JoinContribution {
+                parent: None,
                 id: path.clone(),
                 source: join_source.clone(),
                 input: right.clone(),
                 membership: join_predicate.clone(),
             });
+            join_contributions.extend(nested_contributions);
         }
         let join_node = RowSetNodeId(format!("{path}:join"));
         nodes.insert(
@@ -2532,6 +2559,12 @@ fn normalize_inherited_parent_policy(
                 &parent_inheritance_path,
             )?
         };
+    } else if !matches!(inherits.operation, crate::query::InheritsOperation::Update)
+        || parent_table.write_policies.update_check.is_none()
+    {
+        // Inheritance needs an explicit parent operation. A CHECK-only
+        // UPDATE still declares UPDATE and has no old-row predicate to prove.
+        return Ok(normalize_false_policy_branch(nodes, child_current, prefix));
     }
     let join_node = RowSetNodeId(format!("{prefix}:join"));
     let membership = NormalizedPredicateExpr::Compare {
@@ -2796,7 +2829,9 @@ where
         shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+        let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if shape.schema_version() == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -3091,6 +3126,7 @@ where
                 // contributor representation used by `join_via` so terminal
                 // lowering derives each source from the post-policy root.
                 join_contributions.push(JoinContribution {
+                    parent: None,
                     id: format!("flat_join:{index}"),
                     source: source.clone(),
                     input: right_input,

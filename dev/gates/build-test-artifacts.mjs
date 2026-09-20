@@ -31,7 +31,9 @@ function worktreeGitDirectory(cwd = root) {
     }).trim();
     return isAbsolute(directory) ? directory : resolve(cwd, directory);
   } catch (error) {
-    throw lockFilesystemError("find shared Git directory", error);
+    throw new Error(
+      `${lockFilesystemError("find worktree Git directory", error).message} For an archived-source build, set JAZZ_TEST_ARTIFACT_LOCK_PATH to a writable absolute path reserved for this build; native provenance must still be supplied by the artifact producer.`,
+    );
   }
 }
 

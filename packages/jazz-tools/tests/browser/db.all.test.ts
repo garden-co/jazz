@@ -199,7 +199,7 @@ describe("db.all browser integration", () => {
     expect(teamRows).toHaveLength(1);
     expect(teamRows[0]).toMatchObject({ id: teamId, name: "FK Team" });
 
-    const itemRows = await db.all(bundles.where({ id: bundleId }).hopTo("items"));
+    const itemRows = await db.all(bundles.where({ id: bundleId }).hopTo("itemsRelation"));
     expect(itemRows).toHaveLength(2);
     expect(itemRows.map((row) => row.label).sort()).toEqual(["A", "B"]);
   });

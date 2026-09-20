@@ -336,6 +336,10 @@ impl WasmPendingNativeRead {
             None => Ok(JsValue::NULL),
         }
     }
+
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+    }
 }
 
 fn pending_operation_waker(callback: js_sys::Function) -> Waker {
@@ -998,10 +1002,6 @@ impl WasmDbInner {
                 };
                 if let Some(open_tx) = open_tx {
                     let pending = $db.enqueue_transaction_read(open_tx, future);
-                    #[allow(unused_variables)]
-                    if let WasmDbInner::Memory(memory) = self {
-                        memory.drive_queued_mutation_once();
-                    }
                     pending.await.map_err(transaction_read_cancelled)?
                 } else {
                     future.await
@@ -2591,6 +2591,25 @@ impl WasmTransport {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
         }
         Ok(frames)
+    }
+
+    /// Remaining receive deadline, independent of the semantic node lock.
+    #[wasm_bindgen(js_name = auxiliaryReceiveTimeoutMs)]
+    pub fn auxiliary_receive_timeout_ms(&self) -> Option<u32> {
+        self.auxiliary_pump
+            .incomplete_receive_timeout_ms()
+            .map(|delay| delay.min(u64::from(u32::MAX)) as u32)
+    }
+
+    /// Retire only this connection when a partial channel exceeds its deadline.
+    #[wasm_bindgen(js_name = expireAuxiliaryReceive)]
+    pub fn expire_auxiliary_receive(&self) -> Result<(), JsValue> {
+        self.auxiliary_pump
+            .expire_incomplete_receive()
+            .map_err(|error| {
+                self.auxiliary_pump.disconnect();
+                JsValue::from_str(&error)
+            })
     }
 
     /// Resolve when the independently driven chunk lane has socket output.
@@ -4468,7 +4487,7 @@ mod dynamic_schema_view_tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn wasm_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+    fn wasm_claim_ingress_preserves_nested_json_and_scalar_prototype_names() {
         let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = claims_from_js(
             author,
@@ -4482,8 +4501,8 @@ mod dynamic_schema_view_tests {
         )
         .expect("recursive metadata must not reject WASM admission");
 
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("mixed")));
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("__proto__")),
             Some(&Value::String("safe".to_owned()))
@@ -4581,16 +4600,24 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         let query = postcard::to_allocvec(&view.table("items")).unwrap();
-        let result = block_on(WasmDbInner::Memory(Rc::clone(&view)).all_serialized_query(
-            query,
-            ReadOpts::default(),
-            Some(batch),
-            None,
-            None,
-            false,
-            f64::INFINITY,
-        ))
-        .unwrap();
+        let inner = WasmDbInner::Memory(Rc::clone(&view));
+        let (result, tick) = block_on(async {
+            // This native fixture has no browser scheduler to drive the owner's queue.
+            futures_util::join!(
+                inner.all_serialized_query(
+                    query,
+                    ReadOpts::default(),
+                    Some(batch),
+                    None,
+                    None,
+                    false,
+                    f64::INFINITY,
+                ),
+                owner.tick(),
+            )
+        });
+        tick.unwrap();
+        let result = result.unwrap();
         let SerializedReadResult::Rows(rows) = result else {
             panic!("plain transaction query must return rows")
         };

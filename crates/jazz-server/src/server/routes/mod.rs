@@ -36,6 +36,7 @@ use http::{
     schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
+pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
 
 async fn app_id_gate(
@@ -1595,13 +1596,13 @@ mod tests {
 
         let current = state
             .catalogue
-            .current_permissions(&state.catalogue_store)
+            .active_schema(&state.catalogue_store)
             .expect("read winning permissions")
             .expect("winning permissions head");
         let users = TableName::new("users");
-        assert_eq!(current.head.schema_hash, schema_hash);
+        assert_eq!(current.summary.schema_hash, schema_hash);
         assert_eq!(
-            current.head.bundle_object_id.to_string(),
+            current.summary.bundle_object_id.to_string(),
             winning_bundle_object_id
         );
         assert_eq!(
@@ -1665,7 +1666,7 @@ mod tests {
             .expect("persist H1");
         let h1 = state
             .catalogue
-            .current_permissions_head(&state.catalogue_store)
+            .active_schema_summary(&state.catalogue_store)
             .expect("read H1")
             .expect("H1 exists")
             .bundle_object_id;
@@ -1742,10 +1743,10 @@ mod tests {
 
         let current = state
             .catalogue
-            .current_permissions(&state.catalogue_store)
+            .active_schema(&state.catalogue_store)
             .expect("read durable permissions")
             .expect("durable H2");
-        assert_eq!(current.head.version, 2);
+        assert_eq!(current.summary.version, 2);
         assert_eq!(
             current
                 .permissions

@@ -36,8 +36,9 @@ fn profiles_query() -> jazz::query::Query {
 
 async fn profile_values(client: &JazzClient, row_id: ObjectId) -> Vec<Value> {
     client
-        .query(profiles_query(), None)
+        .query(profiles_query(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query profiles")
         .into_iter()
         .find(|(id, _)| *id == row_id)
@@ -155,6 +156,7 @@ async fn update_reads_back_non_null_values_in_nullable_columns() {
 
     client
         .update(
+            "profiles",
             row_id,
             vec![
                 ("name".to_owned(), Value::Text("updated".to_owned())),
@@ -202,6 +204,7 @@ async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_
         .expect("stage insert non-null values into nullable columns");
 
     tx.update(
+        "profiles",
         row_id,
         vec![
             ("name".to_owned(), Value::Text("staged updated".to_owned())),

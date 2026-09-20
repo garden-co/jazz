@@ -7,8 +7,8 @@ import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.j
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createJazzSession } from "./index.js";
 
-const before = { entries: s.table({ text: s.string() }) };
-const after = { ...before, controls: s.table({ value: s.string() }) };
+const before = { entries: s.table({ text: s.string() }, {}) };
+const after = { ...before, controls: s.table({ value: s.string() }, {}) };
 const oldApp = s.defineApp(before);
 const newApp = s.defineApp(after);
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
@@ -31,7 +31,11 @@ describe("offline persistent schema bootstrap", () => {
           backendSecret: randomUUID(),
           allowLocalFirstAuth: true,
         };
-        let server = await startLocalJazzServer({ ...settings, schema: oldApp });
+        let server = await startLocalJazzServer({
+          ...settings,
+          schema: oldApp,
+          permissions: oldPermissions,
+        });
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
@@ -44,6 +48,7 @@ describe("offline persistent schema bootstrap", () => {
             appId: settings.appId,
             serverUrl: server.url,
             app: clientApp,
+            permissions: clientApp === newApp ? newPermissions : oldPermissions,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: asReader ? "local-first" : { backendSecret: settings.backendSecret },
           });
@@ -102,7 +107,7 @@ describe("offline persistent schema bootstrap", () => {
           expect(await reopened.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
           await close(reopened.session);
           // An incompatible, unpublished target cannot borrow B's admission.
-          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }) });
+          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }, {}) });
           const rejected = await open(incompatible, "reader");
           await expect(rejected.db.all(incompatible.entries, { tier: "global" })).rejects.toThrow(
             /awaiting published catalogue admission/,

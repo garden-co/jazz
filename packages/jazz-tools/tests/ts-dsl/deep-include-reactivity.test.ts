@@ -5,20 +5,35 @@ import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db } from "../../src/runtime/db.js";
 
 const schema = {
-  orgs: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    org_id: s.ref("orgs"),
-  }),
-  user_checks: s.table({
-    todo_id: s.ref("todos"),
-  }),
-  check_notes: s.table({
-    body: s.string(),
-    user_check_id: s.ref("user_checks"),
-  }),
+  orgs: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaOrg: s.reverse("todos", "org") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      org_id: s.uuid(),
+    },
+    { org: s.rel("orgs", "org_id"), user_checksViaTodo: s.reverse("user_checks", "todo") },
+  ),
+  user_checks: s.table(
+    {
+      todo_id: s.uuid(),
+    },
+    {
+      todo: s.rel("todos", "todo_id"),
+      check_notesViaUser_check: s.reverse("check_notes", "user_check"),
+    },
+  ),
+  check_notes: s.table(
+    {
+      body: s.string(),
+      user_check_id: s.uuid(),
+    },
+    { user_check: s.rel("user_checks", "user_check_id") },
+  ),
 };
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);

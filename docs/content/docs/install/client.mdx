@@ -83,7 +83,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Get an app ID
 
-Your app ID namespaces your data for storage and sync. Click below to generate one on [Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`)&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are automatically deleted after 14 days.
+Your app ID namespaces your data for storage and sync. Click below to generate one on [Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`)&hairsp;—&hairsp;you'll also get the secrets you need to deploy your schema and permissions later. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are automatically deleted after 14 days.
 
 <GenerateAppId />
 
@@ -269,7 +269,7 @@ Framework hooks return `undefined` while loading, then an array of matching rows
 
 ## Enable sync
 
-So far, your to-do list only works locally. To sync across devices, you need permissions published to the server.
+So far, your to-do list only works locally. To sync across devices, deploy your schema and permissions to the server.
 
 <Accordions type="single">
   <Accordion title="Didn't generate your app ID above? Generate it now!">
@@ -279,13 +279,13 @@ So far, your to-do list only works locally. To sync across devices, you need per
 
 ### Add permissions
 
-The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
+Without [permissions](/docs/auth/permissions), permission-scoped server reads return no rows and writes are rejected. For this quickstart, allow everything:
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-client-localfirst-ts/permissions.ts#quickstart-permissions-ts
 </include>
 
-Then publish the permissions bundle using the app ID and admin secret from above:
+Then run `deploy` from the directory containing both `schema.ts` and `permissions.ts`, using the app ID and admin secret from above:
 
 <DeployCommand />
 
@@ -295,9 +295,9 @@ Update your client config to add `serverUrl` — Jazz Cloud is at `https://v2.sy
 
 <CloudConfig />
 
-Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
+When you update `schema.ts`, run `deploy` again. Compatible schema changes can use an inferred migration; changes that transform existing rows need a [reviewed migration path](/docs/schemas/migrations) before deployment.
 
-Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy`.
+Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy <appId>` with both files present.
 
 For self-hosted deployments, see [Server Setup](/docs/getting-started/server-setup).
 

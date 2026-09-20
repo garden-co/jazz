@@ -7,10 +7,13 @@ import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const todoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
 const app: s.App<TodoSchema> = s.defineApp(todoSchema);

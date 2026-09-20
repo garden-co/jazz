@@ -10,8 +10,8 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies, TableSchema,
+    TableSchemaBuilder, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
@@ -248,7 +248,11 @@ async fn create_paginated_document(
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())])
+        .update(
+            "documents",
+            document_id,
+            vec![("title".to_string(), title.into())],
+        )
         .expect("update document title");
 }
 
@@ -656,7 +660,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
     let charlie_rows = wait_for_query(
         &charlie,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie sees no owner-restricted rows",
         Some,
@@ -798,6 +802,7 @@ async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
 
     alice
         .update(
+            "documents",
             alice_doc,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -848,7 +853,8 @@ async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
         "bob should still be unable to see alice's row after alice's rejected transfer"
     );
 
-    bob.delete(bob_doc).expect("delete bob owned row");
+    bob.delete("documents", bob_doc)
+        .expect("delete bob owned row");
     let bob_reader_after_delete =
         connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let bob_rows = wait_for_rows(
@@ -971,6 +977,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             active_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1035,6 +1042,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             transferable_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1066,6 +1074,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             archived_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1138,7 +1147,6 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 ///   result:          [Bob Org]
 /// ```
 #[tokio::test]
-#[ignore = "#1761: policy-filtered nested join queries hang for more than 60 seconds"]
 async fn select_policy_excludes_rows_from_join_results() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_excludes_rows_from_join_results_inner())
@@ -1233,7 +1241,6 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
 /// bob claims:   [team_b] ──query──► [team_b row]
 /// ```
 #[tokio::test]
-#[ignore = "#1760: IN session-claim array visibility queries hang for more than 60 seconds"]
 async fn in_session_array_policy_gates_visibility_by_membership() {
     tokio::task::LocalSet::new()
         .run_until(in_session_array_policy_gates_visibility_by_membership_inner())
@@ -1282,7 +1289,7 @@ async fn in_session_array_policy_gates_visibility_by_membership_inner() {
     let alice_rows = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "alice visible team documents",
         |rows| (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows),
@@ -1300,7 +1307,7 @@ async fn in_session_array_policy_gates_visibility_by_membership_inner() {
     let bob_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob visible team documents",
         |rows| (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows),
@@ -1504,14 +1511,19 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
     })
     .await;
 
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
-        .expect("optimistic local update");
+    bob.update(
+        "documents",
+        doc_id,
+        vec![("title".to_string(), "hacked".into())],
+    )
+    .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted update has been accepted or rejected.
     let rows_after_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized update");
     assert!(
         rows_after_update.iter().any(|(id, values)| *id == doc_id
@@ -1719,13 +1731,18 @@ async fn update_policy_read_clause_differs_from_write_clause_inner() {
 
     // Bob's update is applied optimistically on his local client but the
     // with_check policy fails on the server: owner_id=super::ALICE_ID ≠ bob's user_id.
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
-        .expect("optimistic local update");
+    bob.update(
+        "documents",
+        doc_id,
+        vec![("title".to_string(), "hacked".into())],
+    )
+    .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier.
     let rows_after = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized update");
     assert!(
         rows_after.iter().any(|(id, values)| *id == doc_id
@@ -1801,7 +1818,9 @@ async fn delete_then_reinsert_by_owner_visible_to_others_inner() {
     )
     .await;
 
-    alice.delete(doc1_id).expect("delete first document");
+    alice
+        .delete("documents", doc1_id)
+        .expect("delete first document");
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1917,13 +1936,15 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
     })
     .await;
 
-    bob.delete(doc_id).expect("optimistic local delete");
+    bob.delete("documents", doc_id)
+        .expect("optimistic local delete");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted delete has been accepted or rejected.
     let rows_after_delete = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized delete");
     assert!(
         rows_after_delete.iter().any(|(id, values)| *id == doc_id
@@ -1969,7 +1990,6 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
 ///   broken:   owner=super::BOB_ID, title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1763: queuing 500 post-lockout updates currently overflows the Rust policy/sync stack"]
 async fn single_client_operations_reach_server_in_causal_order() {
     tokio::task::LocalSet::new()
         .run_until(single_client_operations_reach_server_in_causal_order_inner())
@@ -2011,7 +2031,11 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
 
     // Transfer ownership (allowed — USING checks current owner_id = super::ALICE_ID).
     alice
-        .update(doc_id, vec![("owner_id".to_string(), super::BOB_ID.into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("owner_id".to_string(), super::BOB_ID.into())],
+        )
         .expect("optimistic local update: transfer ownership");
 
     // Yield to the runtime so the transport's background sender can pick up
@@ -2025,7 +2049,11 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
     // order, ownership has already moved to bob.
     for i in 0..500 {
         alice
-            .update(doc_id, vec![("title".to_string(), "nope".into())])
+            .update(
+                "documents",
+                doc_id,
+                vec![("title".to_string(), "nope".into())],
+            )
             .unwrap_or_else(|error| {
                 panic!("optimistic local update: title change after lockout {i}: {error}")
             });
@@ -2119,15 +2147,23 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     .await;
 
     alice
-        .update(doc_id, vec![("owner_id".to_string(), super::BOB_ID.into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("owner_id".to_string(), super::BOB_ID.into())],
+        )
         .expect("optimistic local update: transfer ownership");
 
     alice
-        .update(doc_id, vec![("title".to_string(), "nope".into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("title".to_string(), "nope".into())],
+        )
         .expect("optimistic local update: title change after lockout");
 
-    // Use the marker as a causal barrier so we know the server has settled
-    // before asking alice about her local view.
+    // The marker establishes server-side ordering, but the observer receiving
+    // it does not guarantee Alice has received her rollback on another socket.
     let marker_id = create_document(&alice, super::ALICE_ID, "marker").await;
     wait_for_rows(
         &observer,
@@ -2143,28 +2179,178 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     // the server. Using EdgeServer durability here would bypass the bug: the
     // server holds the correct value regardless, so an EdgeServer read always
     // returns title="original" even when alice never received a rollback event.
+    let expected_row = document_row_values(super::BOB_ID, "original");
     let alice_rows = wait_for_query(
         &alice,
         query,
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice: local cache converged after rollback",
         |rows| {
             rows.iter()
-                .find(|(id, _)| *id == doc_id)
+                .find(|(id, values)| *id == doc_id && *values == expected_row)
                 .map(|(_, values)| values.clone())
         },
     )
     .await;
 
     assert_eq!(
-        alice_rows,
-        document_row_values(super::BOB_ID, "original"),
+        alice_rows, expected_row,
         "alice must see the rollback — the rejected title update should be \
          reverted so she knows the mutation failed"
     );
 
     alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Alice deletes a membership received only as supporting join data.
+/// Her organization subscription follows the membership; Bob's hidden membership
+/// cannot keep an organization visible to Alice after she leaves.
+#[tokio::test]
+async fn nested_join_subscription_tracks_membership_changes() {
+    tokio::task::LocalSet::new()
+        .run_until(nested_join_subscription_tracks_membership_changes_inner())
+        .await;
+}
+
+async fn nested_join_subscription_tracks_membership_changes_inner() {
+    let schema = join_select_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("admin")
+        .as_admin()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(super::BOB_ID)
+        .as_user()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let alice_org = create_org(&admin, "Alice Org").await;
+    let bob_org = create_org(&admin, "Bob Org").await;
+    let alice_team = create_team(&admin, "Alice Team", alice_org).await;
+    let bob_team = create_team(&admin, "Bob Team", bob_org).await;
+    let alice_membership = create_team_membership(&admin, super::ALICE_ID, alice_team).await;
+    let _bob_membership = create_team_membership(&admin, super::BOB_ID, bob_team).await;
+
+    let membership_join = Query::from("teams")
+        .join_via("team_memberships", "team_id", [])
+        .joins
+        .into_iter()
+        .next()
+        .expect("membership join");
+    let query =
+        Query::from("orgs").join_via_with_nested_joins("teams", "org_id", [], [membership_join]);
+
+    let mut alice_stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe alice");
+    let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
+    let mut alice_log = Vec::new();
+    let mut bob_log = Vec::new();
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice sees her organization",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees his organization",
+        |log| has_added_id(log, bob_org),
+    )
+    .await;
+    assert!(!has_any_change(&alice_log, bob_org));
+    assert!(!has_any_change(&bob_log, alice_org));
+    alice_log.clear();
+    bob_log.clear();
+
+    // Bob also belongs to Alice's team. His membership remains hidden from
+    // Alice and must not preserve her organization after her own row is deleted.
+    create_team_membership(&bob, super::BOB_ID, alice_team).await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees the shared organization through his own membership",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    bob_log.clear();
+    // Alice received this membership only as supporting data for the nested join.
+    alice
+        .delete("team_memberships", alice_membership)
+        .expect("delete alice membership");
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice loses organization despite bob's hidden membership",
+        |log| has_removed(log, alice_org),
+    )
+    .await;
+    let rows = wait_for_query(
+        &alice,
+        query.clone(),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "alice has no organization after removing membership",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(rows.is_empty());
+    alice_log.clear();
+
+    create_team_membership(&admin, super::ALICE_ID, alice_team).await;
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice regains organization with a new membership",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_removed(&bob_log, alice_org),
+        "alice's membership changes must not revoke bob's access"
+    );
+    let rows = wait_for_rows(&bob, query, "bob retains both organizations", |rows| {
+        (rows.len() == 2
+            && rows.iter().any(|(id, _)| *id == alice_org)
+            && rows.iter().any(|(id, _)| *id == bob_org))
+        .then_some(rows)
+    })
+    .await;
+    assert_eq!(rows.len(), 2);
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }

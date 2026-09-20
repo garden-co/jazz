@@ -10,7 +10,7 @@ declare const __JAZZ_COLD_LOAD_BATCH_UPDATES__: boolean;
 declare const __JAZZ_COLD_LOAD_FIXTURE__: string;
 declare const __JAZZ_COLD_LOAD_RESPONSIVENESS__: boolean;
 
-const app = s.defineApp({ tasks: s.table({ title: s.string(), done: s.boolean() }) });
+const app = s.defineApp({ tasks: s.table({ title: s.string(), done: s.boolean() }, {}) });
 
 // Opt-in diagnostic receipt, not a wall-clock correctness gate. Reopen is a
 // fresh runtime in the same browser session (the WASM module cache stays warm).

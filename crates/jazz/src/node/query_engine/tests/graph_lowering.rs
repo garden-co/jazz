@@ -932,6 +932,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: vec![JoinContribution {
+                    parent: None,
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: join_source_node.clone(),
@@ -1082,6 +1083,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: vec![JoinContribution {
+                    parent: None,
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: bridge_node.clone(),

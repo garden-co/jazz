@@ -1,3 +1,5 @@
+import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-metadata.js";
+import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -38,14 +40,17 @@ export function structuralSchemaHash(schema: WasmSchema): string {
         writer.byte(0);
       }
     }
+    if (table.branchBy?.length) {
+      writer.stringBytes("branch_by\0");
+      writer.stringBytes(JSON.stringify(table.branchBy));
+      writer.byte(0);
+    }
   }
 
   return bytesToHex(blake3(writer.bytes()));
 }
 
-export function columnTypeSignature(columnType: WasmColumnType): string {
-  return JSON.stringify(columnType);
-}
+export { columnTypeSignature };
 
 class StructuralHashWriter {
   private chunks: number[] = [];
@@ -75,6 +80,12 @@ class StructuralHashWriter {
   u64(value: number): void {
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+    this.bytes(bytes);
+  }
+
+  i32(value: number): void {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setInt32(0, value, true);
     this.bytes(bytes);
   }
 
@@ -108,8 +119,6 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
     if (column.default) {
       writer.byte(1);
       hashValue(writer, column.default);
-    } else {
-      writer.byte(0);
     }
 
     if (column.merge_strategy) {
@@ -118,6 +127,7 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
     } else {
       writer.byte(0);
     }
+    writer.byte(0); // Column delimiter, including when a default is present.
   }
 }
 
@@ -125,7 +135,7 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
   switch (value.type) {
     case "Integer":
       writer.byte(1);
-      writer.i64(value.value);
+      writer.i32(value.value);
       return;
     case "BigInt":
       writer.byte(2);
@@ -171,10 +181,19 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
         hashValue(writer, inner);
       }
       return;
+    case "Enum":
+      writer.byte(14);
+      writer.stringBytes(value.value.case);
+      writer.byte(0);
+      writer.u64(value.value.values.length);
+      for (const inner of value.value.values) hashValue(writer, inner);
+      return;
     case "Null":
       writer.byte(9);
       return;
   }
+  const exhaustive: never = value;
+  throw new Error(`Unhandled schema default: ${String(exhaustive)}`);
 }
 
 function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType): void {
@@ -236,7 +255,7 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(11);
       if (columnType.schema) {
         writer.byte(1);
-        const encoded = new TextEncoder().encode(JSON.stringify(columnType.schema));
+        const encoded = new TextEncoder().encode(canonicalJsonSchema(columnType.schema));
         writer.u64(encoded.length);
         writer.bytes(encoded);
       } else {
@@ -275,6 +294,7 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.nullable === right.nullable &&
     left.references === right.references &&
     left.merge_strategy === right.merge_strategy &&
+    structuralValuesEqual(left.default, right.default) &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }

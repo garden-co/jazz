@@ -13,7 +13,7 @@ fn todos_physical_table() -> crate::ids::GlobalPhysicalTableId {
         let fixture =
             NodeState::new_with_shared_test_catalogue(node(0xf8), schema, storage).unwrap();
         fixture
-            .scope_physical_table(fixture.catalogue.current_schema_version_id, "todos")
+            .scope_physical_table(fixture.catalogue.local_schema_version_id, "todos")
             .unwrap()
     })
 }
@@ -2827,4 +2827,115 @@ fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+}
+
+
+
+#[test]
+fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
+    use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
+    for scope in [CompleteTransaction, ViewScoped] {
+        let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let tx = reset_scope_tx(tx_id, 2);
+        let versions = vec![
+            version_record(row(1), Vec::new(), title_cells("one"), None),
+            version_record(row(2), Vec::new(), title_cells("two"), None),
+        ];
+        let carrier = VersionCarrier::Bundle(VersionBundle {
+            scope, tx: tx.clone(), versions: versions.clone(),
+            fate: Fate::Pending, global_time: None, durability: DurabilityTier::Local,
+        });
+        reader.remember_discarded_pending_view_transactions(&[carrier.clone()]).unwrap();
+        let mut conflicting = carrier.clone();
+        let VersionCarrier::Bundle(conflicting_bundle) = &mut conflicting else { unreachable!() };
+        conflicting_bundle.tx.made_by = AuthorSubject::system_at(node(9));
+        assert!(matches!(
+            crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflicting])),
+            Err(Error::ConflictingCommitUnit(id)) if id == tx_id
+        ));
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.tx.n_total_writes, 0);
+        assert!(stored.view_scoped_cardinality);
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        reader.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
+        // A duplicate discarded Pending header must leave a terminal identity intact.
+        reader.remember_discarded_pending_view_transactions(&[carrier]).unwrap();
+        let terminal = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(terminal.fate, Fate::Accepted);
+        assert_eq!(terminal.global_time, Some(GlobalTime(1)));
+        assert_eq!(terminal.durability, DurabilityTier::Global);
+        drop(reader);
+        let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert!(stored.view_scoped_cardinality);
+        assert_eq!(stored.tx.n_total_writes, 0);
+        assert_eq!(stored.fate, Fate::Accepted);
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        register_whole_table_receiver(&mut reader, "todos");
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let bundle = VersionBundle { scope, tx, versions, fate: Fate::Pending,
+            global_time: None, durability: DurabilityTier::Local };
+        if scope == ViewScoped {
+            let mut first_fragment = bundle.clone();
+            first_fragment.versions.truncate(1);
+            first_fragment.tx.n_total_writes = 1;
+            reader.apply_view_updates_in_batch(vec![reset_scope_update(subscription, vec![first_fragment])]).unwrap();
+            let partial = reader.query_transaction(tx_id).unwrap().unwrap();
+            assert_eq!(partial.fate, Fate::Accepted, "first fragment preserves terminal fate");
+            assert_eq!(partial.tx.n_total_writes, 1);
+            assert!(partial.view_scoped_cardinality);
+        }
+        reader.apply_view_updates_in_batch(vec![reset_scope_update(subscription, vec![bundle])]).unwrap();
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(stored.view_scoped_cardinality, scope == ViewScoped);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(stored.fate, Fate::Accepted, "later pending carrier must preserve terminal identity ({scope:?})");
+        assert_eq!(stored.global_time, Some(GlobalTime(1)));
+        assert_eq!(stored.durability, DurabilityTier::Global);
+        drop(reader);
+        let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.fate, Fate::Accepted);
+        assert_eq!(stored.global_time, Some(GlobalTime(1)));
+        assert_eq!(stored.durability, DurabilityTier::Global);
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
+    let (_dir, mut reader) = open_node_with_uuid(node(3));
+    let tx_id = TxId::new(TxTime::from(11), node(1));
+    let mut tx = reset_scope_tx(tx_id, 1);
+    tx.kind = TxKind::Exclusive;
+    tx.row_read_set = Some(Vec::new());
+    tx.absent_read_set = Some(Vec::new());
+    tx.predicate_read_set = Some(Vec::new());
+    let full = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx: tx.clone(), versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    tx.row_read_set = None;
+    tx.absent_read_set = None;
+    tx.predicate_read_set = None;
+    let redacted = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx, versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    // Both duplicate entries in a delivery and later redacted deliveries use
+    // the ordinary transaction-identity contract.
+    reader.remember_discarded_pending_view_transactions(&[full.clone(), redacted.clone()]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[full]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[redacted.clone()]).unwrap();
+    let mut conflict = redacted;
+    let VersionCarrier::Bundle(bundle) = &mut conflict else { unreachable!() };
+    bundle.tx.user_metadata_json = Some("true".to_owned());
+    assert!(matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
 }

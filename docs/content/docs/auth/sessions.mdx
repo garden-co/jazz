@@ -66,7 +66,7 @@ Declare a UUID column for account ownership:
 import { schema as s } from "jazz-tools";
 
 const app = s.defineApp({
-  todos: s.table({ title: s.string(), owner_id: s.uuid() }),
+  todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}),
 });
 ```
 

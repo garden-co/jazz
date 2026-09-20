@@ -37,6 +37,42 @@ function waitForDelay(delay: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function schemaValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+
+  if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) {
+    return false;
+  }
+
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    return left.every((value, index) => schemaValuesEqual(value, right[index]));
+  }
+
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return leftKeys.every(
+    (key, index) =>
+      key === rightKeys[index] &&
+      schemaValuesEqual(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+      ),
+  );
+}
+
 function runtimeContextsEqual(
   left: InspectorRuntimeContext[],
   right: InspectorRuntimeContext[],
@@ -49,7 +85,7 @@ function runtimeContextsEqual(
         candidate?.key === context.key &&
         candidate.appId === context.appId &&
         candidate.dbName === context.dbName &&
-        JSON.stringify(candidate.schema) === JSON.stringify(context.schema)
+        schemaValuesEqual(candidate.schema, context.schema)
       );
     })
   );

@@ -274,7 +274,8 @@ impl BoundedOutbound {
         bytes: Vec<u8>,
         after_backpressure_arm: impl FnOnce(),
     ) -> Result<(), TransportError> {
-        let charge = bytes.len().max(1);
+        // A per-frame floor also caps tiny-frame queue cardinality at 512.
+        let charge = bytes.len().max(16 * 1024);
         let reserve = || {
             self.queued_bytes
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -401,12 +402,14 @@ impl WebSocketTransport {
     ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
         validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
             .map_err(WebSocketClientError::ServerRejected)?;
+        let progress = Arc::new(Notify::new());
+        let progress_wake = Arc::clone(&progress);
         let transport = Self::connect_with_wake_and_bootstrap(
             base_url,
             app_id,
             peer_identity,
             auth,
-            Arc::new(|| {}),
+            Arc::new(move || progress_wake.notify_one()),
             true,
             NativeTransportLink::OrdinarySession,
         )
@@ -443,11 +446,25 @@ impl WebSocketTransport {
                     )));
                 }
             }
+            let flush = jazz::db::Transport::poll_flush(&mut wire).map_err(|error| {
+                WebSocketClientError::ServerRejected(format!("bootstrap credit flush: {error:?}"))
+            })?;
+            if flush == jazz::db::WireFlushStatus::MoreReady {
+                tokio::task::yield_now().await;
+                continue;
+            }
             if let Some(error) = inbound_error.lock().ok().and_then(|error| error.clone()) {
                 return Err(WebSocketClientError::ServerRejected(error));
             }
             tokio::select! {
+                _ = progress.notified() => {}
                 _ = notified => {}
+                _ = async {
+                    match jazz::db::Transport::incomplete_receive_timeout_ms(&wire) {
+                        Some(delay) => tokio::time::sleep(std::time::Duration::from_millis(delay)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(WebSocketClientError::HandshakeTimeout);
                 }
@@ -1152,44 +1169,88 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
 
     #[derive(Clone)]
-    struct FrameSink(Arc<Mutex<VecDeque<Vec<u8>>>>);
+    struct FrameSink {
+        outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
 
     impl WireTransport for FrameSink {
         fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.0.lock().expect("frame sink lock").push_back(frame);
+            self.outbound
+                .lock()
+                .expect("frame sink lock")
+                .push_back(frame);
             Ok(())
         }
 
         fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            None
+            self.inbound.lock().expect("frame source lock").pop_front()
         }
     }
 
     fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
         let frames = Arc::new(Mutex::new(VecDeque::new()));
-        let sink = FrameSink(Arc::clone(&frames));
+        let credits = Arc::new(Mutex::new(VecDeque::new()));
+        let received_frames = Arc::new(Mutex::new(VecDeque::new()));
         let features = FEATURE_SYNC_MESSAGE_PAYLOAD | jazz::wire::FEATURE_MESSAGE_FRAGMENTATION;
-        let mut sender = WireTransportAdapter::new(sink, WIRE_PROTOCOL_VERSION, features, None);
+        let mut sender = WireTransportAdapter::new(
+            FrameSink {
+                outbound: Arc::clone(&frames),
+                inbound: Arc::clone(&credits),
+            },
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        );
+        let mut receiver = WireTransportAdapter::new(
+            FrameSink {
+                outbound: credits,
+                inbound: Arc::clone(&received_frames),
+            },
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        );
         let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
             .map(|index| char::from((index % 251) as u8))
             .collect::<String>();
+        let message = jazz::protocol::SyncMessage::SessionClaims {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::from([(
+                "catalogue_fixture".to_owned(),
+                jazz::groove::records::Value::String(body),
+            )]),
+        };
         sender
-            .send(jazz::protocol::SyncMessage::SessionClaims {
-                identity: AuthorSubject::SYSTEM,
-                claims: BTreeMap::from([(
-                    "catalogue_fixture".to_owned(),
-                    jazz::groove::records::Value::String(body),
-                )]),
-            })
+            .send(message.clone())
             .expect("encode valid fragmented logical message");
-        let frames = frames
-            .lock()
-            .expect("frame sink lock")
-            .drain(..)
-            .collect::<Vec<_>>();
-        assert!(frames.len() > 1, "message must be wire fragmented");
-        assert!(frames.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
-        frames
+        let mut captured = Vec::new();
+        for _ in 0..1024 {
+            let turn = frames
+                .lock()
+                .expect("frame sink lock")
+                .drain(..)
+                .collect::<Vec<_>>();
+            received_frames.lock().unwrap().extend(turn.iter().cloned());
+            captured.extend(turn);
+            if let Some(received) = receiver
+                .try_recv_strict()
+                .expect("receive fragmented message")
+            {
+                assert_eq!(
+                    received, message,
+                    "credit-driven fragmentation preserves the full bootstrap"
+                );
+                assert!(captured.len() > 1, "message must be wire fragmented");
+                assert!(captured.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
+                return captured;
+            }
+            assert_eq!(
+                sender.try_recv_strict().expect("apply receiver credits"),
+                None
+            );
+        }
+        panic!("credit-driven fragmented bootstrap must finish within bounded pump turns");
     }
 
     #[test]

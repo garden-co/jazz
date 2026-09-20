@@ -1,3 +1,4 @@
+import { allowAll } from "./testing/allow-all.js";
 import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -20,7 +21,11 @@ import {
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
-import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import {
+  hasJazzNapiBuild,
+  loadNapiModule,
+  createNapiRuntimeFixture,
+} from "./testing/napi-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
@@ -213,7 +218,7 @@ const SIGNED_DEFAULT_CASES: Array<{
 const ALICE_ID = "00000000-0000-4000-8000-0000000000a1";
 const BOB_ID = "00000000-0000-4000-8000-0000000000b2";
 
-const OWNED_TODOS_SCHEMA: WasmSchema = {
+const OWNED_TODOS_SCHEMA = {
   todos: {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -255,10 +260,14 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
       },
     },
   },
-};
+} satisfies WasmSchema;
 
-const CHAT_POLICY_SCHEMA: WasmSchema = {
+const CHAT_POLICY_SCHEMA = {
   chats: {
+    relations: {
+      chat_membersViaChat: { kind: "reverse" as const, table: "chat_members", relation: "chat" },
+      messagesViaChat: { kind: "reverse" as const, table: "messages", relation: "chat" },
+    },
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "visibility", column_type: { type: "Text" }, nullable: false },
@@ -305,6 +314,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
     },
   },
   chat_members: {
+    relations: { chat: { kind: "forward" as const, table: "chats", column: "chat_id" } },
     columns: [
       {
         name: "chat_id",
@@ -343,6 +353,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
     },
   },
   messages: {
+    relations: { chat: { kind: "forward" as const, table: "chats", column: "chat_id" } },
     columns: [
       {
         name: "chat_id",
@@ -407,7 +418,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
       delete: { using: { type: "True" } },
     },
   },
-};
+} satisfies WasmSchema;
 
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () => {
   let server: LocalJazzServerHandle | null = null;
@@ -470,7 +481,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
+    const provenanceApp = s.defineApp({
+      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+    });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
@@ -629,7 +642,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-mutation-error-shape-backend",
       adminSecret: "core-napi-mutation-error-shape-admin",
-      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
 
     const nativeDb = NapiDb.openMemory(
@@ -766,9 +780,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
   it("streams a typed text column through NAPI before publishing the row", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new NativeRuntimeAdapter(
+    const runtime = createNapiRuntimeFixture(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
+      allowAll(TEST_SCHEMA),
       deterministicBytes("jazz-napi-streaming-insert:node"),
       testAuthorBytes("jazz-napi-streaming-insert:author"),
       1,
@@ -1781,7 +1796,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-permission-advice-backend",
       adminSecret: "core-napi-permission-advice-admin",
-      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
 
     const openRuntime = (userId: string, sourceId: number) => {
@@ -1879,7 +1895,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-owned-delete-backend",
       adminSecret: "core-napi-owned-delete-admin",
-      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
 
     const runtime = new NativeRuntimeAdapter(
@@ -1958,7 +1975,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-persistent-owned-delete-backend",
       adminSecret: "core-napi-persistent-owned-delete-admin",
-      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
 
     try {
@@ -2122,13 +2140,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       appId,
       inMemory: true,
       adminSecret: "core-napi-edge-query-admin",
-      schema: encodeSchema(TEST_SCHEMA),
+      schema: TEST_SCHEMA,
+      permissions: allowAll(TEST_SCHEMA),
     });
 
     const openRuntime = (peer: string, sourceId: number) => {
-      const runtime = new NativeRuntimeAdapter(
+      const runtime = createNapiRuntimeFixture(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
+        allowAll(TEST_SCHEMA),
         deterministicBytes(`jazz-napi-core-edge:${peer}:node`),
         testAuthorBytes(`jazz-napi-core-edge:${peer}:author`),
         sourceId,
@@ -2186,13 +2206,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       appId,
       dataDir: tempDir,
       adminSecret: "core-napi-persistent-edge-query-admin",
-      schema: encodeSchema(TEST_SCHEMA),
+      schema: TEST_SCHEMA,
+      permissions: allowAll(TEST_SCHEMA),
     });
 
     const openRuntime = (peer: string, sourceId: number, targetServer: LocalJazzServerHandle) => {
-      const runtime = new NativeRuntimeAdapter(
+      const runtime = createNapiRuntimeFixture(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
+        allowAll(TEST_SCHEMA),
         deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:node`),
         testAuthorBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
         sourceId,
@@ -2225,7 +2247,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         appId,
         dataDir: tempDir,
         adminSecret: "core-napi-persistent-edge-query-admin",
-        schema: encodeSchema(TEST_SCHEMA),
+        schema: TEST_SCHEMA,
+        permissions: allowAll(TEST_SCHEMA),
       });
 
       const reader = openRuntime("reader", 42, server);
@@ -2264,7 +2287,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       adminSecret: "core-napi-branch-policy-admin",
       backendSecret: "core-napi-branch-policy-backend",
-      schema: encodeSchema(CHAT_POLICY_SCHEMA),
+      schema: CHAT_POLICY_SCHEMA,
+      permissions: Object.fromEntries(
+        Object.entries(CHAT_POLICY_SCHEMA).map(([name, table]) => [name, table.policies ?? {}]),
+      ),
     });
 
     const openRuntime = (userId: string, sourceId: number) => {

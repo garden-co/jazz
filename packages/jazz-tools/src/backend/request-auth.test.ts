@@ -1057,3 +1057,50 @@ describe("backend request auth", () => {
     ).rejects.toThrow(/local-first/i);
   });
 });
+
+describe("JWKS HTTP deadlines", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+  it.each(["headers", "body"])(
+    "bounds stalled %s for all waiters and retries immediately",
+    async (phase) => {
+      vi.useFakeTimers();
+      const never = () => new Promise<never>(() => {});
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockImplementationOnce(async () => {
+          if (phase === "headers") return never();
+          return { ok: true, json: never } as unknown as Response;
+        })
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(JWT_SECRET) }] }),
+          ),
+        );
+      vi.stubGlobal("fetch", fetcher);
+      const config = { appId: "test", jwksUrl: `https://issuer.example/${randomUUID()}` };
+      const request = {
+        headers: {
+          authorization: `Bearer ${signHs256Jwt({ iss: "https://issuer.example", sub: "test-user" })}`,
+        },
+      };
+      const first = expect(resolveRequestSession(request, config)).rejects.toThrow(
+        "request timed out",
+      );
+      const second = expect(resolveRequestSession(request, config)).rejects.toThrow(
+        "request timed out",
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.all([first, second]);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+      await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+        user_id: "test-user",
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+});

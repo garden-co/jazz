@@ -23,10 +23,13 @@ import {
 } from "./index.js";
 
 const app = schema.defineApp({
-  todos: schema.table({
-    title: schema.string(),
-    done: schema.boolean().optional(),
-  }),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      done: schema.boolean().optional(),
+    },
+    {},
+  ),
 });
 
 const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();

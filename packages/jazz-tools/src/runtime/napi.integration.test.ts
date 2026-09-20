@@ -15,7 +15,6 @@ import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
-import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -126,10 +125,13 @@ const TEST_SCHEMA: WasmSchema = {
 };
 
 const publicUnionApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
@@ -140,10 +142,13 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
 });
 
 const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table({
-    label: s.string(),
-    value: s.bigint(),
-  }),
+  metrics: s.table(
+    {
+      label: s.string(),
+      value: s.bigint(),
+    },
+    {},
+  ),
 });
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
@@ -356,18 +361,27 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-async function loadPolicyGraphPerfWasmSchema(): Promise<WasmSchema> {
+async function loadPolicyGraphPerfSchema(field: "mergedSchema" | "wasmSchema" = "mergedSchema") {
   const source = JSON.parse(
     await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
-  ) as { mergedSchema: WasmSchema };
-  return source.mergedSchema;
-}
-
-async function loadPolicyGraphPerfAppSchema(): Promise<WasmSchema> {
-  const source = JSON.parse(
-    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
-  ) as { wasmSchema: WasmSchema };
-  return source.wasmSchema;
+  ) as Record<
+    typeof field,
+    Record<
+      string,
+      Omit<WasmSchema[string], "policies"> & {
+        policies?: import("../permissions/index.js").CompiledPermissions[string];
+      }
+    >
+  >;
+  const schema = Object.fromEntries(
+    Object.entries(source[field]).map(([name, { policies: _, ...table }]) => [name, table]),
+  );
+  const permissions = Object.fromEntries(
+    Object.entries(source[field]).flatMap(([name, table]) =>
+      table.policies ? [[name, table.policies]] : [],
+    ),
+  );
+  return { schema, permissions };
 }
 
 async function createPolicyGraphPerfSchemaDir(options?: {
@@ -434,7 +448,7 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 
 describe("NAPI integration", () => {
   it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
-    const { wasmSchema } = await loadTodoServerProject();
+    const { wasmSchema, permissions } = await loadTodoServerProject();
     const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");
     const previousWebSocket = globalThis.WebSocket;
     class OpenWebSocket {
@@ -451,19 +465,29 @@ describe("NAPI integration", () => {
     let first: TestRuntimeWithTransport | null = null;
     let second: TestRuntimeWithTransport | null = null;
     try {
-      first = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
-        appId: randomUUID(),
-        env: "test",
-      })) as TestRuntimeWithTransport;
+      first = (await createPersistentNapiNativeRuntimeAdapter(
+        wasmSchema,
+        permissions!,
+        runtimeData.dataPath,
+        {
+          appId: randomUUID(),
+          env: "test",
+        },
+      )) as TestRuntimeWithTransport;
 
       first.connect("ws://127.0.0.1/jazz/ws", "{}");
       await first.close?.();
       first = null;
 
-      second = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
-        appId: randomUUID(),
-        env: "test",
-      })) as TestRuntimeWithTransport;
+      second = (await createPersistentNapiNativeRuntimeAdapter(
+        wasmSchema,
+        permissions!,
+        runtimeData.dataPath,
+        {
+          appId: randomUUID(),
+          env: "test",
+        },
+      )) as TestRuntimeWithTransport;
       expect(second).toBeDefined();
     } finally {
       await first?.close?.();
@@ -654,7 +678,7 @@ describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");
-    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, dataPath, {
+    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, {}, dataPath, {
       appId: `napi-large-index-${randomUUID()}`,
       env: "test",
     })) as unknown as {
@@ -743,7 +767,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -992,13 +1016,14 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-global-wait-secret";
     const adminSecret = "napi-policy_graph-global-wait-admin-secret";
-    const policyGraphSchemaForServer = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchemaForServer, permissions } = await loadPolicyGraphPerfSchema();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(policyGraphSchemaForServer),
+      schema: policyGraphSchemaForServer,
+      permissions,
     });
     let context: {
       asBackend(): Db;
@@ -1017,7 +1042,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
@@ -1059,7 +1084,7 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-global-wait-deploy-secret";
     const adminSecret = "napi-policy_graph-global-wait-deploy-admin-secret";
-    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
@@ -1092,7 +1117,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
@@ -1135,7 +1160,8 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-holder-subscription-secret";
     const adminSecret = "napi-policy_graph-holder-subscription-admin-secret";
-    const policyGraphSchema = await loadPolicyGraphPerfAppSchema();
+    const { schema: policyGraphSchema, permissions } =
+      await loadPolicyGraphPerfSchema("wasmSchema");
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
@@ -1144,7 +1170,8 @@ describe("NAPI integration", () => {
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(policyGraphSchema),
+      schema: policyGraphSchema,
+      permissions,
       jwksUrl: jwtIssuer.jwksUrl,
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
@@ -1162,7 +1189,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1360,7 +1387,7 @@ describe("NAPI integration", () => {
     const backendSecret = "napi-policy_graph-chain-secret";
     const adminSecret = "napi-policy_graph-chain-admin-secret";
     const dataDir = await createTempDir("jazz-napi-policy_graph-chain-server-");
-    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
@@ -1394,7 +1421,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1493,7 +1520,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1562,25 +1589,25 @@ describe("NAPI integration", () => {
           const schema = {
             team: s.table({
               identity_key: s.string(),
-            }),
+            }, { "team_entryViaTeam": s.reverse("team_entry", "team"), "team_entryViaTarget": s.reverse("team_entry", "target"), "dropdowns_access_edgesViaTeam": s.reverse("dropdowns_access_edges", "team") }),
             team_entry: s.table({
-              team_id: s.ref("team"),
-              target_id: s.ref("team"),
+              team_id: s.uuid(),
+              target_id: s.uuid(),
               administrator: s.boolean(),
-            }),
+            }, { "team": s.rel("team", "team_id"), "target": s.rel("team", "target_id") }),
             dropdowns: s.table({
               name: s.string(),
-            }),
+            }, { "dropdowns_access_edgesViaResource": s.reverse("dropdowns_access_edges", "resource"), "dropdown_entryViaDropdowns": s.reverse("dropdown_entry", "dropdowns") }),
             dropdowns_access_edges: s.table({
-              resource_id: s.ref("dropdowns"),
-              team_id: s.ref("team"),
+              resource_id: s.uuid(),
+              team_id: s.uuid(),
               grant_role: s.string(),
               administrator: s.boolean(),
-            }),
+            }, { "resource": s.rel("dropdowns", "resource_id"), "team": s.rel("team", "team_id") }),
             dropdown_entry: s.table({
-              dropdowns_id: s.ref("dropdowns"),
+              dropdowns_id: s.uuid(),
               label: s.string(),
-            }),
+            }, { "dropdowns": s.rel("dropdowns", "dropdowns_id") }),
           };
 
           type AppSchema = s.Schema<typeof schema>;
@@ -1680,7 +1707,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1769,6 +1796,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: TEST_SCHEMA,
+        permissions: {},
       });
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
@@ -2033,7 +2061,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
+      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, {}, dataPath, {
         appId,
         env: "dev",
       })) as unknown as {

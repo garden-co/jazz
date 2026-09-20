@@ -16,18 +16,11 @@ pub(super) enum PreparedClaimBindingMode {
     FailClosedAuthorizationSupport,
 }
 
-pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
+pub(in crate::node) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     let Some(policy) = &table.read_policy else {
         let mut query = crate::query::Query::from(table.name.as_str());
-        // A table becomes closed as soon as it declares any policy.  An
-        // omitted read clause is therefore an explicit empty read authority,
-        // not the policy-free table default.  Express it as the smallest
-        // ordinary query graph (a constant-false root predicate) so current,
-        // historical, maintained, and advice paths all lower through the same
-        // authorization machinery.
-        if access_edge_parent_reference(table).is_none() && table.has_any_policy() {
-            query.filters.push(Predicate::Any(Vec::new()));
-        }
+        // Missing SELECT is empty read authority, regardless of table names.
+        query.filters.push(Predicate::Any(Vec::new()));
         return query;
     };
     let mut query = crate::query::Query::from(table.name.as_str());
@@ -37,29 +30,7 @@ pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQ
     query.inherits = policy.inherits.clone();
     query.includes = policy.includes.clone();
     query.policy_branches = policy.policy_branches.clone();
-    if let Some(parent_column) = access_edge_parent_reference(table) {
-        query.policy_branches.push(crate::query::PolicyBranch {
-            filters: Vec::new(),
-            joins: Vec::new(),
-            reachable: Vec::new(),
-            inherits: vec![crate::query::InheritsVia {
-                parent_column,
-                operation: crate::query::InheritsOperation::Select,
-                max_depth: None,
-            }],
-        });
-    }
     query
-}
-
-pub(super) fn access_edge_parent_reference(table: &TableSchema) -> Option<String> {
-    if !table.name.ends_with("_access_edges") && table.name != "team_access_edges" {
-        return None;
-    }
-    table
-        .references
-        .contains_key("resource_id")
-        .then(|| "resource_id".to_owned())
 }
 
 pub(super) fn rewrite_claim_join_for_binding(
@@ -146,7 +117,18 @@ pub(super) fn rewrite_claim_predicate_for_binding(
             case,
             payload: Box::new(rewrite_claim_predicate_for_binding(*payload, claims)),
         },
-        Predicate::IsNull(_) => false_predicate(),
+        Predicate::IsNull(Operand::Claim(name)) => {
+            let path = crate::query::operand_claim_path(&name);
+            match claims
+                .and_then(|claims| crate::tools::policy_claims::policy_claim_at_path(claims, &path))
+            {
+                Some(Value::Nullable(None)) => Predicate::All(Vec::new()),
+                // Missing claims must not match IS NULL; the Not guard above
+                // also prevents them from matching IS NOT NULL.
+                _ => false_predicate(),
+            }
+        }
+        Predicate::IsNull(operand) => Predicate::IsNull(operand),
     }
 }
 
@@ -240,6 +222,14 @@ fn bind_scope_claim_predicate(
     binding_values: &mut BTreeMap<String, Value>,
 ) {
     match predicate {
+        Predicate::Not(inner) if predicate_contains_unbound_claim(inner, Some(claim_values)) => {
+            *predicate = false_predicate();
+        }
+        Predicate::IsNull(Operand::Claim(_)) => {
+            // Null checks need no typed parameter: resolve them before claim
+            // slot inference, which cannot infer a type from IS NULL alone.
+            *predicate = rewrite_claim_predicate_for_binding(predicate.clone(), Some(claim_values));
+        }
         Predicate::All(predicates) | Predicate::Any(predicates) => {
             for predicate in predicates {
                 bind_scope_claim_predicate(predicate, claim_values, binding_values);
@@ -281,8 +271,8 @@ fn bind_scope_claim_operand(
     let Operand::Claim(name) = operand else {
         return;
     };
-    let storage_name = crate::query::operand_claim_storage_key(name);
-    let Some(value) = claim_values.get(&storage_name).cloned() else {
+    let path = crate::query::operand_claim_path(name);
+    let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claim_values, &path) else {
         return;
     };
     let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
@@ -486,8 +476,8 @@ fn operand_contains_unbound_claim(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
     matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
-        let storage = crate::query::operand_claim_storage_key(name);
-        claims.contains_key(&storage)
+        let path = crate::query::operand_claim_path(name);
+        crate::tools::policy_claims::policy_claim_at_path(claims, &path).is_some()
     }))
 }
 
@@ -1309,7 +1299,7 @@ where
                     coerce_prepared_binding_value(value, &claim.ty),
                 );
             }
-            program_binding.id = binding_id_for_values(&values);
+            program_binding.id = binding_id_for_values(&values)?;
             program_binding.values = values;
         }
         Ok(program_binding)

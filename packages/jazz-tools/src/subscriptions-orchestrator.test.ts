@@ -6,6 +6,7 @@ import type {
   QueryOptions,
   SubscriptionHandle,
 } from "./runtime/db.js";
+import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -259,6 +260,194 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(remoteKey).not.toBe(defaultKey);
       expect(localFirstKey).not.toBe(defaultKey);
       expect(localFirstKey).not.toBe(remoteKey);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U30 makeQueryKey accepts a scalar bigint branch selector", async () => {
+    const harness = createUnitHarness("app-so-u30");
+    try {
+      const options = { branch: 9007199254740993n } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U31 makeQueryKey accepts a bigint live base selector", async () => {
+    const harness = createUnitHarness("app-so-u31");
+    try {
+      const options = {
+        branch: 7n,
+        base: 3n,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U32 makeQueryKey accepts a bigint tuple base selector", async () => {
+    const harness = createUnitHarness("app-so-u32");
+    try {
+      const options = {
+        branch: 7n,
+        base: [3n, { revision: 1 }] as const,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U33 makeQueryKey accepts a frozen bigint base selector", async () => {
+    const harness = createUnitHarness("app-so-u33");
+    try {
+      const options = Object.freeze({
+        branch: 7n,
+        base: Object.freeze([3n, { revision: 1 }] as const),
+      }) satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U34 qualified bigint branch selectors are equivalent regardless of insertion order", async () => {
+    const harness = createUnitHarness("app-so-u34");
+    try {
+      const query = makeQuery();
+      const firstKey = harness.manager.makeQueryKey(query, {
+        branch: { workspace: 7n, tenant: "acme" },
+      });
+      const secondKey = harness.manager.makeQueryKey(query, {
+        branch: { tenant: "acme", workspace: 7n },
+      });
+
+      expect(secondKey).toBe(firstKey);
+      const firstEntry = harness.manager.getCacheEntry<Todo>(firstKey);
+      const secondEntry = harness.manager.getCacheEntry<Todo>(secondKey);
+      expect(secondEntry).toBe(firstEntry);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U35 bigint and string branch selectors do not collide", async () => {
+    const harness = createUnitHarness("app-so-u35");
+    try {
+      const query = makeQuery();
+      const bigintKey = harness.manager.makeQueryKey(query, { branch: 7n });
+      const stringKey = harness.manager.makeQueryKey(query, { branch: "7" });
+
+      expect(stringKey).not.toBe(bigintKey);
+      harness.manager.getCacheEntry<Todo>(bigintKey);
+      harness.manager.getCacheEntry<Todo>(stringKey);
+      expect(harness.calls).toHaveLength(2);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U36 makeQueryKey does not mutate frozen bigint branch/base options", async () => {
+    const harness = createUnitHarness("app-so-u36");
+    try {
+      const options = Object.freeze({
+        branch: Object.freeze({ workspace: 7n, tenant: "acme" }),
+        base: Object.freeze([
+          Object.freeze({ workspace: 3n, tenant: "base" }),
+          { revision: 1 },
+        ] as const),
+      }) satisfies QueryOptions;
+
+      const before = {
+        branch: { workspace: 7n, tenant: "acme" },
+        base: [{ workspace: 3n, tenant: "base" }, { revision: 1 }] as const,
+      };
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      expect(options).toEqual(before);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U37 forwards exact bigint branch/base values to the delta source", async () => {
+    const harness = createUnitHarness("app-so-u37");
+    try {
+      const options = {
+        tier: "remote",
+        branch: { workspace: 9007199254740993n, tenant: "acme" },
+        base: [{ workspace: 3n, tenant: "base" }, { revision: 1 }] as const,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      harness.manager.getCacheEntry<Todo>(key);
+
+      expect(harness.calls[0]?.options).toEqual(options);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U38 repeated equal bigint selectors share one cache entry", async () => {
+    const harness = createUnitHarness("app-so-u38");
+    try {
+      const query = makeQuery();
+      const firstKey = harness.manager.makeQueryKey(query, {
+        branch: 7n,
+        base: [3n, { revision: 1 }] as const,
+      });
+      const secondKey = harness.manager.makeQueryKey(query, {
+        branch: 7n,
+        base: [3n, { revision: 1 }] as const,
+      });
+
+      expect(secondKey).toBe(firstKey);
+      const firstEntry = harness.manager.getCacheEntry<Todo>(firstKey);
+      const secondEntry = harness.manager.getCacheEntry<Todo>(secondKey);
+      expect(secondEntry).toBe(firstEntry);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U39 Inspector-local options remain isolated from ordinary options", async () => {
+    const harness = createUnitHarness("app-so-u39");
+    try {
+      const query = makeQuery();
+      const ordinaryKey = harness.manager.makeQueryKey(query, { branch: "main" });
+      const inspectorKey = harness.manager.makeQueryKey(
+        query,
+        createInspectorLocalQueryOptions({ branch: "main" }),
+      );
+
+      expect(inspectorKey).not.toBe(ordinaryKey);
+      expect(inspectorKey).toContain("inspector-local:");
+      const ordinaryEntry = harness.manager.getCacheEntry<Todo>(ordinaryKey);
+      const inspectorEntry = harness.manager.getCacheEntry<Todo>(inspectorKey);
+      expect(inspectorEntry).not.toBe(ordinaryEntry);
+      expect(harness.calls).toHaveLength(2);
     } finally {
       await harness.manager.shutdown();
     }
@@ -590,6 +779,72 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const internal = (harness.manager as any).entries.get(key);
       expect(internal.cleanupTimeoutId).not.toBeNull();
       expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("cleans up at the first unused deadline despite continuous deltas", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const off = entry.subscribe({});
+      harness.emit(0, makeDelta([makeTodo("opening")]));
+      off();
+      for (let index = 0; index < 2; index++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("a returning listener owns the entry until its own unused deadline", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      entry.subscribe({})();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.emit(0, makeDelta([makeTodo("slow-opening")]));
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("slow-opening")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("lets an uncommitted Suspense reader receive a delayed first result", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { key, entry } = harness.makeEntry();
+      const pendingRead = entry.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      harness.emit(0, makeDelta([makeTodo("delayed")]));
+      await expect(pendingRead).resolves.toEqual([makeTodo("delayed")]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(harness.manager.getCacheEntry(key)).toBe(entry);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("delayed")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
     } finally {
       await harness.manager.shutdown();
     }

@@ -226,6 +226,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    owner_release_wait: RefCell<Option<futures::future::LocalBoxFuture<'static, ()>>>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
@@ -296,7 +297,8 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
-    local_availability_dirty: Cell<bool>,
+    local_subscription_dirty_generation: Cell<u64>,
+    observed_local_subscription_dirty_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -344,6 +346,7 @@ where
         let mut connection = connection.lock().await;
         connection.staged_inbound.push_back(StagedInboundMessage {
             message,
+            lease: None,
             authority_receipt_eligible,
         });
         self.schedule_tick(TickUrgency::Immediate);
@@ -371,6 +374,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            owner_release_wait: RefCell::new(None),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
             close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
@@ -434,7 +438,8 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
-            local_availability_dirty: Cell::new(false),
+            local_subscription_dirty_generation: Cell::new(0),
+            observed_local_subscription_dirty_generation: Cell::new(0),
         }
     }
 
@@ -580,8 +585,24 @@ where
                 transaction: None,
                 open_tx_id,
                 future: Box::pin(async move {
-                    let result = read.await;
-                    if let Some(sender) = read_sender.borrow_mut().take() {
+                    let mut read = std::pin::pin!(read);
+                    // Cancelling an observation releases its read fence, not
+                    // any staging or commit already admitted after that read.
+                    let result = std::future::poll_fn(|context| {
+                        let cancelled = read_sender
+                            .borrow_mut()
+                            .as_mut()
+                            .is_none_or(|sender| sender.poll_canceled(context).is_ready());
+                        if cancelled {
+                            std::task::Poll::Ready(None)
+                        } else {
+                            read.as_mut().poll(context).map(Some)
+                        }
+                    })
+                    .await;
+                    if let Some(result) = result
+                        && let Some(sender) = read_sender.borrow_mut().take()
+                    {
                         let _ = sender.send(result);
                     }
                     Ok(())
@@ -648,6 +669,32 @@ where
         self.node.try_lock().is_some()
     }
 
+    /// Yield without losing the host wake needed after an external read finishes.
+    pub(super) fn owner_is_available_or_wake_when_released(&self) -> bool {
+        let mut waiter = self.owner_release_wait.borrow_mut();
+        if self.owner_is_available() {
+            waiter.take();
+            return true;
+        }
+        let Some(waker) = self.query_runtime_waker() else {
+            return false;
+        };
+        // Retain the lock future: dropping a pending mutex waiter cancels its wake.
+        let pending = waiter.get_or_insert_with(|| {
+            let node = Rc::clone(&self.node);
+            Box::pin(async move { drop(node.lock().await) })
+        });
+        if pending
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            waiter.take();
+            return true;
+        }
+        false
+    }
+
     pub(super) fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
         self.queued_open_transaction_failures
             .borrow()
@@ -661,36 +708,77 @@ where
             .remove(&id);
     }
 
-    /// Poll one FIFO owner-queue entry, retaining a pending continuation.
+    /// Poll the next eligible owner operation, retaining pending read fences.
     pub(super) fn poll_queued_mutation_once(&self) -> bool {
         use std::task::{Context, Poll, Waker};
 
-        let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+        if self.queued_mutations.borrow().is_empty() {
             return false;
-        };
+        }
         let owned_waker = self.query_runtime_waker();
         let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
         let mut context = Context::from_waker(waker);
-        let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
-            self.queued_open_transaction_failures
-                .borrow()
-                .get(&open_tx_id)
-                .cloned()
-        });
-        let outcome = match poisoned {
-            Some(error) => Poll::Ready(Err(error)),
-            None => operation.future.as_mut().poll(&mut context),
+        let mut deferred_reads: Vec<QueuedMutationOperation> = Vec::new();
+        let mut active_operation = None;
+        let pending = loop {
+            let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+                break !deferred_reads.is_empty();
+            };
+            // ponytail: scan pending readers; index by transaction if wide
+            // concurrent read batches make this quadratic path significant.
+            if deferred_reads
+                .iter()
+                .any(|read| read.open_tx_id == operation.open_tx_id)
+            {
+                // Reads in one transaction retain their invocation order. A
+                // later mutation also fences every operation behind it.
+                if operation.transaction.is_some() || operation.completion.is_none() {
+                    self.queued_mutations.borrow_mut().push_front(operation);
+                    break true;
+                }
+                deferred_reads.push(operation);
+                continue;
+            }
+            let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+                self.queued_open_transaction_failures
+                    .borrow()
+                    .get(&open_tx_id)
+                    .cloned()
+            });
+            let outcome = match poisoned {
+                Some(error) => Poll::Ready(Err(error)),
+                None => operation.future.as_mut().poll(&mut context),
+            };
+            match outcome {
+                Poll::Pending
+                    if operation.transaction.is_none()
+                        && operation.open_tx_id.is_some()
+                        && operation.completion.is_some()
+                        && self.owner_is_available() =>
+                {
+                    // Remote coverage must not stop unrelated local work.
+                    // No queue scan or allocation is needed for ready reads.
+                    deferred_reads.push(operation);
+                }
+                Poll::Pending => {
+                    // Once started, this operation may own the lock needed by
+                    // the deferred reads. It must resume before those readers.
+                    active_operation = Some(operation);
+                    break true;
+                }
+                Poll::Ready(result) => {
+                    self.finish_queued_mutation(operation, result);
+                    break !deferred_reads.is_empty();
+                }
+            }
         };
-        match outcome {
-            Poll::Pending => {
-                self.queued_mutations.borrow_mut().push_front(operation);
-                true
-            }
-            Poll::Ready(result) => {
-                self.finish_queued_mutation(operation, result);
-                false
-            }
+        for read in deferred_reads.into_iter().rev() {
+            self.queued_mutations.borrow_mut().push_front(read);
         }
+        if let Some(operation) = active_operation {
+            self.queued_mutations.borrow_mut().push_front(operation);
+        }
+        pending
     }
 
     fn finish_queued_mutation(
@@ -818,7 +906,7 @@ where
             .contains(&tx_id)
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
             .borrow_mut()
@@ -1048,40 +1136,14 @@ where
         author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
-        let mut node = self.node.lock().await;
-        let pending = node.pending_transaction_ids_for_author(author).await?;
-        let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
-        let mut replay_units = Vec::new();
-        let mut visited = BTreeSet::new();
-        for tx_id in &pending {
-            collect_local_replay_commit_units(&mut node, *tx_id, &mut visited, &mut replay_units)
-                .await?;
-        }
-        drop(node);
-        for (tx_id, unit) in replay_units {
-            // A reopened main-thread runtime has no transaction history. Send
-            // accepted causal ancestors before each pending unit so the latter
-            // can be ingested before its Local ack or later authority fate.
-            downstream_fates.borrow_mut().push(unit.clone());
-            if pending_set.contains(&tx_id) {
-                // Durable recovery omits exclusive snapshot/read evidence. A
-                // live sibling may already retain the exact authored unit;
-                // never replace that unit with its redacted history replay.
-                let retained_unit = self
-                    .outbox
-                    .borrow()
-                    .iter()
-                    .any(|pending| pending.tx_id == tx_id && pending.unit.is_some());
-                if !retained_unit {
-                    self.queue_pending_upload(tx_id, Some(unit));
-                }
-            }
-        }
-        for tx_id in pending {
-            register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
-        }
-        queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
-        Ok(())
+        restore_local_subscriber_replay(
+            &self.node,
+            &self.outbox,
+            &self.local_fate_routes,
+            author,
+            downstream_fates,
+        )
+        .await
     }
 
     pub(super) fn mark_subscriber_connections_dirty(&self) {
@@ -1106,6 +1168,11 @@ where
             .query_runtime_wake_pending
             .swap(false, Ordering::AcqRel)
         {
+            self.local_subscription_dirty_generation.set(
+                self.local_subscription_dirty_generation
+                    .get()
+                    .wrapping_add(1),
+            );
             self.mark_subscriber_connections_dirty();
         }
     }
@@ -1396,6 +1463,7 @@ where
         self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
+    #[cfg(test)]
     pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
         self.transaction_abandonment_shutdown_pending.get()
     }
@@ -1553,10 +1621,6 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
-    }
-
-    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
-        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -2112,6 +2176,7 @@ where
             let confirmation_floor = node.committed_global_time();
             drop(node);
             let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+            let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
             let upstream_upload_destination = session_context.and_then(|context| {
                 context.remote.map(|remote| UpstreamUploadDestination {
                     remote_node: *remote.node.as_bytes(),
@@ -2362,7 +2427,9 @@ where
                 #[cfg(any(test, feature = "testing"))]
                 fail_next_subscription_refresh: Cell::new(false),
                 observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+                local_replay_epoch: self.subscriber_dirty_epoch.get(),
                 observed_session_claim_revision: Cell::new(0),
+                inbound_authority_receipt_quarantine: false,
                 connection_epoch,
                 startup_error: None,
                 released_outbox_tx_ids: Vec::new(),
@@ -2383,6 +2450,7 @@ where
                     failed_large_value_uploads: BTreeSet::new(),
                     pending_row_version_fetches: VecDeque::new(),
                     pending_row_version_repairs: VecDeque::new(),
+                    deferred_repair_fates: VecDeque::new(),
                     scope_view_cuts: BTreeMap::new(),
                     scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
@@ -2395,7 +2463,8 @@ where
                     connection_epoch,
                     PeerIoPumpRole::Upstream,
                     wire_inbound_context,
-                ),
+                )
+                .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
             }));
             self.connections.borrow_mut().push(Rc::clone(&connection));
             self.schedule_tick(TickUrgency::Immediate);
@@ -2751,6 +2820,7 @@ where
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         transport.set_trusted_encoder(ingest_context.trust.is_trusted());
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+        let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
@@ -2787,8 +2857,10 @@ where
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
+            local_replay_epoch: self.subscriber_dirty_epoch.get(),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
+            inbound_authority_receipt_quarantine: false,
             connection_epoch,
             startup_error,
             released_outbox_tx_ids: Vec::new(),
@@ -2822,7 +2894,8 @@ where
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
                 wire_inbound_context,
-            ),
+            )
+            .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -2966,6 +3039,12 @@ where
         }
         if let ConnectionLink::Subscriber(state) = &mut connection_ref.link {
             state.pending_authority_repairs.clear();
+        }
+        connection_ref.staged_inbound.clear();
+        if let ConnectionLink::Upstream(state) = &mut connection_ref.link {
+            state.pending_row_version_repairs.clear();
+            state.pending_row_version_fetches.clear();
+            state.deferred_repair_fates.clear();
         }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
@@ -3320,7 +3399,12 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.local_availability_dirty.replace(false)
+        // Another query can finish a local subscription's first terminal batch
+        // before this turn. Groove is then idle, but the queued terminal still
+        // needs to be folded into the application stream. Preserve its wake as
+        // local delivery work as well as downstream peer publication work.
+        let local_dirty_generation = self.local_subscription_dirty_generation.get();
+        if local_dirty_generation != self.observed_local_subscription_dirty_generation.get()
             || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
@@ -3332,6 +3416,10 @@ where
                 progress_waker.as_ref(),
             ))
             .await?;
+            // Acknowledge only completed delivery. Cancellation/error retains
+            // this generation, and wakes consumed during refresh remain dirty.
+            self.observed_local_subscription_dirty_generation
+                .set(local_dirty_generation);
             self.observed_chunk_completion_generation
                 .set(chunk_completion_generation);
         }
@@ -3344,19 +3432,38 @@ where
         // its initial view can suspend on cold storage, while later inbound
         // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
-        let connections = self.connections.borrow().clone();
-        for connection in &connections {
-            let mut connection = connection.lock().await;
+        let mut connections = self.connections.borrow().clone();
+        let mut retired = Vec::new();
+        for handle in &connections {
+            let mut connection = handle.lock().await;
             // `PeerConnection::tick` contains the subscriber admission state
             // machine. Keep that future off the enclosing Db tick frame so a
             // normal host/test thread cannot accumulate it across connection
             // passes.
-            let next = Box::pin(connection.tick()).await?;
+            let next = match Box::pin(connection.tick()).await {
+                Ok(next) => next,
+                Err(_)
+                    if matches!(connection.link, ConnectionLink::Subscriber(_))
+                        && connection.transport.has_terminal_failure() =>
+                {
+                    connection.auxiliary_pump.disconnect();
+                    drop(connection);
+                    retired.push(Rc::clone(handle));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
+        retired.clear();
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
@@ -3378,8 +3485,21 @@ where
                         connection.mark_subscriber_dirty() || subscriber_state_changed
                     };
                     if should_tick {
-                        let mut connection = connection.lock().await;
-                        let next = Box::pin(connection.tick()).await?;
+                        let handle = connection;
+                        let mut connection = handle.lock().await;
+                        let next = match Box::pin(connection.tick()).await {
+                            Ok(next) => next,
+                            Err(_)
+                                if matches!(connection.link, ConnectionLink::Subscriber(_))
+                                    && connection.transport.has_terminal_failure() =>
+                            {
+                                connection.auxiliary_pump.disconnect();
+                                drop(connection);
+                                retired.push(Rc::clone(handle));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;
@@ -3387,6 +3507,11 @@ where
                 }
             }
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
@@ -3639,7 +3764,11 @@ where
                             drop(owner);
                             self.subscriber_dirty_epoch
                                 .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
-                            self.local_availability_dirty.set(true);
+                            self.local_subscription_dirty_generation.set(
+                                self.local_subscription_dirty_generation
+                                    .get()
+                                    .wrapping_add(1),
+                            );
                             self.schedule_tick(TickUrgency::Immediate);
                         }
                     }
@@ -4057,19 +4186,12 @@ where
                     .await
                     .unsubscribe_groove_subscription(subscription_id);
             }
-            let (shape, binding, prepared_plan) = {
+            let (shape, binding) = {
                 let mut owner = node.lock().await;
-                let mut scoped =
-                    owner.scoped_optional_session_claims(author, request_claims.clone());
-                scoped
-                    .prepare_query_binding_for_link_in_authorization_mode(
-                        &shape,
-                        &binding,
-                        read_tier,
-                        author,
-                        authorization_mode,
-                    )
-                    .await?
+                let scoped = owner.scoped_optional_session_claims(author, request_claims.clone());
+                // Reopening installs its own maintained graph, just like the
+                // initial opener; no unused AppRows graph needs to be retained.
+                scoped.query_binding_for_link(&shape, &binding)?
             };
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
@@ -4092,7 +4214,7 @@ where
                         author,
                         read_tier,
                         &read_view,
-                        Some(prepared_plan),
+                        None,
                         authorization_mode,
                         pending_overlay,
                         progress_waker,
@@ -5378,13 +5500,58 @@ pub(super) fn route_upstream_subscription_rejection(
 /// ones with [`Transport::try_recv`]; the binding owns the actual socket and
 /// scheduling and bridges these to real I/O on its own runtime. Both methods are
 /// non-blocking — `try_recv` returning `None` means "nothing staged right now,"
-/// not "closed" (a disconnect surface lands with a later B slice). This is the
-/// single seam that keeps the async boundary *between* nodes, never inside `Db`.
+/// not "closed." `try_recv_result` is the fallible servicing seam used by
+/// [`PeerConnection`]: transport implementations can surface a sticky terminal
+/// failure discovered while flushing an accepted outbound backlog, while the
+/// default preserves the historical Option-only behavior for semantic adapters.
+/// This is the single seam that keeps the async boundary *between* nodes, never
+/// inside `Db`.
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Fallible receive poll for connection servicing.
+    ///
+    /// `Ok(None)` is idle, `Err(Backpressure)` is recoverable, and
+    /// `Err(Failed(_))` is terminal for the transport. Implementations that do
+    /// not expose transport failures retain the Option-only behavior.
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        Ok(self.try_recv())
+    }
+
+    /// Retain decoded-buffer ownership while a canonical message is deferred.
+    fn try_recv_owned_result(
+        &mut self,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        self.try_recv_result()
+            .map(|message| message.map(super::ReceivedSyncMessage::unleased))
+    }
+
+    /// Drive one bounded output turn. Backpressure must wait for a binding wake.
+    fn poll_flush(&mut self) -> Result<super::WireFlushStatus, TransportError> {
+        Ok(super::WireFlushStatus::Idle)
+    }
+    /// Whether the byte connection has entered an unrecoverable transport state.
+    /// Runtime owners retire only this peer; database/storage errors remain errors.
+    fn has_terminal_failure(&self) -> bool {
+        false
+    }
+
+    /// Remaining time until an incomplete receive must be serviced, even if
+    /// the remote peer sends no further bytes. Hosts use a real delayed wake.
+    fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        None
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    fn set_incomplete_receive_timeout_for_test(&mut self, _timeout_ms: u64) {}
+
+    /// Persistent fixed auxiliary channel shared with a lock-independent pump.
+    #[doc(hidden)]
+    fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
+        None
+    }
 
     /// Assign encoder trust from the locally admitted connection role.
     /// Semantic transports have no byte decoder to configure.

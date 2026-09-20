@@ -5,7 +5,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 
 const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 const todosTable = app.todos;
 const allTodosQuery = app.todos;

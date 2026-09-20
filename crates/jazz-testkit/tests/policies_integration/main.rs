@@ -1,3 +1,4 @@
+use jazz::tools::test_support::AllowAll;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -81,6 +82,7 @@ fn rebac_test_schema() -> Schema {
 fn provenance_notes_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+        .allow_all()
         .build()
 }
 
@@ -100,6 +102,17 @@ fn authorship_permissions_schema() -> Schema {
                 .policies(notes_policies),
         )
         .build()
+}
+
+fn assert_transaction_policy_denied(err: crate::JazzError) {
+    let crate::JazzError::Sync(message) = err else {
+        panic!("expected authority policy rejection, got {err:?}");
+    };
+    assert_eq!(
+        message,
+        "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+        "expected authority policy rejection",
+    );
 }
 
 fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {

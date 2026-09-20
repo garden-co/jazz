@@ -4,7 +4,6 @@
 
 import type {
   Schema,
-  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -25,6 +24,7 @@ import type {
 } from "../drivers/types.js";
 import { analyzeRelations } from "./relation-analyzer.js";
 import { toValue } from "../runtime/value-converter.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -40,7 +40,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
 /**
  * Convert a DSL SqlType to WasmColumnType format.
  */
-function sqlTypeToWasm(sqlType: SqlType): ColumnType {
+export function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
     if (sqlType.kind === "ENUM") {
       if (sqlType.cases) {
@@ -258,8 +258,16 @@ function clonePolicies(policies: DslTablePolicies): TablePolicies {
  */
 export function schemaToWasm(schema: Schema): WasmSchema {
   const tables: Record<string, TableSchema> = {};
+  const tableNames = new Set<string>();
 
   for (const table of schema.tables) {
+    assertSchemaNameAllowed(table.name);
+    if (tableNames.has(table.name)) {
+      throw new Error(
+        `Duplicate table name "${table.name}" in schema. Table names must be unique.`,
+      );
+    }
+    tableNames.add(table.name);
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
       if (
@@ -295,6 +303,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
     tables[table.name] = {
       columns,
+      ...(table.relations ? { relations: table.relations } : {}),
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
@@ -304,6 +313,19 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   // Relation names become keys in the public row shape when an include is
   // materialized. Validate their namespace while compiling a schema rather
   // than allowing consumers to discover a collision later during lowering.
+  for (const [tableName, table] of Object.entries(tables)) {
+    for (const [name, relation] of Object.entries(table.relations ?? {})) {
+      if (relation.kind !== "forward") continue;
+      const column = table.columns.find((c) => c.name === relation.column);
+      if (!column)
+        throw new Error(
+          `Relationship "${tableName}.${name}" references unknown column "${relation.column}".`,
+        );
+      if (column.references && column.references !== relation.table)
+        throw new Error(`Conflicting relationship targets for "${tableName}.${column.name}".`);
+      column.references = relation.table;
+    }
+  }
   analyzeRelations(tables);
   return tables;
 }

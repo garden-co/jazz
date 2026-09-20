@@ -3,7 +3,7 @@ import { schema as s } from "../index.js";
 import { createPolicyTestApp } from "../testing/index.js";
 
 const app = s.defineApp({
-  ints: s.table({ value: s.int() }),
+  ints: s.table({ value: s.int() }, {}),
 });
 
 const permissions = s.definePermissions(app, ({ policy }) => {

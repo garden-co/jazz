@@ -80,7 +80,7 @@ function wasmPackToolVersion(root, name) {
 // ephemeral filename contract: real NAPI sources and any other generated
 // inputs remain provenance inputs.
 const isStagedNapiBinding = (repoPath) =>
-  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.node\.staged-\d+-\d+$/.test(
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|linux-arm64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.node\.staged-\d+-\d+$/.test(
     repoPath,
   );
 
@@ -88,7 +88,7 @@ const isStagedNapiBinding = (repoPath) =>
 // It is ignored, sealed after the producer build, and cannot be a producer
 // input without making the native fingerprint depend on lane-local output.
 const isNapiGeneratedTargetManifest = (repoPath) =>
-  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.manifest\.json$/.test(
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|linux-arm64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.manifest\.json$/.test(
     repoPath,
   );
 
@@ -294,6 +294,8 @@ const sharedInputs = [
   "dev/artifacts/stage-napi-loader.mjs",
   "dev/artifacts/stage-native-fingerprints.mjs",
   "dev/artifacts/stage-napi-manifests.mjs",
+  "dev/artifacts/linux-napi/Dockerfile",
+  "dev/artifacts/linux-napi/build.sh",
 ];
 
 const artifactRoots = {
@@ -346,9 +348,34 @@ export function workspaceDependencyInputs(root, rootManifest) {
       if (!dependency.path || dependency.kind === "dev") continue;
       const dependencyDirectory = resolve(dependency.path);
       if (!packages.has(dependencyDirectory)) {
-        throw new Error(
-          `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+        // Excluded vendored packages are intentionally outside the root
+        // workspace, so --no-deps omits them. Ask their own manifest for the
+        // same declared dependency metadata, without resolving registry crates.
+        const vendored = spawnSync(
+          "cargo",
+          [
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            join(dependencyDirectory, "Cargo.toml"),
+          ],
+          { cwd: root, encoding: "utf8" },
         );
+        if (vendored.status !== 0) {
+          throw new Error(
+            `artifact provenance: cargo metadata failed for path dependency ${dependency.name}: ${vendored.stderr.trim()}`,
+          );
+        }
+        for (const nested of JSON.parse(vendored.stdout).packages) {
+          packages.set(dirname(resolve(nested.manifest_path)), nested);
+        }
+        if (!packages.has(dependencyDirectory)) {
+          throw new Error(
+            `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+          );
+        }
       }
       pending.push(dependencyDirectory);
     }
@@ -468,6 +495,16 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
     wasmBindgen: kind === "wasm" ? wasmPackToolVersion(root, "wasm-bindgen") : "not-applicable",
     wasmOpt: kind === "wasm" ? wasmPackToolVersion(root, "wasm-opt") : "not-applicable",
     napi: kind === "napi" ? toolVersion(root, "napi") : "not-applicable",
+    ...(kind === "napi" && process.platform === "linux"
+      ? {
+          cc: toolVersion(root, process.env.CC || "cc"),
+          cxx: toolVersion(root, process.env.CXX || "c++"),
+          libc: toolVersion(root, "getconf", ["GNU_LIBC_VERSION"]),
+          sysroot: toolVersion(root, process.env.CXX || "c++", ["-print-sysroot"]),
+          baseline: process.env.JAZZ_NAPI_BUILD_BASELINE || "host-userspace",
+          image: process.env.JAZZ_NAPI_BUILD_IMAGE || "host-userspace",
+        }
+      : {}),
   };
   return {
     schema: 1,
@@ -603,7 +640,7 @@ export function verifyManifest(root, kind, profile, targetOverride) {
     if (JSON.stringify(actual[key]) !== JSON.stringify(expected[key]))
       return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;
   }
-  for (const key of ["rustc", "wasmPack", "wasmBindgen", "wasmOpt", "napi"]) {
+  for (const key of Object.keys(expected.tools)) {
     if (actual.tools?.[key] !== expected.tools[key])
       return `tools.${key} differs (built ${JSON.stringify(actual.tools?.[key])}, expected ${JSON.stringify(expected.tools[key])})`;
   }

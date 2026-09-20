@@ -7,25 +7,37 @@ describe("typed migration object syntax", () => {
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-          legacyPriority: s.int().optional(),
-        }),
-        todos: s.table({
-          title: s.string(),
-          done: s.boolean(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+            legacyPriority: s.int().optional(),
+          },
+          {},
+        ),
+        todos: s.table(
+          {
+            title: s.string(),
+            done: s.boolean(),
+          },
+          {},
+        ),
       },
       to: {
-        users: s.table({
-          emailAddress: s.string(),
-        }),
-        todos: s.table({
-          title: s.string(),
-          done: s.boolean(),
-          description: s.string().optional(),
-          ownerId: s.ref("users").optional(),
-        }),
+        users: s.table(
+          {
+            emailAddress: s.string(),
+          },
+          { todosViaOwner: s.reverse("todos", "owner") },
+        ),
+        todos: s.table(
+          {
+            title: s.string(),
+            done: s.boolean(),
+            description: s.string().optional(),
+            ownerId: s.uuid().optional(),
+          },
+          { owner: s.rel("users", "ownerId") },
+        ),
       },
       migrate: {
         users: {
@@ -81,15 +93,21 @@ describe("typed migration object syntax", () => {
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       },
       to: {
-        people: s.table({
-          emailAddress: s.string(),
-          nickname: s.string().optional(),
-        }),
+        people: s.table(
+          {
+            emailAddress: s.string(),
+            nickname: s.string().optional(),
+          },
+          {},
+        ),
       },
       renameTables: {
         people: s.renameTableFrom("users"),
@@ -128,20 +146,32 @@ describe("typed migration object syntax", () => {
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
-        legacyProfiles: s.table({
-          bio: s.string().optional(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
+        legacyProfiles: s.table(
+          {
+            bio: s.string().optional(),
+          },
+          {},
+        ),
       },
       to: {
-        users: s.table({
-          email: s.string(),
-        }),
-        profiles: s.table({
-          bio: s.string().optional(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
+        profiles: s.table(
+          {
+            bio: s.string().optional(),
+          },
+          {},
+        ),
       },
       createTables: {
         profiles: true,
@@ -170,15 +200,21 @@ describe("typed migration object syntax", () => {
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       },
       to: {
-        people: s.table({
-          emailAddress: s.string(),
-          age: s.int(),
-        }),
+        people: s.table(
+          {
+            emailAddress: s.string(),
+            age: s.int(),
+          },
+          {},
+        ),
       },
       renameTables: {
         people: s.renameTableFrom("users"),
@@ -219,14 +255,20 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          people: s.table({
-            emailAddress: s.string(),
-          }),
+          people: s.table(
+            {
+              emailAddress: s.string(),
+            },
+            {},
+          ),
         },
         createTables: {
           people: true,
@@ -250,15 +292,21 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          people: s.table({
-            emailAddress: s.string(),
-            age: s.int(),
-          }),
+          people: s.table(
+            {
+              emailAddress: s.string(),
+              age: s.int(),
+            },
+            {},
+          ),
         },
         renameTables: {
           people: s.renameTableFrom("users"),
@@ -280,15 +328,21 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string().optional(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string().optional(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
@@ -301,15 +355,21 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string().optional(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string().optional(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
@@ -323,15 +383,21 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
@@ -346,12 +412,15 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({}),
+          users: s.table({}, {}),
         },
         migrate: {},
       });
@@ -361,17 +430,26 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
-          profiles: s.table({
-            bio: s.string().optional(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
+          profiles: s.table(
+            {
+              bio: s.string().optional(),
+            },
+            {},
+          ),
         },
       });
 
@@ -380,17 +458,26 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
-          legacyProfiles: s.table({
-            bio: s.string().optional(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
+          legacyProfiles: s.table(
+            {
+              bio: s.string().optional(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
       });
 
@@ -399,14 +486,20 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          legacyUsers: s.table({
-            email: s.json(),
-          }),
+          legacyUsers: s.table(
+            {
+              email: s.json(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         renameTables: {
           users: s.renameTableFrom("legacyUsers"),
@@ -418,14 +511,20 @@ describe("typed migration object syntax", () => {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            emailAddress: s.int(),
-          }),
+          users: s.table(
+            {
+              emailAddress: s.int(),
+            },
+            {},
+          ),
         },
         migrate: {
           users: {

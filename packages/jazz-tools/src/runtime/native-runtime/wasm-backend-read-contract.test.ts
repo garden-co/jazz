@@ -7,8 +7,11 @@ import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.
 import { encodeSchema } from "./schema-codec.js";
 
 const app = s.defineApp({
-  folders: s.table({ title: s.string() }),
-  notes: s.table({ text: s.string(), folderId: s.ref("folders") }),
+  folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
+  notes: s.table(
+    { text: s.string(), folderId: s.uuid() },
+    { folder: s.rel("folders", "folderId") },
+  ),
 });
 
 describe("WASM backend read capability parity", () => {
@@ -43,7 +46,8 @@ describe("WASM backend read capability parity", () => {
         () => db.all(relation, opts),
       ];
       try {
-        for (const read of reads) expect(await resolveRead(read())).toBeInstanceOf(Uint8Array);
+        for (const read of reads)
+          expect(await resolveRead(read(), () => db.tick())).toBeInstanceOf(Uint8Array);
         await db.subscribe(query, opts).cancel();
         await db.subscribe(relation, opts).cancel();
       } finally {
@@ -54,11 +58,51 @@ describe("WASM backend read capability parity", () => {
   }
 });
 
-async function resolveRead(read: Uint8Array | { poll(): Uint8Array | null }): Promise<Uint8Array> {
+it("lets host timers complete a pending read even when every tick completes immediately", async () => {
+  let ready = false;
+  let polls = 0;
+  const bytes = Uint8Array.of(1);
+  const timer = setTimeout(() => {
+    ready = true;
+  }, 0);
+  try {
+    const read = {
+      poll() {
+        if (++polls > 20) throw new Error("Read polling starved the host timer");
+        return ready ? bytes : null;
+      },
+    };
+    expect(await resolveRead(read, () => undefined)).toBe(bytes);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+it("reports host tick failures while a read remains pending", async () => {
+  const error = new Error("Host tick failed");
+  await expect(resolveRead({ poll: () => null }, () => Promise.reject(error))).rejects.toBe(error);
+});
+
+async function resolveRead(
+  read: Uint8Array | { poll(): Uint8Array | null },
+  serviceTick: () => unknown,
+): Promise<Uint8Array> {
   if (read instanceof Uint8Array) return read;
+  let tick: Promise<unknown> | undefined;
+  let failure: { error: unknown } | undefined;
   for (;;) {
     const result = read.poll();
+    if (result !== null) await tick;
+    if (failure) throw failure.error;
     if (result !== null) return result;
+    // Raw bindings need a host tick, but the read must keep polling while it runs.
+    tick ??= Promise.resolve(serviceTick())
+      .catch((error: unknown) => {
+        failure = { error };
+      })
+      .finally(() => {
+        tick = undefined;
+      });
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
