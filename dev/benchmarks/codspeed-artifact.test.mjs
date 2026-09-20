@@ -178,9 +178,7 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
   const run = workflow.split("\n  native-workloads-walltime:\n")[1];
   assert.match(build, /runs-on: blacksmith-16vcpu-ubuntu-2204-arm/);
   assert.match(build, /CARGO_BUILD_JOBS: 16/);
-  assert.match(build, /cache-workspace-crates: true/);
-  assert.match(build, /JAZZ_BENCHMARK_SOURCE: \$\{\{ github.sha \}\}/);
-  assert.match(build, /env-vars: JAZZ_BENCHMARK_SOURCE/);
+  assert.match(build, /cache-targets: false/);
   assert.ok(
     build.includes(
       'RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"\n          export RUSTFLAGS',
@@ -198,4 +196,42 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
     /cargo codspeed run -m walltime --package jazz-example-\$\{\{ matrix.workload \}\}-benchmark --bench walltime/,
   );
   assert.match(run, /RUST_MIN_STACK: 4194304/);
+});
+
+test("compiler cache restores across revisions while isolating compatible workloads", async () => {
+  const workflow = await readFile(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
+  const cache = workflow
+    .split("      - name: Restore native compiler outputs\n")[1]
+    .split("      - name:")[0];
+  const key = cache.match(/          key: (.+)/)[1];
+  const prefix = cache.match(/          restore-keys: \|\n            (.+)/)[1];
+  const render = (template, overrides = {}) => {
+    const values = {
+      "matrix.workload": "todo",
+      "runner.os": "Linux",
+      "runner.arch": "ARM64",
+      "github.sha": "source-a",
+      ...overrides,
+    };
+    return template.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) =>
+      expression.startsWith("hashFiles(") ? (overrides.lockHash ?? "lock-a") : values[expression],
+    );
+  };
+  const oldKey = render(key);
+  const nextKey = render(key, { "github.sha": "source-b" });
+  const nextPrefix = render(prefix, { "github.sha": "source-b" });
+  assert.notEqual(oldKey, nextKey, "each source can save new workspace outputs");
+  assert.ok(oldKey.startsWith(nextPrefix), "next source must restore previous source outputs");
+  for (const change of [
+    { "matrix.workload": "policy-scoped-documents" },
+    { "runner.os": "macOS" },
+    { "runner.arch": "X64" },
+    { lockHash: "lock-b" },
+  ]) {
+    assert.ok(!oldKey.startsWith(render(prefix, change)), "incompatible cache must not restore");
+  }
+  assert.match(prefix, /ubuntu2204-rust1\.93\.1-codspeed5\.0\.1-mimalloc-absolute-remap/);
+  assert.match(cache, /path: target\/release/);
+  assert.match(workflow, /key: \$\{\{ steps.native-build-cache.outputs.cache-primary-key \}\}/);
+  assert.doesNotMatch(workflow, /JAZZ_BENCHMARK_SOURCE/);
 });

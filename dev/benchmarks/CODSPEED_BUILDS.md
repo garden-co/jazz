@@ -20,7 +20,7 @@ Build latency, cache behavior and acceptance receipts are tracked in
   relative-path normalization. `codspeed-artifact.mjs rustflags` owns this mapping,
   the artifact contract pins it, and installation rejects checkout-path drift.
   This is the one intentional debug-path flag difference; it does not change
-  optimization settings. Hosted user-source attribution must still be verified.
+  optimization settings. Hosted user-source attribution passed at `9c7995a1d41189ae0719e2cdb442423c9b75f233`: CodSpeed run `6aaf3c6cc8296f49201b8f39` classified all 54,073 cold-sync project frames and 5,539 sequential-update project frames as user code, with zero non-repository paths. Result IDs are `6aaf3ee7ad9a6239bfb27f3b` and `6aaf3ee7ad9a6239bfb27f37`, respectively.
 - Each workload builds separately to avoid feature unification. A 16-vCPU
   build host replaces four compile jobs on a measurement host. This does not
   change benchmark execution parallelism or the measurement machine.
@@ -30,12 +30,16 @@ Build latency, cache behavior and acceptance receipts are tracked in
   adds total resource-use receipts; the environment step identifies native
   compiler versions, memory and CPU availability.
 - Caches are acceleration, not measurement authority: always run Cargo before
-  sealing outputs. Workload/architecture/OS-separated caches retain workspace
-  crates; the source SHA enters the environment hash so later builds can save
-  updated workspace outputs while retaining cross-revision restore prefixes.
-  Do not combine `key` with `shared-key`: the pinned action ignores `key` then.
-  Standard GitHub branch isolation still applies. This does not pool different
-  workloads' caches or grant PR caches authority over main.
+  sealing outputs. Rust-cache retains registry, Git and installed-tool caches
+  with target caching disabled. Explicit cache restore/save steps retain
+  `target/release`, including workspace outputs. Their compatibility prefix
+  pins workload, OS/architecture, Ubuntu image, Rust/CodSpeed versions, allocator,
+  absolute debug-path contract, Cargo lockfile, toolchain file and Cargo config.
+  Only the primary save key appends the source SHA; the restore prefix does not,
+  so a new revision can restore and then save refreshed outputs. The pinned
+  rust-cache action cannot express this with `key`, `shared-key` or `env-vars`:
+  all affect its restore prefix too. Standard GitHub branch isolation still
+  applies. Receipt bundles are excluded; caches never authorize measurement.
 - The JSON `jazz-codspeed-benchmark-artifact-v1` manifest binds the exact checkout
   SHA, GitHub workflow run ID, compiler identity, workload/build contract and
   SHA-256 of both executables. Consumer paths are fixed, not manifest-controlled.
