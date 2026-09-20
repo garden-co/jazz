@@ -660,6 +660,14 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     });
     if (opts.starter === "next-betterauth" && !opts.skipE2E) {
       transportProxy = await startTransportFaultProxy(server.url);
+      // Internal fault controls belong to the harness, not the generated starter's tests.
+      fs.copyFileSync(
+        path.join(
+          opts.repoRoot,
+          "packages/create-jazz-e2e/fixtures/next-betterauth-transport-loss.spec.ts",
+        ),
+        path.join(appDir, "e2e/transport-loss.spec.ts"),
+      );
     }
     writeEnvFile(
       appDir,
