@@ -715,6 +715,13 @@ fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_acti
     let base = schema();
     let snapshot = catalogue_snapshot_fixture_for_schema(catalogue_evolved_schema_with_allow_all());
     let (dir, mut receiver) = open_node_with_schema(node(0x3f), base.clone());
+    // Establish the authority's UUIDs first: adding historical lineage below
+    // must not accidentally also test adoption of a fresh genesis manifest.
+    let mut genesis = snapshot.clone();
+    genesis.lineages.clear();
+    genesis.schemas.retain(|schema| schema.id == base.version_id());
+    genesis.current_write_schema = CurrentWriteSchema { revision: 0, schema: base.version_id() };
+    receiver.apply_trusted_catalogue_snapshot_settled(genesis).unwrap();
     let runtime_before_transition = receiver.groove_runtime_token();
 
     receiver
@@ -2483,4 +2490,122 @@ fn constant_policy_schema_switch_invalidates_replaced_physical_table() {
         schema: evolved.id,
     }).unwrap();
     assert_ne!(receiver.groove_runtime_token(), before);
+}
+
+#[test]
+fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
+    // Real independently opened catalogues mint distinct provisional UUIDs.
+    // The usual shared test catalogue helper intentionally masks this race.
+    let schema = schema();
+    let open = |id| {
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+        let node = NodeState::new(node(id), schema.clone(), storage).unwrap();
+        (dir, node)
+    };
+    let (_authority_dir, authority) = open(0x71);
+    let (_relay_dir, mut relay) = open(0x72);
+    let schema_id = schema.version_id();
+    let expected = authority.scope_physical_table(schema_id, "todos").unwrap();
+    assert_ne!(
+        relay.scope_physical_table(schema_id, "todos").unwrap(),
+        expected
+    );
+    let tx = relay
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x73), 10)
+                .cells(title_cells("pending-before-rebind")),
+        )
+        .unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (_receiver_dir, mut receiver) = open(0x74);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(relay.catalogue_snapshot().unwrap())
+        .unwrap();
+    register_shape_binding(&mut receiver, &shape, &binding);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let key = receiver
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let baseline_subscriptions = relay.runtime_stats_for_test().active_subscriptions;
+    let mut downstream = PeerState::new();
+    let initial = downstream
+        .rehydrate_query(&mut relay, &shape, &binding)
+        .unwrap();
+    receiver.apply_sync_message_settled(initial).unwrap();
+    let generation = receiver.applied_authority_result_generation(&key);
+    assert!(receiver.has_settled_authority_result(&key));
+    let snapshot = authority.catalogue_snapshot().unwrap();
+    relay
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    assert_eq!(
+        relay.scope_physical_table(schema_id, "todos").unwrap(),
+        expected
+    );
+    assert!(!receiver.has_settled_authority_result(&key));
+    assert_eq!(
+        receiver.applied_authority_result_generation(&key),
+        generation
+    );
+    assert!(
+        receiver.query.authority_results[&key]
+            .compiled_covered_input_sources
+            .is_none()
+    );
+    let token = relay.groove_runtime_token();
+    let identity_generation = relay.physical_identity_generation();
+    relay
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
+        .unwrap();
+    assert_eq!(
+        relay.groove_runtime_token(),
+        token,
+        "identical snapshot must preserve query validity"
+    );
+    assert_eq!(relay.physical_identity_generation(), identity_generation);
+    relay.accept_global_for_test(tx).unwrap();
+    let update = crate::protocol::ViewUpdatePayload::from_view_update(
+        downstream
+            .query_update(&mut relay, &shape, &binding)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        update.supporting_rows.is_snapshot(),
+        "rebound peer must replace its old closure"
+    );
+    assert_eq!(update.supporting_rows.added_rows().len(), 1);
+    assert_eq!(
+        update.supporting_rows.added_rows()[0].physical_table,
+        expected,
+        "live peer support must use the same permanent identities as its announced catalogue"
+    );
+    receiver
+        .apply_sync_message_settled(update.into_view_update())
+        .unwrap();
+    assert!(receiver.has_settled_authority_result(&key));
+    assert!(receiver.applied_authority_result_generation(&key) > generation);
+    assert_eq!(receiver.scalar_authority_input_rows(&key, "todos").len(), 1);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions + 1,
+        "identity refresh must retire the old peer graph immediately"
+    );
+    downstream.forget_subscription_with_node(&mut relay, subscription);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions,
+        "forget must release the replacement without waiting for another runtime tick"
+    );
 }

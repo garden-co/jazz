@@ -987,6 +987,10 @@ where
         Ok(self.database.wait_for_publication_settlement(waker)?)
     }
 
+    pub(crate) fn physical_identity_generation(&self) -> u64 {
+        self.physical_identity_generation
+    }
+
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
     }
