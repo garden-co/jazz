@@ -2011,6 +2011,11 @@ impl Database {
         self.ivm_runtime.stats()
     }
 
+    /// Lifetime topology-cache counters, independent of transactional state.
+    pub fn execution_layout_stats(&self) -> crate::ivm::ExecutionLayoutStats {
+        self.ivm_runtime.execution_layout_stats()
+    }
+
     pub(super) fn durable_indices_store_with_storage<'a, T>(
         &'a self,
         storage: &'a T,
