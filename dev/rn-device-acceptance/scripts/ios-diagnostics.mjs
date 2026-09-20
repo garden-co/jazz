@@ -93,7 +93,7 @@ export const parseLaunchProcessId = (value) => {
 /** Exact fixed counters only; never print arbitrary sandbox contents. */
 export const scopeWriterReadDiagnostic = (value) => {
   const detail = String(value);
-  return /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/.test(
+  return /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|unknown))?$/.test(
     detail,
   ) && !detail.endsWith("\n")
     ? detail

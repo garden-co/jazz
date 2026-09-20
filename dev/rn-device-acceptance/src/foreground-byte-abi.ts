@@ -509,7 +509,7 @@ export async function proveForegroundScopeIsolation(
         try {
           void Promise.resolve(
             reportWriterReadDiagnostic(
-              `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}`,
+              `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}${observation.rejection ? `-reason-${observation.rejection}` : ""}`,
             ),
           ).catch(() => {});
         } catch {
@@ -569,7 +569,26 @@ function setWakeTraceBestEffort(foreground: ScopeForeground, enabled: boolean): 
   }
 }
 
+/** Classify native enum debug text without exposing server detail or payloads. */
+export function scopeReadRejectionCategory(reason: unknown): string {
+  if (typeof reason !== "string") return "unknown";
+  const fixed: Record<string, string> = {
+    ShapeRegistrationPendingCatalogueAdmission: "catalogue-pending",
+    "ServerFailure { code: TableNotFound }": "table-not-found",
+    "ServerFailure { code: SchemaResolution }": "schema-resolution",
+    "ServerFailure { code: QueryValidation }": "query-validation",
+    "ServerFailure { code: QueryLowering }": "query-lowering",
+    "ServerFailure { code: PolicyEvaluation }": "policy-evaluation",
+    "ServerFailure { code: Internal }": "internal",
+  };
+  if (Object.hasOwn(fixed, reason)) return fixed[reason]!;
+  if (reason.startsWith("UnsupportedShapeCapability {")) return "unsupported-shape";
+  if (reason.startsWith("InvalidAuthoritySourceClosure {")) return "invalid-authority-closure";
+  return "unknown";
+}
+
 type ScopeReadObservation = {
+  rejection?: string;
   last: "none" | "pending" | "subscription" | "rejected" | "closed" | "rows";
   wakes: number;
   polls: number;
@@ -685,8 +704,12 @@ async function readScopeRows(
       observeResponse(response);
       if (timing.now() >= deadline) break;
       if (response.type === "subscriptionEvents") {
-        if (response.events.some((event) => event.type === "rejected")) {
-          if (observation) observation.last = "rejected";
+        const rejected = response.events.find((event) => event.type === "rejected");
+        if (rejected) {
+          if (observation) {
+            observation.last = "rejected";
+            observation.rejection = scopeReadRejectionCategory(rejected.reason);
+          }
           throw new Error("scope isolation fixture subscription ended before its read");
         }
         if (response.events.some((event) => event.type === "closed")) {

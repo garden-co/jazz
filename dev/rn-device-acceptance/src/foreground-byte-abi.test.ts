@@ -384,7 +384,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     /subscription ended before its read/,
   );
   assert.deepEqual(rejectedWriterDetails, [
-    "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no",
+    "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no-reason-unknown",
   ]);
 
   await assert.rejects(
@@ -1622,4 +1622,29 @@ test("queries and owner cells match the Rust-generated fixture", async () => {
   assert.deepEqual([...scopeQuery], fixture.scopeQuery);
   assert.deepEqual([...generatedTodosQuery], fixture.todosQuery);
   assert.deepEqual(scopeCells, fixture.scopeCells);
+});
+
+test("scope rejection diagnostics retain only fixed categories, never native detail", async () => {
+  const { scopeReadRejectionCategory } = await import("./foreground-byte-abi.ts");
+  for (const [reason, expected] of [
+    ["ShapeRegistrationPendingCatalogueAdmission", "catalogue-pending"],
+    ["ServerFailure { code: TableNotFound }", "table-not-found"],
+    ["ServerFailure { code: SchemaResolution }", "schema-resolution"],
+    ["ServerFailure { code: QueryValidation }", "query-validation"],
+    ["ServerFailure { code: QueryLowering }", "query-lowering"],
+    ["ServerFailure { code: PolicyEvaluation }", "policy-evaluation"],
+    ["ServerFailure { code: Internal }", "internal"],
+    ['UnsupportedShapeCapability { detail: "private-fixture-detail" }', "unsupported-shape"],
+    [
+      'InvalidAuthoritySourceClosure { transition: "private-fixture-detail" }',
+      "invalid-authority-closure",
+    ],
+    ["private-fixture-detail", "unknown"],
+    ["ServerFailure { code: Internal } private-fixture-detail", "unknown"],
+    ["__proto__", "unknown"],
+  ]) {
+    assert.equal(scopeReadRejectionCategory(reason), expected);
+    assert.doesNotMatch(scopeReadRejectionCategory(reason), /private-fixture-detail/);
+  }
+  assert.equal(scopeReadRejectionCategory(undefined), "unknown");
 });

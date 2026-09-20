@@ -6,7 +6,7 @@ import { isDeviceDiagnosticCode } from "../src/device-diagnostics.ts";
 const THREADTIME_DIAGNOSTIC =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzDeviceAcceptance\s*:\s*(\S+)\s*$/;
 const WRITER_READ_DETAIL =
-  /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
+  /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|unknown))?$/;
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 const THREADTIME_FOREGROUND_WAKE =

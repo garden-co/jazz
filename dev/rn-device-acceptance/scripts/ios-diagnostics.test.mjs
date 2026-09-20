@@ -101,3 +101,49 @@ test("scope writer counters are exact and reject arbitrary or trailing data", as
       "[no recognized scope writer read diagnostic]",
     );
 });
+
+test("scope rejection category sanitizers agree across hosts and reject raw details", async () => {
+  const { scopeWriterReadDiagnostic } = await import("./ios-diagnostics.mjs");
+  const { androidScopeWriterReadDiagnostic } = await import("./android-diagnostics.mjs");
+  const prefix =
+    "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no-reason-";
+  for (const category of [
+    "unsupported-shape",
+    "catalogue-pending",
+    "table-not-found",
+    "schema-resolution",
+    "query-validation",
+    "query-lowering",
+    "policy-evaluation",
+    "internal",
+    "invalid-authority-closure",
+    "unknown",
+  ]) {
+    const detail = prefix + category;
+    assert.equal(scopeWriterReadDiagnostic(detail), detail);
+    assert.equal(
+      androidScopeWriterReadDiagnostic(
+        `08-29 22:52:21.495 4268 4288 E JazzScopeWriterRead: ${detail}`,
+      ),
+      detail,
+    );
+  }
+  for (const category of [
+    "private-fixture-detail",
+    "internal-private-fixture-detail",
+    "internal\nprivate-fixture-detail",
+  ]) {
+    assert.equal(
+      scopeWriterReadDiagnostic(prefix + category),
+      "[no recognized scope writer read diagnostic]",
+    );
+    // Android logs are line-oriented; appended detail on the same line must fail closed.
+    if (!category.includes("\n"))
+      assert.equal(
+        androidScopeWriterReadDiagnostic(
+          `08-29 22:52:21.495 4268 4288 E JazzScopeWriterRead: ${prefix}${category}`,
+        ),
+        undefined,
+      );
+  }
+});

@@ -210,7 +210,7 @@ RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:
 }
 
 RCT_REMAP_METHOD(recordScopeWriterReadDiagnostic, recordScopeWriterReadDiagnostic:(NSString *)detail resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
-  NSString *pattern = @"^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)$";
+  NSString *pattern = @"^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)(-reason-(unsupported-shape|catalogue-pending|table-not-found|schema-resolution|query-validation|query-lowering|policy-evaluation|internal|invalid-authority-closure|unknown))?$";
   NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
   NSTextCheckingResult *match = [expression firstMatchInString:detail options:0 range:NSMakeRange(0, detail.length)];
   if (!match || !NSEqualRanges(match.range, NSMakeRange(0, detail.length))) {
