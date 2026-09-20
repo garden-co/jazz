@@ -2534,6 +2534,7 @@ fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
     let key = receiver
         .authority_result_key_for_subscription(subscription)
         .unwrap();
+    let baseline_subscriptions = relay.runtime_stats_for_test().active_subscriptions;
     let mut downstream = PeerState::new();
     let initial = downstream
         .rehydrate_query(&mut relay, &shape, &binding)
@@ -2596,4 +2597,15 @@ fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
     assert!(receiver.has_settled_authority_result(&key));
     assert!(receiver.applied_authority_result_generation(&key) > generation);
     assert_eq!(receiver.scalar_authority_input_rows(&key, "todos").len(), 1);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions + 1,
+        "identity refresh must retire the old peer graph immediately"
+    );
+    downstream.forget_subscription_with_node(&mut relay, subscription);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions,
+        "forget must release the replacement without waiting for another runtime tick"
+    );
 }

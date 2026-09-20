@@ -532,7 +532,7 @@ impl PeerState {
 
     fn clear_stale_groove_runtime_handles<S>(
         &mut self,
-        node: &NodeState<S>,
+        node: &mut NodeState<S>,
         subscription: SubscriptionKey,
     ) where
         S: OrderedKvStorage,
@@ -551,6 +551,14 @@ impl PeerState {
             })
         {
             if let Some(state) = self.publication_states.get_mut(&subscription) {
+                // UUID adoption can invalidate metadata while the underlying
+                // runtime remains live. Release that graph now; an old-runtime
+                // subscription ID must never address a replacement runtime.
+                if state.groove_runtime_token == Some(current_token)
+                    && let Some(stale) = state.maintained_subscription_view.take()
+                {
+                    node.unsubscribe_groove_subscription(stale.subscription.id());
+                }
                 state.clear_groove_runtime_handles();
             }
             self.refresh_maintained_subscription_view_footprint(subscription);
