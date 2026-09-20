@@ -32,22 +32,44 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
     steps:
-      - name: Read-only authentication and project diagnostics
-        shell: bash
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify artifact run identity and deployment source tree
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node dev/scripts/inspector-provenance.mjs
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.artifact-run-id }}
+          name: inspector-prebuilt
+          path: target/inspector-prebuilt
+
+      - name: Verify complete output and stage without assigning domains
+        env:
+          ARTIFACT_SHA: ${{ steps.artifact.outputs.source_sha }}
         run: |
-          node --input-type=module <<'JS'
-          const token = process.env.VERCEL_TOKEN;
-          const team = process.env.VERCEL_ORG_ID;
-          const project = process.env.VERCEL_PROJECT_ID;
-          console.log(JSON.stringify({tokenPresent: !!token, surroundingWhitespace: token !== token.trim(), teamIdShape: /^team_/.test(team), projectIdShape: /^prj_/.test(project)}));
-          const checks = [
-            ['user', '/v2/user'],
-            ['team', `/v2/teams/${encodeURIComponent(team)}`],
-            ['project', `/v9/projects/${encodeURIComponent(project)}?teamId=${encodeURIComponent(team)}`],
-          ];
-          for (const [check, path] of checks) {
-            const response = await fetch(`https://api.vercel.com${path}`, {headers: {Authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(30000)});
-            const body = await response.json().catch(() => ({}));
-            console.log(JSON.stringify({check, status: response.status, errorCode: body.error?.code, expectedProject: check === 'project' && response.ok ? body.name === 'jazz2-inspector' : undefined, expectedTeam: check === 'team' && response.ok ? body.slug === 'garden-co' : undefined}));
-          }
-          JS
+          node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${ARTIFACT_SHA}"
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the matching Vercel Inspector GitHub secret."
+              exit 1
+            fi
+          done
+          # Vercel checks the invocation root and the configured project root.
+          # Keep both copies identical; the project root is packages/inspector.
+          mkdir -p target/inspector-prebuilt/packages/inspector/.vercel
+          cp -R target/inspector-prebuilt/.vercel/output target/inspector-prebuilt/packages/inspector/.vercel/output
+          cd target/inspector-prebuilt
+          node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
+          npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
+            --token="${VERCEL_TOKEN}" \
+            --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
+            --meta "releaseSourceSha=${ARTIFACT_SHA}"
