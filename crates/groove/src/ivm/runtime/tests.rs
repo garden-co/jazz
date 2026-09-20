@@ -1973,6 +1973,56 @@ async fn subscription_retainers_keep_output_ancestors_alive() {
 }
 
 #[futures_test::test]
+async fn ready_queue_drives_shared_deep_chain_without_ancestor_rewalks() {
+    // Internal work instrumentation is necessary to distinguish two correct
+    // output paths with linear versus repeated-ancestor scheduling work.
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..64 {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    evaluator::take_subgraph_walk_count();
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let second = runtime.subscribe_one_sink(graph, &storage).await.unwrap();
+    assert!(first.recv().unwrap().is_empty());
+    assert!(second.recv().unwrap().is_empty());
+    assert_eq!(evaluator::take_subgraph_walk_count(), 0);
+    let values = vec![Value::U64(1), Value::String("Blue Train".to_owned())];
+    for weight in [1, -1, 1] {
+        runtime
+            .tick(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "albums".to_owned(),
+                    descriptor: albums.clone(),
+                    deltas: vec![RecordDelta {
+                        record: albums.create(&values).unwrap().into(),
+                        weight,
+                    }],
+                }],
+                &storage,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(
+            second.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(evaluator::take_subgraph_walk_count(), 0);
+    }
+}
+
+#[futures_test::test]
 async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
     let schema = albums_schema();
     let albums = schema.table("albums").unwrap().record_schema();
