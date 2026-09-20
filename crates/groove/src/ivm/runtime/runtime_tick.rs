@@ -327,128 +327,92 @@ enum EvaluationEntry {
 }
 
 struct EvaluationWorkQueue {
-    pending: VecDeque<NodeId>,
-    visited: HashSet<NodeId>,
-    entries: HashMap<NodeId, EvaluationEntry>,
-    dependents: HashMap<NodeId, Vec<NodeId>>,
+    layout: Arc<crate::ivm::execution_layout::ExecutionLayout>,
+    entries: Vec<EvaluationEntry>,
     request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
     runnable: VecDeque<NodeId>,
-    roots: HashSet<NodeId>,
     completed_events: Vec<NodeId>,
-    temporal_waiting: HashMap<NodeId, usize>,
+    temporal_waiting: Vec<usize>,
 }
 
 impl EvaluationWorkQueue {
-    fn new(roots: impl IntoIterator<Item = NodeId>) -> Self {
-        let roots = roots.into_iter().collect::<VecDeque<_>>();
-        Self {
-            pending: roots.clone(),
-            visited: HashSet::default(),
-            entries: HashMap::default(),
-            dependents: HashMap::default(),
+    fn discover(
+        graph: &IvmGraph,
+        roots: impl IntoIterator<Item = NodeId>,
+        hydrate_sources: bool,
+    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+        let layout = graph
+            .execution_layout(roots)
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let mut queue = Self {
+            entries: layout
+                .input_counts
+                .iter()
+                .copied()
+                .map(EvaluationEntry::Waiting)
+                .collect(),
+            temporal_waiting: vec![0; layout.nodes.len()],
+            layout,
             request_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
-            roots: roots.into_iter().collect(),
             completed_events: Vec::new(),
-            temporal_waiting: HashMap::default(),
-        }
-    }
-
-    fn discover_hydration(
-        self,
-        graph: &IvmGraph,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        self.discover(graph, true, std::collections::BTreeMap::new())
-    }
-
-    fn discover_incremental(
-        self,
-        graph: &IvmGraph,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        self.discover(graph, false, std::collections::BTreeMap::new())
-    }
-
-    fn discover(
-        mut self,
-        graph: &IvmGraph,
-        hydrate_sources: bool,
-        request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        let mut request_dependencies_by_node = HashMap::<NodeId, usize>::default();
-        for nodes in request_dependents.values() {
-            for node in nodes {
-                *request_dependencies_by_node.entry(*node).or_default() += 1;
-            }
-        }
-        self.request_dependents = request_dependents;
-        while let Some(node_id) = self.pending.pop_front() {
-            if !self.visited.insert(node_id) {
-                continue;
-            }
-            let node = graph
-                .node(node_id)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
-            self.pending.extend(node.descriptor.inputs.iter().copied());
-            for input in &node.descriptor.inputs {
-                self.dependents.entry(*input).or_default().push(node_id);
-            }
-            let request = if hydrate_sources {
-                match &node.descriptor.operator {
+        };
+        if hydrate_sources {
+            for &slot in &queue.layout.source_slots {
+                let node_id = queue.layout.nodes[slot];
+                let node = graph
+                    .node(node_id)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
+                let request = match &node.descriptor.operator {
                     OpType::TableSource(source) => NodeState::table_source_request(source)?,
                     OpType::IndexSource(source) => NodeState::index_source_request(source)?,
-                    _ => None,
+                    _ => unreachable!("layout source slot is not a storage source"),
+                };
+                if let Some(request) = request {
+                    queue
+                        .request_dependents
+                        .entry(EvaluationRequestKey::Storage(request))
+                        .or_default()
+                        .push(node_id);
+                    queue.entries[slot] = EvaluationEntry::Waiting(1);
                 }
-                .map(EvaluationRequestKey::Storage)
-            } else {
-                None
-            };
-            if let Some(request) = request {
-                self.request_dependents
-                    .entry(request)
-                    .or_default()
-                    .push(node_id);
-                self.entries.insert(node_id, EvaluationEntry::Waiting(1));
-            } else {
-                self.entries.insert(
-                    node_id,
-                    EvaluationEntry::Waiting(
-                        node.descriptor.inputs.len()
-                            + request_dependencies_by_node
-                                .get(&node_id)
-                                .copied()
-                                .unwrap_or_default(),
-                    ),
-                );
             }
         }
-        let initially_ready = self
-            .entries
-            .iter()
-            .filter_map(|(node, entry)| (*entry == EvaluationEntry::Waiting(0)).then_some(*node))
-            .collect::<Vec<_>>();
-        for node in initially_ready {
-            self.make_runnable(node);
+        for slot in 0..queue.entries.len() {
+            if queue.entries[slot] == EvaluationEntry::Waiting(0) {
+                queue.make_slot_runnable(slot);
+            }
         }
-        let relevant_nodes = self.visited.clone();
-        Ok((relevant_nodes, self))
+        let relevant_nodes = queue.layout.nodes.iter().copied().collect();
+        Ok((relevant_nodes, queue))
     }
 
     fn requests(&self) -> impl Iterator<Item = &EvaluationRequestKey> {
         self.request_dependents.keys()
     }
 
+    fn dependency_ready(&mut self, node: NodeId) {
+        if let Some(&slot) = self.layout.slots.get(&node) {
+            self.slot_dependency_ready(slot);
+        }
+    }
+
+    fn slot_dependency_ready(&mut self, slot: usize) {
+        let EvaluationEntry::Waiting(remaining) = &mut self.entries[slot] else {
+            return;
+        };
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            self.make_slot_runnable(slot);
+        }
+    }
+
     fn requests_ready(&mut self, requests: impl IntoIterator<Item = EvaluationRequestKey>) {
-        let ready_nodes = requests
-            .into_iter()
-            .flat_map(|request| self.request_dependents.remove(&request).unwrap_or_default())
-            .collect::<Vec<_>>();
-        for node in ready_nodes {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(node);
+        for request in requests {
+            if let Some(nodes) = self.request_dependents.remove(&request) {
+                for node in nodes {
+                    self.dependency_ready(node);
+                }
             }
         }
     }
@@ -467,13 +431,7 @@ impl EvaluationWorkQueue {
             !dependents.is_empty()
         });
         for node in ready_nodes {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(node);
-            }
+            self.dependency_ready(node);
         }
     }
 
@@ -483,8 +441,7 @@ impl EvaluationWorkQueue {
         requests: impl IntoIterator<Item = EvaluationRequestKey>,
     ) {
         let requests = requests.into_iter().collect::<Vec<_>>();
-        self.entries
-            .insert(node, EvaluationEntry::Waiting(requests.len()));
+        self.entries[self.layout.slots[&node]] = EvaluationEntry::Waiting(requests.len());
         for request in requests {
             let dependents = self.request_dependents.entry(request).or_default();
             if !dependents.contains(&node) {
@@ -493,73 +450,68 @@ impl EvaluationWorkQueue {
         }
     }
 
-    fn make_runnable(&mut self, node: NodeId) {
+    fn make_slot_runnable(&mut self, slot: usize) {
         if matches!(
-            self.entries.get(&node),
-            Some(EvaluationEntry::Runnable | EvaluationEntry::Complete)
+            self.entries[slot],
+            EvaluationEntry::Runnable | EvaluationEntry::Complete
         ) {
             return;
         }
-        self.entries.insert(node, EvaluationEntry::Runnable);
-        self.runnable.push_back(node);
+        self.entries[slot] = EvaluationEntry::Runnable;
+        self.runnable.push_back(self.layout.nodes[slot]);
     }
 
     fn complete(&mut self, node: NodeId) {
-        self.entries.insert(node, EvaluationEntry::Complete);
+        let slot = self.layout.slots[&node];
+        self.entries[slot] = EvaluationEntry::Complete;
         self.completed_events.push(node);
-        let dependents = self.dependents.get(&node).cloned().unwrap_or_default();
-        for dependent in dependents {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&dependent) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(dependent);
-            }
+        // Read compact slots directly without cloning a dependent list or
+        // changing the shared layout's reference count per completed node.
+        for index in 0..self.layout.dependents(slot).len() {
+            let dependent = self.layout.dependents(slot)[index];
+            self.slot_dependency_ready(dependent);
         }
     }
 
-    /// Retain a runnable node at the front of the queue after its private step
-    /// deliberately yields. The step future itself is disposable; resumable
-    /// operators keep their bounded continuation in operator state.
+    /// Retain a runnable node after its private step deliberately yields.
+    /// The disposable future is not the continuation; operator state is.
     fn requeue_yielded(&mut self, node: NodeId) {
-        self.entries.insert(node, EvaluationEntry::Runnable);
+        self.entries[self.layout.slots[&node]] = EvaluationEntry::Runnable;
         self.runnable.push_front(node);
     }
 
-    /// A runnable node is an explicit in-memory evaluator continuation.
-    /// Requests are represented separately as `Waiting`, so an eager cold
-    /// storage wake cannot be mistaken for CPU work.
     fn has_resident_continuation(&self) -> bool {
         !self.runnable.is_empty()
     }
 
     fn is_root(&self, node: NodeId) -> bool {
-        self.roots.contains(&node)
+        self.layout.roots.binary_search(&node).is_ok()
     }
 
     fn is_complete(&self, node: NodeId) -> bool {
-        self.entries.get(&node) == Some(&EvaluationEntry::Complete)
+        self.layout
+            .slots
+            .get(&node)
+            .is_some_and(|&slot| self.entries[slot] == EvaluationEntry::Complete)
     }
 
     fn roots_complete(&self) -> bool {
-        self.roots.iter().all(|node| self.is_complete(*node))
+        self.layout.roots.iter().all(|node| self.is_complete(*node))
     }
 
     fn incomplete_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.entries
-            .iter()
-            .filter_map(|(node, entry)| (*entry != EvaluationEntry::Complete).then_some(*node))
+        self.entries.iter().enumerate().filter_map(|(slot, entry)| {
+            (*entry != EvaluationEntry::Complete).then_some(self.layout.nodes[slot])
+        })
     }
 
-    /// Every node registered with a snapshot hydration is a single temporal
-    /// barrier: successors may use none of its isolated state until install.
+    /// A hydration's entire graph slice remains a temporal barrier until install.
     fn registered_nodes(&self) -> Vec<NodeId> {
-        self.entries.keys().copied().collect()
+        self.layout.nodes.clone()
     }
 
     fn overlaps(&self, nodes: &HashSet<NodeId>) -> bool {
-        self.entries.keys().any(|node| nodes.contains(node))
+        self.layout.nodes.iter().any(|node| nodes.contains(node))
     }
 
     fn downstream_closure(&self, roots: impl IntoIterator<Item = NodeId>) -> HashSet<NodeId> {
@@ -569,7 +521,14 @@ impl EvaluationWorkQueue {
             if !affected.insert(node) {
                 continue;
             }
-            pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
+            if let Some(&slot) = self.layout.slots.get(&node) {
+                pending.extend(
+                    self.layout
+                        .dependents(slot)
+                        .iter()
+                        .map(|&slot| self.layout.nodes[slot]),
+                );
+            }
         }
         affected
     }
@@ -610,53 +569,43 @@ impl EvaluationWorkQueue {
         self.request_dependents
             .retain(|_, dependents| !dependents.iter().all(|node| nodes.contains(node)));
         for node in nodes {
-            if self.entries.contains_key(node) {
-                self.entries.insert(*node, EvaluationEntry::Complete);
-                self.temporal_waiting.remove(node);
+            if let Some(&slot) = self.layout.slots.get(node) {
+                self.entries[slot] = EvaluationEntry::Complete;
+                self.temporal_waiting[slot] = 0;
             }
         }
     }
 
     fn add_temporal_blockers(&mut self, blockers: &HashMap<NodeId, usize>) {
-        let blocked = self
-            .entries
-            .keys()
-            .filter_map(|node| blockers.get(node).map(|count| (*node, *count)))
-            .collect::<Vec<_>>();
-        for (node, count) in blocked {
+        for slot in 0..self.entries.len() {
+            let node = self.layout.nodes[slot];
+            let count = blockers.get(&node).copied().unwrap_or_default();
             if count == 0 {
                 continue;
             }
-            self.temporal_waiting.insert(node, count);
-            match self.entries.get(&node).copied() {
-                Some(EvaluationEntry::Runnable) => {
+            self.temporal_waiting[slot] = count;
+            match self.entries[slot] {
+                EvaluationEntry::Runnable => {
                     self.runnable.retain(|candidate| *candidate != node);
-                    self.entries.insert(node, EvaluationEntry::Waiting(count));
+                    self.entries[slot] = EvaluationEntry::Waiting(count);
                 }
-                Some(EvaluationEntry::Waiting(remaining)) => {
-                    self.entries
-                        .insert(node, EvaluationEntry::Waiting(remaining + count));
+                EvaluationEntry::Waiting(remaining) => {
+                    self.entries[slot] = EvaluationEntry::Waiting(remaining + count);
                 }
-                Some(EvaluationEntry::Complete) | None => {}
+                EvaluationEntry::Complete => {}
             }
         }
     }
 
     fn temporal_ready(&mut self, node: NodeId) {
-        let Some(temporal_remaining) = self.temporal_waiting.get_mut(&node) else {
+        let Some(&slot) = self.layout.slots.get(&node) else {
             return;
         };
-        *temporal_remaining = temporal_remaining.saturating_sub(1);
-        if *temporal_remaining == 0 {
-            self.temporal_waiting.remove(&node);
-        }
-        let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
+        if self.temporal_waiting[slot] == 0 {
             return;
-        };
-        *remaining = remaining.saturating_sub(1);
-        if *remaining == 0 {
-            self.make_runnable(node);
         }
+        self.temporal_waiting[slot] -= 1;
+        self.slot_dependency_ready(slot);
     }
 
     fn drain_completed_events(&mut self) -> Vec<NodeId> {
@@ -737,6 +686,7 @@ impl<'a> IncrementalEvaluation<'a> {
         self.discarded = nodes.is_empty()
             || self
                 .work_queue
+                .layout
                 .roots
                 .iter()
                 .all(|root| nodes.contains(root));
@@ -1255,7 +1205,7 @@ impl<'a> EvaluationSession<'a> {
         storage: OwnedStorage<'a>,
     ) -> Result<Self, IvmRuntimeError> {
         let (relevant_nodes, mut work_queue) =
-            EvaluationWorkQueue::new(roots.iter().copied()).discover_hydration(&runtime.graph)?;
+            EvaluationWorkQueue::discover(&runtime.graph, roots.iter().copied(), true)?;
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -2434,8 +2384,14 @@ impl IvmRuntime {
         // evaluator may need unchanged sibling inputs (for example the other
         // side of a join), so discovery walks ancestors of every affected
         // node, while unrelated graph state remains in the live runtime.
-        let (relevant_nodes, _) = EvaluationWorkQueue::new(affected_nodes.iter().copied())
-            .discover_incremental(&self.graph)?;
+        let relevant_nodes = self
+            .graph
+            .execution_layout(affected_nodes.iter().copied())
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?
+            .nodes
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
         // Capture by graph key, never by filtering global retained maps. Root
         // state is the only durable evaluator state; recursive child scopes
         // are scratch and are removed before publication.
@@ -2597,8 +2553,7 @@ impl IvmRuntime {
         active_roots.dedup();
         let requests = EvaluationRequests::new();
         let evaluation_inputs = Some(EvaluationInputs::default());
-        let (_, work_queue) =
-            EvaluationWorkQueue::new(active_roots).discover_incremental(&self.graph)?;
+        let (_, work_queue) = EvaluationWorkQueue::discover(&self.graph, active_roots, false)?;
         Ok(IncrementalEvaluation {
             table_deltas,
             binding_deltas,

@@ -1493,6 +1493,7 @@ fn collect_projection_output_type(
 /// Deduplicated DAG of IVM node descriptors.
 #[derive(Clone, Debug, Default)]
 pub struct IvmGraph {
+    execution_layouts: super::execution_layout::ExecutionLayoutCache,
     /// Deduplicated node specs. The `NodeId` is derived from the full
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
@@ -1502,6 +1503,17 @@ pub struct IvmGraph {
 }
 
 impl IvmGraph {
+    pub(crate) fn execution_layout(
+        &self,
+        roots: impl IntoIterator<Item = NodeId>,
+    ) -> Result<std::sync::Arc<super::execution_layout::ExecutionLayout>, NodeId> {
+        self.execution_layouts.get(self, roots)
+    }
+
+    pub(crate) fn execution_layout_counters(&self) -> (u64, u64) {
+        self.execution_layouts.counters()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1585,6 +1597,7 @@ impl IvmGraph {
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+        self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
     }
 
@@ -1640,6 +1653,7 @@ impl IvmGraph {
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
+        self.execution_layouts.invalidate(Some(id));
 
         for input in node.descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(&input) {
