@@ -846,7 +846,7 @@ impl<'a> IncrementalEvaluation<'a> {
         let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
             let result = {
-                let mut future = evaluator.update_node(node);
+                let mut future = evaluator.update_ready_node(node);
                 Pin::new(&mut future).poll(cx)
             };
             match result {
@@ -1407,7 +1407,7 @@ impl<'a> EvaluationSession<'a> {
                         terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
-                    let mut evaluation = evaluator.update_node(node);
+                    let mut evaluation = evaluator.update_ready_node(node);
                     let poll = Pin::new(&mut evaluation).poll(cx);
                     drop(evaluation);
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);

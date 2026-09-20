@@ -2,6 +2,18 @@
 
 use super::*;
 
+// Test-only work receipt: output equivalence alone cannot detect accidental
+// reintroduction of a full ancestor traversal for each ready queue slot.
+#[cfg(test)]
+thread_local! {
+    static SUBGRAPH_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_subgraph_walk_count() -> usize {
+    SUBGRAPH_WALKS.with(|count| count.replace(0))
+}
+
 fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
     expressions
         .iter()
@@ -881,6 +893,8 @@ impl TickEvaluator<'_> {
         &mut self,
         root: NodeId,
     ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        #[cfg(test)]
+        SUBGRAPH_WALKS.with(|count| count.set(count.get() + 1));
         let mut pending = vec![(root, false)];
         let mut discovered = HashSet::new();
         let mut order = Vec::new();
@@ -914,7 +928,7 @@ impl TickEvaluator<'_> {
 
         let mut result = None;
         for node in order {
-            let records = self.update_one_node(node).await?;
+            let records = self.update_ready_node(node).await?;
             if node == root {
                 result = Some(records);
             }
@@ -1148,7 +1162,7 @@ impl TickEvaluator<'_> {
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         // The postorder driver has already evaluated ordinary inputs. Check
         // their memo before entering another evaluator future: even a cache
-        // hit inside update_one_node would recursively poll that wide future
+        // hit inside compute_node would recursively poll that wide future
         // beneath its parent, overflowing Safari's WebAssembly call stack.
         match self
             .prepare_memo_lookup(node)
@@ -1229,15 +1243,37 @@ impl TickEvaluator<'_> {
         Ok(None)
     }
 
-    fn update_one_node(
+    /// Execute a node whose ordinary inputs have already been driven by the
+    /// caller's dependency queue (or scoped postorder driver).
+    ///
+    /// Do not rediscover its ancestors here. A completed input is not proof of
+    /// producer-index readiness: preserve the normal memo checks, and let an
+    /// operator request an input rebuild through `update_node` when necessary.
+    /// Recursive operators still own their frontier-scoped child evaluation.
+    pub(super) fn update_ready_node(
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        let lookup = match self.prepare_memo_lookup(node) {
+            Ok(lookup) => lookup,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        match self.cached_node_records(&lookup) {
+            Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+            Ok(None) => self.compute_node(node, lookup),
+        }
+    }
+
+    /// Construct the large operator future only on a memo miss. Keep the
+    /// prepared lookup within this evaluation; no driver runs between it and
+    /// the compute, and a blocked/yielded retry prepares a fresh lookup.
+    fn compute_node(
+        &mut self,
+        node: NodeId,
+        lookup: NodeMemoLookup,
+    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         Box::pin(async move {
-            let lookup = self.prepare_memo_lookup(node)?;
-            if let Some(records) = self.cached_node_records(&lookup)? {
-                return Ok(records);
-            }
             let NodeMemoLookup {
                 key: memo_key,
                 input_watermark: current_watermark,
