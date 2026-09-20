@@ -32,6 +32,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: true
+          # Runtime failures must not discard a successful cold dependency build.
+          cache-on-failure: true
           shared-key: codspeed-w1-read-walltime-${{ runner.arch }}-v1
           workspaces: . -> target
 
