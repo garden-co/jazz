@@ -161,3 +161,21 @@ test("rolling release configuration fails before mutation", async () => {
   await assert.rejects(promoteInspectorDeployment(options), /rolling releases/);
   assert.ok(calls.every((c) => c.method === "GET"));
 });
+
+test("malformed JSON errors omit response body details", async () => {
+  const marker = "synthetic-private-response-marker";
+  const { options } = harness();
+  options.fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      throw new SyntaxError(`Unexpected token in ${marker}`);
+    },
+  });
+  await assert.rejects(promoteInspectorDeployment(options), (error) => {
+    assert.equal(error.message, "Vercel GET request returned invalid JSON.");
+    assert.ok(!String(error).includes(marker));
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});

@@ -36,7 +36,13 @@ export async function promoteInspectorDeployment({
     });
     // API response bodies can contain sensitive details; never include them in errors.
     if (!response.ok) throw new Error(`Vercel ${method} request failed (${response.status}).`);
-    return method === "GET" ? response.json() : undefined;
+    if (method === "GET") {
+      try {
+        return await response.json();
+      } catch {
+        throw new Error("Vercel GET request returned invalid JSON.");
+      }
+    }
   }
   const url = new URL(env.DEPLOYMENT_URL);
   if (
