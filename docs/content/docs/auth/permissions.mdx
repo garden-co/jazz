@@ -121,8 +121,8 @@ grant; nullable references contribute no match, and UUID arrays use membership.
 The explicit source form `allowedTo.deleteReferencing(policy.posts, "writer")`
 uses the named forward relationship on `posts` that targets the protected table.
 
-Each helper preserves its selected operation and each update rule's old/new row
-checks. The global helper's TypeScript name check covers the app's declared
+Relationship-name resolution preserves existing operation-policy semantics and
+each update rule's old/new row checks. The global helper's TypeScript name check covers the app's declared
 relationships; permission compilation also checks the particular rule's table,
 and the source direction and target for `*Referencing`.
 
