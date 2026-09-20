@@ -90,8 +90,7 @@ async function listDeployments({ fetchImpl, listUrl, token, requestTimeoutMs }) 
   }
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Vercel deployment lookup failed (${response.status}): ${body}`);
+    throw new Error(`Vercel deployment lookup failed (${response.status}).`);
   }
 
   let body;
