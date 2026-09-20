@@ -145,6 +145,8 @@ pub(super) struct PeerSubscriptionState {
     pub(super) maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     pub(super) prepared_query: Option<CachedPeerQueryPlan>,
     pub(super) groove_runtime_token: Option<u64>,
+    /// UUID adoption invalidates publication metadata without replacing Groove.
+    pub(super) physical_identity_generation: Option<u64>,
     pub(super) authorization_progress: u64,
     pub(super) has_served_authorization_progress: bool,
 }
@@ -159,6 +161,7 @@ impl PeerSubscriptionState {
             prepared_query.clear_runtime_plan();
         }
         self.groove_runtime_token = None;
+        self.physical_identity_generation = None;
     }
 
     pub(super) fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {

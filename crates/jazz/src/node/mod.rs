@@ -545,6 +545,8 @@ pub struct NodeState<S> {
     storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
+    /// Process-local validity of peer metadata that captures physical UUIDs.
+    physical_identity_generation: u64,
     /// Next nonzero process-local identity for an authoritative reset acknowledgement.
     /// This counter is runtime state only; it never enters protocol or durable data.
     next_authoritative_reset_generation: u64,

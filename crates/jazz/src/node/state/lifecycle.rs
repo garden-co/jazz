@@ -798,6 +798,7 @@ where
             content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
+            physical_identity_generation: 0,
             next_authoritative_reset_generation: 1,
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
