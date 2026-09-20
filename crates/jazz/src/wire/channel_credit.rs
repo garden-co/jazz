@@ -519,6 +519,46 @@ mod tests {
         );
     }
 
+    // Internal coverage is necessary: row APIs do not expose which physical
+    // or decoded-buffer reservation a grant releases. A bulk message can exceed
+    // its class's physical window without creating any physical-frame debit.
+    #[test]
+    fn bulk_message_grants_preserve_resource_kind_without_physical_debits() {
+        const BYTES: usize = 721_647;
+        for class in [ChannelClass::Control, ChannelClass::Writes] {
+            let receiver = Arc::new(Mutex::new(ChannelCredits::new(context())));
+            let mut sender = ChannelCredits::new(context());
+            sender.reserve_message(class, BYTES);
+            let lease = ChannelCredits::receive_message(&receiver, class, BYTES).unwrap();
+            drop(lease);
+            let bytes = receiver.lock().unwrap().peek_grant().unwrap().unwrap();
+            let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+                panic!("expected a credit frame");
+            };
+            assert_eq!(grant.class, class);
+            assert_eq!(grant.consumed_bytes, BYTES as u64);
+            assert_eq!(grant.sequence, 0);
+            assert_eq!(
+                grant.kind,
+                WireCreditKind::Messages {
+                    count: 1,
+                    bulk: true
+                }
+            );
+            let mut false_frame_grant = grant.clone();
+            false_frame_grant.kind = WireCreditKind::Frames;
+            assert!(
+                sender.receive_credit(false_frame_grant).is_err(),
+                "decoded-buffer consumption must not fund physical frames"
+            );
+            sender
+                .receive_credit(grant)
+                .expect("release the reserved decoded buffer");
+            receiver.lock().unwrap().accept_grant().unwrap();
+            assert!(receiver.lock().unwrap().peek_grant().unwrap().is_none());
+        }
+    }
+
     #[test]
     fn decoded_buffer_credit_waits_for_last_owner_and_dies_with_connection() {
         let receiver = Arc::new(Mutex::new(ChannelCredits::new(context())));
