@@ -185,6 +185,9 @@ impl Fixture<MemoryStorage> {
 
 impl ResumeFixture {
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        if std::env::var_os("JAZZ_W1_TRACE").is_some() {
+            jazz::wire::channel_credit::diagnostic_credit_self_check();
+        }
         let writer = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
         let task_schema = schema(false)
             .tables()

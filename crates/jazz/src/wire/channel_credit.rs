@@ -674,3 +674,46 @@ mod tests {
         assert_eq!(channel_frame_credit_cost(72 * 1024), 72 * 1024);
     }
 }
+
+// Diagnostic only: exercise the actual compiled credit path before any DB setup.
+#[doc(hidden)]
+pub fn diagnostic_credit_self_check() {
+    use super::{FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, decode_frame};
+    eprintln!("W1 pre-DB credit self-check begin");
+    for class in [
+        ChannelClass::Control,
+        ChannelClass::Requests,
+        ChannelClass::Delivery,
+        ChannelClass::Writes,
+        ChannelClass::LargeValue,
+        ChannelClass::Auxiliary,
+        ChannelClass::Progress,
+    ] {
+        let context =
+            || WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_SYNC_MESSAGE_PAYLOAD, None);
+        let mut sender = ChannelCredits::new(context());
+        let mut receiver = ChannelCredits::new(context());
+        let amount = if matches!(class, ChannelClass::Writes | ChannelClass::LargeValue) {
+            721_647
+        } else {
+            65_573
+        };
+        sender.charge(class, amount).unwrap();
+        receiver.consumed(class, amount).unwrap();
+        let bytes = receiver.peek_grant().unwrap().unwrap();
+        let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+            panic!("expected diagnostic credit");
+        };
+        let expected = match class {
+            ChannelClass::LargeValue => ChannelClass::Writes,
+            other => other,
+        };
+        assert_eq!(grant.class, expected, "pre-DB credit class");
+        assert_eq!(grant.kind, WireCreditKind::Frames);
+        assert_eq!(grant.consumed_bytes, amount as u64);
+        sender.receive_credit(grant).unwrap();
+        receiver.accept_grant().unwrap();
+        assert!(receiver.peek_grant().unwrap().is_none());
+    }
+    eprintln!("W1 pre-DB credit self-check passed");
+}
