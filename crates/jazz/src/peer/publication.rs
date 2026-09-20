@@ -561,7 +561,6 @@ impl PeerState {
                 }
                 state.clear_groove_runtime_handles();
             }
-            self.refresh_maintained_subscription_view_footprint(subscription);
         }
     }
 
@@ -587,7 +586,6 @@ impl PeerState {
         if let Some(stale) = stale {
             node.unsubscribe_groove_subscription(stale.subscription.id());
         }
-        self.refresh_maintained_subscription_view_footprint(subscription);
     }
 
     fn requires_selected_authority_source(
@@ -1393,7 +1391,6 @@ impl PeerState {
                 view.maintained.acknowledge_peer_source_closure();
             }
         }
-        self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(Some(MaintainedCanonicalUpdate {
             changed: true,
             update,
@@ -2055,7 +2052,6 @@ impl PeerState {
             .or_default()
             .has_served_authorization_progress = true;
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(Some(update))
     }
 
@@ -2599,7 +2595,6 @@ impl PeerState {
         }
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(Some(update))
     }
 
@@ -2824,7 +2819,6 @@ impl PeerState {
         }
         self.record_outgoing_view_update_metadata(&target_reset);
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(target_reset)
     }
 }

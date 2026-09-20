@@ -564,16 +564,6 @@ impl PeerState {
         Ok(())
     }
 
-    fn refresh_maintained_subscription_view_footprint(&mut self, subscription: SubscriptionKey) {
-        self.metrics.maintained_subscription_view.footprint = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .map(|maintained| maintained.maintained.footprint())
-            .map(MaintainedSubscriptionViewMetricsFootprint::from)
-            .unwrap_or_default();
-    }
-
     fn apply_outgoing_view_delta(
         &mut self,
         subscription: SubscriptionKey,

@@ -79,7 +79,9 @@ fn run_rung(source_rows: usize) {
     let maintained_result = maintained
         .subscription_result_sets(subscription)
         .expect("maintained result set");
-    let maintained_footprint = maintained.maintained_subscription_view_metrics().footprint;
+    let maintained_footprint = maintained
+        .inspect_maintained_subscription_view_footprint(subscription)
+        .expect("maintained view footprint");
 
     rehydrated_fixture.core.reset_storage_read_metrics();
     let mut rehydrated = PeerState::new();
@@ -95,7 +97,9 @@ fn run_rung(source_rows: usize) {
     let rehydrated_result = rehydrated
         .subscription_result_sets(subscription)
         .expect("rehydrated result set");
-    let rehydrated_footprint = rehydrated.maintained_subscription_view_metrics().footprint;
+    let rehydrated_footprint = rehydrated
+        .inspect_maintained_subscription_view_footprint(subscription)
+        .expect("rehydrated view footprint");
 
     assert_eq!(maintained_result, rehydrated_result);
     assert_eq!(maintained_footprint, rehydrated_footprint);
