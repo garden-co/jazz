@@ -2,6 +2,70 @@
 
 use super::*;
 
+/// Reusing graph wiring must not reuse yesterday's readiness or row values.
+/// A union with the same input twice also checks dependency-edge multiplicity.
+#[futures_test::test]
+async fn reusable_execution_layout_keeps_each_write_and_subscription_fresh() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut db = Database::new(albums_schema(), storage).await.unwrap();
+    let twice = GraphBuilder::union([GraphBuilder::table("albums"), GraphBuilder::table("albums")]);
+    let alice = db.subscribe_one_sink(twice.clone()).await.unwrap();
+    let bob = db.subscribe_one_sink(twice.clone()).await.unwrap();
+    assert!(alice.try_recv().unwrap().is_empty());
+    assert!(bob.try_recv().unwrap().is_empty());
+
+    let mut previous: Option<Vec<Value>> = None;
+    let mut warm_stats = None;
+    for version in 0..8 {
+        let row = vec![Value::U64(1), Value::String(format!("version-{version}"))];
+        let mut batch = db.open_batch();
+        if previous.is_none() {
+            batch.insert("albums", row.clone());
+        } else {
+            batch.update("albums", row.clone());
+        }
+        db.commit_batch(batch).await.unwrap();
+        let mut expected = Vec::new();
+        if let Some(old) = previous.take() {
+            expected.push((old.clone(), -1));
+            expected.push((old, -1));
+        }
+        expected.push((row.clone(), 1));
+        expected.push((row.clone(), 1));
+        assert_eq!(expect_try_recv_vals(&alice), expected);
+        assert_eq!(expect_try_recv_vals(&bob), expected);
+        let stats = db.execution_layout_stats();
+        if let Some((builds, hits)) = warm_stats {
+            assert_eq!(stats.builds, builds, "unchanged graph reuses its layouts");
+            assert!(stats.hits > hits);
+        }
+        warm_stats = Some((stats.builds, stats.hits));
+        previous = Some(row);
+    }
+
+    // Retiring one consumer cannot retire the other consumer's shared graph.
+    assert!(db.unsubscribe(alice.id()));
+    let mut batch = db.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(1));
+    db.commit_batch(batch).await.unwrap();
+    let removed = previous.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&bob),
+        [(removed.clone(), -1), (removed, -1)]
+    );
+    assert!(db.unsubscribe(bob.id()));
+
+    // After all consumers leave, a new subscription sees current empty state,
+    // not readiness/results from either previously installed evaluation.
+    let carol = db.subscribe_one_sink(twice).await.unwrap();
+    assert!(carol.try_recv().unwrap().is_empty());
+    let row = vec![Value::U64(2), Value::String("new".into())];
+    let mut batch = db.open_batch();
+    batch.insert("albums", row.clone());
+    db.commit_batch(batch).await.unwrap();
+    assert_eq!(expect_try_recv_vals(&carol), [(row.clone(), 1), (row, 1)]);
+}
+
 /// Alice cancels or completes a cold first-result read while Bob waits on the
 /// same source. Releasing Alice must unblock Bob without retiring his graph.
 /// cold read -> live attach -> cancel/complete -> Bob receives seed -> write -> delta.

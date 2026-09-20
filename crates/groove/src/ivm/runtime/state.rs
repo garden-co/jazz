@@ -12,6 +12,14 @@ use crate::ivm::{BindingSourceKey, FrontierName, NodeId};
 
 use super::{IvmRuntimeError, RecordDeltas, record_deltas_digest};
 
+/// Lifetime scheduling-cache diagnostics, including unsuccessful evaluations.
+/// Separate from installed semantic state: cache work is not rolled back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionLayoutStats {
+    pub builds: u64,
+    pub hits: u64,
+}
+
 /// Point-in-time runtime counters for benchmark and diagnostics reporting.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {

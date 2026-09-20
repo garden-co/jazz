@@ -7,6 +7,7 @@
 //! row encoding or durable storage APIs; those live in [`crate::records`] and
 //! [`crate::storage`].
 
+mod execution_layout;
 pub mod graph;
 pub mod op_types;
 pub mod planner;

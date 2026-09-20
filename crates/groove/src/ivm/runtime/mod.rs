@@ -67,7 +67,7 @@ use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
     HydrationMode, NodeInputSignature, OperatorStateKey, ScopeId, SubTick, Tick,
 };
-pub use state::{RuntimeStats, TickMetrics};
+pub use state::{ExecutionLayoutStats, RuntimeStats, TickMetrics};
 pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };

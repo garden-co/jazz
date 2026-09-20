@@ -70,6 +70,19 @@ must not accidentally make backend transaction lifecycle a new requirement.
 
 ### One evaluator lifecycle
 
+Immutable scheduling topology may be shared across evaluations. The graph owns
+a bounded cache keyed by the canonical root set: compact node slots, dependency
+counts, reverse edges (including repeated inputs), and storage-source slots.
+Adding unrelated consumers leaves existing ancestor layouts valid; removing a
+node invalidates layouts containing it, and mutable descriptor access clears
+the cache. Layouts do not retain graph nodes and are never persisted.
+
+Every evaluation owns a fresh readiness frame over its layout. Requests,
+temporal blockers, row values, memo validity, and publication state are not
+layout metadata. Sharing topology therefore does not share readiness or bypass
+snapshot installation barriers. Runtime statistics expose layout builds and
+hits to distinguish topology reuse from semantic memo reuse.
+
 Hydration and incremental maintenance use the same owned evaluation session.
 Hydration is the initial delta from empty state; it is not a second evaluator
 or snapshot-shaped installation path. Incremental input can discover a newly
