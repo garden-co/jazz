@@ -50,6 +50,7 @@ mod aggregate;
 pub(crate) mod evaluation_session;
 mod join;
 mod persist;
+mod rank_index;
 mod recursion;
 mod state;
 mod terminal;
@@ -59,6 +60,7 @@ use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
 use persist::apply_persist_delta;
+use rank_index::RankIndex;
 use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
     recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
