@@ -107,7 +107,24 @@ When external auth JWTs carry claims, `session.where(...)` lets you check them d
 ### Inherited access (`allowedTo.*`)
 
 A row can inherit its access from a related row. Use
-`allowedTo.read/insert/update/delete(...)` to express that inheritance.
+`allowedTo.read/insert/update/delete(relationName)` to express that inheritance.
+The argument is an explicit relationship name declared on the protected table,
+using the same names as `hopTo`. For `writer: s.rel("users", "authorId")`, use
+`allowedTo.update("writer")`; the stored column `authorId` is not accepted here.
+
+Reverse names work with the same helpers. Given
+`authored: s.reverse("posts", "writer")` on `users`,
+`allowedTo.delete("authored")` grants deletion only when at least one referencing
+post permits deletion for the current identity. Readability or mere existence
+of a referencing post does not grant deletion. No matching reference means no
+grant; nullable references contribute no match, and UUID arrays use membership.
+The explicit source form `allowedTo.deleteReferencing(policy.posts, "writer")`
+uses the named forward relationship on `posts` that targets the protected table.
+
+Each helper preserves its selected operation and each update rule's old/new row
+checks. The global helper's TypeScript name check covers the app's declared
+relationships; permission compilation also checks the particular rule's table,
+and the source direction and target for `*Referencing`.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
@@ -134,7 +151,9 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 
 `maxDepth` must be a non-negative integer. A value of `0` performs no inheritance
 hop, so the inheritance condition cannot grant access; `1` checks only the
-directly referenced row.
+directly referenced row. These bounds apply to forward relationships. Reverse
+inheritance currently rejects `maxDepth` rather than ignoring it; cyclic reverse
+policy expansion is rejected during schema validation.
 
 </Accordion>
 </Accordions>

@@ -463,7 +463,7 @@ resolution only; it does not change schema, wire, or storage encodings.
 source-table form of reverse operation inheritance. It requires a named forward
 relationship on the source table that targets the protected table. In the
 following semantics, `viaColumn` denotes that relationship's stored column.
-Reverse operation inheritance It grants access to a target row only when there exists at least one
+Reverse operation inheritance grants access to a target row only when there exists at least one
 row in the source table whose `viaColumn` references the target row and that
 source row is allowed for the same `<op>` operation. It does not fall back to
 source read visibility, insert/update policy, ownership, or mere existence of a
@@ -474,7 +474,7 @@ authorization fails closed.
 Forward helpers preserve their existing `maxDepth` semantics. Reverse helpers
 reject an explicit `maxDepth`, because the current reverse expansion does not
 implement bounded recursion; cyclic reverse expansions are rejected during
-schema validation. The global `allowedTo` context constrains typed names to the
+schema validation (bounded reverse support is tracked in [#3210](https://github.com/garden-co/jazz/issues/3210)). The global `allowedTo` context constrains typed names to the
 app's declared relationships; rule compilation additionally validates the
 particular protected table and, for `*Referencing`, the source direction and
 target. Update `whereOld` and `whereNew` remain separate row-image checks.
