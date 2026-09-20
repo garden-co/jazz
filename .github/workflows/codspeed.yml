@@ -189,17 +189,21 @@ jobs:
           mode: walltime
           run: cargo codspeed run -m walltime --package jazz --bench selective_global_hydration
 
-  native-workloads-walltime:
+  native-workloads-build:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: ${{ matrix.workload }} native wall time
-    runs-on: codspeed-macro
+    name: Build ${{ matrix.workload }} native benchmark
+    # Match the measurement host's ABI, but do not spend macro-runner time on
+    # compilation. Separate Cargo invocations preserve per-workload features.
+    runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         workload: [todo, permissioned-resources, policy-scoped-documents]
     env:
-      CARGO_BUILD_JOBS: 4
+      CARGO_BUILD_JOBS: 16
       RUST_MIN_STACK: 4194304
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -209,12 +213,89 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: true
-          shared-key: codspeed-native-${{ matrix.workload }}-${{ runner.arch }}-v1
+          cache-targets: false
+          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v4
           workspaces: . -> target
+      - name: Restore native compiler outputs
+        id: native-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: target/release
+          # Compatibility includes toolchain, CodSpeed, allocator, remap contract,
+          # lockfile and Cargo config. Only the save key includes source SHA.
+          key: codspeed-native-v4-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-mimalloc-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            codspeed-native-v4-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-mimalloc-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+      - name: Test benchmark artifact handoff
+        run: node --test dev/benchmarks/codspeed-artifact.test.mjs
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --version 5.0.1 --locked
+      - name: Record build environment
+        run: |
+          uname -a
+          cat /etc/os-release
+          nproc
+          free -h
+          rustc -vV
+          cc --version
+          c++ --version
+          getconf GNU_LIBC_VERSION
       - name: Build native workload
-        run: cargo codspeed build -m walltime --package jazz-example-${{ matrix.workload }}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc
+        run: |
+          export JAZZ_REAL_CARGO="$(command -v cargo)"
+          export PATH="$PWD/dev/benchmarks/timed-cargo:$PATH"
+          # Match the measurement checkout's absolute root in embedded DWARF.
+          # install rejects runner path drift; relative paths classify unknown.
+          RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"
+          export RUSTFLAGS
+          /usr/bin/time -v cargo codspeed build -m walltime --package jazz-example-${{ matrix.workload }}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc --locked
+      - name: Save native compiler outputs
+        if: steps.native-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: target/release
+          key: ${{ steps.native-build-cache.outputs.cache-primary-key }}
+      - name: Seal benchmark executables
+        run: node dev/benchmarks/codspeed-artifact.mjs seal ${{ matrix.workload }}
+      - name: Upload benchmark executables
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codspeed-native-${{ matrix.workload }}-${{ github.sha }}
+          path: target/codspeed-artifact-${{ matrix.workload }}/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+      - name: Upload compiler timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codspeed-build-timings-${{ matrix.workload }}-${{ github.run_attempt }}
+          path: target/cargo-timings/
+          retention-days: 7
+
+  native-workloads-walltime:
+    needs: native-workloads-build
+    name: ${{ matrix.workload }} native wall time
+    runs-on: codspeed-macro
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: [todo, permissioned-resources, policy-scoped-documents]
+    env:
+      RUST_MIN_STACK: 4194304
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - name: Download this run's benchmark executables
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: codspeed-native-${{ matrix.workload }}-${{ github.sha }}
+          path: target/codspeed-artifact-${{ matrix.workload }}/
+      - name: Verify and install benchmark executables
+        run: node dev/benchmarks/codspeed-artifact.mjs install ${{ matrix.workload }}
       - name: Run native workload
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
