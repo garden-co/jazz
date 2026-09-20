@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Explicit selfhosted scaffold only; never provisions a Cloud app.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { createProcessOwner } from "./process-owner.mjs";
 import { once } from "node:events";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -15,19 +15,26 @@ mkdirSync(parent, { recursive: true });
 assert(!existsSync(join(parent, c.name)), "Never overwrite an existing scaffold");
 // Preview package URL must name the pinned source; published uses immutable version.
 if (c.phase !== "published")
-  assert(c.createJazzSpec.includes(c.sourceSha), "Preview spec must contain exact source SHA");
+  assert.equal(
+    c.createJazzSpec,
+    `https://pkg.pr.new/garden-co/jazz/create-jazz@${c.sourceSha}`,
+    "Preview spec must be the exact candidate locator",
+  );
 else assert.equal(c.createJazzSpec, `create-jazz@${c.packageVersion}`);
 const args =
   c.phase === "published"
     ? ["create", "--yes", `jazz@${c.packageVersion}`, "--", c.name]
     : ["exec", "--yes", `--package=${c.createJazzSpec}`, "--", "create-jazz", c.name];
 args.push("--starter", c.starter ?? "react-localfirst", "--hosting", "selfhosted", "--no-git");
-const child = spawn("npm", args, {
+const processes = createProcessOwner();
+const child = processes.spawn("npm", args, {
   cwd: parent,
   stdio: "inherit",
   env: { ...process.env, CI: "true", JAZZ_STARTER_PATH: "" },
 });
-const timer = setTimeout(() => child.kill("SIGKILL"), 180000);
+const timer = setTimeout(() => {
+  void processes.terminate(1);
+}, 180000);
 try {
   const [code] = await once(child, "exit");
   assert.equal(code, 0, "Scaffold failed");
@@ -35,7 +42,11 @@ try {
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
   assert(deps["jazz-tools"], "Missing Jazz dependency");
   if (c.phase !== "published")
-    assert(deps["jazz-tools"].includes(c.sourceSha), "Scaffold did not preserve preview pin");
+    assert.equal(
+      deps["jazz-tools"],
+      `https://pkg.pr.new/garden-co/jazz/jazz-tools@${c.sourceSha}`,
+      "Scaffold did not preserve exact preview pin",
+    );
   else assert.equal(deps["jazz-tools"], c.packageVersion);
   console.log(
     JSON.stringify({
@@ -49,4 +60,6 @@ try {
   );
 } finally {
   clearTimeout(timer);
+  await processes.cleanup();
+  processes.dispose();
 }

@@ -73,7 +73,10 @@ checks; those may have older package versions. Final-preview/published runs
 require alpha56 manifests. The script checks CLI and tarball hashes and compares
 every installed package file against extracted tarball bytes. Unexpected files
 are rejected except nested dependency directories; pin native payload packages
-as well. Linux additionally verifies the selected native producer manifest's
+as well. Before loading Jazz, every verified package directory is checked to
+ensure its Jazz imports resolve to the verified package directories. Unchecked
+nested Jazz copies are rejected, including overrides below a dist directory.
+Linux additionally verifies the selected native producer manifest's
 source, release profile, fingerprint and binary digest. No same-version package
 substitution is accepted.
 
@@ -106,7 +109,11 @@ both schema and permissions (twice), then starts separate child processes for:
 Local state and credentials stay in the private output directory (0700/0600).
 Do not publish raw logs or config. Generated fixture source remains in the
 external project for review. Cleanup stops owned children but preserves all
-stores and receipts. Each operation has a 20-second bound; child phases have a
+stores and receipts. Commands run in owned POSIX process groups. SIGINT/SIGTERM
+stop each group (including npm descendants), escalate to SIGKILL after 1.5 seconds,
+and allow up to 1.5 further seconds to reap the direct child before exiting
+130/143. Windows is rejected rather than claiming unsupported tree cleanup.
+Each operation has a 20-second bound; child phases have a
 120-second bound and the whole run 300 seconds. A timeout fails the run.
 
 The file account store has exactly one process owner at a time; it is a synthetic
@@ -134,3 +141,10 @@ Installed RN device receipts require the matching platform payload and wrapper,
 installed binary hash and fresh launch nonce. The existing device harness has
 explicit reconnect coverage debt; a green offline SQLite receipt is not proof
 of full network recovery. Do not replace device receipts with host/source tests.
+
+## Focused harness contract tests
+
+Run `node --test dev/release-acceptance/harness.test.mjs`. Synthetic packed
+packages and an npm stub exercise nested dependency rejection, exact preview
+locators, and SIGINT/SIGTERM cleanup including TERM-resistant descendants. They
+make no network requests and do not count as package or Cloud acceptance.

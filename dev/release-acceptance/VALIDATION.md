@@ -31,3 +31,16 @@ but the installed preview package contained them under bin/native. Inspect the
 packed package before scheduling another build. The repository uses oxfmt,
 not prettier. Final CLI source provenance must come from the producer; do not
 construct a manifest afterward merely to satisfy acceptance.
+
+Independent review follow-up adds reproducible synthetic contract tests for
+unchecked root/deep nested Jazz dependency overrides, exact scaffold locators
+(including a wrong-revision URL spoofed with an expected-SHA fragment), and
+SIGINT/SIGTERM process-group cleanup for the runner and npm descendants. Both
+TERM-resistant process cases require escalation. The local historical package
+baseline still passes with resolution verification and owned process groups.
+
+Mutation sensitivity for these boundaries: disabling dependency-resolution checks
+fails both nested-override cases; replacing exact-locator checks with tautologies
+fails both SHA-fragment cases; retaining signal exit codes but bypassing signal
+cleanup fails child-liveness assertions. These mutations run only in temporary
+copies, and the test fixtures kill owned synthetic groups even on failure.

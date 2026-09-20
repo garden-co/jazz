@@ -2,7 +2,7 @@
 // Local disposable acceptance only. Cloud lifecycle is intentionally not automated here.
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
   readFileSync,
@@ -23,6 +23,8 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { createProcessOwner } from "./process-owner.mjs";
+import { verifyJazzResolutions } from "./dependency-resolution.mjs";
 const ownDir = dirname(fileURLToPath(import.meta.url));
 const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
 for (const key of [
@@ -67,6 +69,7 @@ const project = realpathSync(input.project),
 for (const name of ["jazz-tools", "jazz-napi", "jazz-wasm"])
   assert(input.packages[name], `Missing package pin ${name}`);
 const packageDirs = new Map();
+const moduleDirectories = new Set([project]);
 for (const [name, pin] of Object.entries(input.packages)) {
   assert.equal(hash(pin.tarball), pin.sha256, `${name} tarball digest mismatch`);
   let directory = dirname(require.resolve(name));
@@ -82,6 +85,7 @@ for (const [name, pin] of Object.entries(input.packages)) {
   try {
     execFileSync("tar", ["-xzf", resolve(pin.tarball), "-C", unpacked], { stdio: "pipe" });
     const compare = (packed, installed) => {
+      moduleDirectories.add(installed);
       const entries = readdirSync(packed);
       for (const extra of readdirSync(installed))
         assert(
@@ -113,6 +117,7 @@ for (const [name, pin] of Object.entries(input.packages)) {
     `${name} must be installed outside workspace`,
   );
 }
+verifyJazzResolutions(packageDirs, moduleDirectories);
 if (process.platform === "linux") {
   const name = `@garden-co/jazz-napi-linux-${process.arch}-gnu`;
   assert(input.packages[name], "Pin the selected Linux native payload package");
@@ -152,43 +157,39 @@ mkdirSync(c.state, { mode: 0o700 });
 const configPath = join(output, "private-config.json"),
   portPath = join(output, "port");
 let server;
-const children = new Set();
+const processes = createProcessOwner();
 const emit = (check, detail = {}) =>
   console.log(JSON.stringify({ phase: input.phase, check, ...detail }));
 function launch(command, args, log, env = {}) {
   const fd = openSync(join(output, log), "a", 0o600);
-  const child = spawn(command, args, {
+  const child = processes.spawn(command, args, {
     cwd: project,
     env: { ...process.env, ...env },
     stdio: ["ignore", fd, fd],
   });
   closeSync(fd);
-  children.add(child);
-  child.on("exit", () => children.delete(child));
   return child;
 }
 async function command(command, args, log, env = {}, ms = 120000) {
   const child = launch(command, args, log, env);
-  const timer = setTimeout(() => child.kill("SIGKILL"), ms);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    void processes.stop(child);
+  }, ms);
   try {
     const [code, signal] = await once(child, "exit");
+    assert(!timedOut, `${log} exceeded its deadline`);
     assert.equal(code, 0, `${log} failed (${signal ?? code}); inspect private log`);
   } finally {
     clearTimeout(timer);
+    await processes.stop(child);
   }
 }
 async function stop() {
-  if (!server || server.exitCode !== null || server.signalCode !== null) return;
-  const child = server;
-  const exit = once(child, "exit");
-  child.kill("SIGTERM");
-  const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
-  try {
-    await exit;
-  } finally {
-    clearTimeout(timer);
-    server = undefined;
-  }
+  if (!server) return;
+  await processes.stop(server);
+  server = undefined;
 }
 async function start(port = 0) {
   if (existsSync(portPath)) unlinkSync(portPath); // Only this run's owned readiness file.
@@ -229,9 +230,8 @@ async function start(port = 0) {
   throw new Error("CLI readiness timeout");
 }
 const watchdog = setTimeout(() => {
-  for (const child of children) child.kill("SIGKILL");
   console.error("Whole-run deadline exceeded");
-  process.exitCode = 1;
+  void processes.terminate(1);
 }, 300000);
 try {
   emit("provenance", {
@@ -299,6 +299,6 @@ try {
     emit("NOT_RUN", { gate });
 } finally {
   clearTimeout(watchdog);
-  await stop();
-  for (const child of children) child.kill("SIGKILL");
+  await processes.cleanup();
+  processes.dispose();
 }
