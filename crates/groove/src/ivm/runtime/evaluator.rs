@@ -674,10 +674,10 @@ pub(super) struct RootOrderingWindows {
 /// may reuse these only within the same node evaluation, never across the
 /// postorder traversal that can rebuild its input state.
 #[derive(Clone)]
-struct NodeMemoLookup {
+pub(super) struct NodeMemoLookup {
     key: EvalMemoKey,
     input_watermark: u64,
-    depends_on_context: bool,
+    pub(super) depends_on_context: bool,
 }
 
 pub(super) struct TickEvaluator<'a> {
@@ -1378,7 +1378,10 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn prepare_memo_lookup(&mut self, node: NodeId) -> Result<NodeMemoLookup, IvmRuntimeError> {
+    pub(super) fn prepare_memo_lookup(
+        &mut self,
+        node: NodeId,
+    ) -> Result<NodeMemoLookup, IvmRuntimeError> {
         let prepare =
             |this: &Self, signature: &NodeInputSignature, input_watermark| NodeMemoLookup {
                 key: this.memo_key(node, signature),
@@ -1396,7 +1399,7 @@ impl TickEvaluator<'_> {
         Ok(prepare(self, &signature, self.input_generation(node)))
     }
 
-    fn cached_node_records(
+    pub(super) fn cached_node_records(
         &mut self,
         lookup: &NodeMemoLookup,
     ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
@@ -1532,7 +1535,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn memoize_result(
+    pub(super) fn memoize_result(
         &mut self,
         lookup: &NodeMemoLookup,
         result: RecordDeltas,
@@ -1642,7 +1645,7 @@ impl TickEvaluator<'_> {
     /// Construct the large operator future only on a memo miss. Keep the
     /// prepared lookup within this evaluation; no driver runs between it and
     /// the compute, and a blocked/yielded retry prepares a fresh lookup.
-    fn compute_node(
+    pub(super) fn compute_node(
         &mut self,
         node: NodeId,
         lookup: NodeMemoLookup,

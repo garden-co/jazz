@@ -861,6 +861,9 @@ struct AttributionSummary {
 
 #[derive(Clone, Default)]
 struct OperatorAttribution {
+    pipeline_calls: [u64; 2],
+    pipeline_input_records: [u64; 2],
+    pipeline_stage_visits: [u64; 2],
     map_buffer_capacity: u64,
     map_buffer_used: u64,
     map_calls: [u64; 2],
@@ -882,6 +885,12 @@ impl OperatorAttribution {
         self.map_buffer_capacity += after.map_buffer_capacity - before.map_buffer_capacity;
         self.map_buffer_used += after.map_buffer_used - before.map_buffer_used;
         for index in 0..2 {
+            self.pipeline_calls[index] +=
+                after.pipeline_calls[index] - before.pipeline_calls[index];
+            self.pipeline_input_records[index] +=
+                after.pipeline_input_records[index] - before.pipeline_input_records[index];
+            self.pipeline_stage_visits[index] +=
+                after.pipeline_stage_visits[index] - before.pipeline_stage_visits[index];
             self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
             self.map_input_records[index] +=
                 after.map_input_records[index] - before.map_input_records[index];
@@ -3166,6 +3175,11 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
     let operator_json = |operators: &OperatorAttribution| {
         json!({
+            "fused_pipeline": {
+                "calls": operators.pipeline_calls,
+                "input_records": operators.pipeline_input_records,
+                "row_stage_visits": operators.pipeline_stage_visits,
+            },
             "map_project": {
                 "calls": operators.map_calls,
                 "new_buffer_capacity_bytes": operators.map_buffer_capacity,
