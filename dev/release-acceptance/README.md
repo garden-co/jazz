@@ -87,10 +87,14 @@ GitHub API repository `garden-co/jazz`. Caller-authored metadata is not accepted
 No token is written to a receipt or passed on a command line.
 
 The source SHA must match both run and artifact metadata. Approved callers are
-`preview-build.yml` for same-repository pull requests (with the explicit PR head
-also matching), and `preview-jazz-tools-alpha-release.yml` or
-`publish-jazz-tools-alpha.yml` for push/workflow_dispatch. A merge revision is not
-silently substituted for the candidate head. The standalone reusable
+`preview-build.yml` for same-repository pull requests, and
+`preview-jazz-tools-alpha-release.yml` or `publish-jazz-tools-alpha.yml` for
+push/workflow_dispatch. The PR caller explicitly passes the event's head SHA to
+the build checkout; the authenticated run/artifact head and repository identities
+are authoritative. GitHub may return absent or empty `pull_requests` associations;
+these do not invalidate an otherwise exact run. Nonempty associations must be
+consistent. No lookup of the PR's current, possibly advanced head is performed.
+A merge revision is not silently substituted for the candidate head. The standalone reusable
 `build-jazz-packages.yml` has no independent run. `previewRun` must name this
 actual producer run ID or URL, including when packages came from a reused run.
 

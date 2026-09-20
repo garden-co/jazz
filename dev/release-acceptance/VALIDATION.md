@@ -56,3 +56,11 @@ versus packed-byte mismatches. Removing the run-source check, ZIP-digest check,
 or packed-byte comparison in separate temporary copies each makes its focused
 negative test fail with `Missing expected rejection`. These prove test sensitivity
 without downloading or claiming a live final candidate artifact.
+
+A real metadata review found successful trusted PR preview runs with empty
+`pull_requests` arrays. Empty and omitted association fixtures now pass using
+exact authenticated run/artifact heads, repository identities and the approved
+caller's explicit head-SHA checkout. Contradictory nonempty associations, wrong
+source and forks remain rejected. No current-PR-head lookup is introduced.
+Reinstating the mandatory association-array check in a temporary copy makes both
+new positive fixtures fail, confirming sensitivity to the observed false blocker.

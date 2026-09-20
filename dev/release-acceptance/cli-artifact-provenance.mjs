@@ -89,7 +89,12 @@ export async function verifyCliArtifact(
   );
   const repositoryId = id(run.repository.id, "producer repository ID");
   assert.equal(run.head_repository.id, repositoryId, "Fork producer ID mismatch");
-  if (run.event === "pull_request") {
+  // GitHub often omits PR associations even for successful PR runs. Source
+  // authority is the authenticated run head above plus preview-build.yml's
+  // same-repository guard and explicit ref: github.event.pull_request.head.sha.
+  // Do not query the current PR head: it may have advanced since this run.
+  // When associations are supplied, reject contradictory supplemental evidence.
+  if (run.event === "pull_request" && run.pull_requests?.length) {
     assert(
       run.pull_requests?.some(
         (pr) => pr.head?.sha === input.sourceSha && pr.head?.repo?.id === repositoryId,

@@ -282,3 +282,17 @@ test("caller-authored metadata cannot substitute for authenticated API evidence"
     /API unavailable/,
   );
 });
+
+// Real successful preview-build API responses (including run 35153864977)
+// contain pull_requests: []; fixture values remain synthetic and secret-free.
+for (const associations of ["empty", "omitted"])
+  test(`accepts trusted PR run with ${associations} PR associations`, async (t) => {
+    const f = fixture(t);
+    f.run.path = ".github/workflows/preview-build.yml";
+    f.run.event = "pull_request";
+    if (associations === "empty") f.run.pull_requests = [];
+    else delete f.run.pull_requests;
+    const receipt = await verifyCliArtifact(f.input, f.tools, { getJSON: f.getJSON });
+    assert.equal(receipt.summary.sourceSha, sha);
+    assert.equal(receipt.summary.archiveDigest, f.artifact.digest);
+  });
