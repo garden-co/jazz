@@ -147,11 +147,11 @@ pub struct PeerMetrics {
     pub result_adds_out: u64,
     /// Result-set removals emitted.
     pub result_removes_out: u64,
-    /// Maintained subscription view counters and latest index footprint.
+    /// Cheap maintained subscription view counters; footprint inspection is opt-in.
     pub maintained_subscription_view: Box<MaintainedSubscriptionViewMetrics>,
 }
 
-/// Latest maintained subscription view index sizes observed for one peer.
+/// On-demand maintained subscription view index sizes for one subscription.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintainedSubscriptionViewMetricsFootprint {
     /// Active result-current rows in the maintained index.
@@ -196,8 +196,6 @@ pub struct MaintainedSubscriptionViewMetrics {
     /// New maintained subscription rehydrations started after readiness.
     #[cfg(any(test, feature = "testing"))]
     pub rehydrate_attempts: u64,
-    /// Latest maintained subscription view index sizes observed for this peer.
-    pub footprint: MaintainedSubscriptionViewMetricsFootprint,
 }
 
 impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionViewMetricsFootprint {
