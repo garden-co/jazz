@@ -244,7 +244,11 @@ impl VisibilityState {
             return;
         }
         let visible = Rc::make_mut(&mut self.visible);
-        for (key, present) in self.changes.drain() {
+        // This is a transaction journal, not a reusable table-sized buffer.
+        // drain() leaves hydration-sized capacity behind; the next evaluation
+        // then clones that empty allocation when snapshotting operator state.
+        // Consume it so a committed view has no journal allocation to clone.
+        for (key, present) in std::mem::take(&mut self.changes) {
             if present {
                 visible.insert(key);
             } else {
@@ -1286,6 +1290,38 @@ pub(super) fn join_output_mapping(
 
 #[cfg(test)]
 mod tests {
+    // Public delta tests cover the results; only a private test can distinguish
+    // an empty journal from an empty journal retaining hydration-sized buckets.
+    #[test]
+    fn committed_visibility_discards_journal_capacity_and_preserves_snapshots() {
+        let keys = (0..5_000u64)
+            .map(|value| super::JoinKey::from_slice(&value.to_le_bytes()))
+            .collect::<Vec<_>>();
+        let mut live = super::VisibilityState::default();
+        for key in &keys {
+            live.set(key.clone(), true);
+        }
+        live.commit();
+        assert_eq!(live.changes.capacity(), 0);
+        let original = live.clone();
+        assert_eq!(original.changes.capacity(), 0);
+        live.set(keys[0].clone(), false);
+        let staged = live.clone();
+        live.commit();
+        assert_eq!(live.changes.capacity(), 0);
+        assert!(original.contains(&keys[0]));
+        assert!(!staged.contains(&keys[0]));
+        assert!(!live.contains(&keys[0]));
+        for key in &keys[1..] {
+            assert!(live.contains(key));
+        }
+        live.set(keys[0].clone(), true);
+        live.commit();
+        assert!(live.contains(&keys[0]));
+        assert!(!staged.contains(&keys[0]));
+        assert_eq!(live.changes.capacity(), 0);
+    }
+
     use std::collections::BTreeMap;
 
     use super::*;
