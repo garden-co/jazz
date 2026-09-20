@@ -13,22 +13,18 @@ Follow this order when upgrading from alpha.55 to alpha.56:
 
 Run these commands from the app package directory. The examples assume its schema is in `src`; replace `src` with the actual schema directory in every command. Repeat the checks for each independently defined app schema, keeping separate snapshots.
 
-1. **Before upgrading Jazz packages**, export the compiled schema and record the CLI hash with the existing alpha.55 packages and schema. Keep these files outside the schema directory and preserve them through the upgrade:
+1. **Before upgrading Jazz packages**, export the public compiled schema with the existing alpha.55 packages and schema. Keep this file outside the schema directory and preserve it through the upgrade:
 
    ```sh
    pnpm exec jazz-tools schema export --schema-dir src > schema-before-alpha56.json
-   pnpm exec jazz-tools schema hash --schema-dir src > schema-before-alpha56.hash.txt
    ```
 
 2. Upgrade the app's Jazz packages together to alpha.56, then convert the whole app to the schema form below. Preserve the underlying schema identity and update query and permission callers together.
-3. Export again and record the upgraded CLI hash:
+3. Export the converted schema with alpha.56:
 
    ```sh
    pnpm exec jazz-tools schema export --schema-dir src > schema-after-alpha56.json
-   pnpm exec jazz-tools schema hash --schema-dir src > schema-after-alpha56.hash.txt
    ```
-
-   **Compare the exported structure, not the two CLI hash strings.** Alpha.56 also corrects the CLI's hashing of defaults to match the server. A schema containing defaults can therefore display a different CLI hash without changing its stored identity. The CLI prints only a 12-character short hash; preserve both receipts for diagnosis, but do not require cross-version equality.
 
    Run this comparison using Node. It removes only table-local navigation metadata (`relations`), which does not enter storage identity, and checks everything else. It preserves column order, defaults, reference targets, indexes, branch keys, and any other exported metadata; object property order does not matter.
 
@@ -52,7 +48,7 @@ Run these commands from the app package directory. The examples assume its schem
    NODE
    ```
 
-   If this comparison fails, stop before deploying and inspect the conversion. Do not dismiss a structural difference as the hash-calculator correction, remove additional fields to make it pass, or reset existing data. If you already upgraded without a snapshot, recover the original schema and alpha.55 package versions in a separate checkout and export there; do not reconstruct the baseline from the converted schema.
+   If this comparison fails, stop before deploying and inspect the conversion. Do not remove additional fields to make it pass or reset existing data. If you already upgraded without a snapshot, recover the original schema and alpha.55 package versions in a separate checkout and export there; do not reconstruct the baseline from the converted schema.
 
 4. Run the app's TypeScript checks (for example, `pnpm exec tsc --noEmit` where that is the app's check command) and `pnpm exec jazz-tools validate --schema-dir src`. Exercise the app's queries and permissions against its existing data before deploying. Republish permissions if you changed their authored traversals. Structural equality does not prove that every query and permission caller is correct.
 
@@ -113,7 +109,7 @@ The required `authorId`, optional `editorId`, and array `reviewerIds` keep their
 
 Point your coding agent at this guide and the release notes, and give it this instruction:
 
-> Follow the before/after export-and-comparison commands in this guide. Capture the original alpha.55 schema export and CLI hash before upgrading packages. Switch the whole app to the new schema form, preserving all stored schema metadata and updating query and permission callers. Export with alpha.56 and compare the snapshots after removing only each table's `relations` metadata. Do not require the alpha.55 and alpha.56 CLI hash strings to match: alpha.56 fixes default-value hashing. Stop before deployment if the structural comparison fails. Run TypeScript checks, `pnpm exec jazz-tools validate --schema-dir src`, and existing-data query and permission checks. Never reset data to make the upgrade pass.
+> Follow the before/after schema export commands and Node comparison in this guide, using the app's actual schema directory. Export with alpha.55 before upgrading, convert the whole app to alpha.56 while preserving stored schema metadata, and update query and permission callers to the declared relationships. Export again and compare, removing only each table's `relations` metadata. Stop before deployment if the comparison fails. Run the app's TypeScript checks, schema validation, and queries and permissions against existing data. Never reset data to make the upgrade pass.
 
 Have it use the actual app schema directory as described above and check every schema consumer (browser, server, React Native, tests, migration schema witnesses, and generated schema sources). Preserve all column definitions and reference targets, indexes, and branch keys. Update permission traversals together with the declared relationship names. Keep existing stores and pending writes.
 
@@ -121,7 +117,7 @@ Have it use the actual app schema directory as described above and check every s
 
 The underlying mapping, for example `posts.authorId → users`, already participates in schema identity and is used by core query validation and indexing. Both the old `s.ref("users")` and the new `s.rel("users", "authorId")` produce that same mapping.
 
-An equivalent conversion that preserves column definitions and all reference targets requires no stored-data rewrite or database reset. Keep existing stores and pending writes; do not clear browser data as an upgrade shortcut. Relationship aliases and reverse navigation declarations do not themselves enter the core schema hash: renaming `author` to `writer` only changes the authored query API, provided you also update reverse declarations and callers.
+An equivalent conversion that preserves column definitions and all reference targets requires no stored-data rewrite or database reset. Keep existing stores and pending writes; do not clear browser data as an upgrade shortcut. Relationship aliases and reverse navigation declarations do not themselves change stored schema identity: renaming `author` to `writer` only changes the authored query API, provided you also update reverse declarations and callers.
 
 Replacing a former reference with a plain UUID **without** its forward declaration removes reference metadata; changing its target changes that metadata. Those are actual schema changes, not the API-only conversion described here. Do not use a database reset as a migration shortcut or assume an empty migration can retarget references.
 
