@@ -57,15 +57,16 @@ serializable `SyncMessage` fixtures.
 
 ### A.3 Roles, not separate implementations
 
-Relay, edge, and core are roles over a shared node model, not separate semantic
-implementations (`INV-DISC-3`, ch. 9). The same `Node` + `PeerState` machinery
-serves all tiers: relay ingest stores pending units without assigning fate,
-`PeerRole` controls link identity and read narrowing, and the four-tier tests
-run every tier through the same types.
+Core, clients, and local persistence relays share the node and message model
+(`INV-DISC-3`, ch. 9). Relay ingestion stores pending units without assigning
+fate; Core authorizes and settles them. There is no intermediate server role.
 
 **Implementation status (verified).**
-`four_tier_topology_relays_pending_units_and_core_fates` exercises the shared
-topology.
+`local_persistence_forwards_pending_writes_and_core_fates` exercises durable
+local forwarding, worker reopen, duplicate fate application, Core acceptance
+and rejection. `core_peer_terminates_client_identity_and_narrows_reads` checks
+Core's reader-specific result. Real relay transport and admission are covered
+separately by the native-relay integration suite.
 
 ### A.4 Idempotent, conflict-detecting ingestion
 

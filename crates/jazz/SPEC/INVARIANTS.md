@@ -42,3 +42,8 @@ authorizes every ordinary client write as specified in chapter 9.
 ## Open Questions
 
 None.
+
+Retired with removal of server-edge admission: `INV-EDGE-4`, `INV-EDGE-5`,
+`INV-EDGE-9`, `INV-EDGE-10`, `INV-EDGE-17`, and `INV-EDGE-18`. Their IDs must
+not be reused. Core authorizes writes directly; there are no edge permission
+subscriptions, stale-scope acceptance, or deferred edge-fate gates.

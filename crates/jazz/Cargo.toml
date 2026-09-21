@@ -177,7 +177,7 @@ name = "legacy_benchmark_smoke"
 required-features = ["testing"]
 
 [[test]]
-name = "four_tier"
+name = "core_client_topology"
 required-features = ["testing"]
 
 [[test]]
