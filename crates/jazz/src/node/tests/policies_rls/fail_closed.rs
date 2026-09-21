@@ -48,7 +48,7 @@ fn write_only_table_denies_current_maintained_historical_and_advice_reads() {
         "permission advice must be a determinate denial"
     );
 
-    let mut edge = PeerState::edge_client(identity);
+    let mut edge = PeerState::client_link(identity);
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
@@ -144,7 +144,7 @@ fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let mut edge = PeerState::edge_client(user(0xa1));
+    let mut edge = PeerState::client_link(user(0xa1));
 
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
@@ -202,7 +202,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
         team_a,
         BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.test_uuid()))]),
     );
-    let mut edge = PeerState::edge_client(team_a);
+    let mut edge = PeerState::client_link(team_a);
 
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
@@ -268,7 +268,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
             Value::String("secret-123".to_owned()),
         )]),
     );
-    let mut edge = PeerState::edge_client(reader);
+    let mut edge = PeerState::client_link(reader);
 
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "chats").unwrap(),

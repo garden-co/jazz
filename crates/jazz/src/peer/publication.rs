@@ -345,16 +345,11 @@ impl PeerState {
         }
     }
 
-    /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorSubject) -> Self {
-        Self::client_link(identity)
-    }
-
-    /// Construct an edge peer whose wire identity and read-policy identity differ.
+    /// Construct a client link whose wire identity and read-policy identity differ.
     ///
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
-    pub fn edge_client_with_permission_identity(
+    pub fn client_link_with_permission_identity(
         identity: AuthorSubject,
         permission_identity: AuthorSubject,
     ) -> Self {
@@ -1718,7 +1713,7 @@ impl PeerState {
                 // same authority-selected membership, including unbounded
                 // filtered queries whose supporting rows are absent locally.
                 RehydratePurpose::Query if relay_edge_requires_authority_source => scoped
-                    .open_seeded_relay_edge_subscription_view_with_waker(
+                    .open_seeded_relay_subscription_view_with_waker(
                         shape,
                         binding,
                         policy_identity,
@@ -1828,7 +1823,7 @@ impl PeerState {
             }
             Err(error) => return Err(error),
         };
-        // `open_seeded_relay_edge_subscription_view_with_waker` has already
+        // `open_seeded_relay_subscription_view_with_waker` has already
         // installed the exact source closure, driven the receiver graph, and
         // folded the same terminal batch it returns here. Repeating that work
         // used to create a second opening path that could publish a different

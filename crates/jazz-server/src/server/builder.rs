@@ -246,7 +246,6 @@ impl ServerBuilder {
                     storage_config,
                     self.storage_factory.clone(),
                     role,
-                    None,
                 )?,
             ));
         }
@@ -267,7 +266,6 @@ impl ServerBuilder {
                 storage_config,
                 self.storage_factory.clone(),
                 role,
-                None,
             )?,
         ))
     }

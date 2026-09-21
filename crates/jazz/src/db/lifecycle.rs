@@ -1097,14 +1097,6 @@ where
         self.node
             .mark_subscriber_connections_dirty_after_query_runtime_wake();
     }
-    /// Configure automatic edge-cache byte-budget eviction.
-    ///
-    /// `None` disables automatic eviction and preserves the historical manual
-    /// `evict_cold` behavior.
-    pub fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        self.node.set_edge_cache_budget(budget);
-    }
-
     /// Ask the installed scheduler to service pending peer-connection work.
     pub fn schedule_tick(&self, urgency: TickUrgency) {
         self.node.schedule_tick(urgency);

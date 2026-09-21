@@ -2587,7 +2587,7 @@ fn edge_acceptance_phase(
     );
 
     let (scope_shape, scope_binding) = resource_subscription(&schema());
-    let mut core_to_edge_scope = PeerState::edge_client(writer_author);
+    let mut core_to_edge_scope = PeerState::client_link(writer_author);
     let scope_update =
         block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
     let hydration_bytes = view_update_bytes(&scope_update);
@@ -2650,7 +2650,7 @@ fn open_client(
         name: name.to_owned(),
         node,
         _dir: dir,
-        peer: PeerState::edge_client(author),
+        peer: PeerState::client_link(author),
         registered_subscriptions: BTreeSet::new(),
         covered_inputs: BTreeSet::new(),
         visible_rows: BTreeSet::new(),
@@ -2669,7 +2669,7 @@ fn open_edge(
         name: name.to_owned(),
         node,
         _dir: dir,
-        core_peer: PeerState::edge_client(author),
+        core_peer: PeerState::client_link(author),
         // The benchmark drives this policy reader directly. It is not a
         // multiplexing relay connection and has one SYSTEM policy identity.
         policy_peer: PeerState::new(),

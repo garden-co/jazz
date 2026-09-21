@@ -6024,15 +6024,6 @@ where
             *serve_dirty = true;
         }
     }
-
-    pub(super) fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
-        match &self.link {
-            ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
-                peer.eviction_pins()
-            }
-            ConnectionLink::Upstream(_) => crate::peer::PeerEvictionPins::default(),
-        }
-    }
 }
 
 pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {

@@ -607,7 +607,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         BTreeSet::from([public_message])
     );
 
-    let mut other_peer = PeerState::edge_client(other);
+    let mut other_peer = PeerState::client_link(other);
     let update = other_peer
         .rehydrate_query_with_opts(
             &mut core,
@@ -622,7 +622,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
     assert_view_update_only_references_rows(&update, BTreeSet::from([public_chat, public_message]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat, public_message]));
 
-    let mut member_peer = PeerState::edge_client(member);
+    let mut member_peer = PeerState::client_link(member);
     let update = member_peer
         .rehydrate_query_with_opts(
             &mut core,
@@ -727,7 +727,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
     };
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
     let initial = bob_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
@@ -842,7 +842,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         tier: DurabilityTier::Edge,
         ..RegisterShapeOptions::default()
     };
-    let mut alice_peer = PeerState::edge_client(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     let initial = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
@@ -970,7 +970,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
     let update = bob_peer
         .rehydrate_query_with_opts(
             &mut core,
@@ -1181,14 +1181,14 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
         "an unbound relay must not acquire SYSTEM policy bypass to serve a query"
     );
 
-    let mut edge_owner = PeerState::edge_client(owner);
+    let mut edge_owner = PeerState::client_link(owner);
     assert_eq!(edge_owner.permission_subject(), Some(owner));
     assert_view_update_only_references_rows(
         &edge_owner.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),
     );
 
-    let mut edge_other = PeerState::edge_client(other);
+    let mut edge_other = PeerState::client_link(other);
     assert_eq!(edge_other.permission_subject(), Some(other));
     assert_view_update_only_references_rows(
         &edge_other.current_rows_update(&mut core, "todos").unwrap(),
@@ -1306,7 +1306,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
     )
     .unwrap();
 
-    let mut bob = PeerState::edge_client(bob_id);
+    let mut bob = PeerState::client_link(bob_id);
     let chat_shape = Query::from("chats")
         .validate(&core.catalogue.schema)
         .unwrap();
@@ -1392,7 +1392,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
 
     let update = bob_peer
         .rehydrate_query_with_opts(
@@ -1451,7 +1451,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
         .select(["title"])
         .validate(&schema)
         .unwrap();
-    let mut full_link = PeerState::edge_client(reader);
+    let mut full_link = PeerState::client_link(reader);
     let full_update = full_link
         .rehydrate_query(
             &mut core,
@@ -1459,7 +1459,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
             &full_shape.bind(BTreeMap::new()).unwrap(),
         )
         .unwrap();
-    let mut title_link = PeerState::edge_client(reader);
+    let mut title_link = PeerState::client_link(reader);
     let title_update = title_link
         .rehydrate_query(
             &mut core,
@@ -1563,7 +1563,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         BTreeSet::from([chat])
     );
 
-    let mut reader_peer = PeerState::edge_client(reader);
+    let mut reader_peer = PeerState::client_link(reader);
     let update = reader_peer
         .rehydrate_query_with_opts(
             &mut core,
@@ -1616,7 +1616,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
 
     let update = bob_peer
         .rehydrate_query_with_opts(

@@ -140,7 +140,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     subscribe_query_binding_as_system(&mut client, &shape, &binding, &opts);
 
     let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
-    let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -173,7 +173,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         strict_received,
         _strict_inputs,
     ) = client
-        .open_seeded_relay_edge_subscription_view_with_waker(
+        .open_seeded_relay_subscription_view_with_waker(
             &shape,
             &binding,
             AuthorSubject::SYSTEM,
@@ -619,7 +619,7 @@ fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
     };
-    let mut server_peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let mut server_peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let authority = server_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut server,
@@ -639,7 +639,7 @@ fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
 
     let (_receiver, _maintained, _schemas, transitions, _tables, initial_received, _inputs) =
         client
-            .open_seeded_relay_edge_subscription_view_with_waker(
+            .open_seeded_relay_subscription_view_with_waker(
                 &shape,
                 &binding,
                 AuthorSubject::SYSTEM,

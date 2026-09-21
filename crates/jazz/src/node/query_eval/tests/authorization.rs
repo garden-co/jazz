@@ -585,7 +585,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     )
     .expect("one-shot nested policy claim routes must bind against the root descriptor");
 
-    let mut edge = PeerState::edge_client(identity);
+    let mut edge = PeerState::client_link(identity);
     let client_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -739,7 +739,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .whole_table_shape_binding("chatMembers")
         .expect("derive admitted chat-members source receiver");
     register_shape_binding_for_receiver(&mut normal_client, &membership_shape, &membership_binding);
-    let mut normal_membership_peer = PeerState::edge_client(identity);
+    let mut normal_membership_peer = PeerState::client_link(identity);
     normal_client
         .apply_sync_message_settled(
             normal_membership_peer
@@ -779,7 +779,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         normal_opts.clone(),
         Some(normal_session.clone()),
     );
-    let mut normal_simple_peer = PeerState::edge_client(identity);
+    let mut normal_simple_peer = PeerState::client_link(identity);
     let normal_simple_subscription = SubscriptionKey {
         shape_id: simple_message_shape.shape_id(),
         binding_id: simple_message_binding.binding_id(),
@@ -848,7 +848,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         normal_opts.clone(),
         Some(normal_session),
     );
-    let mut normal_peer = PeerState::edge_client(identity);
+    let mut normal_peer = PeerState::client_link(identity);
     let normal_subscription = SubscriptionKey {
         shape_id: message_shape.shape_id(),
         binding_id: message_binding.binding_id(),

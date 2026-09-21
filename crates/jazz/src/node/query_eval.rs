@@ -3272,7 +3272,7 @@ where
     /// authority-selected members, so this must consume that membership as
     /// its source instead of applying the query window a second time.
     #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
-    pub(crate) async fn open_seeded_relay_edge_subscription_view(
+    pub(crate) async fn open_seeded_relay_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3291,7 +3291,7 @@ where
         ),
         Error,
     > {
-        self.open_seeded_relay_edge_subscription_view_with_waker(
+        self.open_seeded_relay_subscription_view_with_waker(
             shape,
             binding,
             identity,
@@ -3308,7 +3308,7 @@ where
         .await
     }
 
-    pub(crate) async fn open_seeded_relay_edge_subscription_view_with_waker(
+    pub(crate) async fn open_seeded_relay_subscription_view_with_waker(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,

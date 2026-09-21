@@ -15,7 +15,6 @@ use crate::db::{
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
-use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
 use crate::serving::{
@@ -1213,25 +1212,22 @@ impl ServerRuntimeHandle {
             storage_config,
             storage_factory,
             NodeRole::Core,
-            None,
             false,
         )
     }
 
-    /// Start a runtime with an explicit role and optional Edge cache budget.
+    /// Start a runtime with an explicit Core or local-relay role.
     pub fn start_with_storage_config(
         schema: JazzSchema,
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
-        edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
             storage_factory,
             role,
-            edge_cache_budget,
             true,
         )
     }
@@ -1241,7 +1237,6 @@ impl ServerRuntimeHandle {
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
-        edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
     ) -> Result<Self, String> {
         let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
@@ -1267,10 +1262,6 @@ impl ServerRuntimeHandle {
                 .with_role(role);
                 let config = match storage_factory {
                     Some(factory) => config.with_storage_factory(factory),
-                    None => config,
-                };
-                let config = match edge_cache_budget {
-                    Some(budget) => config.with_edge_cache_budget(budget),
                     None => config,
                 };
                 let shell = match InMemoryServerShell::start_with_storage(config, storage_config) {

@@ -596,7 +596,7 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
     let (_core_dir, mut core) = open_node(node(4), schema.clone());
 
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     assert_eq!(
         edge_to_client.role(),
@@ -663,7 +663,7 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     let row_uuid = row(9);
     let (tx_id, unit) = commit(
@@ -723,7 +723,7 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     let (tx_id, unit) = commit(&mut client, row(19), 10, "narrow scope", client_author, []);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -764,7 +764,7 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
 
     let (_backend_dir, mut backend) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
-    let mut edge_to_backend = PeerState::edge_client(backend_author);
+    let mut edge_to_backend = PeerState::client_link(backend_author);
 
     let row_uuid = row(20);
     let (tx_id, unit) = block_on(async {
@@ -840,7 +840,7 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     for (idx, row_uuid) in [row(21), row(22)].into_iter().enumerate() {
         let (tx_id, unit) = commit(
@@ -880,8 +880,8 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
-    let mut edge_to_a = PeerState::edge_client(writer_a);
-    let mut edge_to_b = PeerState::edge_client(writer_b);
+    let mut edge_to_a = PeerState::client_link(writer_a);
+    let mut edge_to_b = PeerState::client_link(writer_b);
 
     for (idx, row_uuid) in [row(41), row(42)].into_iter().enumerate() {
         let (_tx_id, unit) = commit_as(
@@ -965,8 +965,8 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
-    let mut edge_to_a = PeerState::edge_client(writer_a);
-    let mut edge_to_b = PeerState::edge_client(writer_b);
+    let mut edge_to_a = PeerState::client_link(writer_a);
+    let mut edge_to_b = PeerState::client_link(writer_b);
 
     let (first_a, unit) = commit_as(&mut client_a, row(44), 10, "a first", writer_a, []);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -1041,7 +1041,7 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     for (idx, row_uuid) in [row(23), row(24)].into_iter().enumerate() {
         let (_tx_id, unit) = commit(
@@ -1078,7 +1078,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     let row_uuid = row(26);
     let (tx_id, unit) = commit(
@@ -1114,7 +1114,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     drop(edge_to_client);
 
     let mut edge = reopen_node(&edge_dir, node(3), schema.clone());
-    let edge_to_client = PeerState::edge_client(client_author);
+    let edge_to_client = PeerState::client_link(client_author);
     assert_eq!(
         edge_to_client.deferred_edge_fate_count(),
         0,
@@ -1138,7 +1138,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected redelivered commit unit");
     };
-    let mut redelivered_edge_to_client = PeerState::edge_client(client_author);
+    let mut redelivered_edge_to_client = PeerState::client_link(client_author);
     assert!(
         edge_ingest(
             &mut redelivered_edge_to_client,
@@ -1186,7 +1186,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     let row_uuid = row(27);
     let (tx_id, unit) = commit(
@@ -1253,7 +1253,7 @@ fn edge_policy_free_table_denies_without_deferral_or_scope() {
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
 
     let (tx_id, unit) = commit(&mut client, row(25), 10, "public write", client_author, []);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -1353,7 +1353,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         panic!("expected commit unit");
     };
 
-    let mut edge_to_client = PeerState::edge_client(client_author);
+    let mut edge_to_client = PeerState::client_link(client_author);
     let first = edge_ingest(
         &mut edge_to_client,
         &mut edge,

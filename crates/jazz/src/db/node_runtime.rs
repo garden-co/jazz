@@ -290,7 +290,6 @@ where
     pub(super) next_write_state_waiter_id: Cell<u64>,
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
-    pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
     pub(super) chunk_resolver: PeerChunkResolver,
@@ -430,7 +429,6 @@ where
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
-            edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
             chunk_resolver,
@@ -1228,10 +1226,6 @@ where
     #[cfg(test)]
     pub(super) fn set_upload_retry_clock_for_test(&self, clock: Rc<dyn UploadRetryClock>) {
         *self.upload_retry_clock.borrow_mut() = clock;
-    }
-
-    pub(super) fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        self.edge_cache_budget.set(budget);
     }
 
     pub(super) fn schedule_tick(&self, urgency: TickUrgency) {
@@ -2566,7 +2560,7 @@ where
             CommitUnitTrust::TrustedBackend
             | CommitUnitTrust::TrustedAuthority
             | CommitUnitTrust::TrustedAdmin => {
-                PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
+                PeerState::client_link_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::client_link(identity),
             CommitUnitTrust::Relay => PeerState::relay(),
@@ -3275,17 +3269,6 @@ where
         connections
             .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
-        if let Some(budget) = self.edge_cache_budget.get() {
-            let mut pins = crate::peer::PeerEvictionPins::default();
-            for connection in &connections {
-                pins.extend(connection.lock().await.eviction_pins());
-            }
-            self.node
-                .lock()
-                .await
-                .enforce_edge_cache_budget(&pins, budget)
-                .await?;
-        }
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
         }

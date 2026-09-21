@@ -25,7 +25,6 @@ use crate::db::{
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
 use crate::ids::{AuthorSubject, MigrationLensId, RowUuid, SchemaVersionId};
-use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
     SyncMessage,
@@ -117,8 +116,6 @@ pub struct InMemoryServerShellConfig {
     pub identity: DbIdentity,
     /// Optional deterministic row-id seed for ABI writes.
     pub row_id_seed: Option<u64>,
-    /// Optional edge-cache byte budget. `None` disables automatic eviction.
-    pub edge_cache_budget: Option<EdgeCacheBudget>,
     /// Jazz-owned policy for unpublished large-value uploads and roots.
     pub large_value_staging_policy: crate::node::LargeValueStagingPolicy,
     /// Server role used for client-link semantics.
@@ -138,7 +135,6 @@ impl InMemoryServerShellConfig {
             schema,
             identity,
             row_id_seed: None,
-            edge_cache_budget: None,
             large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
@@ -149,12 +145,6 @@ impl InMemoryServerShellConfig {
     /// Set a deterministic row-id seed for server-side ABI writes.
     pub fn with_row_id_seed(mut self, row_id_seed: u64) -> Self {
         self.row_id_seed = Some(row_id_seed);
-        self
-    }
-
-    /// Configure automatic edge-cache eviction by byte budget.
-    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
-        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -195,7 +185,6 @@ impl fmt::Debug for InMemoryServerShellConfig {
             .field("schema", &self.schema)
             .field("identity", &self.identity)
             .field("row_id_seed", &self.row_id_seed)
-            .field("edge_cache_budget", &self.edge_cache_budget)
             .field(
                 "large_value_staging_policy",
                 &self.large_value_staging_policy,
@@ -459,13 +448,6 @@ impl ShellDb {
         match self {
             Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
             Self::Durable(db) => db.enable_authoritative_scalar_exit_refresh(),
-        }
-    }
-
-    fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        match self {
-            Self::Memory(db) => db.set_edge_cache_budget(budget),
-            Self::Durable(db) => db.set_edge_cache_budget(budget),
         }
     }
 
@@ -790,7 +772,6 @@ impl InMemoryServerShell {
         config: InMemoryServerShellConfig,
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
-        let edge_cache_budget = config.edge_cache_budget;
         let large_value_staging_policy = config.large_value_staging_policy;
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
@@ -843,7 +824,6 @@ impl InMemoryServerShell {
         if role == NodeRole::Core {
             db.enable_authoritative_scalar_exit_refresh();
         }
-        db.set_edge_cache_budget(edge_cache_budget);
         db.set_large_value_staging_policy(large_value_staging_policy);
 
         let mut shell = Self {

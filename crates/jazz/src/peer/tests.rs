@@ -1402,7 +1402,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // session claim into a settled empty support view, not a binding
     // error. The edge parks the first hydration turn by design.
     let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
-    let mut missing_peer = PeerState::edge_client(writer);
+    let mut missing_peer = PeerState::client_link(writer);
     let missing_outcome = missing_peer
         .ingest_edge_mergeable_commit_unit(
             &mut missing_edge,
@@ -1438,7 +1438,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         .expect("seed readable resource at the edge");
     accept_global(&mut bound_edge, prior, 1);
     let mut system_serving_peer =
-        PeerState::edge_client_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
+        PeerState::client_link_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
     let bound_subscriptions = system_serving_peer
         .unsettled_authority_scope_subscriptions(
             &mut bound_edge,
@@ -1477,7 +1477,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     wrong_type_edge.set_test_provider_claims(writer, wrong_type_claims.clone());
     let wrong_type_policy_claims = wrong_type_edge.session_claims_for(writer);
     let mut wrong_type_peer =
-        PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
+        PeerState::client_link_with_permission_identity(transport_identity, transport_identity);
     wrong_type_peer
         .unsettled_authority_scope_subscriptions(
             &mut wrong_type_edge,
@@ -1521,7 +1521,7 @@ fn deferred_edge_support_coexists_across_same_link_claim_refresh() {
     let a_raw_claims = BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]);
     edge.set_test_provider_claims(writer, a_raw_claims);
     let a_claims = edge.session_claims_for(writer);
-    let mut peer = PeerState::edge_client(writer);
+    let mut peer = PeerState::client_link(writer);
     let a_outcome = peer
         .ingest_edge_mergeable_commit_unit(
             &mut edge,
@@ -1622,7 +1622,7 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xb3), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xb4), schema);
-    let mut peer = PeerState::edge_client(writer);
+    let mut peer = PeerState::client_link(writer);
 
     let outcome = peer
         .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10, 10, BTreeMap::new())
@@ -1644,7 +1644,7 @@ fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xc3), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xc4), schema);
-    let mut peer = PeerState::edge_client(writer);
+    let mut peer = PeerState::client_link(writer);
 
     let _ = peer
         .ingest_edge_mergeable_commit_unit(
@@ -1756,7 +1756,7 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa7), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, row(0xa8));
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xa9), schema);
-    let mut peer = PeerState::edge_client(writer);
+    let mut peer = PeerState::client_link(writer);
     let subscription = SubscriptionKey {
         shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(7)),
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(8)),
@@ -3995,7 +3995,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
 fn peer_runtime_handles_do_not_cross_node_runtime_instances() {
     let user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let (_first_dir, mut first_core) = open_node_with_schema(node(0x90), access_policy_schema());
-    let mut peer = PeerState::edge_client(user);
+    let mut peer = PeerState::client_link(user);
 
     peer.current_rows_update(&mut first_core, "docs").unwrap();
 
@@ -5203,7 +5203,7 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert_eq!(relay.maintained_subscription_view_metrics().hits_out, 1);
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
-    let mut edge_owner = PeerState::edge_client(owner);
+    let mut edge_owner = PeerState::client_link(owner);
     core.set_test_provider_claims(
         owner,
         BTreeMap::from([(
@@ -5219,7 +5219,7 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     );
     assert!(view_update_added_rows(edge_update).contains(&doc));
 
-    let mut edge_other = PeerState::edge_client(other);
+    let mut edge_other = PeerState::client_link(other);
     core.set_test_provider_claims(
         other,
         BTreeMap::from([(
@@ -5265,7 +5265,7 @@ fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
         )]),
     );
 
-    let mut peer = PeerState::edge_client(owner);
+    let mut peer = PeerState::client_link(owner);
     register_whole_table_receiver(&mut reader, "docs");
     reader
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
@@ -5354,7 +5354,7 @@ fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
             Value::Uuid(unseen.test_uuid()),
         )]),
     );
-    let mut unseen_peer = PeerState::edge_client(unseen);
+    let mut unseen_peer = PeerState::client_link(unseen);
     let unseen_update = unseen_peer.current_rows_update(&mut core, "docs").unwrap();
     let SyncMessage::ViewUpdate(payload) = &unseen_update else {
         panic!("expected view update");
@@ -5395,7 +5395,7 @@ fn policy_visible_delete_carries_tombstone_and_clears_receiver_current_row() {
             Value::Uuid(owner.test_uuid()),
         )]),
     );
-    let mut peer = PeerState::edge_client(owner);
+    let mut peer = PeerState::client_link(owner);
     register_whole_table_receiver(&mut reader, "docs");
     reader
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
@@ -5475,7 +5475,7 @@ fn concurrent_policy_revoke_cannot_cross_authorize_another_rows_tombstone() {
             Value::Uuid(owner.test_uuid()),
         )]),
     );
-    let mut peer = PeerState::edge_client(owner);
+    let mut peer = PeerState::client_link(owner);
     register_whole_table_receiver(&mut reader, "docs");
     reader
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
@@ -5558,7 +5558,7 @@ fn same_row_policy_revoke_and_delete_do_not_leak_a_tombstone() {
             Value::Uuid(owner.test_uuid()),
         )]),
     );
-    let mut peer = PeerState::edge_client(owner);
+    let mut peer = PeerState::client_link(owner);
     register_whole_table_receiver(&mut reader, "docs");
     reader
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
