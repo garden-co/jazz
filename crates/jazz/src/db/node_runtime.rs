@@ -3624,7 +3624,7 @@ where
             };
             if node.transaction_record(tx).await.is_some_and(|record| {
                 matches!(record.fate, crate::tx::Fate::Accepted)
-                    && record.durability >= DurabilityTier::Edge
+                    && record.durability >= DurabilityTier::Global
             }) {
                 if let Ok(coordinate) = node.current_row_coordinate(table, row) {
                     candidates.push(coordinate);
@@ -4297,7 +4297,7 @@ where
             // trusted backend may still request Local: it evaluates its own
             // storage-backed graph and merely propagates upstream, exactly
             // like any other Local reader.
-            let authority_scoped = read_tier >= DurabilityTier::Edge;
+            let authority_scoped = read_tier >= DurabilityTier::Global;
             let authoritative_reset_pending =
                 authority_scoped && authoritative_reset_result.is_some();
             // Optimistic local writes are represented as eligible local input

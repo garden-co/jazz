@@ -367,7 +367,7 @@ fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
             &shape,
             &binding,
             alice,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             &ReadViewSpec::default(),
             None,
             QueryAuthorizationMode::ClientLocal,
@@ -1029,10 +1029,10 @@ fn local_edit_after_confirmed_unavailable_retains_optimistic_visibility() {
     assert_eq!(parent_ids(&mut node, &schema, author(2)).len(), 2);
 }
 
-/// Edge-accepted versions can remain in Ahead storage. They are settled cache,
+/// Core-confirmed versions are settled cache,
 /// while a distinct pending successor must still participate normally.
 #[test]
-fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
+fn local_unavailable_confirmed_row_keeps_pending_successor() {
     let (_dir, mut node, schema) = fixture();
     let alice = author(1);
     let parent = node
@@ -1046,12 +1046,34 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
                 .parents(vec![parent])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
-                    Value::String("edge accepted".to_owned()),
+                    Value::String("core confirmed".to_owned()),
                 )])),
         )
         .unwrap();
-    node.apply_fate_update(accepted, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    // Model interruption after confirmation persists but before Ahead cleanup.
+    // The public confirmation path normally performs both together.
+    let stored = node.query_transaction(accepted).unwrap().unwrap();
+    let global_time = node.allocate_global_time_for_test();
+    let version = node.query_versions_for_tx(accepted).unwrap().remove(0);
+    let mut batch = node.database.open_batch();
+    batch.update(
+        "jazz_transactions",
+        transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            Fate::Accepted,
+            Some(global_time),
+            DurabilityTier::Global,
+            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::db::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
     let scope = node.local_read_policy_binding(alice).unwrap();
     let table = node
         .local_availability_table_id(schema.version_id(), "parents")
@@ -1068,7 +1090,7 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
     assert_eq!(
         parent_ids(&mut node, &schema, alice),
         BTreeSet::from([row(2)]),
-        "Edge-accepted Ahead content is still subject to the settled exclusion"
+        "Core-confirmed content is still subject to the settled exclusion"
     );
     let pending = node
         .commit_mergeable_settled(
@@ -1095,7 +1117,7 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
     assert_eq!(
         parent_ids(&mut node, &schema, alice),
         BTreeSet::from([row(2)]),
-        "rejection cannot resurrect the Edge-accepted predecessor"
+        "rejection cannot resurrect the Core-confirmed predecessor"
     );
 }
 

@@ -853,7 +853,7 @@ where
     /// Use the host-selected authority tier, matching subscription registration.
     /// Local reads remain local regardless of the upstream durability floor.
     fn client_authority_read_tier(&self, tier: DurabilityTier) -> DurabilityTier {
-        if tier >= DurabilityTier::Edge {
+        if tier >= DurabilityTier::Global {
             remote_subscription_tier(tier, self.node.upstream_durability_floor.get())
         } else {
             tier

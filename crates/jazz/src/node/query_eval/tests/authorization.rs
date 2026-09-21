@@ -267,12 +267,12 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .prepare_query_binding_for_link(
             &client_shape,
             &client_binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             identity,
         )
         .expect("prepare retained invite binding on the client before server coverage");
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut client, &shape, opts.clone());
@@ -378,7 +378,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .compile_current_query_program_for_read_view(
             &shape,
             &server_binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             &ReadViewSpec::default(),
@@ -407,7 +407,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             "chatMembers",
             identity,
             ParamBindingMode::RetainAllParams,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             program.request.input.binding.source_shape.clone(),
             program.request.input.binding.extra_user_params.clone(),
             program.request.input.binding.claim_params.clone(),
@@ -419,7 +419,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let members_authorized = node
         .compose_policy_filtered_current_source_graph(
             Ok(members_policy),
-            node.maintained_view_content_current_with_version(&members, DurabilityTier::Edge)
+            node.maintained_view_content_current_with_version(&members, DurabilityTier::Global)
                 .expect("compile chat-members storage source"),
             &global_current_storage_fields(&members, true, true),
         )
@@ -443,7 +443,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .compile_current_query_program_for_read_view(
             &shape,
             &server_binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             identity,
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
@@ -453,7 +453,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .compile_current_query_program_for_read_view(
             &shape,
             &server_binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             AuthorSubject::SYSTEM,
             CurrentQueryProgramOutput::MaintainedView,
             &ReadViewSpec::default(),
@@ -483,7 +483,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             "chatMembers",
             AuthorSubject::SYSTEM,
             ParamBindingMode::RetainAllParams,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             program.request.input.binding.source_shape.clone(),
             program.request.input.binding.extra_user_params.clone(),
             program.request.input.binding.claim_params.clone(),
@@ -572,14 +572,14 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         &shape,
         &server_binding,
         identity,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         &ReadViewSpec::default(),
     )
     .expect("nested policy claim routes must prepare and bind against the root binding descriptor");
     node.query_rows_with_prepared_plan_for_identity(
         &shape,
         &server_binding,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         None,
         identity,
     )
@@ -705,7 +705,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .query_rows_with_prepared_plan_for_identity(
             &message_shape,
             &message_binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             None,
             identity,
         )
@@ -722,7 +722,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         &message_shape,
         &message_binding,
         identity,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         &ReadViewSpec::default(),
     )
     .expect("prepare and hydrate normal-member message include/order subscription");

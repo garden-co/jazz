@@ -1419,7 +1419,7 @@ where
         // binding view registered by upstream coverage. A client-local plan
         // without that host-owned route must not fall back to its raw overlay.
         if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && tier >= DurabilityTier::Edge
+            && tier >= DurabilityTier::Global
             && settled_binding_view.is_none()
         {
             return Ok(Vec::new());
@@ -2201,7 +2201,7 @@ where
             .flatten();
         let settled_binding_view = client_settled_view.as_ref().map(|view| view.key);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && tier >= DurabilityTier::Edge
+            && tier >= DurabilityTier::Global
             && settled_binding_view.is_none()
         {
             return Ok(RelationSnapshot {
@@ -3267,7 +3267,7 @@ where
         }
     }
 
-    /// Re-publish an Edge window from a durable relay to its non-durable
+    /// Re-publish a Core-confirmed window from a durable relay to its non-durable
     /// browser peer. The relay's Global receipt already names the
     /// authority-selected members, so this must consume that membership as
     /// its source instead of applying the query window a second time.
@@ -3297,7 +3297,7 @@ where
             identity,
             read_view,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 read_view: read_view.clone(),
                 ..RegisterShapeOptions::default()
             }
@@ -3343,7 +3343,7 @@ where
                 shape,
                 binding,
                 identity,
-                DurabilityTier::Edge,
+                DurabilityTier::Global,
                 read_view,
                 read_view_key,
                 QueryAuthorizationMode::ClientLocal,

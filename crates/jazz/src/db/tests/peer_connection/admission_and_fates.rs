@@ -416,7 +416,7 @@ fn downstream_fate_retries_after_bounded_transport_backpressure() {
         tx_id: TxId::new(TxTime::from(2), NodeUuid::from_bytes([0xc2; 16])),
         fate: Fate::Accepted,
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     subscriber
         .borrow()

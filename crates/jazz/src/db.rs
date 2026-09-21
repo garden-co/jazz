@@ -4605,7 +4605,7 @@ where
         let state = self.write_state().await?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
-            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+            Fate::Pending if tier >= DurabilityTier::Global => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
             )),
@@ -4907,7 +4907,7 @@ impl SubscriptionSender {
         index: &RelationSnapshotIndex,
     ) -> Result<Option<SubscriptionPublicationSnapshot>, Error> {
         let publication = self.publication.borrow();
-        if tier >= DurabilityTier::Edge
+        if tier >= DurabilityTier::Global
             && !settled
             && publication.opened
             && publication.deferred.is_none()
@@ -4953,11 +4953,11 @@ impl SubscriptionSender {
         let mut publication = self.publication.borrow_mut();
         if !publishable
             || !materialized
-            || (self.requested_tier >= DurabilityTier::Edge && !settled)
+            || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
             if publication.opened
                 && publication.deferred.is_none()
-                && self.requested_tier >= DurabilityTier::Edge
+                && self.requested_tier >= DurabilityTier::Global
             {
                 publication.deferred = Some(before.ok_or_else(|| {
                     Error::new(
@@ -4970,7 +4970,7 @@ impl SubscriptionSender {
             // immediate delivery. Do not checkpoint those updates. If local
             // required cells are actually missing, resume with a canonical
             // reset when the maintained result becomes materialized again.
-            publication.reset |= reset || self.requested_tier < DurabilityTier::Edge;
+            publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
@@ -5522,7 +5522,7 @@ impl PreparedQuery {
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
-            DurabilityTier::None | DurabilityTier::Edge => None,
+            DurabilityTier::None => None,
         }
     }
 
@@ -5574,7 +5574,7 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .upstream_subscription_handles
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
-                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Edge {
+                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
                         let event = subscription_delta_event(
                             state_ref.read_tier,
                             false,

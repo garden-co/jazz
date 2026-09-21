@@ -1603,7 +1603,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             full.clone(),
             Fate::Pending,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )])
         .unwrap();
     assert_eq!(

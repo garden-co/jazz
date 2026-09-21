@@ -131,7 +131,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .expect("validate issues query");
     let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, opts.clone());
@@ -202,7 +202,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
             &shape,
             &binding,
             AuthorSubject::SYSTEM,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             &ReadViewSpec::default(),
             None,
             QueryAuthorizationMode::ClientLocal,
@@ -605,7 +605,7 @@ fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
         .expect("validate issues query");
     let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, opts.clone());

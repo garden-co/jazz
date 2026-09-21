@@ -1826,7 +1826,7 @@ impl WasmDb {
             }
             let requires_coverage = tier_is_explicit
                 && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Edge
+                    || (opts.tier >= DurabilityTier::Global
                         && opts.propagation == Propagation::Full));
             let result = inner
                 .all_serialized_query(
@@ -3234,7 +3234,7 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
     match tier {
         "None" | "none" => Ok(DurabilityTier::None),
         "Local" | "local" => Ok(DurabilityTier::Local),
-        "Edge" | "edge" => Ok(DurabilityTier::Edge),
+        "Edge" | "edge" => Ok(DurabilityTier::Global),
         "Global" | "global" => Ok(DurabilityTier::Global),
         other => Err(JsValue::from_str(&format!(
             "unknown durability tier {other}"
@@ -3250,7 +3250,9 @@ fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
         // The host connection manager applies the explicit-offline decision
         // before invoking this ABI. A direct WASM caller therefore gets the
         // strict remote behavior for RemoteIfPossible.
-        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => Ok(DurabilityTier::Edge),
+        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
+            Ok(DurabilityTier::Global)
+        }
         _ => durability_tier_from_str(tier),
     }
 }
@@ -3956,7 +3958,7 @@ mod dynamic_schema_view_tests {
         );
         assert_eq!(
             read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            DurabilityTier::Edge
+            DurabilityTier::Global
         );
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),

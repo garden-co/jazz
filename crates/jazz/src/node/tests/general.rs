@@ -1761,14 +1761,13 @@ fn deletion_register_hides_and_restore_reveals_current_content() {
 }
 
 #[test]
-fn durability_tier_ladder_orders_edge_between_local_and_global() {
+fn durability_tier_ladder_orders_local_before_global() {
     assert!(DurabilityTier::None < DurabilityTier::Local);
-    assert!(DurabilityTier::Local < DurabilityTier::Edge);
-    assert!(DurabilityTier::Edge < DurabilityTier::Global);
+    assert!(DurabilityTier::Local < DurabilityTier::Global);
 }
 
 #[test]
-fn edge_current_rows_exclude_purely_local_pending_writes() {
+fn global_current_rows_exclude_purely_local_pending_writes() {
     let (_temp_dir, mut node) = open_node();
     let row = row(0xe1);
     node.commit_mergeable_settled(
@@ -1785,41 +1784,12 @@ fn edge_current_rows_exclude_purely_local_pending_writes() {
         vec![row]
     );
     assert!(
-        node.current_rows("todos", DurabilityTier::Edge)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn edge_current_rows_include_edge_accepted_ahead_versions() {
-    let (_temp_dir, mut node) = open_node();
-    let row = row(0xe2);
-    let tx_id = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row, 10).cells(title_cells("edge accepted")),
-        )
-        .unwrap();
-
-    // E1: edge-accept produced directly; E2 wires the acceptance path.
-    node.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
-        .unwrap();
-
-    assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
-    assert_eq!(
-        node.current_rows("todos", DurabilityTier::Edge)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![row]
-    );
-    assert!(
         node.current_rows("todos", DurabilityTier::Global)
             .unwrap()
             .is_empty()
     );
 }
+
 
 #[test]
 fn global_fate_cleans_ahead_current_overlay() {
@@ -2263,7 +2233,7 @@ fn known_parent_must_match_exact_physical_table_for_local_and_replicated_version
             vec![remote],
             Fate::Accepted,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )
         .unwrap_err();
     assert!(matches!(
@@ -2770,4 +2740,29 @@ fn retired_edge_publications_are_rejected_without_writes_for_every_trust_mode() 
         assert!(receiver.query_transaction(tx.tx_id).unwrap().is_none());
         assert!(receiver.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
     }
+}
+
+// Pin both supported encoding boundaries. Public durability has no Edge tier,
+// but old bytes must decode as Local without renumbering Global.
+#[test]
+fn durability_encoding_preserves_global_tag_and_decodes_legacy_edge_as_local() {
+    use groove::records::{RecordField, ScalarEnumSchema, ValueType};
+    let ty = ValueType::EnumTag(ScalarEnumSchema::new(
+        "durability", ["none", "local", "edge", "global"],
+    ).unwrap());
+    for (tag, tier, encoded) in [
+        (0, DurabilityTier::None, 0),
+        (1, DurabilityTier::Local, 1),
+        (2, DurabilityTier::Local, 1),
+        (3, DurabilityTier::Global, 3),
+    ] {
+        assert_eq!(postcard::from_bytes::<DurabilityTier>(&[tag]).unwrap(), tier);
+        assert_eq!(postcard::to_allocvec(&tier).unwrap(), vec![encoded]);
+        assert_eq!(DurabilityTier::from_discriminant(tag).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_tuple_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(tier.to_value(), Value::EnumTag(encoded));
+    }
+    assert!(DurabilityTier::from_discriminant(4).is_err());
+    assert!(postcard::from_bytes::<DurabilityTier>(&[4]).is_err());
 }

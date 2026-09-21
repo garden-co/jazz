@@ -219,14 +219,14 @@ fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_h
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     let scheduler = Rc::new(RecordingScheduler::default());
@@ -328,14 +328,14 @@ fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     control.take_observed();
@@ -1249,9 +1249,9 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         block_on(
             client
                 .node
-                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
         )
-        .expect("Accepted Edge durability does not require a Global timestamp")
+        .expect("Local durability does not require a Global timestamp")
         .unwrap(),
         tx_id
     );
@@ -2984,7 +2984,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_ti
             |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
         )
     );
-    for durability in [DurabilityTier::Local, DurabilityTier::Edge] {
+    for durability in [DurabilityTier::Local, DurabilityTier::Global] {
         authority
             .send(SyncMessage::FateUpdate {
                 tx_id,
@@ -4330,7 +4330,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         tx_id: rejected_id,
         fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     route_local_fate(&routes, rejected_id, &rejected);
     assert!(matches!(

@@ -3189,7 +3189,6 @@ fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> 
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
-        DurabilityTier::Edge => 2,
         DurabilityTier::Global => 3,
     });
     bytes.push(u8::from(options.propagate_upstream));
@@ -7763,18 +7762,18 @@ mod tests {
         // entries, so the exact canonical preimage must be pinned below the
         // public subscription API boundary.
         let options = RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             read_view: ReadViewSpec::branch_view(selector(1), None),
             propagate_upstream: false,
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
             hex::encode(canonical_register_shape_options_v1_bytes(&options)),
-            "4a52564b010200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            "4a52564b010300010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("ab3adac6-1943-535a-8983-1541732f0fb1")
+            uuid::uuid!("7922a41b-d6d5-5918-a7c0-d0ba05062ea4")
         );
     }
 

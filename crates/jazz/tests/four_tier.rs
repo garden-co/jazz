@@ -404,7 +404,7 @@ fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
 fn edge_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
-    block_on(node.current_rows("todos", DurabilityTier::Edge))
+    block_on(node.current_rows("todos", DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row.cell(table, "title").expect("title")))
@@ -707,12 +707,12 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
             tx_id,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
     assert_eq!(
         transaction_state(&mut edge, tx_id),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
 }
 
@@ -818,12 +818,12 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
             tx_id,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
     assert_eq!(
         transaction_state(&mut edge, tx_id),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
     let SyncMessage::CommitUnit { tx: stored_tx, .. } =
         block_on(edge.commit_unit_for(tx_id)).unwrap()
@@ -987,7 +987,7 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         .unwrap();
     assert_eq!(
         transaction_state(&mut edge, first_a),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
 
     let (second_a, unit) = commit_as(&mut client_a, row(45), 20, "a second", writer_a, []);
@@ -1009,7 +1009,7 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
             tx_id: second_a,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
 
@@ -1163,12 +1163,12 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
             tx_id,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
     assert_eq!(
         transaction_state(&mut edge, tx_id),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
     assert_eq!(
         edge_rows(&mut edge),
@@ -1220,12 +1220,12 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
             tx_id,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
     assert_eq!(
         transaction_state(&mut edge, tx_id),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
     drop(edge);
     drop(edge_to_client);
@@ -1233,7 +1233,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
     let mut reopened = reopen_node(&edge_dir, node(3), schema);
     assert_eq!(
         transaction_state(&mut reopened, tx_id),
-        (Fate::Accepted, None, DurabilityTier::Edge),
+        (Fate::Accepted, None, DurabilityTier::Global),
         "edge-accepted fate must persist in edge storage across restart"
     );
     assert_eq!(
@@ -1372,7 +1372,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             tx_id,
             fate: Fate::Accepted,
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         }
     );
 
@@ -1415,7 +1415,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
                 scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
                 fate: Fate::Accepted,
                 global_time: None,
-                durability: DurabilityTier::Edge,
+                durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
             supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
@@ -1425,14 +1425,14 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     let (fate, global_time, durability) = transaction_state(&mut core, tx_id);
     assert_eq!(fate, Fate::Accepted);
     assert!(global_time.is_none());
-    assert_eq!(durability, DurabilityTier::Edge);
+    assert_eq!(durability, DurabilityTier::Global);
     let canvas_table = schema
         .tables
         .iter()
         .find(|table| table.name == "canvases")
         .expect("canvases schema");
     assert_eq!(
-        block_on(core.current_rows("canvases", DurabilityTier::Edge))
+        block_on(core.current_rows("canvases", DurabilityTier::Global))
             .unwrap()
             .into_iter()
             .map(|row| (

@@ -1513,16 +1513,18 @@ mod tests {
         assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
 
         // Sensitivity plant: the final enum tag is durability.  A receiver
-        // must not silently retain Global when a payload says Edge.
+        // must decode the legacy Edge tag as Local, never as Global.
         let mut edge = fixture.clone();
         *edge.last_mut().expect("non-empty fixture") = 2;
+        // The untrusted boundary also rejects this sequenced Local receipt.
+        assert!(decode_sync_message(&edge).is_err());
         assert_eq!(
-            decode_sync_message(&edge).unwrap(),
+            decode_sync_message_trusted(&edge).unwrap(),
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
-                durability: Some(DurabilityTier::Edge),
+                durability: Some(DurabilityTier::Local),
             }
         );
     }

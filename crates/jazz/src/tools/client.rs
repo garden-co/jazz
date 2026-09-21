@@ -3233,7 +3233,7 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
 fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer => CoreDurabilityTier::Edge,
+        DurabilityTier::EdgeServer => CoreDurabilityTier::Global,
         DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
@@ -3941,7 +3941,7 @@ impl JazzClient {
             // Edge and Global are strict remote one-shots: they must own a
             // fresh coverage lifetime and return only after the receiver's
             // local maintained graph has settled that exact coverage.
-            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
+            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Global;
             self.db
                 .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
@@ -4881,7 +4881,7 @@ mod tests {
         );
         assert_eq!(
             core_write_tier(DurabilityTier::EdgeServer),
-            CoreDurabilityTier::Edge
+            CoreDurabilityTier::Global
         );
         assert_eq!(
             core_write_tier(DurabilityTier::GlobalServer),

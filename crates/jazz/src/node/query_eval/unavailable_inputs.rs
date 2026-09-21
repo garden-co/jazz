@@ -286,12 +286,20 @@ impl<S: OrderedKvStorage> NodeState<S> {
         let id = self.local_unavailable_input(scope, table).await?;
         let unavailable = GraphBuilder::input_source(id, descriptor());
         if pending_ahead {
-            // Ahead also holds Edge-accepted versions. Keep exact version keys:
+            // Ahead can retain Core-confirmed versions until cleanup. Keep exact version keys:
             // a settled predecessor cannot suppress a pending sibling/successor.
             let fields = ["row_uuid", "tx_time", "tx_node_id"];
             let settled = GraphBuilder::join(
                 graph.clone(),
-                read_sources::edge_accepted_transaction_source_graph(),
+                GraphBuilder::table("jazz_transactions")
+                    .filter(
+                        PredicateExpr::And(vec![
+                            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
+                        ])
+                        .canonicalize(),
+                    )
+                    .project(["time", "node_id"]),
                 ["tx_time", "tx_node_id"],
                 ["time", "node_id"],
             )

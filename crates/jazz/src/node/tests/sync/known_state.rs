@@ -2449,12 +2449,12 @@ fn retired_scope_payloads_never_restore_authority() {
 }
 
 #[test]
-fn known_state_declaration_never_skips_unfated_edge_members() {
+fn known_state_declaration_never_skips_pending_local_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
+    let (_relay_dir, mut relay) = open_node_with_uuid(node(7));
     let row_uuid = row(18);
-    // A zero-offset exact-id Edge read without a policy remains a genuinely
-    // local relay evaluation: an unfated Edge member must be visible even
+    // A zero-offset exact-id Local read without a policy remains a genuinely
+    // local relay evaluation: an unfated Local member must be visible even
     // though no Global receipt exists to source it.
     let shape = Query::from("todos")
         .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))))
@@ -2462,7 +2462,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Local,
         ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
@@ -2479,7 +2479,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    edge.ingest_known_transaction(tx, versions, Fate::Accepted, None, DurabilityTier::Edge)
+    relay.ingest_known_transaction(tx, versions, Fate::Pending, None, DurabilityTier::Local)
         .unwrap();
     let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
@@ -2491,7 +2491,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     );
 
     let update = peer
-        .rehydrate_query_for_subscription_with_opts(&mut edge, subscription, &shape, &binding, opts)
+        .rehydrate_query_for_subscription_with_opts(&mut relay, subscription, &shape, &binding, opts)
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);

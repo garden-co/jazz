@@ -2974,7 +2974,7 @@ impl NapiDb {
                             .map_err(napi_error)?;
                     }
                     let requires_coverage = non_durable_client
-                        || (opts.tier >= jazz::tx::DurabilityTier::Edge
+                        || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
                     let coverage_deadline = Instant::now() + Duration::from_secs(15);
                     let result = db
@@ -4296,7 +4296,7 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
     match tier {
         "None" | "none" => Ok(CoreDurabilityTier::None),
         "Local" | "local" => Ok(CoreDurabilityTier::Local),
-        "Edge" | "edge" => Ok(CoreDurabilityTier::Edge),
+        "Edge" | "edge" => Ok(CoreDurabilityTier::Global),
         "Global" | "global" => Ok(CoreDurabilityTier::Global),
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
@@ -4313,7 +4313,7 @@ fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
         // connection manager resolves RemoteIfPossible before the ABI call;
         // direct NAPI callers therefore retain strict remote behavior.
         "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
-            Ok(CoreDurabilityTier::Edge)
+            Ok(CoreDurabilityTier::Global)
         }
         _ => core_durability_tier_from_str(tier),
     }
@@ -4710,16 +4710,14 @@ impl JazzServer {
             opts.data_dir.unwrap_or_else(|| "./data".to_string())
         };
 
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_native_transport_connector(std::sync::Arc::new(
-                jazz_native_transport::NativeWebSocketConnector,
-            ));
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         if let Some(schema) = core_server_shell_schema {
             server_builder = server_builder.with_core_server_shell_schema(schema);
         }
-        if let Some(upstream_url) = opts.upstream_url.clone() {
-            server_builder = server_builder.with_upstream_url(upstream_url);
+        if opts.upstream_url.is_some() {
+            return Err(napi::Error::from_reason(
+                "server edges are no longer supported; remove upstreamUrl and connect clients directly to Core",
+            ));
         }
 
         if in_memory {
@@ -5243,7 +5241,7 @@ mod tests {
         );
         assert_eq!(
             core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            jazz::tx::DurabilityTier::Edge
+            jazz::tx::DurabilityTier::Global
         );
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),
@@ -7249,7 +7247,7 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: operations,
             settled: false,
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
         })
         .expect("encode terminal operations");
 

@@ -2350,7 +2350,7 @@ mod tests {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..Default::default()
                 },
             )
@@ -3274,7 +3274,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Edge,
+                        tier: DurabilityTier::Global,
                         ..Default::default()
                     },
                 )
@@ -3292,7 +3292,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Edge,
+                        tier: DurabilityTier::Global,
                         ..Default::default()
                     },
                 )
@@ -3313,7 +3313,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Edge,
+                        tier: DurabilityTier::Global,
                         ..Default::default()
                     },
                 )
@@ -3332,7 +3332,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Edge,
+                        tier: DurabilityTier::Global,
                         ..Default::default()
                     },
                 )

@@ -5,7 +5,7 @@
 //! [`super::ingest`] and [`super::policy`], and query execution in
 //! [`super::query_eval`]. It is the node layer's boundary to groove storage.
 
-use super::query_engine::{left_field, user_column_field};
+use super::query_engine::user_column_field;
 use super::*;
 use crate::protocol::{ResultRowLayer, SnapshotRef};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
@@ -126,12 +126,69 @@ groove::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
     TxKind::Exclusive = 1,
 });
-groove::impl_record_field_enum!(DurabilityTier {
-    DurabilityTier::None = 0,
-    DurabilityTier::Local = 1,
-    DurabilityTier::Edge = 2,
-    DurabilityTier::Global = 3,
-});
+// Storage tags are independent of the public enum: 2 is a decode-only legacy
+// alias for Local, while Global remains 3.
+impl DurabilityTier {
+    #[doc(hidden)]
+    pub fn from_discriminant(tag: u8) -> Result<Self, groove::records::Error> {
+        match tag {
+            0 => Ok(Self::None),
+            1 | 2 => Ok(Self::Local),
+            3 => Ok(Self::Global),
+            tag => Err(groove::records::Error::InvalidEnumDiscriminant {
+                enum_name: "DurabilityTier".to_owned(),
+                discriminant: tag,
+            }),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn discriminant(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Local => 1,
+            Self::Global => 3,
+        }
+    }
+}
+
+impl groove::records::RecordField for DurabilityTier {
+    fn read(
+        record: &groove::records::BorrowedRecord<'_>,
+        idx: usize,
+    ) -> Result<Self, groove::records::Error> {
+        Self::from_discriminant(record.get_enum(idx)?)
+    }
+    fn to_value(&self) -> Value {
+        Value::EnumTag(self.discriminant())
+    }
+    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Enum;
+    fn read_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        match value_type {
+            groove::records::ValueType::EnumTag(schema) => {
+                let tag = <u8 as groove::records::RecordField>::read_raw(
+                    bytes,
+                    &groove::records::ValueType::U8,
+                )?;
+                schema.variant(tag)?;
+                Self::from_discriminant(tag)
+            }
+            _ => Err(groove::records::Error::TypeMismatch {
+                expected: groove::records::ValueType::U8,
+            }),
+        }
+    }
+    fn read_tuple_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        Self::read_raw(bytes, value_type)
+    }
+}
+
 groove::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
     DeletionEvent::Restored = 1,
@@ -3731,7 +3788,6 @@ pub(super) fn durability_string(durability: DurabilityTier) -> &'static str {
     match durability {
         DurabilityTier::None => "none",
         DurabilityTier::Local => "local",
-        DurabilityTier::Edge => "edge",
         DurabilityTier::Global => "global",
     }
 }
@@ -4239,31 +4295,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     ]);
     content_fields.push("tx_time".to_owned());
     content_fields.push("tx_node_id".to_owned());
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
-        GraphBuilder::join(
-            GraphBuilder::table(table_name).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                        PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::EnumTag(2)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
-                        ])
-                        .canonicalize(),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deleted_winners) = if settled == DurabilityTier::Global {
         // The global-current table now carries every user cell, so current rows
         // resolve directly from it in O(current rows) — no join against the full
@@ -4275,12 +4307,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             .project(["row_uuid"]);
         (content, deleted)
     } else {
-        let ahead_content = if settled == DurabilityTier::Edge {
-            edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_fields.clone(),
-            )
-        } else {
+        let ahead_content = {
             GraphBuilder::table(ahead_current_table_name(&table.name))
                 .project(content_fields.clone())
         };
@@ -4294,12 +4321,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deleted = if settled == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-            )
-        } else {
+        let ahead_deleted = {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
                 .project(deletion_fields.clone())
         };
@@ -4861,14 +4883,8 @@ pub(super) fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, Error> 
 }
 
 pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, Error> {
-    match value {
-        0 => Ok(DurabilityTier::None),
-        1 => Ok(DurabilityTier::Local),
-        // Legacy persisted edge possession provides only local durability.
-        2 => Ok(DurabilityTier::Local),
-        3 => Ok(DurabilityTier::Global),
-        _ => Err(Error::InvalidStoredValue("unknown durability")),
-    }
+    DurabilityTier::from_discriminant(value)
+        .map_err(|_| Error::InvalidStoredValue("unknown durability"))
 }
 
 pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, Error> {

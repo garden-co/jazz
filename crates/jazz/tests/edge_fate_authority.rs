@@ -232,7 +232,7 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     pump_client_edge(&alice, &alice_wire, &mut edge, alice_session);
     pump_client_edge(&bob, &bob_wire, &mut edge, bob_session);
 
-    assert!(block_on(write.wait(DurabilityTier::Edge)).is_ok());
+    assert!(block_on(write.wait(DurabilityTier::Global)).is_ok());
     assert!(block_on(write.wait(DurabilityTier::Global)).is_err());
     assert!(bob_global_subscription.try_next_event().is_none());
     assert!(visible_titles(&bob, DurabilityTier::Global).is_empty());

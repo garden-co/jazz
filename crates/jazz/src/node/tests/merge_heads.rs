@@ -195,13 +195,13 @@ fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
 
     edge.ingest_relay_commit_unit(right_tx, right_versions)
         .unwrap();
-    edge.apply_fate_update(right, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    edge.accept_global_for_test(right)
         .unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
     edge.ingest_relay_commit_unit(left_tx, left_versions)
         .unwrap();
-    edge.apply_fate_update(left, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    edge.accept_global_for_test(left)
         .unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
@@ -233,7 +233,7 @@ fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
 
     edge.reset_merge_head_reachability_walks_for_test();
     for tx_id in versions.into_iter().rev() {
-        edge.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        edge.accept_global_for_test(tx_id)
             .unwrap();
     }
 

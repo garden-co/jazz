@@ -1420,8 +1420,8 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     .unwrap();
 }
 
-fn accept_edge(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
-    core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+fn accept_confirmed(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
+    core.finalize_local_mergeable_commit_settled(tx_id)
         .unwrap();
 }
 
@@ -1637,7 +1637,7 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
     let (_dir, mut core) = open_node_with_uuid(node(0x44));
     let (shape, binding) = title_shape_binding("match");
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
@@ -1670,7 +1670,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     let (shape, binding) = title_shape_binding("shared");
     let subscription = subscription_key(&shape, &binding);
     let edge_opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     let edge_subscription = subscription_key_with_opts(&shape, &binding, &edge_opts);
@@ -2461,13 +2461,13 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
             MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
         )
         .unwrap();
-    accept_edge(&mut core, original_tx);
+    accept_confirmed(&mut core, original_tx);
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    accept_edge(&mut core, delete_tx);
+    accept_confirmed(&mut core, delete_tx);
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
@@ -2475,7 +2475,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
                 .cells(title_cells("restored")),
         )
         .unwrap();
-    accept_edge(&mut core, restored_content_tx);
+    accept_confirmed(&mut core, restored_content_tx);
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
@@ -2483,7 +2483,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
-    accept_edge(&mut core, restore_tx);
+    accept_confirmed(&mut core, restore_tx);
     let (shape, binding) = title_shape_binding("restored");
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Local,
@@ -2542,13 +2542,13 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
             MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
         )
         .unwrap();
-    accept_edge(&mut core, original_tx);
+    accept_confirmed(&mut core, original_tx);
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    accept_edge(&mut core, delete_tx);
+    accept_confirmed(&mut core, delete_tx);
     let restore_tx = core
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row_uuid, 1_002)
@@ -2559,7 +2559,7 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
                 .deletion(DeletionEvent::Restored),
         ])
         .unwrap();
-    accept_edge(&mut core, restore_tx);
+    accept_confirmed(&mut core, restore_tx);
     let (shape, binding) = title_shape_binding("restored");
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Local,

@@ -1848,7 +1848,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 &stored.tx,
                 Fate::Accepted,
                 Some(GlobalTime(7)),
-                DurabilityTier::Edge,
+                DurabilityTier::Local,
                 node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                     .unwrap(),
             )
@@ -2038,7 +2038,7 @@ fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
     let other_node = node(2);
     let states = [
         (local_node, local_author, Fate::Pending, None, DurabilityTier::Local),
-        (local_node, local_author, Fate::Accepted, None, DurabilityTier::Edge),
+        (local_node, local_author, Fate::Accepted, None, DurabilityTier::Local),
         (
             local_node,
             local_author,
@@ -2117,7 +2117,7 @@ fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan
     }
     for (offset, fate, durability) in [
         (0, Fate::Pending, DurabilityTier::Local),
-        (1, Fate::Accepted, DurabilityTier::Edge),
+        (1, Fate::Accepted, DurabilityTier::Local),
     ] {
         seed_pending_replay_state(
             &mut node_under_test,
@@ -2884,39 +2884,29 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
         Fate::Rejected(RejectionReason::MalformedCommit("detail".to_owned())),
     ] {
-        for durability in [
-            DurabilityTier::None,
-            DurabilityTier::Local,
-            DurabilityTier::Edge,
-            DurabilityTier::Global,
-        ] {
+        for tag in [0, 1, 2, 3] {
+            let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
+                let mut values = transaction_values(
+                    stored.node_alias, &stored.tx, fate.clone(), global_time, durability,
+                    core.contribution_merge_storage_value(None).unwrap(),
+                ).unwrap();
+                values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
                 let mut batch = core.database.open_batch();
-                batch.update(
-                    "jazz_transactions",
-                    transaction_values(
-                        stored.node_alias,
-                        &stored.tx,
-                        fate.clone(),
-                        global_time,
-                        durability,
-                        core.contribution_merge_storage_value(None).unwrap(),
-                    )
-                    .unwrap(),
-                );
+                batch.update("jazz_transactions", values);
                 let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
                 let persisted = crate::db::block_on(applied.persist());
                 core.database.finish_persistence(persisted).unwrap();
                 assert_eq!(
                     core.transaction_state_settled(tx_id),
                     Some((
-                        if fate == Fate::Accepted && durability == DurabilityTier::Edge && global_time.is_none() {
+                        if fate == Fate::Accepted && tag == 2 && global_time.is_none() {
                             Fate::Pending
                         } else {
                             fate.clone()
                         },
                         global_time,
-                        if durability == DurabilityTier::Edge { DurabilityTier::Local } else { durability },
+                        durability,
                     ))
                 );
                 let audit = core.transaction_record(tx_id).unwrap();
@@ -3092,15 +3082,16 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
             )
             .unwrap();
         let stored = writer.query_transaction(tx_id).unwrap().unwrap();
-        let values = transaction_values(
+        let mut values = transaction_values(
             stored.node_alias,
             &stored.tx,
             Fate::Accepted,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Local,
             Value::Nullable(None),
         )
         .unwrap();
+        values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
         let mut batch = writer.database.open_batch();
         batch.update("jazz_transactions", values);
         let applied = crate::db::block_on(writer.database.apply_batch(batch)).unwrap();

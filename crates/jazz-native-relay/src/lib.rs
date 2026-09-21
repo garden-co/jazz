@@ -2823,7 +2823,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Edge,
+                "edge" => CoreDurabilityTier::Global,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -2846,7 +2846,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Edge,
+                "edge" => CoreDurabilityTier::Global,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -12404,7 +12404,7 @@ mod tests {
             .subscribe_foreground_query_with_options(
                 postcard::to_allocvec(&Query::from("todos")).unwrap(),
                 ReadOpts {
-                    tier: CoreDurabilityTier::Edge,
+                    tier: CoreDurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             )

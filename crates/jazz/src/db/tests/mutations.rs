@@ -1980,7 +1980,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
     client.wait_for_write_with(
         &write,
         WriteWaitOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             observe_only: true,
         },
         move |outcome| *observer.borrow_mut() = Some(outcome),
@@ -1990,7 +1990,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2374,12 +2374,12 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
 
     let target_outcome = Rc::new(RefCell::new(None));
     let target_callback = Rc::clone(&target_outcome);
-    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Global, move |outcome| {
         *target_callback.borrow_mut() = Some(outcome);
     });
     let alias_outcome = Rc::new(RefCell::new(None));
     let alias_callback = Rc::clone(&alias_outcome);
-    client.wait_for_write_with(&alias, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_write_with(&alias, DurabilityTier::Global, move |outcome| {
         *alias_callback.borrow_mut() = Some(outcome);
     });
     authority_transport
@@ -2387,7 +2387,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
             tx_id: target_tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches client");
     client.tick().expect("fate settles both active observers");
@@ -2454,7 +2454,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     let callback_result = Rc::clone(&wait_result);
     client.wait_for_transaction_with(
         write.mergeable_tx_id(),
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         move |result| *callback_result.borrow_mut() = Some(result),
     );
     authority_transport
@@ -2462,7 +2462,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
 
@@ -2511,13 +2511,13 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
 
     let error =
-        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Edge))
+        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global))
             .unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(error.message.contains("AuthorizationDenied"));
@@ -2576,7 +2576,7 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2663,7 +2663,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches durable client");
     client
@@ -2672,7 +2672,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
 
     let drained_outcome = Rc::new(RefCell::new(None));
     let callback_outcome = Rc::clone(&drained_outcome);
-    client.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
         *callback_outcome.borrow_mut() = Some(outcome);
     });
     drop(write);
@@ -4093,7 +4093,7 @@ fn local_persistence_wakes_existing_transaction_waits() {
             observe_only: true,
         }
     ));
-    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Edge));
+    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     assert!(local.as_mut().poll(&mut context).is_pending());
     assert!(observer.as_mut().poll(&mut context).is_pending());

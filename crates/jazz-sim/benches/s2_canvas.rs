@@ -1627,7 +1627,7 @@ fn edge_fate_updates_accepted(
                 fate: Fate::Accepted,
                 durability,
                 ..
-            } if *seen == tx_id && durability.is_some_and(|tier| tier >= DurabilityTier::Edge)
+            } if *seen == tx_id && durability.is_some_and(|tier| tier >= DurabilityTier::Global)
         );
         if matches!(update, SyncMessage::FateUpdate { .. }) {
             let _ = writer_fate_txs[writer_idx].send(WriterFate {
@@ -1654,7 +1654,7 @@ fn edge_fate_update_accepted(
             fate: Fate::Accepted,
             durability,
             ..
-        } if durability.is_some_and(|tier| tier >= DurabilityTier::Edge)
+        } if durability.is_some_and(|tier| tier >= DurabilityTier::Global)
     )
 }
 
@@ -1726,7 +1726,7 @@ fn await_write_tier(
 ) {
     match tier {
         DurabilityTier::None | DurabilityTier::Local => return,
-        DurabilityTier::Edge | DurabilityTier::Global => {}
+        DurabilityTier::Global | DurabilityTier::Global => {}
     }
     while let Ok(update) = fate_rx.recv() {
         let matches_tier = match &update.message {

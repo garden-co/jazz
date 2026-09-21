@@ -2614,7 +2614,7 @@ fn edge_acceptance_phase(
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
-                durability: Some(DurabilityTier::Edge),
+                durability: Some(DurabilityTier::Global),
                 ..
             } if *tx_id == tx.tx_id
         )),
@@ -2622,7 +2622,7 @@ fn edge_acceptance_phase(
     );
     assert_eq!(
         block_on(edge.node.transaction_state(tx.tx_id)).unwrap(),
-        (Fate::Accepted, None, DurabilityTier::Edge)
+        (Fate::Accepted, None, DurabilityTier::Global)
     );
     acceptance_latency
         .record((ctx.now_ms() - start) * 1_000)
@@ -2943,7 +2943,7 @@ fn visible_rows(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) -> BTreeSet<RowUuid> {
-    block_on(node.query_rows(shape, binding, DurabilityTier::Edge))
+    block_on(node.query_rows(shape, binding, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
