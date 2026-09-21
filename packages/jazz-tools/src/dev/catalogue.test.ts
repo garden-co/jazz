@@ -52,7 +52,7 @@ import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.met
 import { app } from "./schema.ts";
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user }),
+  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
 ]);
 `;
 }
@@ -221,6 +221,27 @@ describe("dev catalogue push behavior", () => {
       schemaHash: SCHEMA_HASH,
       version: 1,
     });
+  });
+
+  it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
+    const { deploy } = await import("./catalogue.js");
+    const oldApp = s.defineApp({ todos: s.table({ owner: s.string() }, {}) });
+    const permissions = s.definePermissions(oldApp, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.identity.subject });
+    });
+    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      deploy({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        schema: app,
+        permissions,
+      }),
+    ).rejects.toThrow("owner");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("deploy rejects missing permissions before contacting the server", async () => {

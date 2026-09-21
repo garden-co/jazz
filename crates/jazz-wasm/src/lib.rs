@@ -52,6 +52,12 @@ pub mod bench_probes;
 #[global_allocator]
 static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
 
+/// Validate a schema and its embedded permissions without opening a database.
+#[wasm_bindgen(js_name = validateSchema)]
+pub fn validate_schema(schema: Vec<u8>) -> Result<(), JsValue> {
+    decode_public_schema(&schema).map(|_| ())
+}
+
 /// Initialize the WASM module.
 ///
 /// Sets up the panic hook for better error messages in the browser console.

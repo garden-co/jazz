@@ -111,6 +111,12 @@ use jazz_storage_rocksdb::{
     Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
 };
 
+/// Validate a schema and its embedded permissions without opening a database.
+#[napi(js_name = "validateSchema")]
+pub fn validate_schema(schema: Uint8Array) -> napi::Result<()> {
+    decode_public_schema(&schema).map(|_| ())
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {

@@ -1,3 +1,4 @@
+import { validateSchemaAndPermissions } from "./schema-validation.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 /**
  * Contains utilities for deploying schemas, permissions, and migrations to a Jazz server.
@@ -252,6 +253,7 @@ export async function validateProject(
   options: ValidateProjectOptions,
 ): Promise<ValidateProjectResult> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   return {
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
@@ -1784,6 +1786,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   if ("noVerify" in options)
     throw new Error("noVerify is no longer supported; deploy requires a complete migration path.");
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
   const resolvedChain = await resolveProjectDeployMigrationChain(options, migrationsDir, compiled);
   const releaseHash = await computeSchemaHash(compiled.wasmSchema);

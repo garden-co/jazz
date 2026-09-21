@@ -349,6 +349,9 @@ export interface UpsertOptions {
   updatedAtMs?: number
 }
 
+/** Validate a schema and its embedded permissions without opening a database. */
+export declare function validateSchema(schema: Uint8Array): void
+
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {

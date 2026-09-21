@@ -1,3 +1,4 @@
+import { validateSchemaAndPermissions } from "./schema-validation.js";
 /**
  * Contains utilities for deploying schemas, permissions, and migrations to a Jazz server.
  */
@@ -11,7 +12,6 @@ import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
-  validatePermissionsAgainstSchema,
 } from "../schema-permissions.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
@@ -521,7 +521,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     throw new Error("noVerify is no longer supported; deploy requires a complete migration path.");
   }
   const wasmSchema = mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), {});
-  validatePermissionsAgainstSchema(Object.keys(wasmSchema), options.permissions);
+  await validateSchemaAndPermissions(wasmSchema, options.permissions);
   const warnings: string[] = [];
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
     Object.keys(wasmSchema),
