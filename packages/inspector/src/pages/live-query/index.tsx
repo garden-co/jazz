@@ -92,10 +92,8 @@ function tierRank(tier: DurabilityTier): number {
   switch (tier) {
     case "local":
       return 0;
-    case "edge":
-      return 1;
     case "global":
-      return 2;
+      return 1;
   }
 }
 

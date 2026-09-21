@@ -7,7 +7,7 @@ type Todo = { id: string; title: string; done: boolean };
 type MutationErrorEvent = { reason: string; transaction: { transactionId: string } };
 type DeleteWrite = {
   txId: Promise<string>;
-  wait: (options?: { tier: "local" | "edge" }) => Promise<void>;
+  wait: (options?: { tier: "local" | "global" }) => Promise<void>;
 };
 
 function deferred<T>() {
@@ -176,7 +176,7 @@ it("completes local delete progress while edge confirmation is unavailable and r
         {
           txId: Promise.resolve("tx-transport"),
           wait: (options) =>
-            options?.tier === "edge" ? Promise.reject(edgeFailure) : Promise.resolve(),
+            options?.tier === "global" ? Promise.reject(edgeFailure) : Promise.resolve(),
         },
       ],
     ]),

@@ -23,7 +23,7 @@ describe("LiveQueryFilters", () => {
     expect(screen.getByRole("option", { name: "todos" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "All tiers" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "local" })).not.toBeNull();
-    expect(screen.getByRole("option", { name: "edge" })).not.toBeNull();
+    expect(screen.queryByRole("option", { name: "edge" })).toBeNull();
     expect(screen.getByRole("option", { name: "global" })).not.toBeNull();
   });
 
@@ -45,10 +45,10 @@ describe("LiveQueryFilters", () => {
       target: { value: "todos" },
     });
     fireEvent.change(screen.getByLabelText("Filter by tier"), {
-      target: { value: "edge" },
+      target: { value: "global" },
     });
 
     expect(onTableChange).toHaveBeenCalledWith("todos");
-    expect(onTierChange).toHaveBeenCalledWith("edge");
+    expect(onTierChange).toHaveBeenCalledWith("global");
   });
 });
