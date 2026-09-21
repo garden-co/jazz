@@ -412,6 +412,8 @@ pub use subscriptions::*;
 mod operator_updates;
 use operator_updates::*;
 mod evaluator;
+#[cfg(test)]
+pub(crate) use evaluator::take_async_node_frame_count;
 use evaluator::*;
 mod record_projection;
 use record_projection::*;
