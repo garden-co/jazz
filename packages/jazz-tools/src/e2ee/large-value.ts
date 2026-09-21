@@ -75,16 +75,14 @@ function reader(source: AsyncIterable<Uint8Array>, signal?: AbortSignal) {
       }
       return written === 0 ? undefined : output.subarray(0, written);
     },
-    async close(failed: boolean) {
+    close() {
       chunk = new Uint8Array();
-      if (ended || !iterator.return) return;
+      if (ended) return;
+      ended = true;
       try {
-        const cleanup = iterator.return();
-        // Cleanup must not replace or indefinitely delay an established failure.
-        if (failed) cleanup.catch(() => {});
-        else await wait(cleanup);
-      } catch (error) {
-        if (!failed) throw error;
+        Promise.resolve(iterator.return?.()).catch(() => {});
+      } catch {
+        // Upstream cleanup must not delay termination or replace its outcome.
       }
     },
   };
@@ -111,7 +109,6 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
       const { aad, derived } = prepare(key, context);
       let state: ReturnType<SodiumStreamPrimitives["encrypt"]> | undefined;
       let input: ReturnType<typeof reader> | undefined;
-      let failed = false;
       try {
         state = sodium.encrypt(derived);
         derived.fill(0);
@@ -130,13 +127,10 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
         }
         options?.signal?.throwIfAborted();
         yield record(state.push(new Uint8Array(), aad, true));
-      } catch (error) {
-        failed = true;
-        throw error;
       } finally {
         derived.fill(0);
         state?.dispose();
-        await input?.close(failed);
+        input?.close();
       }
     },
     async *decrypt(key, context, source, options) {
@@ -144,7 +138,6 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
       const { aad, derived } = prepare(key, context);
       let state: ReturnType<SodiumStreamPrimitives["decrypt"]> | undefined;
       let input: ReturnType<typeof reader> | undefined;
-      let failed = false;
       try {
         input = reader(source, options?.signal);
         const prefix = await input.read(header.length + 24);
@@ -176,13 +169,10 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
           if (result.message.length === 0) throw new Error("Invalid E2EE stream record");
           yield result.message;
         }
-      } catch (error) {
-        failed = true;
-        throw error;
       } finally {
         derived.fill(0);
         state?.dispose();
-        await input?.close(failed);
+        input?.close();
       }
     },
   };
