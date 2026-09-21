@@ -55,7 +55,7 @@ export async function validate(options: BuildOptions): Promise<void> {
       `Conventional provenance columns are forbidden by --strict-provenance:\n${provenanceWarnings.join("\n")}`,
     );
   }
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
+  console.log(`Loaded schema from ${result.schemaFile}.`);
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
@@ -76,7 +76,7 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
 
 export async function schemaHash(options: SchemaHashOptions): Promise<void> {
   const result = await getCurrentSchemaHash(options);
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
+  console.log(`Loaded schema from ${result.schemaFile}.`);
   console.log(`Current schema hash: ${shortSchemaHash(result.hash)}`);
 }
 
@@ -335,7 +335,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
       console.log("No migration created because there was no previous local schema baseline.");
       return null;
     case "unchanged":
-      console.log("No structural schema changes detected.");
+      console.log("No schema changes detected.");
       return null;
     case "migration-not-required": {
       const version = await packageVersion();
@@ -351,7 +351,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
       const version = await packageVersion();
       console.log("Generated: " + result.filePath);
       console.log("");
-      console.log("Migration stubs are only for structural schema changes.");
+      console.log("Migration stubs are only for schema changes.");
       console.log(PERMISSIONS_LIFECYCLE_NOTE);
       console.log("");
       console.log("Next steps:");
@@ -466,11 +466,9 @@ function printHelp(): void {
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
-  console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log("  schema export         Print the compiled schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
-  console.log(
-    "  migrations create     Generate a typed structural migration stub between two schema versions",
-  );
+  console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -481,7 +479,7 @@ function printHelp(): void {
     "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
   );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
+  console.log("  --schema-hash <hash>  Export a stored schema by hash");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
   console.log(
     "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
