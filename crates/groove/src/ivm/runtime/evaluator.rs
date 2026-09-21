@@ -1009,13 +1009,13 @@ impl TickEvaluator<'_> {
     }
 
     fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        let depends_on_aggregate = self
+        let depends_on_hydration_state = self
             .graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
-            .depends_on_aggregate();
+            .depends_on_hydration_state();
         #[cfg(test)]
-        if depends_on_aggregate {
+        if depends_on_hydration_state {
             // Public output cannot distinguish this private metadata lookup
             // from repeated ancestry traversal, so count the inspection here.
             self.metrics.aggregate_dependency_walk_nodes = self
@@ -1023,7 +1023,7 @@ impl TickEvaluator<'_> {
                 .aggregate_dependency_walk_nodes
                 .saturating_add(1);
         }
-        Ok(depends_on_aggregate)
+        Ok(depends_on_hydration_state)
     }
 
     fn aggregate_arrangements_are_current(

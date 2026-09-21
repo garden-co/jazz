@@ -1518,12 +1518,14 @@ impl IvmGraph {
             );
             return id;
         }
-        let depends_on_aggregate = matches!(descriptor.operator, OpType::Aggregate(_))
-            || descriptor.inputs.iter().any(|input| {
-                self.nodes
-                    .get(input)
-                    .is_some_and(GraphNode::depends_on_aggregate)
-            });
+        let depends_on_hydration_state = matches!(
+            &descriptor.operator,
+            OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_) | OpType::Arrange(_)
+        ) || descriptor.inputs.iter().any(|input| {
+            self.nodes
+                .get(input)
+                .is_some_and(GraphNode::depends_on_hydration_state)
+        });
 
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
@@ -1559,7 +1561,7 @@ impl IvmGraph {
         }
         self.nodes.insert(
             id,
-            GraphNode::new(descriptor, durability, depends_on_aggregate),
+            GraphNode::new(descriptor, durability, depends_on_hydration_state),
         );
         id
     }
@@ -1694,30 +1696,24 @@ pub struct GraphNode {
     pub durability: NodeDurability,
     /// Reverse edges make eager GC cheap when graph subscriptions go away.
     pub children: HashSet<NodeId>,
-    /// Whether this node or one of its transitive inputs is an aggregate.
-    ///
-    /// Graph nodes are immutable after insertion and their inputs are
-    /// dependency-ordered, so this structural fact is computed once.
-    depends_on_aggregate: bool,
+    /// Whether this node or one of its transitive inputs requires aggregate
+    /// and arrangement hydration state.
+    depends_on_hydration_state: bool,
 }
 
 impl GraphNode {
-    fn new(
-        descriptor: NodeDescriptor,
-        durability: NodeDurability,
-        depends_on_aggregate: bool,
-    ) -> Self {
+    fn new(descriptor: NodeDescriptor, durability: NodeDurability, hydration_state: bool) -> Self {
         Self {
             id: descriptor.node_id(),
             descriptor,
             durability,
             children: HashSet::default(),
-            depends_on_aggregate,
+            depends_on_hydration_state: hydration_state,
         }
     }
 
-    pub(crate) fn depends_on_aggregate(&self) -> bool {
-        self.depends_on_aggregate
+    pub(crate) fn depends_on_hydration_state(&self) -> bool {
+        self.depends_on_hydration_state
     }
 
     pub fn is_durable(&self) -> bool {
@@ -2913,10 +2909,7 @@ mod tests {
             ),
             NodeDurability::Ephemeral,
         );
-        assert!(
-            !graph.node(source).unwrap().depends_on_aggregate(),
-            "a plain source must not require arrangement hydration"
-        );
+        assert!(!graph.node(source).unwrap().depends_on_hydration_state(),);
 
         let arrangement = graph.dedup_node(
             NodeDescriptor::new(
@@ -2930,8 +2923,10 @@ mod tests {
             NodeDurability::Ephemeral,
         );
         assert!(
-            graph.node(arrangement).unwrap().depends_on_aggregate(),
-            "arrangement state is part of hydration readiness"
+            graph
+                .node(arrangement)
+                .unwrap()
+                .depends_on_hydration_state(),
         );
 
         let top_by = graph.dedup_node(
@@ -2954,9 +2949,6 @@ mod tests {
             ),
             NodeDurability::Ephemeral,
         );
-        assert!(
-            graph.node(top_by).unwrap().depends_on_aggregate(),
-            "arrangement consumers inherit hydration readiness"
-        );
+        assert!(graph.node(top_by).unwrap().depends_on_hydration_state(),);
     }
 }

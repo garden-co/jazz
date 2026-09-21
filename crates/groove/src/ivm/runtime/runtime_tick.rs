@@ -1679,7 +1679,7 @@ impl IvmRuntime {
             .collect::<VecDeque<_>>();
         let hydrate_arrangements = lifetime == SubscriptionLifetime::Retained
             && roots.iter().copied().try_fold(false, |found, root| {
-                Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
+                Ok::<_, IvmRuntimeError>(found || self.output_requires_hydration_state(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         if let Some(shape) = binding_frontier_advance {
@@ -2759,7 +2759,7 @@ impl IvmRuntime {
         }
         let hydrate_arrangements = mode == HydrationMode::Subscription
             && roots.iter().copied().try_fold(false, |found, root| {
-                Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
+                Ok::<_, IvmRuntimeError>(found || self.output_requires_hydration_state(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
         if let Some(shape) = binding_frontier_advance {
@@ -2825,12 +2825,15 @@ impl IvmRuntime {
         subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
     }
 
-    fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
+    fn output_requires_hydration_state(
+        &self,
+        output_node: NodeId,
+    ) -> Result<bool, IvmRuntimeError> {
         Ok(self
             .graph
             .node(output_node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))?
-            .depends_on_aggregate())
+            .depends_on_hydration_state())
     }
 
     #[allow(clippy::too_many_arguments)]
