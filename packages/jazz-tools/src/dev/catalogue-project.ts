@@ -52,7 +52,6 @@ import {
   pushSchema as pushCatalogueSchema,
   resolveKnownSchemaHash,
   resolveStoredStructuralSchemaHash,
-  resolveStoredStructuralSchemaHashOrThrow,
   schemaTransitionRequiresRowTransform,
   shortSchemaHash,
 } from "./catalogue.js";
@@ -211,20 +210,6 @@ type CreateMigrationResult =
       snapshotPath: string | null;
     };
 
-interface PermissionsStatusOptions {
-  appId: string;
-  serverUrl: string;
-  adminSecret: string;
-  schemaDir: string;
-}
-
-interface PermissionsStatusResult {
-  schemaFile: string;
-  permissionsFile: string;
-  localSchemaHash: string;
-  head: StoredPermissionsHead | null;
-}
-
 interface ResolvedProjectDeployMigrationChain {
   previousHead: StoredPermissionsHead;
   migrations: Array<{
@@ -301,29 +286,6 @@ export async function getCurrentSchemaHash(
   return {
     schemaFile: compiled.schemaFile,
     hash: await computeSchemaHash(compiled.wasmSchema),
-  };
-}
-
-export async function getPermissionsStatus(
-  options: PermissionsStatusOptions,
-): Promise<PermissionsStatusResult> {
-  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
-  const localSchemaHash = await resolveStoredStructuralSchemaHashOrThrow(
-    options.appId,
-    options.serverUrl,
-    options.adminSecret,
-    compiled.wasmSchema,
-  );
-  const { head } = await fetchPermissionsHead(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-  });
-
-  return {
-    schemaFile: compiled.schemaFile,
-    permissionsFile: compiled.permissionsFile,
-    localSchemaHash,
-    head,
   };
 }
 

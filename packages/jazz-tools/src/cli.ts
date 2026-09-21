@@ -11,7 +11,6 @@ import {
   deploy as deployCatalogue,
   exportSchema as exportCatalogueSchema,
   getCurrentSchemaHash,
-  getPermissionsStatus,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -60,9 +59,7 @@ export async function validate(options: BuildOptions): Promise<void> {
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
-    console.log(
-      "Use `jazz-tools permissions status <appId>` or `jazz-tools deploy <appId>` for auth publication.",
-    );
+    console.log("Use `jazz-tools deploy <appId>` to publish schema, permissions, and migrations.");
   }
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
@@ -89,13 +86,6 @@ export interface MigrationCommandOptions {
   adminSecret?: string;
   migrationsDir: string;
   schemaDir?: string;
-}
-
-export interface PermissionsCommandOptions {
-  appId: string;
-  serverUrl: string;
-  adminSecret: string;
-  schemaDir: string;
 }
 
 export interface CreateMigrationOptions extends MigrationCommandOptions {
@@ -290,28 +280,6 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function resolvePermissionsOptions(args: string[]): Omit<PermissionsCommandOptions, "appId"> {
-  const serverUrl = getFlagValue(args, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS);
-  const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
-  const schemaDir = resolve(process.cwd(), getFlagValue(args, "--schema-dir") ?? process.cwd());
-
-  if (!serverUrl) {
-    throw new Error(
-      "Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL (or a framework-prefixed form such as VITE_JAZZ_SERVER_URL).",
-    );
-  }
-
-  if (!adminSecret) {
-    throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
-  }
-
-  return {
-    serverUrl,
-    adminSecret,
-    schemaDir,
-  };
-}
-
 function requireSchemaExportServerValue(
   value: string | undefined,
   kind: "serverUrl" | "adminSecret",
@@ -421,33 +389,6 @@ function logDeployWarning(message: string): void {
   console.warn(`Warning: ${message}`);
 }
 
-export async function permissionsStatus(options: PermissionsCommandOptions): Promise<void> {
-  const result = await getPermissionsStatus(options);
-
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
-  console.log(`Loaded current permissions from ${result.permissionsFile}.`);
-  console.log(
-    `Local structural schema matches stored hash ${shortSchemaHash(result.localSchemaHash)}.`,
-  );
-  console.log(PERMISSIONS_LIFECYCLE_NOTE);
-
-  if (!result.head) {
-    console.log("Server has no published permissions head yet.");
-    console.log("Next deploy will publish version 1.");
-    return;
-  }
-
-  console.log(`Server permissions head is ${describePermissionsHead(result.head)}.`);
-  if (result.head.schemaHash === result.localSchemaHash) {
-    console.log("Current server permissions already target this structural schema.");
-  } else {
-    console.log(
-      `Current server permissions target ${shortSchemaHash(result.head.schemaHash)}; deploying will retarget the head to ${shortSchemaHash(result.localSchemaHash)}.`,
-    );
-  }
-  console.log(`Next deploy will require parent bundle ${result.head.bundleObjectId}.`);
-}
-
 export async function deploy(options: DeployOptions): Promise<void> {
   const result = await deployCatalogue({
     ...options,
@@ -527,7 +468,6 @@ function printHelp(): void {
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
-  console.log("  permissions status <appId> Show the current server permissions head for this app");
   console.log(
     "  migrations create     Generate a typed structural migration stub between two schema versions",
   );
@@ -543,15 +483,6 @@ function printHelp(): void {
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
-  console.log(
-    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-  );
-  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-  console.log("\nPermissions options:");
-  console.log(
-    "  <appId>               Required (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-  );
-  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log(
     "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
   );
@@ -655,22 +586,6 @@ if (isMainModule()) {
         ),
       );
     }
-
-    task.catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
-  } else if (command === "permissions") {
-    const subcommand = args[1] ?? "";
-    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
-    const options = {
-      ...resolvePermissionsOptions(commandArgs),
-      appId: requireAppId(appId),
-    };
-    const task =
-      subcommand === "status"
-        ? permissionsStatus(options)
-        : Promise.reject(new Error("Usage: node dist/cli.js permissions status <appId> [options]"));
 
     task.catch((err) => {
       console.error(err.message);
