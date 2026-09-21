@@ -57,3 +57,11 @@ it("rejects invalid adapter identifiers and versions rather than normalising the
     expect(() => encodeEnvelope({ id: "test", version }, new Uint8Array())).toThrow();
   }
 });
+
+it("rejects non-string mechanism identifiers supplied by JavaScript callers", () => {
+  for (const id of [undefined, null, 123]) {
+    expect(() =>
+      Reflect.apply(encodeEnvelope, undefined, [{ id, version: 1 }, new Uint8Array()]),
+    ).toThrow();
+  }
+});
