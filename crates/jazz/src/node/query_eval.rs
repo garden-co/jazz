@@ -491,6 +491,33 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
+    }
+
+    fn current_query_program_request_and_access_paths(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
         let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
@@ -518,8 +545,7 @@ where
                     .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
             );
         }
-        self.compile_query_program_request_with_access_paths(request, access_paths)
-            .await
+        Ok((request, access_paths))
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -1103,6 +1129,7 @@ where
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.supported_query_program_requests.clear();
     }
 
     #[cfg(test)]
@@ -3142,17 +3169,19 @@ where
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view_in_authorization_mode(
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            None,
             authorization_mode,
-        )
-        .await
-        .map(|_| ())
+            PreparedClaimBindingMode::Strict,
+        )?;
+        self.ensure_query_program_request_supported(request, access_paths)
+            .await
     }
 
     pub(crate) fn mark_peer_maintained_query_shape_cache(

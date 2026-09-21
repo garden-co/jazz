@@ -562,12 +562,16 @@ fn query_program_source_cache_safe(source: &RequestedSourceExpr) -> bool {
 
 fn query_program_cache_safe(request: &QueryProgramRequest) -> bool {
     request.authorization_mode == QueryAuthorizationMode::TrustedServing
-        && request
-            .reads
-            .primary
-            .sources
-            .values()
-            .all(query_program_source_cache_safe)
+        && query_program_sources_cache_safe(request)
+}
+
+fn query_program_sources_cache_safe(request: &QueryProgramRequest) -> bool {
+    request
+        .reads
+        .primary
+        .sources
+        .values()
+        .all(query_program_source_cache_safe)
         && request
             .reads
             .fact_reads
@@ -587,6 +591,47 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Repeated wire admission checks need a capability proof, not a retained
+    /// executable graph. Build the request (including strict claims) on every
+    /// call; reuse only a successful exact-context stable-source compilation.
+    /// Actual installation still compiles and owns its exact receiver inputs.
+    pub(super) async fn ensure_query_program_request_supported(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        // Branches, overlays, inline snapshots and covered inputs
+        // likewise stay on the ordinary path. No data-sensitive source is
+        // admitted from a remembered success.
+        let cacheable = matches!(
+            request.authorization_mode,
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::ClientLocal
+        ) && query_program_sources_cache_safe(&request);
+        let key = cacheable.then(|| {
+            // Process-local only, never stored or sent. BLAKE3 bounds retained
+            // memory without keeping full schema/policy debug strings alive.
+            *blake3::hash(query_program_cache_key(&request, &access_paths).as_bytes()).as_bytes()
+        });
+        if key
+            .as_ref()
+            .is_some_and(|key| self.query.supported_query_program_requests.contains(key))
+        {
+            return Ok(());
+        }
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await?;
+        if let Some(key) = key {
+            // FIFO eviction only causes recompilation. There is no lifetime
+            // admission quota and failed/cancelled compilation is never cached.
+            const MAX_ADMISSIONS: usize = 256;
+            if self.query.supported_query_program_requests.len() == MAX_ADMISSIONS {
+                self.query.supported_query_program_requests.pop_front();
+            }
+            self.query.supported_query_program_requests.push_back(key);
+        }
+        Ok(())
+    }
+
     pub(super) async fn compile_query_program_request(
         &mut self,
         request: QueryProgramRequest,
