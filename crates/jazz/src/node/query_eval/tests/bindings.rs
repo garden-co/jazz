@@ -2,6 +2,115 @@
 
 use super::*;
 
+/// Internal work-bound check: public dashboard tests cover exact results and
+/// revocation, but cannot distinguish a successful admission cache hit from
+/// another successful compiler execution. Alice's strict query claim is still
+/// resolved on every request; changing/removing it must not reuse old admission.
+#[test]
+fn capability_admission_reuses_only_exact_claim_context_and_clears_with_plans() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("assignee", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (_directory, mut node) =
+        open_node_with_uuid(NodeUuid::from_bytes([0x71; 16]), schema.clone());
+    let alice = author(0x72);
+    let bob = author(0x73);
+    let shape = Query::from("issues")
+        .filter(eq(col("assignee"), claim("selected_assignee")))
+        .validate_runtime(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let set_claim = |node: &mut NodeState<RocksDbStorage>, value: AuthorSubject| {
+        node.set_test_provider_claims(
+            alice,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("selected_assignee"),
+                Value::Uuid(value.test_uuid()),
+            )]),
+        );
+    };
+    let admit = |node: &mut NodeState<RocksDbStorage>| {
+        crate::db::block_on(node.ensure_peer_maintained_subscription_view_supported(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            alice,
+            &ReadViewSpec::default(),
+            QueryAuthorizationMode::ClientLocal,
+        ))
+    };
+    set_claim(&mut node, alice);
+    admit(&mut node).unwrap();
+    let first = node.query_program_compilations_for_test();
+    assert!(first > 0);
+    admit(&mut node).unwrap();
+    assert_eq!(node.query_program_compilations_for_test(), first);
+
+    set_claim(&mut node, bob);
+    admit(&mut node).unwrap();
+    let changed = node.query_program_compilations_for_test();
+    assert!(
+        changed > first,
+        "another claim context needs its own validation"
+    );
+    node.set_test_provider_claims(alice, BTreeMap::new());
+    // Missing claims may lower to a valid empty-result program. Admission is
+    // not an authorization decision; compare with a fresh uncached admission
+    // instead of incorrectly requiring every missing claim to be a compile error.
+    let missing = admit(&mut node).map_err(|error| format!("{error:?}"));
+    assert!(
+        node.query_program_compilations_for_test() > changed,
+        "removing a claim must not reuse either prior context"
+    );
+    node.clear_prepared_query_plan_cache_for_test();
+    assert_eq!(
+        admit(&mut node).map_err(|error| format!("{error:?}")),
+        missing
+    );
+    set_claim(&mut node, alice);
+    admit(&mut node).unwrap();
+    node.clear_prepared_query_plan_cache_for_test();
+    let before = node.query_program_compilations_for_test();
+    admit(&mut node).unwrap();
+    assert!(node.query_program_compilations_for_test() > before);
+
+    // This is a bounded optimization, not a permanent admission quota. More
+    // than the capacity of successful queries must keep working, and an
+    // evicted query must simply compile again. Keep the authorization context
+    // fixed: its separate availability-input budget is not this cache's budget.
+    for index in 0..260u128 {
+        let other_shape = Query::from("issues")
+            .filter(eq(col("assignee"), lit(uuid::Uuid::from_u128(index + 1))))
+            .validate_runtime(&schema)
+            .unwrap();
+        let other_binding = other_shape.bind(BTreeMap::new()).unwrap();
+        crate::db::block_on(node.ensure_peer_maintained_subscription_view_supported(
+            &other_shape,
+            &other_binding,
+            DurabilityTier::Global,
+            alice,
+            &ReadViewSpec::default(),
+            QueryAuthorizationMode::ClientLocal,
+        ))
+        .unwrap();
+    }
+    assert_eq!(node.query.supported_query_program_requests.len(), 256);
+    set_claim(&mut node, alice);
+    let before = node.query_program_compilations_for_test();
+    admit(&mut node).unwrap();
+    assert!(
+        node.query_program_compilations_for_test() > before,
+        "evicted proof must recompile"
+    );
+    let before = node.query_program_compilations_for_test();
+    admit(&mut node).unwrap();
+    assert_eq!(node.query_program_compilations_for_test(), before);
+}
+
 #[test]
 fn prepared_integer_bindings_coerce_only_when_representable() {
     let cases = [
