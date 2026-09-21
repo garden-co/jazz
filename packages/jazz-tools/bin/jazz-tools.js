@@ -133,7 +133,6 @@ function printWrapperHelp() {
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
   );
   console.log("  deploy                Publish schema, permissions, and required migrations");
-  console.log("  permissions status    Show the current server permissions head for this app");
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
@@ -159,7 +158,6 @@ if (!command || command === "--help" || command === "-h") {
   command === "validate" ||
   command === "deploy" ||
   command === "migrations" ||
-  command === "permissions" ||
   command === "schema"
 ) {
   const tsCliPath = join(here, "..", "dist", "cli.js");

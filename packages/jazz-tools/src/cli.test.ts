@@ -31,7 +31,6 @@ import {
   loadDotEnv,
   loadEnvFile,
   readEnvFiles,
-  permissionsStatus as rawPermissionsStatus,
   resolveEnvVar,
   schemaHash as rawSchemaHash,
   validate,
@@ -63,9 +62,6 @@ const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
 const pushMigration = (
   options: Omit<Parameters<typeof rawPushMigration>[0], "appId"> & { appId?: string },
 ) => rawPushMigration(withAppId(options));
-const permissionsStatus = (
-  options: Omit<Parameters<typeof rawPermissionsStatus>[0], "appId"> & { appId?: string },
-) => rawPermissionsStatus(withAppId(options));
 const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
   rawDeploy(withAppId(options));
 
@@ -2572,136 +2568,6 @@ export default s.defineMigration({
   });
 });
 
-describe("cli permissions", () => {
-  it("reports the current permissions head against the matching stored structural schema", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-
-    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash,
-              version: 3,
-              parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-              bundleObjectId: "22222222-2222-2222-2222-222222222222",
-            },
-          }),
-          { status: 200 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
-      permissionsStatus({
-        appId: APP_ID,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        schemaDir: root,
-      }),
-    );
-
-    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
-    expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
-    expect(logs).toContain(
-      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
-    );
-    expect(logs).toContain(`Server permissions head is v3 on ${schemaHash.slice(0, 12)}.`);
-    expect(logs).toContain(
-      "Next deploy will require parent bundle 22222222-2222-2222-2222-222222222222.",
-    );
-  });
-
-  it("loads src/permissions.ts when reporting the current permissions head", async () => {
-    const { root } = await createWorkspace();
-    const srcDir = join(root, "src");
-    await mkdir(srcDir, { recursive: true });
-    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
-
-    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-        return new Response(JSON.stringify({ head: null }), { status: 200 });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
-      permissionsStatus({
-        appId: APP_ID,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        schemaDir: root,
-      }),
-    );
-
-    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
-    expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
-  });
-
-  it("matches stored schemas even when server column order differs", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-
-    const schemaHash = "ababeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
-        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-        return new Response(JSON.stringify({ head: null }), { status: 200 });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
-      permissionsStatus({
-        appId: APP_ID,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        schemaDir: root,
-      }),
-    );
-
-    expect(logs).toContain(
-      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
-    );
-  });
-});
-
 describe("cli deploy", () => {
   it("rejects missing permissions before publication", async () => {
     const { root } = await createWorkspace();
@@ -3936,7 +3802,7 @@ exit 0
     expect(result.stdout).toContain("schema export");
     expect(result.stdout).toContain("deploy");
     expect(result.stdout).not.toContain("migrations push");
-    expect(result.stdout).toContain("deploy");
+    expect(result.stdout).not.toContain("permissions status");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
   });
