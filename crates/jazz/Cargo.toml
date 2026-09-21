@@ -185,7 +185,7 @@ name = "browser_relay_durability"
 required-features = ["testing"]
 
 [[test]]
-name = "threaded_four_tier"
+name = "threaded_client_relay"
 required-features = ["testing"]
 
 [[test]]

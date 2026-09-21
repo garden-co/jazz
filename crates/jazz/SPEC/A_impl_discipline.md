@@ -33,7 +33,7 @@ randomness. Time enters only as an explicit `now_ms` parameter
 (`TxTime::tick(register, now_ms)`, authority ingest's `now_ms`), and `Node` /
 `PeerState` advance synchronously through explicit methods (`INV-DISC-1`).
 Threading and channels belong only to integration drivers
-(`threaded_four_tier`), never to node logic.
+(`threaded_client_relay`), never to node logic.
 
 **Implementation status (verified).**
 `m3_seeded_run_is_deterministic_for_fixed_seed` exercises fixed-seed replay.
