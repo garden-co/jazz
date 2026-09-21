@@ -50,7 +50,7 @@ struct EvaluationSession<'a> {
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -98,7 +98,7 @@ pub(super) struct IncrementalEvaluation<'a> {
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -328,7 +328,6 @@ enum EvaluationEntry {
 }
 
 struct EvaluationWorkQueue {
-    batches: Vec<Option<evaluator::BatchRegister>>,
     unary_batches: HashMap<NodeId, evaluator::PendingUnaryBatch>,
     pipelines: HashMap<NodeId, Arc<[NodeId]>>,
     pipeline_batches: HashMap<NodeId, pipeline::PendingPipeline>,
@@ -352,7 +351,6 @@ impl EvaluationWorkQueue {
             .execution_layout(roots)
             .map_err(IvmRuntimeError::GraphNodeNotFound)?;
         let mut queue = Self {
-            batches: (0..layout.nodes.len()).map(|_| None).collect(),
             unary_batches: HashMap::default(),
             pipelines: HashMap::default(),
             pipeline_batches: HashMap::default(),
@@ -452,14 +450,13 @@ impl EvaluationWorkQueue {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         let slot = self.layout.slots[&node];
-        let result = if let Some(pipeline) = self.pipelines.get(&node) {
+        if let Some(pipeline) = self.pipelines.get(&node) {
             let head = self.layout.slots[&pipeline[0]];
             evaluator.poll_pipeline(
                 pipeline,
                 &mut self.pipeline_batches,
                 evaluator::FrameInputs {
                     slots: self.layout.inputs(head),
-                    batches: &self.batches,
                 },
                 cx,
             )
@@ -469,18 +466,10 @@ impl EvaluationWorkQueue {
                 &mut self.unary_batches,
                 evaluator::FrameInputs {
                     slots: self.layout.inputs(slot),
-                    batches: &self.batches,
                 },
                 cx,
             )
-        };
-        if let Poll::Ready(Ok(records)) = &result {
-            self.batches[slot] = Some(match evaluator.batch_register(node, Arc::clone(records)) {
-                Ok(register) => register,
-                Err(error) => return Poll::Ready(Err(error)),
-            });
         }
-        result
     }
 
     fn dependency_ready(&mut self, node: NodeId) {
@@ -876,10 +865,19 @@ impl<'a> IncrementalEvaluation<'a> {
             .arrangement_keys_by_input
             .extend(std::mem::take(&mut self.arrangement_keys_by_input));
 
-        runtime
-            .eval_memo
-            .extend(std::mem::take(&mut self.eval_memo));
-        runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
+        // Tick deltas belong to the frame, not the retained hydration cache.
+        // Previously we hashed/copied them into runtime only to evict them at
+        // the end of publication. Retain only actual hydration reuse entries.
+        for (key, entry) in std::mem::take(&mut self.eval_memo).into_entries() {
+            if key.tick_epoch.is_none() {
+                runtime.eval_memo_bytes =
+                    runtime.eval_memo_bytes.saturating_add(entry.payload_bytes);
+                if let Some(old) = runtime.eval_memo.insert(key, entry) {
+                    runtime.eval_memo_bytes =
+                        runtime.eval_memo_bytes.saturating_sub(old.payload_bytes);
+                }
+            }
+        }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         // Retainers are owned by graph lifecycle operations, not by this
         // evaluation snapshot. Preserve their current live value when a
@@ -1354,12 +1352,14 @@ impl<'a> EvaluationSession<'a> {
                 }
             }
         }
-        let eval_memo = runtime
-            .eval_memo
-            .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut eval_memo = EvaluationMemo::for_layout(Arc::clone(&work_queue.layout));
+        eval_memo.extend(
+            runtime
+                .eval_memo
+                .iter()
+                .filter(|(key, _)| relevant_nodes.contains(&key.node))
+                .map(|(key, entry)| (key.clone(), entry.clone())),
+        );
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
         let node_meta = relevant_nodes
             .iter()
@@ -1706,7 +1706,11 @@ impl<'a> EvaluationSession<'a> {
         runtime
             .eval_memo
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime.eval_memo.extend(self.eval_memo);
+        runtime.eval_memo.extend(
+            self.eval_memo
+                .into_entries()
+                .filter(|(key, _)| key.tick_epoch.is_none()),
+        );
         runtime.eval_memo_bytes = runtime
             .eval_memo
             .values()
@@ -2538,7 +2542,7 @@ impl IvmRuntime {
         }
         // Tick memo entries are disposable. Recomputing the affected graph is
         // bounded by that graph slice and avoids a global memo scan.
-        let mut eval_memo = HashMap::default();
+        let mut eval_memo = EvaluationMemo::default();
         let mut eval_memo_bytes = 0;
         let mut memo_use_clock = self.memo_use_clock;
         let mut node_meta = relevant_nodes
@@ -2667,6 +2671,7 @@ impl IvmRuntime {
         let evaluation_inputs = Some(EvaluationInputs::default());
         let (_, work_queue) =
             EvaluationWorkQueue::discover(&self.graph, &self.node_meta, active_roots, false)?;
+        eval_memo.set_layout(Arc::clone(&work_queue.layout));
         Ok(IncrementalEvaluation {
             table_deltas,
             binding_deltas,
@@ -2921,7 +2926,7 @@ impl IvmRuntime {
         operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
         arrangement_states: &mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
         arrangement_keys_by_input: &mut HashMap<NodeId, HashSet<ArrangementKey>>,
-        eval_memo: &mut HashMap<EvalMemoKey, EvalMemoEntry>,
+        eval_memo: &mut EvaluationMemo,
         eval_memo_bytes: &mut usize,
         memo_use_clock: &mut u64,
         node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
@@ -3123,6 +3128,67 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
     };
     use crate::storage::MemoryStorage;
+
+    // Internal publication receipt: observing the final rows cannot detect
+    // inserting every tick memo into runtime and immediately evicting it again.
+    #[futures_test::test]
+    async fn publication_retains_only_hydration_memos_with_exact_replacement_accounting() {
+        let mut runtime = IvmRuntime::new(DatabaseSchema::new([])).unwrap();
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let node = runtime
+            .add_dedup_graph(
+                &GraphBuilder::values(descriptor.clone(), [vec![Value::U64(1)]]).unwrap(),
+            )
+            .unwrap()
+            .node;
+        let hydration_key = EvalMemoKey {
+            scope: ScopeId::root(),
+            node,
+            input_signature_hash: 1,
+            tick_epoch: None,
+            sub_tick: 0,
+            context_digest: 0,
+        };
+        let make_entry = |bytes| {
+            EvalMemoEntry::new(
+                Arc::new(RecordDeltas::empty(descriptor.clone())),
+                0,
+                bytes,
+                0,
+            )
+        };
+        runtime
+            .eval_memo
+            .insert(hydration_key.clone(), make_entry(3));
+        runtime.eval_memo_bytes = 3;
+        let storage = Rc::new(MemoryStorage::new(&[]).unwrap());
+        let mut evaluation = runtime
+            .begin_tick_with_params(Vec::new(), Vec::new(), OwnedStorage::new(storage), None)
+            .await
+            .unwrap();
+        evaluation
+            .eval_memo
+            .set_layout(runtime.graph.execution_layout([node]).unwrap());
+        evaluation
+            .eval_memo
+            .insert(hydration_key.clone(), make_entry(7));
+        evaluation.eval_memo.insert(
+            EvalMemoKey {
+                tick_epoch: Some(evaluation.current_tick),
+                ..hydration_key.clone()
+            },
+            make_entry(11),
+        );
+        evaluation.eval_memo_bytes = 18;
+        evaluation.install(&mut runtime);
+        assert_eq!(runtime.eval_memo.len(), 1);
+        assert!(runtime.eval_memo.keys().all(|key| key.tick_epoch.is_none()));
+        assert_eq!(
+            runtime.eval_memo.get(&hydration_key).unwrap().payload_bytes,
+            7
+        );
+        assert_eq!(runtime.eval_memo_bytes, 7);
+    }
 
     // Internal mechanism receipt: identical public rows cannot prove that the
     // queue removed intermediate tasks, or that live sharing invalidates that
