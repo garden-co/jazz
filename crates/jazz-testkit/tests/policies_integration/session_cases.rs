@@ -471,7 +471,7 @@ async fn select_policy_pagination_offsets_over_visible_rows_only_inner() {
 ///
 /// Alice and bob each insert an owned row into a table protected by
 /// `owner_id = session.user`. Each client should only observe its own row,
-/// both in the live subscription stream and in EdgeServer query results.
+/// both in the live subscription stream and in GlobalServer query results.
 ///
 /// ```text
 /// alice ──insert "Alice Subject"──► server ──► alice stream (add ✓)
@@ -1433,7 +1433,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync_inner() {
 ///
 /// Alice creates a document. Bob can read it (no SELECT restriction) but does
 /// not own it. Bob's update is applied optimistically on his local client but
-/// silently dropped by the server. An EdgeServer-tier query serves as the
+/// silently dropped by the server. An GlobalServer-tier query serves as the
 /// causal barrier: it blocks until the server has settled, so if the value is
 /// still "original" the rejection is confirmed. The observer's stream is then
 /// drained to verify no update delta arrived.
@@ -1443,7 +1443,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync_inner() {
 ///
 /// bob ──update title="hacked"────────► server ──✗ rejected (owner_id ≠ bob)
 ///                                          │
-///                                          └── observer query (EdgeServer) → "original"
+///                                          └── observer query (GlobalServer) → "original"
 ///                                          └── observer stream → no update delta
 /// ```
 #[tokio::test]
@@ -1518,17 +1518,17 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
     )
     .expect("optimistic local update");
 
-    // EdgeServer query is the causal barrier: it blocks until the server has
+    // GlobalServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted update has been accepted or rejected.
     let rows_after_update = observer
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after unauthorized update");
+        .expect("GlobalServer query after unauthorized update");
     assert!(
         rows_after_update.iter().any(|(id, values)| *id == doc_id
             && *values == document_row_values(super::ALICE_ID, "original")),
-        "unauthorized update should not be persisted at EdgeServer: rows={rows_after_update:?}"
+        "unauthorized update should not be persisted at GlobalServer: rows={rows_after_update:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -1547,7 +1547,7 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
 ///
 /// Mallory forges a document claiming alice's `owner_id`. Alice then creates
 /// a legitimate document, which serves as the causal barrier: once alice can
-/// see her own row at EdgeServer tier, the inbox has processed (and dropped)
+/// see her own row at GlobalServer tier, the inbox has processed (and dropped)
 /// mallory's earlier insert. A fresh subscriber that connects after the barrier
 /// must find only alice's legitimate row in its initial query result.
 ///
@@ -1555,7 +1555,7 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
 /// mallory ──insert owner=super::ALICE_ID──► server ──✗ rejected (INSERT policy)
 ///
 /// alice ──insert "legitimate"────► server ──► committed
-///   └── EdgeServer query barrier ──────────────────────► (server settled)
+///   └── GlobalServer query barrier ──────────────────────► (server settled)
 ///
 /// fresh subscriber (connects after) ──query──► [alice's row only]
 /// ```
@@ -1650,7 +1650,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber_inner() {
 /// Bob can read alice's row because there is no SELECT policy and `using = True`
 /// means he can attempt to update it. But the server rejects his write because
 /// the committed row state (`owner_id = super::ALICE_ID`) fails the `with_check` when
-/// evaluated against bob's session (`user_id = super::BOB_ID`). An EdgeServer-tier
+/// evaluated against bob's session (`user_id = super::BOB_ID`). An GlobalServer-tier
 /// query then confirms the original value persisted and the observer's stream
 /// received no update delta.
 ///
@@ -1660,7 +1660,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber_inner() {
 /// bob (using=True → can target row) ──update title="hacked"──► server
 ///   └── with_check: owner_id=super::ALICE_ID ≠ bob ──✗ rejected
 ///
-/// observer ──EdgeServer query──► "original" (unchanged)
+/// observer ──GlobalServer query──► "original" (unchanged)
 /// observer stream → no update delta
 /// ```
 #[tokio::test]
@@ -1738,16 +1738,16 @@ async fn update_policy_read_clause_differs_from_write_clause_inner() {
     )
     .expect("optimistic local update");
 
-    // EdgeServer query is the causal barrier.
+    // GlobalServer query is the causal barrier.
     let rows_after = observer
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after unauthorized update");
+        .expect("GlobalServer query after unauthorized update");
     assert!(
         rows_after.iter().any(|(id, values)| *id == doc_id
             && *values == document_row_values(super::ALICE_ID, "original")),
-        "update rejected by with_check must not persist at EdgeServer: rows={rows_after:?}"
+        "update rejected by with_check must not persist at GlobalServer: rows={rows_after:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -1858,7 +1858,7 @@ async fn delete_then_reinsert_by_owner_visible_to_others_inner() {
 ///
 /// Alice creates a document. Bob can read it (no SELECT restriction) but does
 /// not own it. Bob's delete is applied optimistically on his local client but
-/// silently dropped by the server. An EdgeServer-tier query serves as the
+/// silently dropped by the server. An GlobalServer-tier query serves as the
 /// causal barrier: it blocks until the server has settled, so if the row is
 /// still present the rejection is confirmed. The observer's stream is then
 /// drained to verify no remove delta arrived.
@@ -1868,7 +1868,7 @@ async fn delete_then_reinsert_by_owner_visible_to_others_inner() {
 ///
 /// bob ──delete────────────────────────► server ──✗ rejected (owner_id ≠ bob)
 ///                                           │
-///                                           └── observer query (EdgeServer) → row present
+///                                           └── observer query (GlobalServer) → row present
 ///                                           └── observer stream → no remove delta
 /// ```
 #[tokio::test]
@@ -1939,17 +1939,17 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
     bob.delete("documents", doc_id)
         .expect("optimistic local delete");
 
-    // EdgeServer query is the causal barrier: it blocks until the server has
+    // GlobalServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted delete has been accepted or rejected.
     let rows_after_delete = observer
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after unauthorized delete");
+        .expect("GlobalServer query after unauthorized delete");
     assert!(
         rows_after_delete.iter().any(|(id, values)| *id == doc_id
             && *values == document_row_values(super::ALICE_ID, "original")),
-        "unauthorized delete should not be persisted at EdgeServer: rows={rows_after_delete:?}"
+        "unauthorized delete should not be persisted at GlobalServer: rows={rows_after_delete:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -1974,7 +1974,7 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
 /// transport — if the transport delivers them out of order, the title update
 /// lands while alice still owns the row and is incorrectly accepted.
 ///
-/// The observer's EdgeServer query is used as a causal barrier: once the
+/// The observer's GlobalServer query is used as a causal barrier: once the
 /// marker document (sent last by alice) is visible, all prior writes have
 /// been processed. The observer then checks the settled state of the document.
 ///
@@ -2176,8 +2176,8 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     // Alice's *local* cache must converge to the server's truth after rejection.
     // We deliberately query with no durability tier (local reads only) so the
     // assertion exercises alice's in-process state rather than round-tripping to
-    // the server. Using EdgeServer durability here would bypass the bug: the
-    // server holds the correct value regardless, so an EdgeServer read always
+    // the server. Using GlobalServer durability here would bypass the bug: the
+    // server holds the correct value regardless, so an GlobalServer read always
     // returns title="original" even when alice never received a rollback event.
     let expected_row = document_row_values(super::BOB_ID, "original");
     let alice_rows = wait_for_query(

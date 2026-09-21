@@ -3936,8 +3936,8 @@ impl JazzClient {
                 .query_transaction_rows(query.clone(), opts, transaction_id, author)
                 .await?
         } else {
-            // A product `Remote` read lowers to the legacy Edge tier. Both
-            // Edge and Global are strict remote one-shots: they must own a
+            // A product `Remote` read lowers to Global. Strict remote
+            // one-shots must own a
             // fresh coverage lifetime and return only after the receiver's
             // local maintained graph has settled that exact coverage.
             let wait_for_coverage = opts.tier >= CoreDurabilityTier::Global;

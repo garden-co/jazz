@@ -335,7 +335,7 @@ impl ColdSubscriptionBench {
                 let _ = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Local))
                     .expect("cold local current rows");
             }
-            DurabilityTier::None | DurabilityTier::Global => {
+            DurabilityTier::None => {
                 unreachable!("bench only uses local/global")
             }
         }
@@ -352,7 +352,7 @@ impl ColdSubscriptionBench {
         let phase = match tier {
             DurabilityTier::Global => "global_current_rows_update",
             DurabilityTier::Local => "local_current_rows",
-            DurabilityTier::None | DurabilityTier::Global => {
+            DurabilityTier::None => {
                 unreachable!("bench only uses local/global")
             }
         };

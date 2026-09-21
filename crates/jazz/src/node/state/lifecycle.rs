@@ -962,7 +962,7 @@ where
     }
 
     /// Enable only for a host that owns complete current policy inputs. The
-    /// historical-read flag is insufficient: server edge shells also use it.
+    /// historical-read flag alone does not confer authority.
     #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
         if self.client_relay_scope().is_none() {
@@ -971,7 +971,7 @@ where
     }
 
     /// Mark this process as the durable half of a browser client/worker relay.
-    /// The marker only selects an internal upstream binding identity for Edge
+    /// The marker only selects an internal upstream binding identity for Core
     /// coverage; it is neither persisted nor an authorization policy input.
     pub(crate) fn configure_scope_isolated_client_relay(
         &mut self,

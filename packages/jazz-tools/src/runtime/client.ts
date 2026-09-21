@@ -339,8 +339,7 @@ export interface AuthConfig {
  * Persistence tier for durability guarantees.
  *
  * - `local`: Persisted in local durable storage
- * - `edge`: Persisted at edge server
- * - `global`: Persisted at global server
+ * - `global`: Authorized and durably accepted by Core
  */
 export type DurabilityTier = "local" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */

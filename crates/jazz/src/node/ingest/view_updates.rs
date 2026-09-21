@@ -1492,8 +1492,8 @@ where
 
     /// Once a transaction is rejected or globally settled, it must not remain
     /// in the ahead-current overlay: accepted global effects live in current
-    /// tables, and rejected effects are no longer visible. Edge-accepted
-    /// no-global transactions intentionally stay ahead-visible at Edge tier.
+    /// tables, and rejected effects are no longer visible. Pending local
+    /// transactions remain in this overlay until Core supplies a final fate.
     /// Outbox/redelivery may keep the commit unit until fate arrives, so
     /// callers invoke this strictly after the cleanup-triggering fate is durable.
     pub(super) async fn cleanup_fated_ahead_current_for_tx(

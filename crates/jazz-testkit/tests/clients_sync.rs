@@ -28,7 +28,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         query,
         jazz::tools::ReadTier::Remote,
         timeout,
-        "EdgeServer query readiness",
+        "GlobalServer query readiness",
         |_| Some(()),
     )
     .await;

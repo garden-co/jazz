@@ -337,7 +337,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!("timed out waiting for GlobalServer query readiness");
 }
 
 #[tokio::test]

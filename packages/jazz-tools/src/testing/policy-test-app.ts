@@ -58,8 +58,8 @@ export type TestDb = Db & {
   /**
    * Assert that a write is rejected by the serving authority.
    *
-   * Client writes are admitted optimistically, so this checks the write's edge
-   * receipt rather than expecting synchronous local permission enforcement.
+   * Client writes are admitted optimistically, so this checks Core's write
+   * outcome rather than expecting synchronous local permission enforcement.
    */
   expectDenied(callback: (db: Db) => PendingWrite): Promise<void>;
 };
@@ -131,7 +131,7 @@ export class PolicyTestApp {
   /**
    * Seed the database with one admin write and wait until the serving
    * authority has accepted it before returning. Session-scoped reads default
-   * to the edge tier, so local staging alone can otherwise race their first
+   * to remote/Core confirmation, so local staging alone can otherwise race their first
    * policy-evaluated query.
    */
   async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {

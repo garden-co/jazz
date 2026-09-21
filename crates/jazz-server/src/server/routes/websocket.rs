@@ -2004,11 +2004,7 @@ mod tests {
         .await;
     }
 
-    /// Alice connects to a blank Edge and is told it is awaiting its authority,
-    /// rather than being told to publish a schema directly to that Edge.
-
-    /// Exercise the actual HTTP registry and WebSocket boundary, including permanent denial.
-
+    /// Exercise the production WebSocket diagnostic for an unpublished catalogue.
     async fn assert_blank_runtime_diagnostic(expected: &str) {
         let builder = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
@@ -2859,7 +2855,7 @@ mod tests {
                         ..Default::default()
                     },
                 )
-                .expect("default read view edge attachment should be supported");
+                .expect("default read view remote attachment should be supported");
             (query, attachment)
         }
 
@@ -2877,11 +2873,11 @@ mod tests {
                         ..Default::default()
                     },
                 )
-                .expect("default read view edge attachment should be supported");
+                .expect("default read view remote attachment should be supported");
             (query, attachment)
         }
 
-        fn edge_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        fn remote_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
             self.db.query_attachment_is_covered(attachment)
         }
 
@@ -2889,7 +2885,7 @@ mod tests {
             self.db.detach_query(attachment);
         }
 
-        async fn edge_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
+        async fn remote_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
             self.db
                 .all(
                     query,
@@ -2899,7 +2895,7 @@ mod tests {
                     },
                 )
                 .await
-                .expect("read edge todos")
+                .expect("read remote todos")
                 .into_iter()
                 .filter_map(|row| match row.cell(&self.todos_table, "title") {
                     Some(CoreValue::String(title)) => Some(title.clone()),
@@ -2908,7 +2904,7 @@ mod tests {
                 .collect()
         }
 
-        async fn edge_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+        async fn remote_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
             self.db
                 .all(
                     query,
@@ -2918,7 +2914,7 @@ mod tests {
                     },
                 )
                 .await
-                .expect("read edge rows")
+                .expect("read remote rows")
                 .into_iter()
                 .filter_map(|row| match row.cell(table, "title") {
                     Some(CoreValue::String(title)) => Some(title.clone()),
@@ -3092,14 +3088,14 @@ mod tests {
             .await
             .expect("send initial websocket query setup");
         let deadline = tokio::time::Instant::now() + WS_PUMP_DEADLINE;
-        while !client.edge_attachment_is_covered(&attachment)
+        while !client.remote_attachment_is_covered(&attachment)
             && tokio::time::Instant::now() < deadline
         {
             let _ = pump_core_websocket_transport_once(client, ws).await;
             tokio::task::yield_now().await;
         }
         assert!(
-            client.edge_attachment_is_covered(&attachment),
+            client.remote_attachment_is_covered(&attachment),
             "websocket setup must settle the initial query before testing a later operation"
         );
         assert!(
@@ -3143,8 +3139,8 @@ mod tests {
             let (sent, received) = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
-            titles = client_b.edge_todo_titles(&client_b_todos).await;
-            if client_b.edge_attachment_is_covered(&client_b_todos_attachment)
+            titles = client_b.remote_todo_titles(&client_b_todos).await;
+            if client_b.remote_attachment_is_covered(&client_b_todos_attachment)
                 && titles == expected_titles
             {
                 break;
@@ -3371,18 +3367,21 @@ mod tests {
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(&client_b_todos_attachment)
+        while !client_b.remote_attachment_is_covered(&client_b_todos_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            client_b.edge_attachment_is_covered(&client_b_todos_attachment),
+            client_b.remote_attachment_is_covered(&client_b_todos_attachment),
             "reader query must be covered by the initial empty server response"
         );
         assert!(
-            client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
+            client_b
+                .remote_todo_titles(&client_b_todos)
+                .await
+                .is_empty(),
             "reader should settle the initial covered result as empty"
         );
         let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
@@ -3393,7 +3392,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         let mut writer_sent = 0;
         let mut reader_received_push = 0;
-        while client_b.edge_todo_titles(&client_b_todos).await.is_empty()
+        while client_b
+            .remote_todo_titles(&client_b_todos)
+            .await
+            .is_empty()
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let (sent, _) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
@@ -3412,7 +3414,7 @@ mod tests {
             "reader must receive an unsolicited server push without re-propagating the query"
         );
         assert_eq!(
-            client_b.edge_todo_titles(&client_b_todos).await,
+            client_b.remote_todo_titles(&client_b_todos).await,
             vec!["after empty coverage".to_owned()]
         );
         client_b.detach_query(client_b_todos_attachment);
@@ -3444,7 +3446,7 @@ mod tests {
             "the first pump deliberately skips its response"
         );
         assert!(
-            !client.edge_attachment_is_covered(&attachment),
+            !client.remote_attachment_is_covered(&attachment),
             "the queued response must not be applied before the idle pump reads it"
         );
 
@@ -3453,7 +3455,8 @@ mod tests {
         // work to make the response observable accidentally.
         let start = tokio::time::Instant::now();
         let mut received = 0;
-        while !client.edge_attachment_is_covered(&attachment) && start.elapsed() < WS_PUMP_DEADLINE
+        while !client.remote_attachment_is_covered(&attachment)
+            && start.elapsed() < WS_PUMP_DEADLINE
         {
             let (sent, newly_received) = pump_core_websocket_transport_once(&client, &mut ws).await;
             assert_eq!(sent, 0, "idle pumps must have no new client work");
@@ -3465,7 +3468,7 @@ mod tests {
             "the idle pump must consume the queued response"
         );
         assert!(
-            client.edge_attachment_is_covered(&attachment),
+            client.remote_attachment_is_covered(&attachment),
             "the drained server response must cover the registered query"
         );
         client.detach_query(attachment);
@@ -3580,7 +3583,7 @@ mod tests {
         let mut reader_ws = open_negotiated_ws_session(addr, &state, reader_identity).await;
         let (query, attachment) = settle_ws_todos_query(&reader, &mut reader_ws).await;
         assert_eq!(
-            reader.edge_todo_titles(&query).await,
+            reader.remote_todo_titles(&query).await,
             vec![visible_title],
             "the recovered permissions must expose the allowed row and hide the other row"
         );
@@ -3628,7 +3631,7 @@ mod tests {
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(&client_b_docs_attachment)
+        while !client_b.remote_attachment_is_covered(&client_b_docs_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
@@ -3636,15 +3639,15 @@ mod tests {
         }
 
         assert!(
-            client_b.edge_attachment_is_covered(&client_b_docs_attachment),
+            client_b.remote_attachment_is_covered(&client_b_docs_attachment),
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(
             client_b
-                .edge_titles(&client_b_docs, &docs_table)
+                .remote_titles(&client_b_docs, &docs_table)
                 .await
                 .is_empty(),
-            "Bob must receive empty edge rows for Alice's private row"
+            "Bob must receive empty remote rows for Alice's private row"
         );
     }
 

@@ -162,13 +162,13 @@ fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
 /// - `documents_insert_true`: insert allowed
 /// - `documents_insert_false`: insert rejected
 ///
-/// Bob only checks EdgeServer query results, so each assertion is about the
+/// Bob only checks GlobalServer query results, so each assertion is about the
 /// server-accepted state rather than alice's optimistic local cache.
 ///
 /// ```text
 /// alice ──insert──► server ──policy True/False──► persisted rows
 ///                                     │
-///                                     └── bob EdgeServer query observes result
+///                                     └── bob GlobalServer query observes result
 /// ```
 #[tokio::test]
 async fn insert_policies_boolean() {
@@ -268,13 +268,13 @@ async fn insert_policies_boolean_inner() {
 /// - `documents_select_true`: row is visible to bob
 /// - `documents_select_false`: row is hidden from bob
 ///
-/// Bob only checks EdgeServer query results, so each assertion is about the
+/// Bob only checks GlobalServer query results, so each assertion is about the
 /// server-accepted visible set rather than alice's optimistic local cache.
 ///
 /// ```text
 /// alice ──insert──► server ──SELECT True/False──► visible rows
 ///                                      │
-///                                      └── bob EdgeServer query observes result
+///                                      └── bob GlobalServer query observes result
 /// ```
 #[tokio::test]
 async fn select_policies_boolean() {
@@ -513,7 +513,7 @@ async fn select_exists_policy_does_not_implicitly_fetch_readable_grants_inner() 
 /// rows out of query results.
 ///
 /// Alice inserts one active row and one archived row into the same table. Bob
-/// should only ever observe the active row from the EdgeServer query because
+/// should only ever observe the active row from the GlobalServer query because
 /// the archived row fails the SELECT predicate on the persisted state.
 ///
 /// ```text
@@ -584,13 +584,13 @@ async fn select_policies_filter_out_archived_rows_inner() {
 /// - `documents_update_true`: update allowed
 /// - `documents_update_false`: update rejected
 ///
-/// Bob only checks EdgeServer query results, so each assertion is about the
+/// Bob only checks GlobalServer query results, so each assertion is about the
 /// server-accepted state rather than alice's optimistic local cache.
 ///
 /// ```text
 /// alice ──update──► server ──policy True/False──► persisted rows
 ///                                     │
-///                                     └── bob EdgeServer query observes result
+///                                     └── bob GlobalServer query observes result
 /// ```
 #[tokio::test]
 async fn update_policies_boolean() {
@@ -714,13 +714,13 @@ async fn update_policies_boolean_inner() {
 /// - `documents_delete_true`: delete allowed
 /// - `documents_delete_false`: delete rejected
 ///
-/// Bob only checks EdgeServer query results, so each assertion is about the
+/// Bob only checks GlobalServer query results, so each assertion is about the
 /// server-accepted state rather than alice's optimistic local cache.
 ///
 /// ```text
 /// alice ──delete──► server ──policy True/False──► persisted rows
 ///                                     │
-///                                     └── bob EdgeServer query observes result
+///                                     └── bob GlobalServer query observes result
 /// ```
 #[tokio::test]
 async fn delete_policies_boolean() {
@@ -997,10 +997,10 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
 /// filter rows end-to-end.
 ///
 /// Alice seeds matching and non-matching priorities into each table, and bob
-/// checks the persisted visible set through EdgeServer queries.
+/// checks the persisted visible set through GlobalServer queries.
 ///
 /// ```text
-/// alice ──insert priorities──► server ──scalar comparator──► bob EdgeServer query
+/// alice ──insert priorities──► server ──scalar comparator──► bob GlobalServer query
 /// ```
 #[tokio::test]
 async fn select_policies_scalar_comparators_filter_rows() {
@@ -1242,7 +1242,7 @@ async fn select_policies_scalar_comparators_filter_rows_inner() {
 /// checks the server-visible state after policy enforcement.
 ///
 /// ```text
-/// alice ──insert/update reviewer_id──► server ──null policy checks──► bob EdgeServer query
+/// alice ──insert/update reviewer_id──► server ──null policy checks──► bob GlobalServer query
 /// ```
 #[tokio::test]
 async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
@@ -1520,11 +1520,11 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes_inner() {
 /// Verifies that row-level `contains` and literal `IN (...)` predicates grant
 /// matching rows and that an empty `IN` list fails closed.
 ///
-/// Alice seeds matching and non-matching rows, and bob checks that EdgeServer
+/// Alice seeds matching and non-matching rows, and bob checks that GlobalServer
 /// queries only expose the persisted rows allowed by each predicate.
 ///
 /// ```text
-/// alice ──insert rows──► server ──contains / in-list checks──► bob EdgeServer query
+/// alice ──insert rows──► server ──contains / in-list checks──► bob GlobalServer query
 /// ```
 #[tokio::test]
 async fn row_level_contains_and_in_list_policies_filter_rows() {
@@ -1865,7 +1865,7 @@ async fn updates_require_read_and_update_permissions_inner() {
 /// rows, while other readers can see only rows with `archived = false`.
 ///
 /// Actors: alice mutates rows, observer holds the live subscription, and fresh
-/// verifier clients query EdgeServer state after each step.
+/// verifier clients query GlobalServer state after each step.
 ///
 /// ```text
 /// alice ──insert archived=false──► observer stream (add ✓)
@@ -1962,7 +1962,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after hidden insert");
+        .expect("GlobalServer query after hidden insert");
     assert!(
         has_row(&rows_after_hidden_insert, visible_id, &visible_values),
         "visible insert should still be readable: rows={rows_after_hidden_insert:?}"
@@ -2002,7 +2002,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     let rows_after_visible_update = wait_for_rows(
         &verifier_after_visible_update,
         query.clone(),
-        "EdgeServer query after visible update",
+        "GlobalServer query after visible update",
         |rows| has_row(&rows, visible_id, &renamed_visible_values).then_some(rows),
     )
     .await;
@@ -2052,7 +2052,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     let rows_after_hide = wait_for_rows(
         &verifier_after_hide,
         query.clone(),
-        "EdgeServer query after hiding row",
+        "GlobalServer query after hiding row",
         |rows| lacks_row(&rows, visible_id).then_some(rows),
     )
     .await;
@@ -2099,7 +2099,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     let rows_after_reveal = wait_for_rows(
         &verifier_after_reveal,
         query,
-        "EdgeServer query after revealing row",
+        "GlobalServer query after revealing row",
         |rows| has_row(&rows, hidden_id, &revealed_hidden_values).then_some(rows),
     )
     .await;
