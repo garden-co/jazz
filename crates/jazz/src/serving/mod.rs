@@ -2614,10 +2614,10 @@ mod tests {
     #[test]
     fn schema_dry_run_maps_server_config_to_runtime_plan() {
         let schema = simple_schema();
-        let mut config = ServerConfig::local("edge-a");
-        config.role = NodeRole::Edge;
+        let mut config = ServerConfig::local("core-a");
+        config.role = NodeRole::Core;
         config.storage = StorageConfig::RocksDb {
-            path: PathBuf::from("/var/lib/jazz/edge-a"),
+            path: PathBuf::from("/var/lib/jazz/core-a"),
         };
         let expected_column_family_count = required_column_families(&schema).len();
 
@@ -2630,7 +2630,7 @@ mod tests {
         assert_eq!(
             report.runtime_plan,
             ServerRuntimePlan {
-                core_role: NodeRole::Edge,
+                core_role: NodeRole::Core,
                 profile: DeploymentProfile::Local,
                 storage_kind: StorageKind::RocksDb,
                 schema_column_family_count: expected_column_family_count,

@@ -280,10 +280,7 @@ async fn ws_admission(
         // application-policy evaluation. Complete authority publications have
         // their own prior-edge-admission capability, never inferred from SYSTEM
         // or from an ordinary backend credential.
-        let trust = if prelude.bootstrap_catalogue
-            && peer_identity == AuthorSubject::SYSTEM
-            && state.topology == crate::server::ServerTopology::Core
-        {
+        let trust = if prelude.bootstrap_catalogue && peer_identity == AuthorSubject::SYSTEM {
             CommitUnitTrust::TrustedAdmin
         } else {
             CommitUnitTrust::TrustedAuthority
@@ -710,7 +707,6 @@ async fn handle_ws_connection(
     if bootstrap_catalogue {
         if admission.credential != WebSocketCredential::Admin
             || admission.identity != AuthorSubject::SYSTEM
-            || state.topology != crate::server::ServerTopology::Core
         {
             send_ws_error(
                 &mut socket,
@@ -785,8 +781,6 @@ async fn handle_ws_connection(
     let Some(core_server_shell) = state.runtime_for_client() else {
         let message = if state.shutdown.is_shutting_down() {
             "runtime is shutting down; retry later"
-        } else if state.topology.is_edge() {
-            "edge runtime is awaiting a complete authoritative catalogue; retry shortly"
         } else {
             match state.catalogue.known_schema_hashes(&state.catalogue_store) {
                 Ok(hashes) if hashes.is_empty() => {
@@ -2402,7 +2396,6 @@ mod tests {
     #[tokio::test]
     async fn ws_blank_core_reports_schema_deployment_required() {
         assert_blank_runtime_diagnostic(
-            false,
             "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting",
         )
         .await;
@@ -2410,103 +2403,16 @@ mod tests {
 
     /// Alice connects to a blank Edge and is told it is awaiting its authority,
     /// rather than being told to publish a schema directly to that Edge.
-    #[tokio::test]
-    async fn ws_blank_edge_reports_catalogue_wait() {
-        assert_blank_runtime_diagnostic(
-            true,
-            "edge runtime is awaiting a complete authoritative catalogue; retry shortly",
-        )
-        .await;
-    }
 
     /// Exercise the actual HTTP registry and WebSocket boundary, including permanent denial.
-    #[tokio::test]
-    async fn ws_registry_outages_are_retryable_but_denials_remain_terminal() {
-        for status in [503_u16, 429, 403] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let upstream = listener.local_addr().unwrap();
-            let router = axum::Router::new()
-                .fallback(move || async move { axum::http::StatusCode::from_u16(status).unwrap() });
-            let task = tokio::spawn(async move {
-                axum::serve(listener, router).await.unwrap();
-            });
-            let app_id = AppId::random();
-            let server = ServerBuilder::new(app_id)
-                .with_auth_config(AuthConfig {
-                    admin_secret: Some("admin-secret".into()),
-                    allow_local_first_auth: true,
-                    ..Default::default()
-                })
-                .with_storage(StorageBackend::InMemory)
-                .with_upstream_url(format!("http://{upstream}"))
-                .build()
-                .await
-                .unwrap();
-            let addr = start_ws_test_server(server.state.clone()).await;
-            let seed = [0x31; 32];
-            let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
-            let account = jazz::account_registry::local_first_account_id(*app_id.uuid(), &subject);
-            let identity = AuthorSubject::from_canonical(
-                &serde_json::to_string(&(
-                    account.0,
-                    jazz::tools::identity::LOCAL_FIRST_ISSUER,
-                    &subject,
-                ))
-                .unwrap(),
-            )
-            .unwrap();
-            let token = jazz::tools::identity::mint_jazz_self_signed_token(
-                &seed,
-                jazz::tools::identity::LOCAL_FIRST_ISSUER,
-                &app_id.to_string(),
-                3600,
-            )
-            .unwrap();
-            let prelude = serde_json::json!({"peer_identity":identity.canonical(), "auth":{"jwt_token":token}}).to_string();
-            let (mut client, _) = connect_async(ws_url(addr, app_id)).await.unwrap();
-            client
-                .send(WsMessage::Binary(prelude.into_bytes().into()))
-                .await
-                .unwrap();
-            let message = tokio::time::timeout(Duration::from_secs(5), client.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frames = decode_ws_message(&message);
-            let [WireFrame::Error(error)] = frames.as_slice() else {
-                panic!("expected structured admission error: {frames:?}")
-            };
-            assert_eq!(
-                error.code,
-                if status == 403 {
-                    WireErrorCode::AuthFailed
-                } else {
-                    WireErrorCode::NotReady
-                }
-            );
-            assert_eq!(
-                error.retry,
-                if status == 403 {
-                    WireRetry::Never
-                } else {
-                    WireRetry::Later
-                }
-            );
-            task.abort();
-        }
-    }
 
-    async fn assert_blank_runtime_diagnostic(edge: bool, expected: &str) {
-        let mut builder = ServerBuilder::new(AppId::random())
+    async fn assert_blank_runtime_diagnostic(expected: &str) {
+        let builder = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory);
-        if edge {
-            builder = builder.with_upstream_url("ws://127.0.0.1:9");
-        }
         let server = builder.build().await.expect("build blank server");
         let state = server.state;
         let addr = start_ws_test_server(state.clone()).await;

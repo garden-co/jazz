@@ -1,7 +1,5 @@
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
@@ -79,61 +77,6 @@ pub async fn push_catalogue_in_memory(
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
 pub(crate) const MAX_CATALOGUE_REQUEST_BODY_BYTES: usize = 8 << 20;
-pub(crate) const DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES: usize = 64 << 20;
-pub(crate) const FIXED_CATALOGUE_RESPONSE_LIMIT_BYTES: usize = 8 << 20;
-pub(crate) const FORWARDING_APPLICATION_CHUNK_BYTES: usize = 64 << 10;
-const FORWARDING_TRANSPORT_BYTES: usize = 2 * 1_032_192;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CatalogueForwardingPolicy {
-    pub(crate) list_response_limit_bytes: usize,
-}
-
-impl CatalogueForwardingPolicy {
-    pub(crate) fn new(list_response_limit_bytes: usize) -> Result<Self, String> {
-        let chunks = list_response_limit_bytes
-            .checked_div(FORWARDING_APPLICATION_CHUNK_BYTES)
-            .and_then(|whole| {
-                list_response_limit_bytes
-                    .checked_rem(FORWARDING_APPLICATION_CHUNK_BYTES)
-                    .and_then(|remainder| whole.checked_add(usize::from(remainder != 0)))
-            })
-            .ok_or_else(|| "catalogue forwarding response limit is invalid".to_owned())?;
-        if list_response_limit_bytes == 0 {
-            return Err("catalogue forwarding response limit must be positive".to_owned());
-        }
-        let application_bytes = chunks
-            .checked_mul(FORWARDING_APPLICATION_CHUNK_BYTES)
-            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
-        let descriptor_bytes = chunks
-            .checked_mul(std::mem::size_of::<Option<axum::body::Bytes>>())
-            .ok_or_else(|| "catalogue forwarding descriptor budget is invalid".to_owned())?;
-        let _descriptor_layout = std::alloc::Layout::array::<Option<axum::body::Bytes>>(chunks)
-            .map_err(|_| "catalogue forwarding descriptor layout is invalid".to_owned())?;
-        MAX_CATALOGUE_REQUEST_BODY_BYTES
-            .checked_add(application_bytes)
-            .and_then(|value| value.checked_add(descriptor_bytes))
-            .and_then(|value| value.checked_add(FORWARDING_TRANSPORT_BYTES))
-            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
-        Ok(Self {
-            list_response_limit_bytes,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ServerTopology {
-    #[default]
-    Core,
-    Edge,
-}
-
-impl ServerTopology {
-    pub fn is_edge(self) -> bool {
-        matches!(self, Self::Edge)
-    }
-}
-
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub(crate) accounts: Option<accounts::AccountRegistryOwner>,
@@ -144,17 +87,6 @@ pub struct ServerState {
     pub app_id: AppId,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
-    /// Upstream HTTP base URL used by edge servers to forward catalogue HTTP requests.
-    pub upstream_http_url: Option<String>,
-    /// Whether this process is the core/global node or an edge syncing upstream.
-    pub topology: ServerTopology,
-    /// Shared HTTP client for forwarding admin requests to a remote authority.
-    ///
-    /// Replacement clients retain forwarding's application/body/deadline safety
-    /// but do not carry the builder client's bounded HTTP transport allowance.
-    pub http_client: reqwest::Client,
-    /// Private bounds and lifecycle policy used by edge catalogue forwarding.
-    pub(crate) forwarding_policy: CatalogueForwardingPolicy,
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
@@ -176,53 +108,6 @@ pub struct ServerState {
     #[cfg(test)]
     runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     pub shutdown: ShutdownController,
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test-only synchronization point immediately before the production
-    /// snapshot helper acquires the shell lock.
-    static CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn run_client_shell_snapshot_before_lock_hook() {
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
-            hook();
-        }
-    });
-}
-
-#[cfg(test)]
-fn with_client_shell_snapshot_before_lock_hook<T>(
-    hook: impl FnMut() + 'static,
-    callback: impl FnOnce() -> T,
-) -> T {
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        assert!(
-            slot.borrow().is_none(),
-            "snapshot hook is already installed"
-        );
-        *slot.borrow_mut() = Some(Box::new(hook));
-    });
-    let result = callback();
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        slot.borrow_mut().take();
-    });
-    result
-}
-
-/// Snapshot a shell and its dynamic-admission generation under one lock.
-///
-/// The readiness flag is atomic because the connector publishes it from an
-/// async task, but it is read while the shell lock is held. Dynamic bootstrap
-/// updates both values under that same write lock, so a client cannot pair the
-/// old generation's `true` with the newly published shell.
-fn client_shell_snapshot<T: Clone>(shell: &StdRwLock<Option<T>>) -> Option<T> {
-    #[cfg(test)]
-    run_client_shell_snapshot_before_lock_hook();
-    shell.read().unwrap().clone()
 }
 
 impl ServerState {
@@ -272,14 +157,14 @@ impl ServerState {
         }
     }
 
-    /// Test-only observation of whether an edge has installed a runtime shell.
+    /// Test-only observation of whether Core has installed a runtime shell.
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_test(&self) -> bool {
         self.runtime().is_some()
     }
 
-    /// Test-only observation of whether an edge is ready for downstream clients.
+    /// Test-only observation of whether Core is ready for downstream clients.
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_client_for_test(&self) -> bool {
@@ -305,7 +190,7 @@ impl ServerState {
 
     /// Return the Core runtime eligible for a client session.
     pub fn runtime_for_client(&self) -> Option<ServerRuntimeHandle> {
-        client_shell_snapshot(&self.core_server_shell)
+        self.runtime()
     }
 
     pub(crate) fn start_core_server_shell(
@@ -449,10 +334,8 @@ fn run_shutdown_finalizer(state: Arc<ServerState>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, RwLock};
-    use std::thread;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -560,15 +443,6 @@ mod tests {
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),
-            upstream_http_url: None,
-            topology: ServerTopology::Core,
-            http_client: reqwest::Client::builder()
-                .build()
-                .expect("build HTTP client"),
-            forwarding_policy: CatalogueForwardingPolicy::new(
-                DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
-            )
-            .expect("default forwarding policy"),
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
@@ -577,53 +451,8 @@ mod tests {
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
-            dynamic_edge_catalogue_ready: AtomicBool::new(true),
-            edge_upstream_health: StdRwLock::new(EdgeUpstreamHealth::NotConfigured),
-            edge_upstream_task: StdMutex::new(None),
             shutdown: ShutdownController::new(timeout),
         })
-    }
-
-    /// Dynamic publication must not let a downstream reader pair the prior
-    /// generation's readiness with the newly published shell. The test hook
-    /// synchronizes the actual production snapshot helper at its pre-lock
-    /// boundary; it is not a hand-written model of that helper.
-    #[test]
-    fn dynamic_client_shell_snapshot_cannot_mix_ready_generation_with_new_shell() {
-        let shell = Arc::new(RwLock::new(Some("old")));
-        let ready = Arc::new(AtomicBool::new(true));
-        let mut write = shell.write().unwrap();
-        let (at_lock_boundary_tx, at_lock_boundary_rx) = mpsc::channel();
-        let (continue_tx, continue_rx) = mpsc::channel();
-        let fixed_shell = Arc::clone(&shell);
-        let fixed_ready = Arc::clone(&ready);
-        let fixed_reader = thread::spawn(move || {
-            with_client_shell_snapshot_before_lock_hook(
-                move || {
-                    at_lock_boundary_tx
-                        .send(())
-                        .expect("tell publisher reader reached production lock boundary");
-                    continue_rx
-                        .recv()
-                        .expect("publisher releases production reader");
-                },
-                || client_shell_snapshot(ServerTopology::Edge, &fixed_shell, &fixed_ready),
-            )
-        });
-        at_lock_boundary_rx
-            .recv()
-            .expect("reader reached production helper lock boundary");
-        *write = Some("new");
-        ready.store(false, Ordering::Release);
-        drop(write);
-        continue_tx
-            .send(())
-            .expect("release reader after publication");
-        assert_eq!(
-            fixed_reader.join().expect("fixed reader joins"),
-            None,
-            "the lock-first production helper observes the new generation as unready"
-        );
     }
 
     #[tokio::test]

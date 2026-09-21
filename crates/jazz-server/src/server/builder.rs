@@ -14,8 +14,7 @@ use crate::middleware::auth::{
 };
 use crate::server::routes;
 use crate::server::{
-    CatalogueForwardingPolicy, CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
-    ServerState, ServerTopology, StoredCatalogue,
+    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, StoredCatalogue,
 };
 use jazz::tools::AppId;
 #[allow(deprecated)]
@@ -78,7 +77,6 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     core_server_shell_schema: Option<JazzSchema>,
-    catalogue_list_response_limit_bytes: usize,
     shutdown_timeout: Duration,
     storage_factory: Option<Arc<dyn StorageFactory>>,
 }
@@ -96,8 +94,6 @@ impl ServerBuilder {
                 path: PathBuf::from("./data"),
             },
             core_server_shell_schema: None,
-            catalogue_list_response_limit_bytes:
-                crate::server::DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             storage_factory: None,
         }
@@ -110,12 +106,6 @@ impl ServerBuilder {
 
     pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
         self.auth_config.allow_local_first_auth = enabled;
-        self
-    }
-
-    /// Configure the maximum body accepted from the forwarded `/schemas` list.
-    pub fn with_catalogue_list_response_limit_bytes(mut self, limit: usize) -> Self {
-        self.catalogue_list_response_limit_bytes = limit;
         self
     }
 
@@ -148,22 +138,11 @@ impl ServerBuilder {
 
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
-        let topology = ServerTopology::Core;
-        validate_server_config(&auth_config, topology)?;
+        validate_server_config(&auth_config)?;
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
-        log_auth_config(&auth_config, topology);
+        log_auth_config(&auth_config);
 
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
-        let http_client = reqwest::Client::builder()
-            .http1_only()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .pool_max_idle_per_host(1)
-            .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-        let forwarding_policy =
-            CatalogueForwardingPolicy::new(self.catalogue_list_response_limit_bytes)?;
-
         let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
         let core_server_shell = self.build_core_server_shell(
             latest_catalogue_schema,
@@ -171,7 +150,7 @@ impl ServerBuilder {
         )?;
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
-        let accounts = if topology == ServerTopology::Core {
+        let accounts = {
             let durable = match &self.storage_backend {
                 StorageBackend::InMemory => None,
                 StorageBackend::Persistent { path } => Some((
@@ -188,8 +167,6 @@ impl ServerBuilder {
             Some(crate::server::accounts::AccountRegistryOwner::open(
                 durable,
             )?)
-        } else {
-            None
         };
 
         let state = Arc::new(ServerState {
@@ -198,11 +175,7 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            upstream_http_url: None,
-            topology,
             jwt_verifier,
-            http_client,
-            forwarding_policy,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             websocket_admissions: Arc::new(
                 crate::server::routes::WebSocketAdmissionState::default(),
@@ -417,10 +390,7 @@ async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVe
     }
 }
 
-fn validate_server_config(
-    auth_config: &AuthConfig,
-    topology: ServerTopology,
-) -> Result<(), String> {
+fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
     let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
     if auth_config
         .jwt_issuer
@@ -481,16 +451,12 @@ fn validate_server_config(
         return Err("backend secret cannot be empty".to_owned());
     }
 
-    if topology.is_edge() && auth_config.admin_secret.is_none() {
-        return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
-    }
-
     Ok(())
 }
 
-fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
+fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
@@ -499,8 +465,7 @@ fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
         auth_config.auth_cookie_name.is_some(),
         auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
-        auth_config.admin_secret.is_some(),
-        topology
+        auth_config.admin_secret.is_some()
     );
 }
 
@@ -513,13 +478,8 @@ mod tests {
     use jazz::groove::storage::OrderedKvStorage;
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
-    use jazz::tools::native_transport_connector::{
-        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportFuture,
-    };
     use jazz::tools::public_schema::SchemaHash;
     use jazz::tools::schema_lens::LensTransform;
-    use jazz::wire::{TransportError, WireTransport};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -552,724 +512,6 @@ mod tests {
         .expect("open raw catalogue storage")
     }
 
-    struct NoopWireTransport;
-
-    impl WireTransport for NoopWireTransport {
-        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            None
-        }
-    }
-
-    struct ClosingConnector {
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        connect_count: AtomicUsize,
-    }
-
-    impl NativeTransportConnector for ClosingConnector {
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            let connection = self.connect_count.fetch_add(1, Ordering::SeqCst);
-            let terminal = if connection == 0 {
-                Box::pin(std::future::ready(NativeTransportTerminal::PeerClosed(
-                    "idle websocket closed".to_owned(),
-                )))
-                    as jazz::tools::native_transport_connector::NativeTransportTerminalFuture
-            } else {
-                Box::pin(std::future::pending())
-            };
-            Box::pin(async move {
-                Ok(ConnectedNativeTransport {
-                    transport: Box::new(NoopWireTransport),
-                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-                    features: jazz::wire::FEATURE_NONE,
-                    session_context: None,
-                    permits_delegated_sessions: false,
-                    terminal,
-                })
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            let snapshot = self.snapshot.clone();
-            Box::pin(async move { Ok(snapshot) })
-        }
-    }
-
-    struct OwnerDroppingConnector {
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        connect_count: AtomicUsize,
-    }
-
-    impl NativeTransportConnector for OwnerDroppingConnector {
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            self.connect_count.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {
-                Ok(ConnectedNativeTransport {
-                    transport: Box::new(NoopWireTransport),
-                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-                    features: jazz::wire::FEATURE_NONE,
-                    session_context: None,
-                    permits_delegated_sessions: false,
-                    terminal: Box::pin(std::future::ready(NativeTransportTerminal::OwnerDropped)),
-                })
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            let snapshot = self.snapshot.clone();
-            Box::pin(async move { Ok(snapshot) })
-        }
-    }
-
-    struct PendingTerminalConnector {
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        connect_count: AtomicUsize,
-    }
-
-    impl NativeTransportConnector for PendingTerminalConnector {
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            self.connect_count.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {
-                Ok(ConnectedNativeTransport {
-                    transport: Box::new(NoopWireTransport),
-                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-                    features: jazz::wire::FEATURE_NONE,
-                    session_context: None,
-                    permits_delegated_sessions: false,
-                    terminal: Box::pin(std::future::pending()),
-                })
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            let snapshot = self.snapshot.clone();
-            Box::pin(async move { Ok(snapshot) })
-        }
-    }
-
-    struct MalformedWireTransport {
-        returned_frame: bool,
-    }
-
-    impl WireTransport for MalformedWireTransport {
-        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            if self.returned_frame {
-                None
-            } else {
-                self.returned_frame = true;
-                Some(vec![0xff])
-            }
-        }
-    }
-
-    struct FatalProtocolConnector {
-        snapshot: jazz::protocol::CatalogueSnapshot,
-    }
-
-    impl NativeTransportConnector for FatalProtocolConnector {
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            Box::pin(async {
-                Ok(ConnectedNativeTransport {
-                    transport: Box::new(MalformedWireTransport {
-                        returned_frame: false,
-                    }),
-                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-                    features: jazz::wire::FEATURE_NONE,
-                    session_context: None,
-                    permits_delegated_sessions: false,
-                    terminal: Box::pin(std::future::pending()),
-                })
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            let snapshot = self.snapshot.clone();
-            Box::pin(async move { Ok(snapshot) })
-        }
-    }
-
-    struct PendingBootstrapConnector;
-
-    impl NativeTransportConnector for PendingBootstrapConnector {
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            Box::pin(std::future::pending())
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    /// Records every adapter boundary an edge build could reach. This internal
-    /// test is necessary because the observable security property is that a
-    /// rejected credential never reaches the target-owned transport adapter.
-    struct AdmissionProbeConnector {
-        validation_calls: AtomicUsize,
-        bootstrap_calls: AtomicUsize,
-        connect_calls: AtomicUsize,
-    }
-
-    impl NativeTransportConnector for AdmissionProbeConnector {
-        fn validate_catalogue_bootstrap_url(
-            &self,
-            _server_url: &str,
-            _app_id: AppId,
-        ) -> Result<(), NativeTransportError> {
-            self.validation_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
-            self.connect_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(std::future::pending())
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            self.bootstrap_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(std::future::pending())
-        }
-    }
-
-    #[test]
-    fn edge_reconnect_delay_is_exponential_and_capped() {
-        assert_eq!(edge_reconnect_delay(1), Duration::from_millis(100));
-        assert_eq!(edge_reconnect_delay(2), Duration::from_millis(200));
-        assert_eq!(edge_reconnect_delay(6), Duration::from_millis(3_200));
-        assert_eq!(edge_reconnect_delay(7), EDGE_RECONNECT_MAX_DELAY);
-        assert_eq!(edge_reconnect_delay(u32::MAX), EDGE_RECONNECT_MAX_DELAY);
-    }
-
-    #[tokio::test]
-    async fn idle_upstream_terminal_reconnects_and_reaches_connected_again() {
-        let app_id = AppId::from_name("edge-idle-upstream-reconnect");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let core = ServerBuilder::new(app_id)
-            .with_schema(dynamic_bootstrap_schema())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let connector = Arc::new(ClosingConnector {
-            snapshot,
-            connect_count: AtomicUsize::new(0),
-        });
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .with_native_transport_connector(connector.clone())
-            .build()
-            .await
-            .expect("build edge");
-
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if connector.connect_count.load(Ordering::SeqCst) >= 2
-                    && edge.state.edge_upstream_health() == EdgeUpstreamHealth::Connected
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("edge reconnects after idle terminal");
-
-        assert!(connector.connect_count.load(Ordering::SeqCst) >= 2);
-        edge.shutdown().await;
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn owner_drop_stops_connected_edge_upstream_without_reconnect() {
-        let app_id = AppId::from_name("edge-owner-drop-stopped-health");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let core = ServerBuilder::new(app_id)
-            .with_schema(dynamic_bootstrap_schema())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let connector = Arc::new(OwnerDroppingConnector {
-            snapshot,
-            connect_count: AtomicUsize::new(0),
-        });
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .with_native_transport_connector(connector.clone())
-            .build()
-            .await
-            .expect("build edge");
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Stopped {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("owner drop publishes stopped health");
-        assert_eq!(
-            connector.connect_count.load(Ordering::SeqCst),
-            1,
-            "owner drop must stop the connector rather than opening a replacement transport"
-        );
-
-        edge.shutdown().await;
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_cancels_connected_edge_upstream_without_reconnect() {
-        let app_id = AppId::from_name("edge-connected-cancellation-stopped-health");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let core = ServerBuilder::new(app_id)
-            .with_schema(dynamic_bootstrap_schema())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let connector = Arc::new(PendingTerminalConnector {
-            snapshot,
-            connect_count: AtomicUsize::new(0),
-        });
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .with_native_transport_connector(connector.clone())
-            .build()
-            .await
-            .expect("build edge");
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Connected {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("edge reaches connected before cancellation");
-        edge.shutdown().await;
-        assert_eq!(
-            edge.state.edge_upstream_health(),
-            EdgeUpstreamHealth::Stopped,
-            "cancelling the attached driver publishes stopped health"
-        );
-        assert_eq!(
-            connector.connect_count.load(Ordering::SeqCst),
-            1,
-            "cancellation must not open a replacement transport"
-        );
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn fatal_upstream_protocol_error_stops_connector_with_visible_health_failure() {
-        let app_id = AppId::from_name("edge-fatal-upstream-health");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let core = ServerBuilder::new(app_id)
-            .with_schema(dynamic_bootstrap_schema())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .with_native_transport_connector(Arc::new(FatalProtocolConnector { snapshot }))
-            .build()
-            .await
-            .expect("build edge");
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if matches!(
-                    edge.state.edge_upstream_health(),
-                    EdgeUpstreamHealth::Failed { .. }
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("fatal protocol outcome becomes visible");
-        let health = edge.state.edge_upstream_health();
-        assert!(
-            matches!(
-                &health,
-                EdgeUpstreamHealth::Failed { reason }
-                    if reason.contains("malformed auxiliary wire frame")
-            ),
-            "fatal protocol reason remains available to health reporting"
-        );
-
-        edge.shutdown().await;
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_cancels_pending_edge_bootstrap_before_shell_publication() {
-        let app_id = AppId::from_name("edge-shutdown-cancels-bootstrap");
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("bootstrap-secret".to_owned()),
-                ..Default::default()
-            })
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .with_native_transport_connector(Arc::new(PendingBootstrapConnector))
-            .build()
-            .await
-            .expect("build edge");
-
-        let phase = tokio::time::timeout(Duration::from_secs(1), edge.shutdown())
-            .await
-            .expect("shutdown cancels pending bootstrap");
-        assert_eq!(phase, crate::server::ShutdownPhase::StorageClosed);
-        assert!(edge.state.runtime().is_none());
-        assert_eq!(
-            edge.state.edge_upstream_health(),
-            EdgeUpstreamHealth::Stopped
-        );
-    }
-
-    #[tokio::test]
-    async fn dynamic_edge_keeps_unready_after_malformed_snapshot_then_accepts_retry() {
-        let app_id = AppId::from_name("dynamic-edge-bootstrap-malformed-retry");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let core = ServerBuilder::new(app_id)
-            .with_schema(dynamic_bootstrap_schema())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let edge = ServerBuilder::new(app_id)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
-            .await
-            .expect("build blank edge");
-        let mut malformed = snapshot.clone();
-        malformed.schemas.push(
-            malformed
-                .schemas
-                .first()
-                .expect("authority has genesis")
-                .clone(),
-        );
-        assert!(
-            edge.state
-                .start_dynamic_edge_shell(malformed, None)
-                .is_err()
-        );
-        assert!(
-            edge.state.runtime().is_none(),
-            "failed adoption must not publish a shell to downstream clients"
-        );
-        assert!(
-            edge.state
-                .start_dynamic_edge_shell(snapshot.clone(), None)
-                .is_ok()
-        );
-        let first_shell = edge.state.runtime().expect("retry publishes ready shell");
-        let second_shell = edge
-            .state
-            .start_dynamic_edge_shell(snapshot, None)
-            .expect("duplicate driver wake is idempotent");
-        assert_eq!(
-            first_shell
-                .trusted_catalogue_snapshot_for_test()
-                .await
-                .expect("read first ready shell"),
-            second_shell
-                .trusted_catalogue_snapshot_for_test()
-                .await
-                .expect("read duplicate-ready shell"),
-            "a duplicate bootstrap wake reuses the already-published shell"
-        );
-    }
-
-    #[tokio::test]
-    async fn durable_dynamic_edge_gates_failed_catalogue_refresh_until_install_succeeds() {
-        let app_id = AppId::from_name("dynamic-edge-refresh-install-failure");
-        let auth = AuthConfig {
-            admin_secret: Some("bootstrap-secret".to_owned()),
-            ..Default::default()
-        };
-        let schema = dynamic_bootstrap_schema();
-        let core = ServerBuilder::new(app_id)
-            .with_schema(schema.clone())
-            .with_auth_config(auth.clone())
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build authority core");
-        let snapshot = core
-            .state
-            .runtime()
-            .expect("core has shell")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read authority snapshot");
-        let edge = ServerBuilder::new(app_id)
-            .with_schema(schema)
-            .with_auth_config(auth)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
-            .await
-            .expect("build edge with a validated durable generation");
-        let shell = edge.state.runtime().expect("edge has ready shell");
-        assert!(
-            edge.state.runtime_for_client().is_some(),
-            "validated catalogue is usable while the upstream is offline"
-        );
-
-        let mut malformed = snapshot.clone();
-        malformed.schemas.push(
-            malformed
-                .schemas
-                .first()
-                .expect("authority has genesis")
-                .clone(),
-        );
-        assert!(
-            edge.state
-                .refresh_dynamic_edge_catalogue(&shell, malformed)
-                .await
-                .is_err()
-        );
-        assert!(
-            edge.state.runtime_for_client().is_none(),
-            "failed validation/install must not advance the ready generation"
-        );
-
-        edge.state
-            .refresh_dynamic_edge_catalogue(&shell, snapshot.clone())
-            .await
-            .expect("later complete refresh installs successfully");
-        assert!(
-            edge.state.runtime_for_client().is_some(),
-            "readiness advances only after the complete install returns"
-        );
-
-        let base = snapshot
-            .schemas
-            .first()
-            .expect("authority has genesis")
-            .clone();
-        let evolved_source = jazz::tools::public_schema::SchemaBuilder::new()
-            .table(
-                jazz::tools::public_schema::TableSchema::builder("notes")
-                    .column("body", jazz::tools::public_schema::ColumnType::Text)
-                    .column("extra", jazz::tools::public_schema::ColumnType::Text),
-            )
-            .build();
-        let evolved_runtime =
-            jazz::schema::JazzSchema::new(&evolved_source).expect("evolved public schema compiles");
-        let evolved = jazz::protocol::SchemaVersion::new(evolved_runtime);
-        let mut evolved_snapshot = snapshot;
-        evolved_snapshot.schemas.push(evolved.clone());
-        evolved_snapshot.lineages.push((
-            1,
-            jazz::protocol::SchemaLineagePublication::author_from_prior(
-                &base.schema,
-                &evolved_snapshot.genesis_physical_identities,
-                evolved.clone(),
-                jazz::protocol::MigrationLens::new(
-                    base.id,
-                    evolved.id,
-                    vec![jazz::protocol::TableLens {
-                        source_table: "notes".to_owned(),
-                        target_table: "notes".to_owned(),
-                        ops: vec![jazz::protocol::LensOp::AddColumn {
-                            column: "extra".to_owned(),
-                            default: groove::records::Value::String(String::new()),
-                        }],
-                    }],
-                )
-                .expect("snapshot fixture lens is valid"),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )
-            .expect("snapshot fixture authors its descendant lineage"),
-        ));
-        evolved_snapshot.current_write_schema = jazz::protocol::CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        };
-        shell
-            .set_catalogue_activation_failpoint(
-                jazz::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
-            )
-            .await
-            .expect("arm post-registry install failure");
-        assert!(
-            edge.state
-                .refresh_dynamic_edge_catalogue(&shell, evolved_snapshot)
-                .await
-                .is_err(),
-            "v1-to-v2 activation fails after registry reconstruction at the planted boundary"
-        );
-        assert!(
-            edge.state.runtime_for_client().is_none(),
-            "a post-registry activation failure must not publish the new ready generation"
-        );
-    }
-
-    #[tokio::test]
-    async fn edge_upstream_mode_builds_with_admin_secret() {
-        let app_id =
-            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
-        let auth_config = AuthConfig {
-            admin_secret: Some("test-admin-secret".to_owned()),
-            ..Default::default()
-        };
-
-        let result = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("http://127.0.0.1:12345")
-            .build()
-            .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn upstream_http_url_conversion_maps_base_urls_to_app_routes() {
-        let app_id =
-            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
-
-        assert_eq!(
-            upstream_http_url("https://core.example.com", app_id).expect("https conversion"),
-            "https://core.example.com/"
-        );
-        assert_eq!(
-            upstream_http_url("http://core.example.com/base/", app_id).expect("http conversion"),
-            "http://core.example.com/base/"
-        );
-        assert_eq!(
-            upstream_http_url("ws://core.example.com", app_id).expect("ws conversion"),
-            "http://core.example.com/"
-        );
-        assert_eq!(
-            upstream_http_url(
-                "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws",
-                app_id,
-            )
-            .expect("wss conversion"),
-            "https://core.example.com/"
-        );
-        assert_eq!(
-            upstream_http_url(
-                "wss://core.example.com/base/apps/00000000-0000-0000-0000-000000000001/ws",
-                app_id,
-            )
-            .expect("prefixed wss conversion"),
-            "https://core.example.com/base/"
-        );
-    }
-
-    #[test]
-    fn upstream_http_url_conversion_rejects_query_and_fragment_urls() {
-        let app_id =
-            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
-
-        assert!(upstream_http_url("https://core.example.com?token=abc", app_id).is_err());
-        assert!(upstream_http_url("https://core.example.com#cluster-a", app_id).is_err());
-    }
-
     #[test]
     fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
         let local_first = AuthConfig {
@@ -1277,56 +519,19 @@ mod tests {
             allow_local_first_auth: true,
             ..Default::default()
         };
-        validate_server_config(&local_first, ServerTopology::Core)
+        validate_server_config(&local_first)
             .expect("local-first admission does not require external JWT bindings");
 
         let external_only = AuthConfig {
             allow_local_first_auth: false,
             ..local_first
         };
-        let error = validate_server_config(&external_only, ServerTopology::Core)
+        let error = validate_server_config(&external_only)
             .expect_err("an external-only verifier must be explicitly bound");
         assert!(error.contains("--jwt-issuer"), "{error}");
         assert!(error.contains("--jwt-audience"), "{error}");
     }
 
-    #[tokio::test]
-    async fn builder_requires_admin_secret_in_edge_mode() {
-        let auth_config = AuthConfig {
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-
-        let result = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
-            .await;
-        let error = result
-            .err()
-            .expect("edge mode without admin secret should fail");
-
-        assert!(error.contains("--admin-secret"));
-        assert!(error.contains("--upstream-url"));
-    }
-
-    #[tokio::test]
-    async fn builder_accepts_edge_mode_with_admin_secret() {
-        let built = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
-            .with_storage(StorageBackend::InMemory)
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("admin-secret".to_string()),
-                ..Default::default()
-            })
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
-            .await
-            .expect("build edge server with admin secret");
-
-        assert!(built.state.topology.is_edge());
-        assert!(built.state.upstream_http_url.is_some());
-    }
     #[tokio::test]
     async fn builder_omitted_secrets_preserve_unconfigured_auth() {
         let built = ServerBuilder::new(AppId::from_name("builder-omitted-secrets"))
@@ -1370,41 +575,6 @@ mod tests {
                     "validation error must not expose the configured credential"
                 );
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn builder_rejects_blank_edge_admin_without_exposing_credential() {
-        for value in ["", " \t\n"] {
-            let connector = Arc::new(AdmissionProbeConnector {
-                validation_calls: AtomicUsize::new(0),
-                bootstrap_calls: AtomicUsize::new(0),
-                connect_calls: AtomicUsize::new(0),
-            });
-            let result = ServerBuilder::new(AppId::from_name("builder-blank-edge-admin"))
-                .with_auth_config(AuthConfig {
-                    admin_secret: Some(value.to_owned()),
-                    ..Default::default()
-                })
-                .with_storage(StorageBackend::InMemory)
-                .with_upstream_url("ws://127.0.0.1:9")
-                .with_native_transport_connector(connector.clone())
-                .build()
-                .await;
-            let error = result
-                .err()
-                .expect("blank edge admin credential must be rejected during build");
-
-            assert_eq!(error, "admin secret cannot be empty");
-            if !value.is_empty() {
-                assert!(
-                    !error.contains(value),
-                    "validation error must not expose the configured credential"
-                );
-            }
-            assert_eq!(connector.validation_calls.load(Ordering::SeqCst), 0);
-            assert_eq!(connector.bootstrap_calls.load(Ordering::SeqCst), 0);
-            assert_eq!(connector.connect_calls.load(Ordering::SeqCst), 0);
         }
     }
 
@@ -1647,26 +817,6 @@ mod tests {
             .build()
             .await
             .expect("repair permits a fresh atomic catalogue recovery");
-    }
-
-    #[test]
-    fn owner_drop_stops_the_connector_while_peer_close_reconnects() {
-        assert!(matches!(
-            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
-                NativeTransportTerminal::OwnerDropped,
-            )),
-            EdgeConnectorOutcome::Stopped
-        ));
-        assert!(matches!(
-            connected_transport_outcome(ServerUpstreamTerminalReason::Cancelled),
-            EdgeConnectorOutcome::Stopped
-        ));
-        assert!(matches!(
-            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
-                NativeTransportTerminal::PeerClosed("peer closed".to_owned()),
-            )),
-            EdgeConnectorOutcome::Reconnect(reason) if reason == "peer closed"
-        ));
     }
 
     #[tokio::test]
@@ -1913,7 +1063,7 @@ mod tests {
     }
 
     /// Internal fixture access is needed to recreate a pre-active-schema store.
-    /// Startup must restore the administrative revision before a fresh edge sees B.
+    /// Startup must restore the administrative revision before clients receive schema B.
     #[tokio::test]
     async fn legacy_authority_restores_active_descendant_before_serving_snapshots() {
         use jazz::tools::schema_lens::{Lens, LensOp};
@@ -2034,21 +1184,6 @@ mod tests {
             selected.schema.public_schema()[&TableName::new("notes")].policies,
             permissions[&TableName::new("notes")]
         );
-        let edge = crate::server::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
-            StorageConfig::InMemory,
-            None,
-            None,
-            snapshot.clone(),
-        )
-        .expect("fresh edge accepts the upgraded authority snapshot");
-        assert_eq!(
-            edge.trusted_catalogue_snapshot_for_test()
-                .await
-                .unwrap()
-                .current_write_schema,
-            snapshot.current_write_schema
-        );
-        edge.shutdown().await.unwrap();
         reopened.shutdown().await;
     }
 
@@ -2265,31 +1400,6 @@ mod tests {
         assert_eq!(
             second_runtime.block_on(reopened.shutdown()),
             crate::server::ShutdownPhase::StorageClosed
-        );
-    }
-
-    #[tokio::test]
-    async fn builder_uses_edge_tier_with_upstream() {
-        let built = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
-            .with_storage(StorageBackend::InMemory)
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("admin-secret".to_string()),
-                ..Default::default()
-            })
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
-            .await
-            .expect("build edge server");
-
-        let tiers = built
-            .state
-            .catalogue_store
-            .local_durability_tiers_for_test()
-            .expect("read catalogue durability tiers");
-
-        assert_eq!(
-            tiers,
-            std::collections::HashSet::from([DurabilityTier::EdgeServer])
         );
     }
 }

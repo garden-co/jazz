@@ -6,8 +6,7 @@ pub mod server;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, ServerBuilder, ServerState, ServerTopology, ShutdownController, ShutdownPhase,
-    StorageBackend,
+    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{

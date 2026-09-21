@@ -579,155 +579,6 @@ fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission
 }
 
 #[test]
-fn restarted_edge_forwards_complete_publication_without_original_clients() {
-    use crate::tools::test_support::AllowAll;
-    // Internal topology test: inspect exact merge authorship and the durable
-    // outbox while exercising the real peer-connection scheduler/storage.
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text)
-                    .column("body", PublicColumnType::Text),
-            )
-            .allow_all(),
-    );
-    let edge_id = NodeUuid::from_bytes([0xe6; 16]);
-    let core_id = NodeUuid::from_bytes([0xc6; 16]);
-    let dir = tempfile::tempdir().unwrap();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut edge_state = NodeState::new(
-        edge_id,
-        schema.clone(),
-        RocksDbStorage::open(dir.path(), &refs).unwrap(),
-    )
-    .unwrap();
-    let shared_row = RowUuid::from_bytes([0x66; 16]);
-    let mut writes = Vec::new();
-    for (writer_id, column, value) in [(0xa6, "title", "left"), (0xb6, "body", "right")] {
-        let mut writer = NodeState::new(
-            NodeUuid::from_bytes([writer_id; 16]),
-            schema.clone(),
-            rocks_storage(&schema),
-        )
-        .unwrap();
-        let (tx_id, unit) = writer
-            .commit_mergeable_unit_settled(
-                MergeableCommit::new("todos", shared_row, 10)
-                    .made_by(AuthorSubject::for_test_bytes([writer_id; 16]))
-                    .cells(BTreeMap::from([(
-                        column.to_owned(),
-                        Value::String(value.to_owned()),
-                    )])),
-            )
-            .unwrap();
-        let SyncMessage::CommitUnit { tx, versions } = unit else {
-            panic!("commit unit")
-        };
-        let outcome = edge_state
-            .ingest_edge_authority_mergeable_commit_unit(tx, versions, 100)
-            .unwrap();
-        block_on(edge_state.persist_and_settle_outcome(outcome)).unwrap();
-        writes.push(tx_id);
-    }
-    let publication = edge_state
-        .edge_authority_publication_for(writes[1])
-        .unwrap();
-    let merge_tx = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id.node == edge_id)
-        .unwrap()
-        .tx
-        .tx_id;
-    drop(edge_state);
-
-    let reopened = NodeState::new(
-        edge_id,
-        schema.clone(),
-        RocksDbStorage::open(dir.path(), &refs).unwrap(),
-    )
-    .unwrap();
-    let edge = Node::new(reopened);
-    block_on(edge.restore_edge_authority_uploads()).unwrap();
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        1,
-        "recover one frontier, not one growing history prefix per write"
-    );
-    let anchor = edge.outbox.borrow().iter().next().unwrap().tx_id;
-    let completed = edge
-        .outbox
-        .borrow_mut()
-        .remove_released(&mut HashSet::from([anchor]));
-    assert!(completed.is_empty());
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        1,
-        "an anchor receipt alone must not retire a publication with unacknowledged members"
-    );
-    assert!(
-        writes
-            .iter()
-            .all(|tx_id| edge.outbox.borrow().authority_members.contains(tx_id)),
-        "recovered member fates remain bound to the selected authority after a partial acknowledgement"
-    );
-    let core = open_core(0xc6, AuthorSubject::SYSTEM, &schema);
-    let (edge_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_id, 61, core_id, 62);
-    let _upstream = block_on(edge.connect_upstream(edge_transport));
-    let _subscriber = core.accept_subscriber_with_trust(
-        core_transport,
-        AuthorSubject::SYSTEM,
-        CommitUnitTrust::TrustedAuthority,
-    );
-    for _ in 0..16 {
-        block_on(edge.tick()).unwrap();
-        core.tick().unwrap();
-        block_on(edge.tick()).unwrap();
-        if edge.outbox.borrow().len() == 0 {
-            break;
-        }
-    }
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        0,
-        "core's accepted receipts must discharge the recovered publication"
-    );
-    for tx_id in writes.into_iter().chain([merge_tx]) {
-        assert!(matches!(
-            edge.node().borrow_mut().transaction_state(tx_id).resolve(),
-            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
-        ));
-    }
-    let rows = core.read(&Query::from("todos")).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(
-        rows[0].cell(&schema.tables()[0], "title"),
-        Some(Value::String("left".to_owned()))
-    );
-    assert_eq!(
-        rows[0].cell(&schema.tables()[0], "body"),
-        Some(Value::String("right".to_owned()))
-    );
-    assert_eq!(
-        core.node()
-            .borrow_mut()
-            .current_row_tx_id(&rows[0])
-            .resolve(),
-        Some(merge_tx),
-        "forwarding must not create a redundant core merge"
-    );
-    block_on(edge.restore_edge_authority_uploads()).unwrap();
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        0,
-        "globally acknowledged history is not recovered again"
-    );
-}
-
-#[test]
 fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
     let schema = schema();
@@ -6060,7 +5911,6 @@ fn authority_query_delegation_requires_explicit_host_admission() {
 #[derive(Clone, Copy, Debug)]
 enum QueryTestHost {
     Core,
-    PartialEdge,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6073,7 +5923,7 @@ enum QueryTestClient {
 fn remote_query_delivery(
     propagate_upstream: bool,
     tier: DurabilityTier,
-    host: QueryTestHost,
+    _host: QueryTestHost,
     client_scope: QueryTestClient,
 ) -> (bool, bool) {
     let schema = owner_read_schema();
@@ -6128,9 +5978,6 @@ fn remote_query_delivery(
     } else {
         edge.accept_subscriber(transport, alice)
     };
-    if matches!(host, QueryTestHost::PartialEdge) {
-        subscriber.borrow_mut().set_partial_edge_query_host();
-    }
     client
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -6193,7 +6040,7 @@ fn remote_query_delivery(
 
 #[test]
 fn remote_queries_cannot_disable_upstream_propagation() {
-    for host in [QueryTestHost::Core, QueryTestHost::PartialEdge] {
+    for host in [QueryTestHost::Core] {
         for client in [
             QueryTestClient::Session,
             QueryTestClient::System,
@@ -6211,25 +6058,6 @@ fn remote_queries_cannot_disable_upstream_propagation() {
 // Internal transport fixture isolates local serving from upstream hydration:
 // no Core is connected. The Edge must evaluate cached data under the admitted
 // reader instead of waiting for a selected Core result for this exact query.
-#[test]
-fn partial_edge_evaluates_cached_queries_without_selected_core_source() {
-    for client in [
-        QueryTestClient::Session,
-        QueryTestClient::Delegated,
-        QueryTestClient::System,
-    ] {
-        assert_eq!(
-            remote_query_delivery(
-                true,
-                DurabilityTier::Global,
-                QueryTestHost::PartialEdge,
-                client,
-            ),
-            (true, false),
-            "{client:?}"
-        );
-    }
-}
 
 // Rust equivalent of a memory-only browser foreground: LocalOnly can read its
 // own pending data but may not ask the worker (or any node) for a local view.
