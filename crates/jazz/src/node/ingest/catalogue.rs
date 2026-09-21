@@ -856,6 +856,7 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -880,6 +881,7 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -930,6 +932,7 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
