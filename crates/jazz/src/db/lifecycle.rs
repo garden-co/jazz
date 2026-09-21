@@ -1438,6 +1438,15 @@ where
     }
 
     #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only count of compiler executions, excluding cache hits.
+    pub fn query_program_compilations_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .query_program_compilations_for_test()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
     /// Test-only count of maintained subscription rehydrate entrypoints.
     pub fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
         self.node
