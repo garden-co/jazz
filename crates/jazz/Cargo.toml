@@ -189,7 +189,7 @@ name = "threaded_four_tier"
 required-features = ["testing"]
 
 [[test]]
-name = "edge_fate_authority"
+name = "core_fate_authority"
 required-features = ["runtime"]
 
 [[test]]

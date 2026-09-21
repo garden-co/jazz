@@ -2291,6 +2291,7 @@ dependencies = [
  "jazz",
  "jazz-native-transport",
  "jazz-server",
+ "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
  "jazz-testkit",
  "libc",
