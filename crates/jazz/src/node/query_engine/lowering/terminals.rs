@@ -612,7 +612,8 @@ pub(super) fn lowered_terminals(
                     })
                     .collect(),
                 AppRowTerminal::Direct,
-            ),
+                )
+            }
             PayloadProjection::Relation(requested) => {
                 let columns = match root_linear_steps(plan).and_then(|steps| match steps.last() {
                     Some(LinearStep::Project(columns)) => Some(columns.clone()),
