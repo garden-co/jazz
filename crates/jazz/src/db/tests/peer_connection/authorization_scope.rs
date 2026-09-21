@@ -157,6 +157,102 @@ fn foreground_initial_subscription_completes_empty_owner_answer() {
     assert_foreground_initial_owner_snapshot(false);
 }
 
+// Internal topology receipt: public clients cannot pause the owner transport
+// and inspect runtime compilation work. Results still use the public Db stream.
+// The compilation count is an abstract-work guard, not a timing assertion.
+#[test]
+fn foreground_owner_answer_advances_the_existing_graph() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let owner = open_db(0xd8, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let expected = row(0xd9);
+    owner
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(expected),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    owner.tick().unwrap();
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(&foreground, &Query::from("todos"));
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    for _ in 0..3 {
+        foreground.tick().unwrap();
+        assert!(stream.try_next_event().is_none());
+    }
+    let compilations = foreground.query_program_compilations_for_test();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut first = None;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        owner.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            first = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        settled: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = first
+    else {
+        panic!("owner must publish its complete first answer: {first:?}");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![expected]
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    assert_eq!(
+        foreground.query_program_compilations_for_test(),
+        compilations,
+        "input arrival must not recompile the foreground graph"
+    );
+    owner
+        .update(
+            "todos",
+            expected,
+            BTreeMap::from([("title".into(), Value::String("edited".into()))]),
+            Default::default(),
+        )
+        .unwrap();
+    let mut changed = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            changed = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        ..
+    }) = changed
+    else {
+        panic!("the retained graph must continue delivering edits: {changed:?}");
+    };
+    assert!(added.is_empty() && removed.is_empty());
+    assert_eq!(
+        updated.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![expected]
+    );
+}
+
 // Internal topology receipt: ordinary single-Db subscriptions do not enter
 // the foreground owner's initial reset path. Observe only public stream output.
 #[test]
