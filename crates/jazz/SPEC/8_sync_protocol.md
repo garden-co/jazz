@@ -24,17 +24,15 @@ Invariant digest:
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: A supporting set and its native payloads MUST include enough authorized deletion-register evidence to reconstruct the row’s visible presence or absence.
 - `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, branch key, row, transaction, and schema, and receivers MUST resolve the sender's record through their own stable physical mapping.
-- `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
 - `INV-SYNC-20`: Applying only the local input differences between complete supporting sets MUST be observationally equivalent to evaluating the newer complete set, including enter/leave churn and exact-version replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
-- `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
 - `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
-- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
+- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, upstream switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
 - `INV-SYNC-31`: A downstream subscription MUST synchronize exact canonical authored supporting versions, never application-projected rows as replicated truth.
 - `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
@@ -67,12 +65,10 @@ Invariant digest:
 Encoder trust is established by the local authenticated topology, never by a
 message claiming to be trusted. The required decoding contract is:
 
-| Direction                               | Encoder contract                                      |
-| --------------------------------------- | ----------------------------------------------------- |
-| Edge → client                           | Trusted encoder; decode directly                      |
-| Core → edge                             | Trusted encoder; decode directly                      |
-| Edge → core                             | Trusted encoder; decode directly                      |
-| Client → edge (or direct client → core) | Untrusted encoder; bounded connection-scoped decoding |
+| Direction                                                   | Encoder contract                                      |
+| ----------------------------------------------------------- | ----------------------------------------------------- |
+| Core → client, including its local relay                    | Trusted encoder; decode directly                      |
+| Client → Core, including bytes forwarded by its local relay | Untrusted encoder; bounded connection-scoped decoding |
 
 Trusted output MUST NOT undergo canonical-byte comparisons, round-trip
 re-encoding, or structural validation passes before or during reads. Wire and
@@ -91,10 +87,9 @@ mutation must also be bounded/isolated.
 
 Authentication, write authorization, schema/application constraints, transaction
 identity and fate rules still apply. They are semantic admission, not defensive
-record decoding. A trusted edge encoder does not grant its client permission to
-write arbitrary data. Forwarding raw client bytes alone does not turn the client
-into a trusted encoder; the edge's trusted publication boundary owns the output
-contract.
+record decoding. Authentication of a local relay does not authorize its
+client's writes. Forwarding client bytes does not turn the client into a
+trusted encoder; Core still owns semantic admission.
 
 This section governs runtime validation policy where older codec descriptions
 or malformed-input fixtures demand universal rejection. Encoder layout/version
@@ -106,15 +101,15 @@ establish and test connection containment before relying on decoder failure.
 
 ### 8.1 One protocol, roles not code
 
-Sync uses one peer protocol everywhere in the deployment. UI, worker, edge, and
-core links all exchange the same `SyncMessage` vocabulary; a tier's behavior is
+Sync uses one peer protocol everywhere in the deployment. UI, local-worker, and
+Core links all exchange the same `SyncMessage` vocabulary; a tier's behavior is
 determined by its role, not by a separate wire language (ch. 1, principle 2).
-Roles include relay links (`PeerRole::Relay`), edge-client links
-(`PeerRole::ClientLink { identity }`), fate authority, durability, and eviction.
+Roles include local relay links (`PeerRole::Relay`) and client links
+(`PeerRole::ClientLink { identity }`). Core alone assigns final fates and Global durability.
 
 A relay link is an authenticated transport capability with no permission
 subject. It neither implies `AuthorSubject::SYSTEM` nor independently narrows
-reads. An edge-client link carries the terminated peer identity and narrows
+reads. A client link carries the terminated peer identity and narrows
 reads under that identity. A scope-isolated client relay may carry only the
 foreground binding admitted for that exact relay scope and attachment; the
 upstream authority, not the relay, evaluates policy under that binding (ch. 7,
@@ -255,40 +250,14 @@ through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v3 intentionally provides neither
 old-version decoding nor migration.
 
-`AuthorityPublication` has the postcard field order `tx_id`, `commits`. `tx_id`
-is the upload/acknowledgement anchor and must occur among the members. `commits`
-is a length-prefixed sequence in strictly increasing `TxId` order; each member
-has field order `tx`, `versions`, using exactly the ordinary `CommitUnit`
-transaction and complete-version encodings. It is not a new transaction or a
-persistent storage format. Compression and fragmentation preserve the complete
-logical publication; a receiver never admits a physical fragment or parks one
-member for independent admission.
-
-Only a host-authenticated authority control-plane connection may submit this
-message to core. An admin-authenticated catalogue bootstrap connection also
-possesses that authority capability. A wire role, `SYSTEM` author, ordinary
-backend credential, or delegated session does not establish it. Normal
-`CommitUnit` messages on the authority link still undergo their normal policy
-checks; the prior-edge-admission privilege belongs to this publication only.
-
-Before changing transaction state, core validates the whole publication's
-structure, schema availability, replay identities, and parent closure. Members
-include all not-yet-globally-acknowledged parents; omitted parents must already
-be globally accepted at core. Missing catalogue/dependency context fails the
-whole attempt without acknowledging or separately parking members. The sender
-retains/reconstructs the complete publication for retry after context repair.
-The members' canonical transaction, history, and current-state records are
-persisted in one ordinary Groove batch. A crash or cancellation cannot expose
-only an accepted prefix after reopen; process-local alias allocations may
-precede this batch but are not admitted transactions. After all members are
-durable, core reconciles residual cross-edge heads using
-the shared merge machinery (ch. 4), then emits ordinary per-transaction fates.
-The edge retains a publication until every member has a selected-authority
-Global receipt, not merely its anchor. Partial acknowledgements never remove
-the remaining members' authority binding or their reconnect replay obligation.
-Edge recovery reconstructs unacknowledged publications from accepted history,
-including other clients' writes and edge merges, without requiring those
-clients to reconnect. It stops ancestry traversal at Global acknowledgements.
+Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
+shortcut MUST NOT authorize a transaction, including on privileged links.
+The retained legacy carrier is rejected before any transaction publication.
+Recoverable locally authored writes use ordinary `CommitUnit` admission,
+which applies current Core authorization and normal idempotent replay rules.
+There is no edge catalogue-bootstrap exchange; an explicit legacy request is
+rejected with `UnsupportedFeature`/`Never` rather than reinterpreted as a
+different kind of session.
 
 Feature bits are also permanent: `SyncMessagePayload=1<<0`,
 `SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
@@ -421,7 +390,8 @@ The prelude object has these server-owned fields:
 - `peer_identity`: required canonical `AuthorSubject` JSON string.
 - `auth`: required `AuthConfig` object. Its current fields are `jwt_token`,
   `backend_secret`, `admin_secret`, and `backend_session`.
-- `bootstrap_catalogue`: optional boolean; omission means `false`.
+- `bootstrap_catalogue`: decode-only legacy boolean; `true` is rejected with
+  `UnsupportedFeature/Never`, including for admin-authenticated sessions.
 - `requested_link`: optional string enum; omission means `ordinary_session`.
   The only admitted values are `ordinary_session` and
   `scope_isolated_client_relay`. The latter produces its scoped-link admission
@@ -436,8 +406,8 @@ top-level fields and unknown fields nested in `auth` are ignored. An unknown
 mode. Missing required fields, non-UTF-8 bytes, malformed JSON, a trailing JSON
 suffix, or an invalid known field are rejected before admission.
 
-The native Rust writer serializes only `peer_identity`, `auth`, and a true
-`bootstrap_catalogue`; its optional `AuthConfig` members currently serialize as
+The native Rust writer serializes `peer_identity`, `auth`, and the requested
+link mode when non-default. Its optional `AuthConfig` members serialize as
 explicit JSON nulls. The TypeScript native-runtime writer preserves its
 existing top-level auth and `sub` compatibility fields while also writing the
 nested `auth` object; those extra top-level fields are ignored by the server.
@@ -726,31 +696,13 @@ feature is compiled in. WASM/browser artifacts keep transport compression
 opt-in so bundle-size trade-offs stay explicit; reconnect resets the compression
 context and relies on known-state redelivery for correctness.
 
-### 8.9 Edge mergeable fate deferral and permission-scope subscriptions
+### 8.9 Write admission
 
-An edge that acts as mergeable fate authority needs the relevant policy data
-before it can decide a write's fate. It therefore must defer fate assignment
-until the relevant **permission-scope subscription** has settled; until then it
-retains the unit only in its in-memory deferred-admission state, outside edge
-history (`INV-SYNC-18`). Once the scope settles, the edge ingests the authorized
-unit exactly once and routes its edge fate; a denied unit is rejected without
-being ingested.
-
-A permission-scope subscription is an _upstream_ subscription opened by the edge
-against core for the policy data required by its acceptance gate. It is keyed by
-`(policy_shape, writer_claim)` (ch. 9 §9.5): the write policy's query shape bound
-to the writer's `claim("user")`. This hydrates only the policy rows that writer's
-writes can depend on, never a whole table.
-
-Permission scopes are shared at the sync level whenever one settled subscription
-can satisfy every dependent acceptance gate (`INV-SYNC-22`).
-
-**Implementation status (verified 2026-07-27).** Exact-key scopes are shared and
-reference-counted by dependent gates; this is covered by
-`edge_deduplicates_scope_subscription_for_repeated_deferred_units` and
-`edge_releases_scope_subscription_after_last_deferred_unit_resolves`
-(`crates/jazz/tests/four_tier.rs`). Whether and how a broader scope can satisfy a
-narrower one remains an open design question below.
+Core evaluates a client's write against authoritative policy data. A local
+relay may retain pending writes and retry their upload, but cannot assign an
+accepted fate or Global durability. There are no intermediary permission-scope
+subscriptions or deferred edge-admission gates. Core's ordinary transaction
+admission, dependency repair, and rejection rules still apply.
 
 ### 8.10 Catalogue lane
 
@@ -849,10 +801,10 @@ or edges serving the same authoritative database lineage for known-state payload
 dedup and repair, but is never persisted or recovered. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
 the selected continuously live upstream connection has sent a fresh confirming
-`ViewUpdate`. A fresh `Edge`/`Global` one-shot requires that confirmation for
+`ViewUpdate`. A fresh `Global` one-shot requires that confirmation for
 its exact current usage-site `SubscriptionKey`; a late update for a detached
 predecessor cannot satisfy the new attachment even when shape, binding, and
-options are equal. Disconnect, client restart, edge switch, or applying any
+options are equal. Disconnect, client restart, upstream switch, or applying any
 view update from a nonselected upstream immediately retires all
 selected-authority receipts and
 makes cached rows unsettled/local until the selected authority reconfirms. A stale cursor can

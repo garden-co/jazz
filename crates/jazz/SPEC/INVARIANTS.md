@@ -32,6 +32,9 @@ Jazz chapter and therefore have no record yet. A record is created only when a
 chapter cites the invariant; this avoids treating deliberate numbering gaps as
 dangling references.
 
+The IDs `INV-SYNC-18` and `INV-SYNC-22` are retired with server-edge admission.
+They must not be reused for unrelated behavior.
+
 ## Open Questions
 
 None.

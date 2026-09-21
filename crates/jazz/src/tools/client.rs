@@ -4216,8 +4216,8 @@ mod tests {
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::native_transport_connector::{
-        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportError,
-        NativeTransportFuture, NativeTransportTerminal, NativeTransportTerminalFuture,
+        ConnectedNativeTransport, NativeTransportError, NativeTransportFuture,
+        NativeTransportTerminal, NativeTransportTerminalFuture,
     };
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
@@ -4348,17 +4348,6 @@ mod tests {
                         Err(NativeTransportError::Terminal(error))
                     }
                 }
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(NativeTransportError::Terminal(
-                    "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                ))
             })
         }
     }
@@ -4583,19 +4572,6 @@ mod tests {
                             NativeTransportTerminal::OwnerDropped
                         }),
                     },
-                )
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(
-                    crate::tools::native_transport_connector::NativeTransportError::Terminal(
-                        "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                    ),
                 )
             })
         }

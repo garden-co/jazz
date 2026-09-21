@@ -5,8 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz::query::Query;
 use jazz::tools::native_transport_connector::{
-    NativeCatalogueBootstrapFuture, NativeTransportConnector, NativeTransportError,
-    NativeTransportFuture, NativeTransportRequest,
+    NativeTransportConnector, NativeTransportFuture, NativeTransportRequest,
 };
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
@@ -25,15 +24,6 @@ struct RetryLaterConnector {
 }
 
 impl NativeTransportConnector for RetryLaterConnector {
-    fn validate_catalogue_bootstrap_url(
-        &self,
-        server_url: &str,
-        app_id: jazz::tools::AppId,
-    ) -> Result<(), NativeTransportError> {
-        jazz_native_transport::NativeWebSocketConnector
-            .validate_catalogue_bootstrap_url(server_url, app_id)
-    }
-
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         let deadline = self.deadline;
         Box::pin(async move {
@@ -51,13 +41,6 @@ impl NativeTransportConnector for RetryLaterConnector {
                 }
             }
         })
-    }
-
-    fn bootstrap_catalogue(
-        &self,
-        request: NativeTransportRequest,
-    ) -> NativeCatalogueBootstrapFuture {
-        jazz_native_transport::NativeWebSocketConnector.bootstrap_catalogue(request)
     }
 }
 

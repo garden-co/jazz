@@ -86,9 +86,8 @@ struct WebSocketAdmission {
     requested_link: RequestedWebSocketLink,
 }
 
-/// Authentication class selected by the prelude.  `TrustedBackend` is still
-/// the normal commit-ingest trust level for both machine credentials, but the
-/// privileged catalogue bootstrap has a narrower authority boundary.
+/// Authentication class selected by the prelude, independently of the
+/// permission subject carried by each forwarded transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WebSocketCredential {
     Admin,
@@ -118,8 +117,8 @@ struct WebSocketAdmissionRegistry {
 
 struct WebSocketAdmissionRegistration {
     /// Present only for a public session. Trusted backend links are not part of
-    /// the per-session connection cap: one edge legitimately owns multiple
-    /// short-lived bootstrap and long-lived replication sockets under SYSTEM.
+    /// the per-session connection cap: a backend can own several independent
+    /// client sessions.
     owner: Arc<WebSocketAdmissionState>,
     key: Option<WebSocketAdmissionKey>,
     id: u64,
@@ -275,16 +274,9 @@ async fn ws_admission(
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
-        // An admin credential authenticates Edge's control plane, but ordinary
-        // relay commits must retain their transaction permission subject for
-        // application-policy evaluation. Complete authority publications have
-        // their own prior-edge-admission capability, never inferred from SYSTEM
-        // or from an ordinary backend credential.
-        let trust = if prelude.bootstrap_catalogue && peer_identity == AuthorSubject::SYSTEM {
-            CommitUnitTrust::TrustedAdmin
-        } else {
-            CommitUnitTrust::TrustedAuthority
-        };
+        // Forwarded commits keep their own permission subjects. Admin
+        // authentication is not a substitute for per-transaction authorization.
+        let trust = CommitUnitTrust::TrustedAuthority;
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
@@ -644,12 +636,8 @@ async fn handle_ws_connection(
             return;
         }
     };
-    // This cap follows policy-scoped sessions, including trusted backend impersonation,
-    // after credential verification.  It must not key off `SYSTEM` (or any
-    // other claimed subject): trusted edge/bootstrap links share SYSTEM and a
-    // single edge may transiently hold several such connections while
-    // reconnecting.  Reserved subjects are rejected by `ws_admission` before
-    // reaching this point.
+    // Scope connection limits by the authenticated policy identity, rather
+    // than a caller-supplied subject or a shared backend identity.
     let mut admission_registration = ws_register_admission(
         Arc::clone(&state.websocket_admissions),
         WebSocketAdmissionKey {
@@ -705,76 +693,16 @@ async fn handle_ws_connection(
     // turn a client self-assertion into authority proof.
 
     if bootstrap_catalogue {
-        if admission.credential != WebSocketCredential::Admin
-            || admission.identity != AuthorSubject::SYSTEM
-        {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::AuthFailed,
-                    WireRetry::Never,
-                    "catalogue bootstrap requires the authenticated core authority",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
-        let Some(core_server_shell) = state.runtime() else {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Later,
-                    "authority runtime is not ready to provide its catalogue",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        };
-        let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-        let hello = match encode_frame(&WireFrame::Hello(
-            WireHello::current(WirePeerRole::Core, negotiated.features)
-                .with_authority(server_endpoint.node, server_endpoint.epoch),
-        )) {
-            Ok(frame) => frame,
-            Err(error) => {
-                send_ws_error(
-                    &mut socket,
-                    WireError::new(
-                        WireErrorCode::Internal,
-                        WireRetry::Never,
-                        format!("failed to encode bootstrap hello: {error}"),
-                    ),
-                )
-                .await;
-                let _ = socket.close().await;
-                return;
-            }
-        };
-        if send_ws_encoded_frames(&mut socket, &[hello]).await.is_err() {
-            return;
-        }
-        let snapshot = match core_server_shell.trusted_catalogue_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                send_ws_error(
-                    &mut socket,
-                    WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                )
-                .await;
-                let _ = socket.close().await;
-                return;
-            }
-        };
-        let _ = stream_bootstrap_catalogue(
-            socket,
-            snapshot,
-            negotiated.protocol_version,
-            negotiated.features,
+        send_ws_error(
+            &mut socket,
+            WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::Never,
+                "edge catalogue bootstrap is no longer supported; open an ordinary client session",
+            ),
         )
         .await;
+        let _ = socket.close().await;
         return;
     }
 
@@ -1037,138 +965,11 @@ async fn handle_ws_connection(
     }
 }
 
-const BOOTSTRAP_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
 struct SocketWriterGuard(tokio::task::AbortHandle);
 impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
-    }
-}
-
-type BootstrapQueues = (VecDeque<Vec<u8>>, VecDeque<Vec<u8>>);
-
-#[derive(Clone, Default)]
-struct BootstrapWire {
-    queues: Arc<std::sync::Mutex<BootstrapQueues>>,
-}
-impl jazz::wire::WireTransport for BootstrapWire {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), jazz::wire::TransportError> {
-        let mut queues = self.queues.lock().expect("bootstrap queue lock poisoned");
-        if queues.1.len() >= 32 {
-            return Err(jazz::wire::TransportError::Backpressure);
-        }
-        queues.1.push_back(frame);
-        Ok(())
-    }
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues
-            .lock()
-            .expect("bootstrap queue lock poisoned")
-            .0
-            .pop_front()
-    }
-}
-
-async fn stream_bootstrap_catalogue(
-    socket: WebSocket,
-    snapshot: jazz::protocol::CatalogueSnapshot,
-    version: u16,
-    features: jazz::wire::WireFeatures,
-) -> Result<(), String> {
-    use jazz::db::{Transport, WireFlushStatus, WireTransportAdapter};
-    let queues = BootstrapWire::default();
-    let mut adapter = WireTransportAdapter::new(queues.clone(), version, features, None);
-    adapter
-        .send(jazz::protocol::SyncMessage::CatalogueSnapshot(Box::new(
-            snapshot,
-        )))
-        .map_err(|error| format!("bootstrap enqueue: {error:?}"))?;
-    let (mut sink, mut source) = socket.split();
-    let (sender, mut receiver) = mpsc::channel::<Vec<Message>>(2);
-    let (stopped_tx, mut stopped_rx) = tokio::sync::oneshot::channel();
-    let mut writer = tokio::spawn(async move {
-        let result = async {
-            while let Some(batch) = receiver.recv().await {
-                for message in batch {
-                    sink.send(message)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            sink.close().await.map_err(|error| error.to_string())
-        }
-        .await;
-        let _ = stopped_tx.send(());
-        result
-    });
-    let _writer_guard = SocketWriterGuard(writer.abort_handle());
-    let deadline = tokio::time::Instant::now() + BOOTSTRAP_DELIVERY_TIMEOUT;
-    let result = async {
-        let mut pending = None;
-        loop {
-            let status = adapter.poll_flush().map_err(|error| format!("bootstrap flush: {error:?}"))?;
-            if pending.is_none() {
-                let frames = queues.queues.lock().map_err(|_| "bootstrap queue poisoned")?.1.drain(..).collect::<Vec<_>>();
-                if !frames.is_empty() {
-                    pending = Some(encode_ws_frame_batches(&frames).map_err(|error| error.to_string())?
-                        .into_iter().map(|bytes| Message::Binary(bytes.into())).collect::<Vec<_>>());
-                }
-            }
-            // The receiver still has to decode the last carrier and return its
-            // consumption credit. Closing when the writer drains races that
-            // credit send in native transports and can discard a valid snapshot.
-            // Keep the credit path alive until the receiver ends this one-shot
-            // exchange, under the same delivery deadline.
-            let delivered = status == WireFlushStatus::Idle && pending.is_none();
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return Err("bootstrap delivery timed out".to_owned()),
-                _ = &mut stopped_rx => return Err("bootstrap writer stopped before delivery".to_owned()),
-                permit = sender.reserve(), if pending.is_some() => {
-                    permit.map_err(|_| "bootstrap writer stopped")?.send(pending.take().unwrap());
-                }
-                incoming = source.next() => {
-                    match incoming {
-                        Some(Ok(Message::Binary(bytes))) => {
-                            let frames = decode_ws_encoded_frame_batch(&bytes).map_err(|error| error.to_string())?;
-                            for frame in &frames {
-                                if !matches!(jazz::wire::decode_frame(frame), Ok(WireFrame::ChannelCredit(_))) {
-                                    return Err("snapshot-only bootstrap accepts only channel credit".to_owned());
-                                }
-                            }
-                            if frames.len() > 64 { return Err("bootstrap credit frame count exceeded".to_owned()); }
-                            queues.queues.lock().map_err(|_| "bootstrap queue poisoned")?.0.extend(frames);
-                            if adapter.try_recv_result().map_err(|error| format!("bootstrap credit: {error:?}"))?.is_some() {
-                                return Err("snapshot-only bootstrap received semantic traffic".to_owned());
-                            }
-                        }
-                        Some(Ok(Message::Close(_))) | None if delivered => break,
-                        Some(Ok(Message::Close(_))) | None => return Err("bootstrap peer disconnected before delivery".to_owned()),
-                        Some(Err(error)) => return Err(error.to_string()),
-                        _ => {}
-                    }
-                }
-                _ = tokio::task::yield_now(), if status == WireFlushStatus::MoreReady && pending.is_none() => {}
-            }
-        }
-        Ok(())
-    }.await;
-    drop(sender);
-    if result.is_err() {
-        writer.abort();
-        let _ = writer.await;
-        return result;
-    }
-    // Idle means the codec has no more frames; completion also requires the
-    // sole writer to flush every queued carrier before sending socket close.
-    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut writer).await {
-        Ok(result) => result.map_err(|error| error.to_string())?,
-        Err(_) => {
-            writer.abort();
-            let _ = writer.await;
-            Err("bootstrap writer timed out".to_owned())
-        }
     }
 }
 
@@ -1285,7 +1086,7 @@ mod tests {
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
+    use jazz::tx::{DurabilityTier, Fate, TxId};
     use jazz::wire::decode_frame;
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
@@ -1603,164 +1404,10 @@ mod tests {
         assert_eq!(WS_MAX_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES);
     }
 
-    #[tokio::test]
-    async fn bootstrap_streams_small_and_large_catalogues_through_live_receiver_credit() {
-        use jazz::db::Transport;
-        use jazz::tools::{ColumnDescriptor, RowDescriptor, TableName, Value as PublicValue};
-        for default_bytes in [8, 2 * 1024 * 1024] {
-            let schema = Schema::from([(
-                TableName::new("records"),
-                PublicTableSchema::with_policies(
-                    RowDescriptor::new(vec![
-                        ColumnDescriptor::new("label", ColumnType::Text)
-                            .default(PublicValue::Text("x".repeat(default_bytes))),
-                    ]),
-                    public_table_policies(),
-                ),
-            )]);
-            let server = ServerBuilder::new(AppId::random())
-                .with_auth_config(AuthConfig {
-                    admin_secret: Some("admin-secret".to_owned()),
-                    ..Default::default()
-                })
-                .with_storage(StorageBackend::InMemory)
-                .with_schema(schema)
-                .build()
-                .await
-                .unwrap();
-            let state = server.state.clone();
-            let expected = state
-                .runtime()
-                .unwrap()
-                .trusted_catalogue_snapshot()
-                .await
-                .unwrap();
-            let expected_bytes = jazz::wire::encode_sync_message(&SyncMessage::CatalogueSnapshot(
-                Box::new(expected),
-            ))
-            .unwrap();
-            if default_bytes > 1024 * 1024 {
-                assert!(expected_bytes.len() > 1024 * 1024);
-            }
-            let addr = start_ws_test_server(state.clone()).await;
-            let prelude = serde_json::to_vec(&serde_json::json!({
-                "peer_identity": AuthorSubject::SYSTEM.canonical(),
-                "auth": { "admin_secret": "admin-secret" },
-                "bootstrap_catalogue": true,
-            }))
-            .unwrap();
-            let mut socket = open_negotiated_ws_with_prelude_and_features(
-                addr,
-                &state,
-                prelude,
-                current_wire_features(),
-            )
-            .await;
-            let queue = BootstrapWire::default();
-            let mut receiver = WireTransportAdapter::current(queue.clone());
-            let mut grants = 0;
-            let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let Some(Ok(WsMessage::Binary(bytes))) = socket.next().await else {
-                        panic!("bootstrap closed before full snapshot")
-                    };
-                    queue
-                        .queues
-                        .lock()
-                        .unwrap()
-                        .0
-                        .extend(decode_ws_encoded_frame_batch(&bytes).unwrap());
-                    let message = receiver.try_recv_result().unwrap();
-                    if let Some(SyncMessage::CatalogueSnapshot(snapshot)) = message {
-                        break snapshot;
-                    }
-                    receiver.poll_flush().unwrap();
-                    let outgoing = queue.queues.lock().unwrap().1.drain(..).collect::<Vec<_>>();
-                    grants += outgoing.len();
-                    for batch in encode_ws_frame_batches(&outgoing).unwrap() {
-                        socket.send(WsMessage::Binary(batch.into())).await.unwrap();
-                    }
-                }
-            })
-            .await
-            .expect("credit must advance a snapshot larger than the physical window");
-            assert_eq!(
-                jazz::wire::encode_sync_message(&SyncMessage::CatalogueSnapshot(snapshot)).unwrap(),
-                expected_bytes
-            );
-            if default_bytes > 1024 * 1024 {
-                assert!(
-                    grants > 0,
-                    "the live receiver replenished its physical window"
-                );
-            }
-            let _ = socket.close(None).await;
-            let _ = server.shutdown().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn bootstrap_stalled_credit_and_disconnected_peers_release_the_socket() {
-        use jazz::tools::{ColumnDescriptor, RowDescriptor, TableName, Value as PublicValue};
-        let schema = Schema::from([(
-            TableName::new("records"),
-            PublicTableSchema::with_policies(
-                RowDescriptor::new(vec![
-                    ColumnDescriptor::new("label", ColumnType::Text)
-                        .default(PublicValue::Text("x".repeat(2 * 1024 * 1024))),
-                ]),
-                public_table_policies(),
-            ),
-        )]);
-        let server = ServerBuilder::new(AppId::random())
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("admin-secret".to_owned()),
-                ..Default::default()
-            })
-            .with_storage(StorageBackend::InMemory)
-            .with_schema(schema)
-            .build()
-            .await
-            .unwrap();
-        let state = server.state.clone();
-        let addr = start_ws_test_server(state.clone()).await;
-        for disconnect in [false, true] {
-            let prelude = serde_json::to_vec(&serde_json::json!({
-                "peer_identity": AuthorSubject::SYSTEM.canonical(),
-                "auth": { "admin_secret": "admin-secret" },
-                "bootstrap_catalogue": true,
-            }))
-            .unwrap();
-            let mut socket = open_negotiated_ws_with_prelude_and_features(
-                addr,
-                &state,
-                prelude,
-                current_wire_features(),
-            )
-            .await;
-            if disconnect {
-                socket.close(None).await.unwrap();
-            }
-            // Read carriers without returning consumption credits. The large
-            // catalogue cannot finish; the server must retire the socket.
-            tokio::time::timeout(BOOTSTRAP_DELIVERY_TIMEOUT + Duration::from_secs(2), async {
-                loop {
-                    match socket.next().await {
-                        None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => break,
-                        Some(Ok(_)) => {}
-                    }
-                }
-            })
-            .await
-            .expect("stalled or disconnected bootstrap must release its socket");
-        }
-        let _ = server.shutdown().await;
-    }
-
     // Cancellation is a task ownership boundary, observable here without a
     // timing-dependent TCP disconnect race.
     #[tokio::test]
-    async fn bootstrap_writer_is_cancelled_when_its_owner_is_dropped() {
+    async fn socket_writer_is_cancelled_when_its_owner_is_dropped() {
         let (released_tx, released_rx) = tokio::sync::oneshot::channel::<()>();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let writer = tokio::spawn(async move {
@@ -1976,7 +1623,7 @@ mod tests {
             &state,
         )
         .await
-        .expect("admit authenticated edge relay");
+        .expect("admit authenticated delegated client link");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
         assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
         assert_eq!(
@@ -2005,50 +1652,6 @@ mod tests {
             "admin credentials must not select scope-isolated client admission"
         );
 
-        let bootstrap = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
-                bootstrap_catalogue: true,
-                requested_link: RequestedWebSocketLink::OrdinarySession,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    admin_secret: Some("admin-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
-            &HeaderMap::new(),
-            &state,
-        )
-        .await
-        .expect("admit authenticated catalogue bootstrap");
-        assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
-        assert_eq!(
-            ws_link_admission(&bootstrap, 0, 1).unwrap(),
-            ServerLinkAdmission::OrdinarySession
-        );
-
-        let non_system = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::for_test_bytes([0x77; 16])
-                    .canonical()
-                    .to_owned(),
-                bootstrap_catalogue: true,
-                requested_link: RequestedWebSocketLink::OrdinarySession,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    admin_secret: Some("admin-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
-            &HeaderMap::new(),
-            &state,
-        )
-        .await
-        .expect("admit authentication before protocol bootstrap rejection");
-        assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
-        assert_eq!(
-            ws_link_admission(&non_system, 0, 1).unwrap(),
-            ServerLinkAdmission::OrdinarySession
-        );
-
         let backend = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
@@ -2063,7 +1666,7 @@ mod tests {
             &state,
         )
         .await
-        .expect("ordinary backend is authenticated, but has no prior-edge-admission proof");
+        .expect("ordinary backend uses ordinary session admission");
         assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
         assert_eq!(
             ws_link_admission(&backend, 0, 1).unwrap(),
@@ -3218,28 +2821,6 @@ mod tests {
             self.write_todo(title).mergeable_tx_id()
         }
 
-        fn update_todo(
-            &self,
-            row_uuid: jazz::ids::RowUuid,
-            title: &str,
-        ) -> WriteHandle<CoreMemoryStorage> {
-            jazz::db::block_on(self.db.update(
-                "todos",
-                row_uuid,
-                RowCells::from([
-                    ("title".to_owned(), CoreValue::String(title.to_owned())),
-                    ("done".to_owned(), CoreValue::Bool(false)),
-                ]),
-                Default::default(),
-            ))
-            .expect("update client row")
-        }
-
-        fn delete_todo(&self, row_uuid: jazz::ids::RowUuid) -> WriteHandle<CoreMemoryStorage> {
-            jazz::db::block_on(self.db.delete("todos", row_uuid, Default::default()))
-                .expect("delete client row")
-        }
-
         fn insert_private_doc(&self, title: &str, owner: AuthorSubject) -> jazz::ids::RowUuid {
             let (_, owner) = issuer_and_subject(owner);
             jazz::db::block_on(self.db.insert(
@@ -3586,6 +3167,46 @@ mod tests {
         );
     }
     // Admission precedes context creation, so this exercises the raw public wire.
+    // A retired edge request must fail even with a valid admin credential.
+    #[tokio::test]
+    async fn retired_catalogue_bootstrap_is_rejected_before_server_hello() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        for identity in [
+            AuthorSubject::SYSTEM,
+            AuthorSubject::for_test_bytes([0x77; 16]),
+        ] {
+            let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+            let prelude = serde_json::to_vec(&serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "admin_secret": "admin-secret" },
+                "bootstrap_catalogue": true,
+            }))
+            .unwrap();
+            ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("rejection deadline")
+                .expect("response")
+                .expect("wire response");
+            let WsMessage::Binary(bytes) = response else {
+                panic!("expected rejection");
+            };
+            let frames = decode_ws_frame_batch(&bytes).unwrap();
+            assert_eq!(frames.len(), 1);
+            assert!(matches!(&frames[0], WireFrame::Error(error)
+            if error.code == WireErrorCode::UnsupportedFeature
+                && error.retry == WireRetry::Never
+                && error.message.contains("edge catalogue bootstrap is no longer supported")));
+            let _ = ws.close(None).await;
+        }
+    }
+
     #[tokio::test]
     async fn accountless_anonymous_proof_cannot_open_public_websocket() {
         let state = make_ws_test_state().await;
