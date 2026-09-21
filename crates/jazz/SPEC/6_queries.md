@@ -895,15 +895,20 @@ rows complete only relative to the node's own visible-current knowledge
 (`INV-QUERY-11`). A settled read on a subscriber is answered from the
 subscription's settled subscription result set; an unresolvable result-set entry is an
 invariant violation, not a degraded answer (`INV-QUERY-12`).
-An include-deleted one-shot read widens only the root current-row source: deleted
-root rows may be returned and marked deleted, while joins, reachability access
-tables, reachability edge tables, and include payloads continue to use ordinary
-visible-current witnesses.
+An include-deleted one-shot or exclusive-transaction read widens only the root
+current-row source: deleted root rows may be returned and marked deleted, while
+joins, reachability access tables, reachability edge tables, and include
+payloads continue to use ordinary visible-current witnesses. Its exclusive
+predicate evidence is mode-distinct and compares the complete row identity
+`(RowUuid, optional content TxId, optional deletion-register TxId, deleted)`;
+content and deletion winners are not collapsed into one selected witness.
+Tombstone-only membership is valid, but missing required witness data is a
+storage/evidence error rather than a dropped member.
 
 Inside an open exclusive transaction, `tx_query` records a binding-sensitive
-`PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
-`INV-QUERY-14`) compares the shape+binding output `(RowUuid, TxId)` set at
-`base_snapshot.global_base` against now.
+`PredicateRead` with its root visibility mode (`INV-QUERY-13`). The later
+phantom check (ch. 3, `INV-QUERY-14`) compares the mode-specific output
+identity at the complete dotted `base_snapshot` against now.
 
 Allowed "magic" select columns are the provenance columns `$createdAt`,
 `$createdBy`, `$updatedAt`, `$updatedBy`. Alpha-compatible permission

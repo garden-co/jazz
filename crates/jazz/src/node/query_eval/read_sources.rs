@@ -1066,18 +1066,13 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(snapshot) = snapshot {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::HistoricalStorageCut,
-                ));
-            }
             let rows = self
                 .node
                 .projected_snapshot_current_rows(
                     &request.source.table,
                     self.read_view.read_schema,
                     &snapshot,
+                    request.visibility == RowVisibility::IncludeDeleted,
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
@@ -1086,13 +1081,31 @@ where
                 .ensure_schema_version_alias(self.read_view.read_schema)
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
-                &table,
-                rows,
-                schema_version_alias,
-                "snapshot",
-                &request.requirements,
-            )
+            let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
+            let (base, descriptor, metadata) = if include_deleted {
+                let rows = rows
+                    .into_iter()
+                    .map(|row| {
+                        let deleted = row.is_deleted();
+                        (row, deleted)
+                    })
+                    .collect();
+                inline_snapshot_include_deleted_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "snapshot",
+                    &request.requirements,
+                )
+            } else {
+                inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "snapshot",
+                    &request.requirements,
+                )
+            }
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             snapshot_content_version = request
                 .requirements
@@ -3038,9 +3051,36 @@ where
                 ProjectField::named("row_uuid"),
                 ProjectField::named("tx_time"),
                 ProjectField::named("tx_node_id"),
+                ProjectField::renamed("created_by", "$createdBy"),
+                ProjectField::renamed("created_at", "$createdAt"),
                 ProjectField::renamed("updated_by", "$updatedBy"),
                 ProjectField::renamed("updated_at", "$updatedAt"),
             ]);
+        let tombstone_only = GraphBuilder::anti_join(
+            deleted_winners.clone(),
+            content.clone(),
+            ["row_uuid"],
+            ["row_uuid"],
+        )
+        .project_fields(
+            [ProjectField::named("row_uuid")]
+                .into_iter()
+                .chain(table.columns.iter().map(|column| {
+                    ProjectField::null_typed(
+                        user_column_field(&column.name),
+                        ValueType::Nullable(Box::new(column.column_type.clone())),
+                    )
+                }))
+                .chain([
+                    ProjectField::named("$createdBy"),
+                    ProjectField::named("$createdAt"),
+                    ProjectField::named("$updatedBy"),
+                    ProjectField::named("$updatedAt"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                    ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+                ]),
+        );
         let undeleted = GraphBuilder::anti_join(
             content.clone(),
             deleted_winners.clone(),
@@ -3068,7 +3108,7 @@ where
                     })
                     .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
             );
-        Ok(GraphBuilder::union([undeleted, deleted]))
+        Ok(GraphBuilder::union([undeleted, deleted, tombstone_only]))
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
@@ -5294,9 +5334,36 @@ fn include_deleted_branch_graph(
             ProjectField::named("row_uuid"),
             ProjectField::named("tx_time"),
             ProjectField::named("tx_node_id"),
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
             ProjectField::renamed("updated_by", "$updatedBy"),
             ProjectField::renamed("updated_at", "$updatedAt"),
         ]);
+    let tombstone_only = GraphBuilder::anti_join(
+        deleted_winners.clone(),
+        content.clone(),
+        ["row_uuid"],
+        ["row_uuid"],
+    )
+    .project_fields(
+        [ProjectField::named("row_uuid")]
+            .into_iter()
+            .chain(table.columns.iter().map(|column| {
+                ProjectField::null_typed(
+                    user_column_field(&column.name),
+                    ValueType::Nullable(Box::new(column.column_type.clone())),
+                )
+            }))
+            .chain([
+                ProjectField::named("$createdBy"),
+                ProjectField::named("$createdAt"),
+                ProjectField::named("$updatedBy"),
+                ProjectField::named("$updatedAt"),
+                ProjectField::named("tx_time"),
+                ProjectField::named("tx_node_id"),
+                ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+            ]),
+    );
     let undeleted = GraphBuilder::anti_join(
         content.clone(),
         deleted_winners.clone(),
@@ -5324,7 +5391,7 @@ fn include_deleted_branch_graph(
                 })
                 .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
         );
-    Ok(GraphBuilder::union([undeleted, deleted]))
+    Ok(GraphBuilder::union([undeleted, deleted, tombstone_only]))
 }
 
 fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
@@ -5452,6 +5519,8 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             ProjectField::named("row_uuid"),
             ProjectField::named("tx_time"),
             ProjectField::named("tx_node_id"),
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
             ProjectField::renamed("updated_by", "$updatedBy"),
             ProjectField::renamed("updated_at", "$updatedAt"),
         ]);
@@ -5467,22 +5536,46 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             .map(ProjectField::named)
             .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
     );
-    let deleted = GraphBuilder::join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project_fields(
-            current_row_fields(table)
-                .into_iter()
-                .map(|field| {
-                    let source = match field.as_str() {
-                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                            right_field(&field)
-                        }
-                        _ => left_field(&field),
-                    };
-                    ProjectField::renamed(source, field)
-                })
-                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
-        );
-    GraphBuilder::union([undeleted, deleted])
+    let deleted = GraphBuilder::join(
+        content_current.clone(),
+        deleted_winners.clone(),
+        ["row_uuid"],
+        ["row_uuid"],
+    )
+    .project_fields(
+        current_row_fields(table)
+            .into_iter()
+            .map(|field| {
+                let source = match field.as_str() {
+                    "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => right_field(&field),
+                    _ => left_field(&field),
+                };
+                ProjectField::renamed(source, field)
+            })
+            .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
+    );
+    let tombstone_only =
+        GraphBuilder::anti_join(deleted_winners, content_current, ["row_uuid"], ["row_uuid"])
+            .project_fields(
+                [ProjectField::named("row_uuid")]
+                    .into_iter()
+                    .chain(table.columns.iter().map(|column| {
+                        ProjectField::null_typed(
+                            user_column_field(&column.name),
+                            ValueType::Nullable(Box::new(column.column_type.clone())),
+                        )
+                    }))
+                    .chain([
+                        ProjectField::named("$createdBy"),
+                        ProjectField::named("$createdAt"),
+                        ProjectField::named("$updatedBy"),
+                        ProjectField::named("$updatedAt"),
+                        ProjectField::named("tx_time"),
+                        ProjectField::named("tx_node_id"),
+                        ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+                    ]),
+            );
+    GraphBuilder::union([undeleted, deleted, tombstone_only])
 }
 
 pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<String> {

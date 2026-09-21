@@ -2299,11 +2299,24 @@ enum LocalReplayStatus {
     Complete,
     Blocked,
 }
+
 fn local_replay_unit_is_complete(unit: &SyncMessage) -> bool {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         return false;
     };
     usize::try_from(tx.n_total_writes).ok() == Some(versions.len())
+}
+
+fn local_replay_unit_has_complete_exclusive_evidence(unit: &SyncMessage) -> bool {
+    let SyncMessage::CommitUnit { tx, .. } = unit else {
+        return false;
+    };
+    tx.has_complete_exclusive_evidence()
+}
+
+fn local_replay_unit_is_complete_for_pending(unit: &SyncMessage, pending: bool) -> bool {
+    local_replay_unit_is_complete(unit)
+        && (!pending || local_replay_unit_has_complete_exclusive_evidence(unit))
 }
 
 enum LocalReplayFrame {
@@ -2314,6 +2327,7 @@ enum LocalReplayFrame {
 async fn plan_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     roots: &BTreeSet<TxId>,
+    pending_transaction_ids: &BTreeSet<TxId>,
     retained_replay_units: &BTreeMap<TxId, SyncMessage>,
 ) -> Result<
     (
@@ -2375,9 +2389,17 @@ where
                                 .collect::<Vec<_>>(),
                         )
                     };
+                    if !local_replay_unit_is_complete_for_pending(
+                        &unit,
+                        pending_transaction_ids.contains(&tx_id),
+                    ) {
+                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                        continue;
+                    }
                     units.insert(tx_id, unit);
                     if usize::try_from(n_total_writes).ok() != Some(version_count) {
                         statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                        units.remove(&tx_id);
                         continue;
                     }
                     parents_by_tx.insert(tx_id, parents.clone());
@@ -2438,6 +2460,7 @@ where
                 has_matching_route = true;
                 if let Some(unit) = &route.replay_unit
                     && local_replay_unit_is_complete(unit)
+                    && local_replay_unit_has_complete_exclusive_evidence(unit)
                 {
                     units.entry(*tx_id).or_insert_with(|| unit.clone());
                 }
@@ -2457,8 +2480,13 @@ where
     let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
     let mut roots = pending_set.clone();
     roots.extend(retained_replay_roots);
-    let (statuses, blocked_units, replay_units) =
-        plan_local_replay_commit_units(&mut node_state, &roots, &retained_replay_units).await?;
+    let (statuses, blocked_units, replay_units) = plan_local_replay_commit_units(
+        &mut node_state,
+        &roots,
+        &pending_set,
+        &retained_replay_units,
+    )
+    .await?;
     drop(node_state);
 
     let mut outbox_units = outbox
@@ -2472,9 +2500,7 @@ where
         // can be ingested before its Local ack or later authority fate.
         downstream_fates.borrow_mut().push(unit.clone());
         if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
-            // Durable recovery omits exclusive snapshot/read evidence. A live
-            // sibling may already retain the exact authored unit; never
-            // replace that unit with its redacted history replay.
+            // Preserve the complete authored proof across reconnect and reopen.
             queue_pending_upload_in(outbox, tx_id, Some(unit));
         }
     }
@@ -2502,6 +2528,7 @@ where
         register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
         if pending_set.contains(&tx_id)
             && let Some(unit) = unit
+            && local_replay_unit_has_complete_exclusive_evidence(&unit)
         {
             if outbox_units.insert(tx_id) {
                 queue_pending_upload_in(outbox, tx_id, Some(unit));

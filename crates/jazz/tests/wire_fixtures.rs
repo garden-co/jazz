@@ -28,7 +28,10 @@ use jazz::time::{GlobalTime, TxTime};
 use jazz::tools::{
     ColumnType as PublicColumnType, ObjectId, ResultKey, SchemaBuilder, TableSchemaBuilder,
 };
-use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
+use jazz::tx::{
+    AbsentRead, DurabilityTier, Fate, PredicateRead, PredicateReadMode, RowRead, Snapshot,
+    Transaction, TxId, TxKind,
+};
 use jazz::wire::{
     FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
     FEATURE_AUXILIARY_CHUNKS, FEATURE_MESSAGE_FRAGMENTATION, FEATURE_PAYLOAD_LZ4,
@@ -586,6 +589,38 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "commit_unit_exclusive_predicate_evidence",
+            "CommitUnit",
+            SyncMessage::CommitUnit {
+                tx: Transaction {
+                    tx_id: TxId::new(TxTime(13), node),
+                    kind: TxKind::Exclusive,
+                    n_total_writes: 0,
+                    made_by: author,
+                    permission_subject: None,
+                    base_snapshot: Some(Snapshot {
+                        owner: node,
+                        global_base: GlobalTime(0),
+                        local_base: TxTime(12),
+                        dots: Vec::new(),
+                    }),
+                    row_read_set: Some(Vec::<RowRead>::new()),
+                    absent_read_set: Some(Vec::<AbsentRead>::new()),
+                    predicate_read_set: Some(vec![PredicateRead {
+                        table: "todos".to_owned(),
+                        shape_id,
+                        shape: Query::from("todos"),
+                        binding_id,
+                        binding_values: BTreeMap::new(),
+                        mode: PredicateReadMode::IncludeDeleted,
+                    }]),
+                    user_metadata_json: None,
+                    contribution_merge: None,
+                },
+                versions: Vec::new(),
+            },
+        ),
+        (
             "publish_schema_todos_body",
             "PublishSchema",
             SyncMessage::PublishSchema {
@@ -816,7 +851,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v3",
+        fixture_set: "jazz-wire-message-frames-v4",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

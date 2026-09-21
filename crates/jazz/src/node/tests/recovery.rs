@@ -3068,3 +3068,64 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
     assert_eq!(indexes, expected_indexes);
     storage.close().unwrap();
 }
+
+#[test]
+fn exclusive_predicate_evidence_lost_on_reopen_is_rejected_without_global_rows() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = {
+        let mut client = open_node_at(&temp_dir, schema.clone());
+        let shape = Query::from("todos")
+            .filter(crate::query::eq(
+                crate::query::col("title"),
+                crate::query::lit("watched"),
+            ))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let open = OpenTransactionId::new();
+        client.open_exclusive(open).unwrap();
+        assert!(
+            client
+                .tx_query_with_options(open, &shape, &binding, true)
+                .unwrap()
+                .is_empty()
+        );
+        client
+            .tx_write(open, "todos", row(2), title_cells("mine"), None)
+            .unwrap();
+        let (tx_id, _) = client
+            .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+            .unwrap();
+        client.database.close().unwrap();
+        tx_id
+    };
+
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let mut reopened = open_node_at(&temp_dir, schema);
+    let unit = reopened.commit_unit_for(tx_id).unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate: actual, .. } = &fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(actual, &Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty(),
+        "proofless reconstructed exclusive units must not create global rows"
+    );
+
+    reopened.apply_sync_message_settled(fate).unwrap();
+    assert!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
+    reopened.database.close().unwrap();
+}

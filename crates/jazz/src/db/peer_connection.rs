@@ -2574,6 +2574,15 @@ where
                             } else {
                                 self.node.lock().await.commit_unit_for(tx_id).await?
                             };
+                            if matches!(&unit, SyncMessage::CommitUnit { .. })
+                                && !super::local_replay_unit_has_complete_exclusive_evidence(&unit)
+                            {
+                                // A restored pending exclusive upload may have
+                                // lost its authored read proof. Keep the outbox
+                                // obligation and wait for the exact unit to be
+                                // supplied; never send a weaker reconstruction.
+                                continue;
+                            }
                             if let std::collections::btree_map::Entry::Vacant(entry) =
                                 large_value_uploads.entry(tx_id)
                             {

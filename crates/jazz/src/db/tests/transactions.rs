@@ -2046,6 +2046,237 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
 }
 
 #[test]
+fn exclusive_include_deleted_filtered_read_rejects_concurrent_insert_then_delete() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let target = row(0xd8);
+    let prepared = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("target"))))
+        .unwrap();
+    let open = OpenTransactionId::new();
+    db.begin_exclusive(open).unwrap();
+
+    assert!(
+        db.exclusive_tx_ref(open)
+            .all_prepared_with_opts(
+                &prepared,
+                ReadOpts {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty()
+    );
+    // A later ordinary read of the same shape must not erase its other mode.
+    assert!(
+        db.exclusive_tx_ref(open)
+            .all_prepared(&prepared)
+            .unwrap()
+            .is_empty()
+    );
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("target", false),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", target, Default::default()).unwrap();
+
+    let probe = OpenTransactionId::new();
+    db.begin_exclusive(probe).unwrap();
+    let include_deleted = db
+        .exclusive_tx_ref(probe)
+        .all_prepared_with_opts(
+            &prepared,
+            ReadOpts {
+                include_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(row_ids(&include_deleted), vec![target]);
+    assert!(include_deleted[0].is_deleted());
+    assert!(
+        db.exclusive_tx_ref(probe)
+            .all_prepared(&prepared)
+            .unwrap()
+            .is_empty(),
+        "ordinary reads omit the deleted row"
+    );
+    db.abandon_exclusive_handle(probe).unwrap();
+
+    let staged = row(0xd9);
+    db.exclusive_tx_ref(open)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("mine", false),
+            InsertOptions {
+                row_id: Some(staged),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let error = db.commit_exclusive_handle(open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    db.abandon_exclusive_handle(open).unwrap();
+
+    let all_rows = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        db.read(&all_rows).unwrap().is_empty(),
+        "rejected exclusive writes remain invisible"
+    );
+}
+
+#[test]
+fn exclusive_include_deleted_filtered_read_ignores_unrelated_same_table_write() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let deleted = row(0xdc);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("target", false),
+        InsertOptions {
+            row_id: Some(deleted),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", deleted, Default::default()).unwrap();
+    let prepared = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("target"))))
+        .unwrap();
+    let open = OpenTransactionId::new();
+    db.begin_exclusive(open).unwrap();
+    let rows = db
+        .exclusive_tx_ref(open)
+        .all_prepared_with_opts(
+            &prepared,
+            ReadOpts {
+                include_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(row_ids(&rows), vec![deleted]);
+    assert!(rows[0].is_deleted());
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("unrelated", false),
+        InsertOptions {
+            row_id: Some(row(0xda)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row(0xda), Default::default()).unwrap();
+    db.exclusive_tx_ref(open)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("mine", false),
+            InsertOptions {
+                row_id: Some(row(0xdb)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    db.commit_exclusive_handle(open).unwrap();
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(row_ids(&rows), vec![row(0xdb)]);
+}
+
+#[test]
+fn exclusive_include_deleted_detects_deletion_restoration_and_content_rewrites() {
+    for transition in ["delete", "restore", "content"] {
+        let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+        let target = row(0xdd);
+        db.insert(
+            "todos",
+            doctest_support::todo_cells("target", false),
+            InsertOptions {
+                row_id: Some(target),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if transition == "restore" {
+            db.delete("todos", target, Default::default()).unwrap();
+        }
+        let query = db
+            .prepare_query(
+                &Query::from("todos")
+                    .filter(eq(col("title"), lit("target")))
+                    .select(["title"]),
+            )
+            .unwrap();
+        let open = OpenTransactionId::new();
+        db.begin_exclusive(open).unwrap();
+        let before = db
+            .exclusive_tx_ref(open)
+            .all_prepared_with_opts(
+                &query,
+                ReadOpts {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(row_ids(&before), vec![target], "{transition}");
+        assert_eq!(before[0].is_deleted(), transition == "restore");
+        match transition {
+            "delete" => {
+                db.delete("todos", target, Default::default()).unwrap();
+            }
+            "restore" => {
+                let tx = db.mergeable_tx().unwrap();
+                tx.restore(
+                    "todos",
+                    target,
+                    Some(doctest_support::todo_cells("target", false)),
+                    Default::default(),
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            "content" => {
+                // The selected title stays unchanged, but its content version changes.
+                db.update(
+                    "todos",
+                    target,
+                    BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                    Default::default(),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let staged = row(0xde);
+        db.exclusive_tx_ref(open)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("mine", false),
+                InsertOptions {
+                    row_id: Some(staged),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let error = db.commit_exclusive_handle(open).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TransactionConflict, "{transition}");
+        db.abandon_exclusive_handle(open).unwrap();
+        assert!(
+            prepared_read(&db, &db.table("todos"))
+                .iter()
+                .all(|row| row.row_uuid() != staged),
+            "{transition}"
+        );
+    }
+}
+
+#[test]
 fn upsert_merges_existing_rows_but_writes_absent_rows_directly() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];

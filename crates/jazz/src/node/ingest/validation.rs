@@ -677,7 +677,18 @@ where
             && stored_tx
                 .as_ref()
                 .is_some_and(|stored| !stored.view_scoped_cardinality);
-        let storage_tx = if preserve_authoritative_cardinality {
+        let preserve_durable_evidence = stored_tx.as_ref().is_some_and(|stored| {
+            stored.tx.kind == TxKind::Exclusive
+                && stored.tx.base_snapshot.is_some()
+                && stored.tx.row_read_set.is_some()
+                && stored.tx.absent_read_set.is_some()
+                && stored.tx.predicate_read_set.is_some()
+                && tx.base_snapshot.is_none()
+                && tx.row_read_set.is_none()
+                && tx.absent_read_set.is_none()
+                && tx.predicate_read_set.is_none()
+        });
+        let storage_tx = if preserve_authoritative_cardinality || preserve_durable_evidence {
             &stored_tx.as_ref().expect("checked above").tx
         } else {
             &tx

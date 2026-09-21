@@ -46,10 +46,10 @@ use crate::protocol::ProgramFactEntry;
 use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
     MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
-    PolicyBindingKey, ProgramSourceId, ProgramSourceRole, ReadViewKey, ResultMemberEntry,
-    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
-    expand_version_carriers,
+    PolicyBindingKey, ProgramSourceId, ProgramSourceRole, ReadViewKey, ReadViewSpec,
+    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
+    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
+    VersionRecord, expand_version_carriers,
 };
 use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
@@ -65,8 +65,8 @@ use crate::tx::{
     AbsentRead, BranchWriteIntent, BranchWriteOperation, ContributionComponent,
     ContributionCoordinate, ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
     ContributionSubstitutionIndex, DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect,
-    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
-    Transaction, TransactionRecord, TxId, TxKind,
+    PredicateRead, PredicateReadMode, RejectedTransaction, RejectedVersion, RejectionReason,
+    RowRead, Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
 
 fn install_enum_case_ids(
@@ -2303,6 +2303,7 @@ impl CurrentRow {
             binding_fields,
             binding_field_names,
         );
+        projected.deleted = self.deleted;
         let fields = std::sync::Arc::make_mut(&mut projected.publication_fields);
         for field in fields {
             let Some(name) = field.application_name() else {

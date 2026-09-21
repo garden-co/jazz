@@ -1,3 +1,11 @@
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PredicateOutputIdentity {
+    row_uuid: RowUuid,
+    content: Option<TxId>,
+    deletion: Option<TxId>,
+    deleted: bool,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -240,7 +248,12 @@ where
         tx: &Transaction,
         versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        let Some(base_snapshot) = &tx.base_snapshot else {
+        let (Some(base_snapshot), Some(row_reads), Some(absent_reads), Some(predicate_reads)) = (
+            tx.base_snapshot.as_ref(),
+            tx.row_read_set.as_deref(),
+            tx.absent_read_set.as_deref(),
+            tx.predicate_read_set.as_deref(),
+        ) else {
             return Ok(false);
         };
         // Point-read records carry names, not schema IDs. A retained alias is
@@ -248,19 +261,10 @@ where
         // ponytail: scans retained schemas per distinct read table; index alias
         // agreement at catalogue activation if this becomes a measured cost.
         let mut read_schemas = BTreeMap::new();
-        for table in tx
-            .row_read_set
-            .as_deref()
-            .unwrap_or(&[])
+        for table in row_reads
             .iter()
             .map(|read| read.table.as_str())
-            .chain(
-                tx.absent_read_set
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|read| read.table.as_str()),
-            )
+            .chain(absent_reads.iter().map(|read| read.table.as_str()))
         {
             if read_schemas.contains_key(table) {
                 continue;
@@ -288,7 +292,7 @@ where
         let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
         let mut visible_layer_memo =
             BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
-        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
+        for read in row_reads {
             let current = self.visible_global_row_tx_id_now_memoized(
                 read_schemas[read.table.as_str()],
                 &read.table,
@@ -299,7 +303,7 @@ where
                 return Ok(false);
             }
         }
-        for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
+        for absent in absent_reads {
             let current = self.visible_global_row_tx_id_now_memoized(
                 read_schemas[absent.table.as_str()],
                 &absent.table,
@@ -310,7 +314,7 @@ where
                 return Ok(false);
             }
         }
-        for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
+        for predicate in predicate_reads {
             if self.predicate_read_is_degenerate_whole_table(predicate)? {
                 if self
                     .global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)
@@ -441,20 +445,55 @@ where
             return Ok(true);
         }
         if shape.query().aggregate.is_some() {
-            let at_base = self
-                .query_rows_at_snapshot(&shape, &binding, snapshot)
-                .await?;
-            let at_now = match comparison_snapshot {
-                Some(current) => {
-                    self.query_rows_at_snapshot(&shape, &binding, current)
+            let at_base = match predicate.mode {
+                PredicateReadMode::Visible => {
+                    self.query_rows_at_snapshot(&shape, &binding, snapshot)
                         .await?
                 }
-                None => {
-                    self.query_rows(&shape, &binding, DurabilityTier::Global)
+                PredicateReadMode::IncludeDeleted => {
+                    self.query_rows_including_deleted_at_snapshot(&shape, &binding, snapshot)
                         .await?
                 }
             };
+            let at_now = match (predicate.mode, comparison_snapshot) {
+                (PredicateReadMode::Visible, Some(current)) => {
+                    self.query_rows_at_snapshot(&shape, &binding, current)
+                        .await?
+                }
+                (PredicateReadMode::IncludeDeleted, Some(current)) => {
+                    self.query_rows_including_deleted_at_snapshot(&shape, &binding, current)
+                        .await?
+                }
+                (PredicateReadMode::Visible, None) => {
+                    self.query_rows(&shape, &binding, DurabilityTier::Global)
+                        .await?
+                }
+                (PredicateReadMode::IncludeDeleted, None) => {
+                    self.query_rows_including_deleted_with_query_engine(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        AuthorSubject::SYSTEM,
+                        QueryAuthorizationMode::TrustedServing,
+                        &ReadViewSpec::default(),
+                    )
+                    .await?
+                }
+            };
             return Ok(!Self::aggregate_query_outputs_equivalent(&at_base, &at_now));
+        }
+        if predicate.mode == PredicateReadMode::IncludeDeleted {
+            let at_base = self
+                .shape_output_identity_set_at_snapshot(&shape, &binding, snapshot)
+                .await?;
+            let at_now = match comparison_snapshot {
+                Some(current) => {
+                    self.shape_output_identity_set_at_snapshot(&shape, &binding, current)
+                        .await?
+                }
+                None => self.shape_output_identity_set_now(&shape, &binding).await?,
+            };
+            return Ok(at_base != at_now);
         }
         let at_base = self
             .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
@@ -491,6 +530,86 @@ where
             }
         }
         true
+    }
+
+    async fn shape_output_identity_set_now(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<BTreeSet<PredicateOutputIdentity>, Error> {
+        let table = shape.query().table.clone();
+        let table_id = self.physical_table_id_for_schema(shape.schema_version(), &table)?;
+        let rows = self
+            .query_rows_including_deleted_with_query_engine(
+                shape,
+                binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM,
+                QueryAuthorizationMode::TrustedServing,
+                &ReadViewSpec::default(),
+            )
+            .await?;
+        let mut set = BTreeSet::new();
+        for row in rows {
+            let Some((content, deletion, deleted)) = self
+                .visible_global_row_identity_now(table_id, row.row_uuid())
+                .await?
+            else {
+                return Err(Error::InvalidStoredValue(
+                    "include-deleted query output row has no global witnesses",
+                ));
+            };
+            if content.is_none() && deletion.is_none() {
+                return Err(Error::InvalidStoredValue(
+                    "include-deleted query output row has no content or deletion witness",
+                ));
+            }
+            set.insert(PredicateOutputIdentity {
+                row_uuid: row.row_uuid(),
+                content,
+                deletion,
+                deleted,
+            });
+        }
+        Ok(set)
+    }
+
+    async fn shape_output_identity_set_at_snapshot(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        snapshot: &Snapshot,
+    ) -> Result<BTreeSet<PredicateOutputIdentity>, Error> {
+        if snapshot.global_base == GlobalTime(0)
+            && snapshot.local_base == TxTime(0)
+            && snapshot.dots.is_empty()
+        {
+            return Ok(BTreeSet::new());
+        }
+        let table = shape.query().table.clone();
+        let rows = self
+            .query_rows_including_deleted_at_snapshot(shape, binding, snapshot)
+            .await?;
+        let mut set = BTreeSet::new();
+        for row in rows {
+            let row_uuid = row.row_uuid();
+            let snapshot_row = self
+                .snapshot_row_in_schema(shape.schema_version(), &table, row_uuid, snapshot)
+                .await?;
+            let (content, deletion, deleted) = snapshot_row.identity();
+            if content.is_none() && deletion.is_none() {
+                return Err(Error::InvalidStoredValue(
+                    "historical include-deleted output row has no witnesses",
+                ));
+            }
+            set.insert(PredicateOutputIdentity {
+                row_uuid,
+                content,
+                deletion,
+                deleted,
+            });
+        }
+        Ok(set)
     }
 
     async fn shape_output_tx_set_now(

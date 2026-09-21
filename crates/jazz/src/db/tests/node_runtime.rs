@@ -4243,6 +4243,188 @@ fn incomplete_retained_root_reloads_after_storage_repair() {
     );
 }
 
+#[test]
+fn legacy_exclusive_replay_waits_for_complete_authored_evidence() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xce; 16]);
+    let origin = open_db(0xce, author, &schema);
+    let worker = open_db(0xcf, author, &schema);
+    let open = OpenTransactionId::new();
+    origin.begin_exclusive(open).unwrap();
+    let query = origin
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("watched"))))
+        .unwrap();
+    origin
+        .exclusive_tx_ref(open)
+        .all_prepared_with_opts(
+            &query,
+            ReadOpts {
+                include_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    origin
+        .exclusive_tx_ref(open)
+        .insert("todos", cells("mine", false, author), Default::default())
+        .unwrap();
+    let tx_id = origin.commit_exclusive_handle(open).unwrap();
+    let authored = origin
+        .node
+        .outbox
+        .borrow()
+        .iter()
+        .find(|entry| entry.tx_id == tx_id)
+        .and_then(|entry| entry.unit.clone())
+        .expect("publication retains the complete authored unit");
+    let SyncMessage::CommitUnit { mut tx, versions } = authored.clone() else {
+        panic!("expected commit unit");
+    };
+    tx.base_snapshot = None;
+    tx.row_read_set = None;
+    tx.absent_read_set = None;
+    tx.predicate_read_set = None;
+    // A legacy durable audit row retains the versions, but not the read proof.
+    worker
+        .node
+        .node
+        .borrow_mut()
+        .ingest_relay_commit_unit(tx.clone(), versions.clone())
+        .unwrap();
+    let redacted = SyncMessage::CommitUnit { tx, versions };
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &queue, author, Some(redacted));
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &queue,
+    ))
+    .unwrap();
+    assert!(
+        queue.borrow().is_empty(),
+        "missing proof must not release payloads or acknowledgements"
+    );
+    assert!(
+        worker
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .all(|entry| entry.tx_id != tx_id || entry.unit.is_none()),
+        "a redacted exclusive unit must not be uploaded"
+    );
+    assert_eq!(worker.write_state(tx_id).unwrap().fate, Fate::Pending);
+
+    register_local_replay_route(&routes, tx_id, &queue, author, Some(authored));
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &queue,
+    ))
+    .unwrap();
+    assert!(queue.borrow().iter().any(|message| matches!(
+        message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+    )));
+    assert!(
+        worker
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|entry| entry.tx_id == tx_id && entry.unit.is_some())
+    );
+}
+
+#[test]
+fn restored_proofless_exclusive_upload_waits_for_complete_unit() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc0; 16]);
+    let origin = open_db(0xc0, author, &schema);
+    let worker = open_db(0xc1, author, &schema);
+    let open = OpenTransactionId::new();
+    origin.begin_exclusive(open).unwrap();
+    let query = origin
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("watched"))))
+        .unwrap();
+    origin
+        .exclusive_tx_ref(open)
+        .all_prepared_with_opts(
+            &query,
+            ReadOpts {
+                include_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    origin
+        .exclusive_tx_ref(open)
+        .insert("todos", cells("mine", false, author), Default::default())
+        .unwrap();
+    let tx_id = origin.commit_exclusive_handle(open).unwrap();
+    let authored = origin
+        .node
+        .outbox
+        .borrow()
+        .iter()
+        .find(|entry| entry.tx_id == tx_id)
+        .and_then(|entry| entry.unit.clone())
+        .expect("publication retains the complete authored unit");
+    let SyncMessage::CommitUnit { mut tx, versions } = authored.clone() else {
+        panic!("expected commit unit");
+    };
+    tx.base_snapshot = None;
+    tx.row_read_set = None;
+    tx.absent_read_set = None;
+    tx.predicate_read_set = None;
+    worker
+        .node
+        .node
+        .borrow_mut()
+        .ingest_relay_commit_unit(tx, versions)
+        .unwrap();
+
+    let (worker_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(worker.connect_upstream(worker_transport));
+    worker.node.queue_pending_upload(tx_id, None);
+    worker.tick().unwrap();
+    assert!(
+        std::iter::from_fn(|| authority_transport.try_recv()).all(
+            |message| !matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        ),
+        "a restored proofless exclusive unit must not be uploaded"
+    );
+    assert!(
+        worker
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|entry| entry.tx_id == tx_id && entry.unit.is_none())
+    );
+
+    worker.tick().unwrap();
+    assert!(
+        std::iter::from_fn(|| authority_transport.try_recv()).all(
+            |message| !matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        ),
+        "an incomplete restored unit must not cause a retry loop"
+    );
+
+    worker.node.queue_pending_upload(tx_id, Some(authored));
+    worker.tick().unwrap();
+    assert!(
+        std::iter::from_fn(|| authority_transport.try_recv()).any(
+            |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        ),
+        "the complete authored unit must unblock the retained upload"
+    );
+}
+
 fn local_replay_restore_point_reads(chain_len: usize) -> usize {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xd8; 16]);
