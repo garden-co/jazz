@@ -814,6 +814,7 @@ where
         table: &str,
         read_schema_version: SchemaVersionId,
         snapshot: &Snapshot,
+        include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
@@ -843,56 +844,73 @@ where
             }
         }
         let mut rows = Vec::new();
-        for (row_uuid, content) in content {
-            if deletions
-                .get(&row_uuid)
-                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
-            {
+        let mut row_uuids = content.keys().copied().collect::<BTreeSet<_>>();
+        row_uuids.extend(deletions.keys().copied());
+        for row_uuid in row_uuids {
+            let content = content.get(&row_uuid);
+            let deletion = deletions.get(&row_uuid);
+            let deleted =
+                deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted));
+            if deleted && !include_deleted {
                 continue;
             }
+            let source_version = content.or(deletion).ok_or(Error::InvalidStoredValue(
+                "snapshot row has no content or deletion witness",
+            ))?;
             let source_schema = self
-                .schema_version_for_alias(content.schema_version_alias())
+                .schema_version_for_alias(source_version.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(content.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let source_table = self.table_in_schema(source_version.table(), source_schema)?;
+            let mut cells = if let Some(content) = content {
+                self.materialized_cells_for_version(&source_table, content)?
+            } else {
+                BTreeMap::new()
+            };
             let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
-                content.table(),
+                source_version.table(),
                 &mut cells,
             )?
             else {
                 continue;
             };
-            if projected_table == table {
-                let updated = match deletions.get(&row_uuid) {
-                    Some(deletion)
-                        if self
-                            .version_tx_id(deletion)?
-                            .time
-                            .sort_key(self.version_tx_id(deletion)?.node)
-                            > self
-                                .version_tx_id(&content)?
-                                .time
-                                .sort_key(self.version_tx_id(&content)?.node) =>
+            if projected_table != table {
+                continue;
+            }
+            let updated = match (content, deletion) {
+                (Some(content), Some(deletion)) => {
+                    let content_tx = self.version_tx_id(content)?;
+                    let deletion_tx = self.version_tx_id(deletion)?;
+                    if deletion_tx.time.sort_key(deletion_tx.node)
+                        > content_tx.time.sort_key(content_tx.node)
                     {
                         deletion
+                    } else {
+                        content
                     }
-                    _ => &content,
-                };
-                match current_row_from_materialized_cells_with_layer_provenance(
-                    &read_table,
-                    &content,
-                    &content,
-                    updated,
-                    &cells,
-                ) {
-                    Ok(row) => rows.push(row),
-                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
-                    Err(error) => return Err(error),
                 }
+                (Some(content), None) => content,
+                (None, Some(deletion)) => deletion,
+                (None, None) => unreachable!("source version was checked above"),
+            };
+            let row_content = content.unwrap_or(source_version);
+            match current_row_from_materialized_cells_with_layer_provenance(
+                &read_table,
+                row_content,
+                row_content,
+                updated,
+                &cells,
+            ) {
+                Ok(row) => rows.push(if include_deleted && deleted {
+                    row.into_deleted()
+                } else {
+                    row
+                }),
+                Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                Err(error) => return Err(error),
             }
         }
         sort_current_rows(&mut rows);

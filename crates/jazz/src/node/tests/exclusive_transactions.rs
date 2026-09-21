@@ -179,6 +179,7 @@ fn exclusive_tx_reads_own_pending_writes() {
             shape: predicate_shape.query().clone(),
             binding_id: predicate_binding.binding_id(),
             binding_values: predicate_binding.values().clone(),
+            mode: crate::tx::PredicateReadMode::Visible,
         }]
     );
 }
@@ -492,7 +493,7 @@ fn partial_node_snapshot_advances_from_authoritative_settled_through() {
     assert_eq!(base.global_base, GlobalTime(2));
     assert_eq!(base.dots, vec![TxId::new(TxTime::new(13, 0), node(9))]);
     let rows = reader
-        .projected_snapshot_current_rows("todos", schema().version_id(), &base)
+        .projected_snapshot_current_rows("todos", schema().version_id(), &base, false)
         .resolve()
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -972,6 +973,322 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
         panic!("expected fate update");
     };
     assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+// Exercise the commit-unit admission seam so the concurrent rows reach only
+// the authority, never the originating client's local conflict check.
+#[test]
+fn exclusive_include_deleted_authority_rejects_inserted_then_deleted_phantom() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert!(
+        client
+            .tx_query_with_options(open, &shape, &binding, true)
+            .unwrap()
+            .is_empty()
+    );
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+    );
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 11).deletion(DeletionEvent::Deleted),
+    );
+    client
+        .tx_write(open, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 12)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn exclusive_include_deleted_authority_tracks_content_behind_unchanged_deletion() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+    );
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 20).deletion(DeletionEvent::Deleted),
+    );
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    let rows = client
+        .tx_query_with_options(open, &shape, &binding, true)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert!(rows[0].is_deleted());
+    // The deletion winner and projected title stay unchanged at the authority.
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 15).cells(title_cells("watched")),
+    );
+    client
+        .tx_write(open, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 30)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn exclusive_include_deleted_snapshot_keeps_newer_content_deleted() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let content_parent = commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+    );
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 20).deletion(DeletionEvent::Deleted),
+    );
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 30)
+            .parents(vec![content_parent])
+            .cells(title_cells("watched")),
+    );
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    let rows = client
+        .tx_query_with_options(open, &shape, &binding, true)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert!(
+        rows[0].is_deleted(),
+        "content writes cannot restore a deleted row"
+    );
+    assert!(client.tx_query(open, &shape, &binding).unwrap().is_empty());
+    client
+        .tx_write(open, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 40)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Accepted);
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row(2)]
+    );
+}
+
+#[test]
+fn exclusive_pending_duplicates_require_complete_evidence_and_versions() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    client
+        .tx_query_with_options(open, &shape, &binding, true)
+        .unwrap();
+    client
+        .tx_write(open, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let repeated = client
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &repeated[..],
+        [SyncMessage::FateUpdate {
+            fate: Fate::Pending,
+            ..
+        }]
+    ));
+    let mut missing_reads = tx.clone();
+    missing_reads.predicate_read_set = None;
+    let mut different_versions = versions.clone();
+    different_versions[0] = version_record(row(2), Vec::new(), title_cells("substituted"), None);
+    for (altered_tx, altered_versions) in [
+        (missing_reads, versions.clone()),
+        (tx.clone(), different_versions.clone()),
+    ] {
+        assert!(matches!(
+            client.ingest_commit_unit_settled(
+                altered_tx,
+                altered_versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            ),
+            Err(Error::ConflictingCommitUnit(id)) if id == tx.tx_id
+        ));
+    }
+    let (_partial_core_dir, mut partial_core) = open_node_with_uuid(node(8));
+    let mut partial = tx.clone();
+    partial.predicate_read_set = None;
+    let rejected = partial_core
+        .ingest_commit_unit_settled(partial, versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &rejected[..],
+        [SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            ..
+        }]
+    ));
+    assert!(
+        partial_core
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    let accepted = core
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &accepted[..],
+        [SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }]
+    ));
+    assert!(matches!(
+        core.ingest_commit_unit_settled(tx.clone(), different_versions, u64::MAX - SKEW_TOLERANCE_MS),
+        Err(Error::ConflictingCommitUnit(id)) if id == tx.tx_id
+    ));
+    let mut redacted = tx;
+    redacted.base_snapshot = None;
+    redacted.row_read_set = None;
+    redacted.absent_read_set = None;
+    redacted.predicate_read_set = None;
+    assert_eq!(
+        core.ingest_commit_unit_settled(redacted, versions, u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(2), title_cells("mine"))])
+    );
+}
+
+#[test]
+fn exclusive_include_deleted_returns_tombstone_without_content() {
+    let (_directory, mut client) = open_node();
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 10).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let shape = crate::query::Query::from("todos")
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    let rows = client
+        .tx_query_with_options(open, &shape, &binding, true)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert!(rows[0].is_deleted());
+    assert!(client.tx_query(open, &shape, &binding).unwrap().is_empty());
+    client.abandon_tx(open).unwrap();
 }
 
 #[test]

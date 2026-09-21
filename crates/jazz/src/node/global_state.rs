@@ -50,6 +50,88 @@ where
         Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
     }
 
+    async fn global_layer_tx_id_checked(
+        &mut self,
+        table_id: PhysicalTableId,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<TxId>, Error> {
+        let current_table = match layer {
+            VersionLayer::Content => physical_global_current_table_name(table_id),
+            VersionLayer::Deletion => physical_register_global_current_table_name(table_id),
+        };
+        let Some(raw) = self
+            .database
+            .primary_key_get_raw(
+                &current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = raw.record();
+        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias =
+            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let tx_node = self
+            .node_for_alias(tx_node_alias)
+            .ok_or(Error::InvalidStoredValue(
+                "global current row node alias must exist",
+            ))?;
+        Ok(Some(TxId::new(tx_time, tx_node)))
+    }
+
+    /// Return both immutable layer winners and the current deletion state.
+    ///
+    /// Include-deleted predicate evidence must retain content and deletion
+    /// witnesses independently; the visible-row helper intentionally returns
+    /// only the winner of the effective row register.
+    pub(super) async fn visible_global_row_identity_now(
+        &mut self,
+        table_id: PhysicalTableId,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(Option<TxId>, Option<TxId>, bool)>, Error> {
+        let content = self
+            .global_layer_tx_id_checked(table_id, row_uuid, VersionLayer::Content)
+            .await?;
+        let (deletion, deleted) = if let Some(raw) = self
+            .database
+            .primary_key_get_raw(
+                &physical_register_global_current_table_name(table_id),
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?
+        {
+            let record = raw.record();
+            let alias =
+                NodeAlias(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                "global deletion row node alias must exist",
+            ))?;
+            let tx_id = TxId::new(
+                TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                node,
+            );
+            let deleted = deletion_event_from_value(
+                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+            )? == DeletionEvent::Deleted;
+            (Some(tx_id), deleted)
+        } else {
+            (None, false)
+        };
+        if content.is_none() && deletion.is_none() {
+            return Ok(None);
+        }
+        Ok(Some((content, deletion, deleted)))
+    }
+
     pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,

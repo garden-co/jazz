@@ -1018,11 +1018,22 @@ where
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
             .clone();
+        let output = materialization_app_row_schema(None, Some(program))?;
+        let deleted_idx = output
+            .descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some("__jazz_deleted"));
         let mut rows = Vec::new();
         for (record, weight) in app_rows.iter() {
             if weight > 0 {
+                let deleted = deleted_idx
+                    .map(|index| record.get_bool(index))
+                    .transpose()?
+                    .unwrap_or(false);
                 let row = decode_current_row(&table, record)?;
-                rows.push(self.materialize_current_row(&table, row)?);
+                let row = self.materialize_current_row(&table, row)?;
+                rows.push(if deleted { row.into_deleted() } else { row });
             }
         }
         // Multisink records are transport-key ordered. Restore public root rank

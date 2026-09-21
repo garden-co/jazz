@@ -321,6 +321,7 @@ where
                 row_uuid,
                 snapshot_row,
             )?;
+            let cells = cells.or_else(|| (include_deleted && deleted).then(BTreeMap::new));
             if let Some(cells) = cells
                 && (!deleted || include_deleted)
             {
@@ -386,6 +387,11 @@ where
                 shape: shape.query().clone(),
                 binding_id: binding.binding_id(),
                 binding_values: binding.values().clone(),
+                mode: if include_deleted {
+                    crate::tx::PredicateReadMode::IncludeDeleted
+                } else {
+                    crate::tx::PredicateReadMode::Visible
+                },
             });
         Ok(current)
     }
@@ -1606,6 +1612,48 @@ where
             })
     }
 
+    async fn snapshot_layer_winner_checked(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        snapshot: &Snapshot,
+    ) -> Result<Option<VersionRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            let tx_id = self.version_tx_id(version)?;
+            let version_layer = if version.is_register_record() {
+                VersionLayer::Deletion
+            } else {
+                VersionLayer::Content
+            };
+            if version_layer == layer && self.snapshot_covers(tx_id, snapshot).await {
+                candidate_indices.push(idx);
+            }
+        }
+        Ok(
+            current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
+                .map(|idx| versions[idx].clone()),
+        )
+    }
+
+    fn snapshot_deletion_event(version: &VersionRow) -> Result<Option<DeletionEvent>, Error> {
+        if !version.is_register_record() {
+            return Ok(None);
+        }
+        deletion_event_from_value(
+            version
+                .record
+                .borrowed()
+                .get_idx(RegisterRowRecord::FIELD__DELETION_IDX)?,
+        )
+        .map(Some)
+    }
+
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
@@ -1614,27 +1662,28 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Content,
                 snapshot,
             )
-            .await;
+            .await?;
         let deletion = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Deletion,
                 snapshot,
             )
-            .await;
-        let deleted = matches!(
-            deletion.as_ref().and_then(|version| version.deletion()),
-            Some(DeletionEvent::Deleted)
-        );
+            .await?;
+        let deletion_event = deletion
+            .as_ref()
+            .map(Self::snapshot_deletion_event)
+            .transpose()?;
+        let deleted = deletion_event.flatten() == Some(DeletionEvent::Deleted);
         let target_table = self.table_in_schema(table, schema_version)?;
         let content_cells = if let Some(version) = content.as_ref() {
             let source_schema = self
@@ -1676,25 +1725,28 @@ where
             };
             Some((content.clone(), updated.clone()))
         } else {
-            None
+            deletion
+                .as_ref()
+                .map(|version| (version.clone(), version.clone()))
+        };
+        let content_version = content
+            .as_ref()
+            .map(|version| self.version_tx_id(version))
+            .transpose()?;
+        let deletion_version = deletion
+            .as_ref()
+            .map(|version| self.version_tx_id(version))
+            .transpose()?;
+        let read_version = if deleted {
+            deletion_version
+        } else {
+            content_version
         };
         Ok(SnapshotRow {
             content_cells,
-            content_version: content
-                .as_ref()
-                .and_then(|version| self.version_tx_id(version).ok()),
-            deletion_version: deletion
-                .as_ref()
-                .and_then(|version| self.version_tx_id(version).ok()),
-            read_version: if deleted {
-                deletion
-                    .as_ref()
-                    .and_then(|version| self.version_tx_id(version).ok())
-            } else {
-                content
-                    .as_ref()
-                    .and_then(|version| self.version_tx_id(version).ok())
-            },
+            content_version,
+            deletion_version,
+            read_version,
             deleted,
             provenance,
         })
@@ -1909,4 +1961,10 @@ pub(super) struct SnapshotRow {
     read_version: Option<TxId>,
     deleted: bool,
     provenance: Option<(VersionRow, VersionRow)>,
+}
+
+impl SnapshotRow {
+    pub(super) fn identity(&self) -> (Option<TxId>, Option<TxId>, bool) {
+        (self.content_version, self.deletion_version, self.deleted)
+    }
 }
