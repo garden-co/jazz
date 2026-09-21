@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createBrowserCrypto } from "./browser.js";
 import { createNativeCrypto } from "./native.js";
 import { bytes, vectors } from "./fixtures/vectors.js";
@@ -57,6 +57,69 @@ describe.each([
     },
     5_000,
   );
+
+  describe.each(["encrypt", "decrypt"] as const)("%s early return", (operation) => {
+    it.each(["stalls", "rejects", "throws", "getter throws"])(
+      "finishes without waiting for source cleanup that %s",
+      async (cleanup) => {
+        const cipher = (await createCrypto()).largeValueCipher!;
+        const key = new Uint8Array(32);
+        const context = new Uint8Array();
+        const plaintext = new Uint8Array(65_536).fill(7);
+        const input =
+          operation === "encrypt"
+            ? plaintext
+            : await collect(cipher.encrypt(key, context, chunks(plaintext, plaintext.length)));
+        let cleanupRequests = 0;
+        let releaseCleanup!: () => void;
+        const pendingCleanup = new Promise<void>((resolve) => {
+          releaseCleanup = resolve;
+        });
+        const source: AsyncIterable<Uint8Array> = {
+          [Symbol.asyncIterator]() {
+            return {
+              next: async () => ({ value: input, done: false }),
+              get return() {
+                if (cleanup === "getter throws") {
+                  cleanupRequests++;
+                  throw new Error("Cleanup getter failure");
+                }
+                return () => {
+                  cleanupRequests++;
+                  if (cleanup === "throws") throw new Error("Cleanup failure");
+                  if (cleanup === "rejects") return Promise.reject(new Error("Cleanup failure"));
+                  return pendingCleanup.then(() => ({ value: undefined, done: true as const }));
+                };
+              },
+            };
+          },
+        };
+        const stream = cipher[operation](key, context, source)[Symbol.asyncIterator]();
+        if (operation === "encrypt") await stream.next();
+        expect((await stream.next()).done).toBe(false);
+        vi.useFakeTimers();
+        const returned = stream.return!();
+        try {
+          const outcome = Promise.race([
+            returned,
+            new Promise<"blocked">((resolve) => {
+              setTimeout(() => resolve("blocked"), 250);
+            }),
+          ]).then(
+            (result) => ({ result }),
+            (error: unknown) => ({ error }),
+          );
+          await vi.runAllTimersAsync();
+          expect(await outcome).toEqual({ result: { value: undefined, done: true } });
+          expect(cleanupRequests).toBe(1);
+        } finally {
+          vi.useRealTimers();
+          releaseCleanup();
+          await returned.catch(() => {});
+        }
+      },
+    );
+  });
 
   it("opens the independent C/libsodium stream fixture", async () => {
     const cipher = (await createCrypto()).largeValueCipher!;
