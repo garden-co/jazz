@@ -2898,4 +2898,65 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn dependency_metadata_includes_arrange_consumers() {
+        let mut graph = IvmGraph::new();
+        let source = graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::TableSource(TableSourceOp {
+                    table: "rows".to_owned(),
+                    scan: None,
+                    variant_projection: None,
+                }),
+                [],
+                output(),
+            ),
+            NodeDurability::Ephemeral,
+        );
+        assert!(
+            !graph.node(source).unwrap().depends_on_aggregate(),
+            "a plain source must not require arrangement hydration"
+        );
+
+        let arrangement = graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Arrange(ArrangeOp {
+                    fields: vec!["f0".to_owned()],
+                    comparison: ValueComparison::Exact,
+                }),
+                [source],
+                NodeOutput::Arrangement(ArrangementDescriptor { records: output() }),
+            ),
+            NodeDurability::Ephemeral,
+        );
+        assert!(
+            graph.node(arrangement).unwrap().depends_on_aggregate(),
+            "arrangement state is part of hydration readiness"
+        );
+
+        let top_by = graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::TopBy(TopByOp {
+                    group_fields: Vec::new(),
+                    group_field_indices: Vec::new(),
+                    order_fields: vec![TopByOrderField {
+                        field: "f0".to_owned(),
+                        direction: TopByDirection::Asc,
+                    }],
+                    tie_fields: vec!["f0".to_owned()],
+                    sort_field_indices: vec![0, 0],
+                    sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],
+                    offset: 0,
+                    limit: TopByLimit::Unbounded,
+                }),
+                [arrangement],
+                output(),
+            ),
+            NodeDurability::Ephemeral,
+        );
+        assert!(
+            graph.node(top_by).unwrap().depends_on_aggregate(),
+            "arrangement consumers inherit hydration readiness"
+        );
+    }
 }
