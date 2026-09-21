@@ -2179,8 +2179,8 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     // the server. Using EdgeServer durability here would bypass the bug: the
     // server holds the correct value regardless, so an EdgeServer read always
     // returns title="original" even when alice never received a rollback event.
-    let expected_row = document_row_values(super::BOB_ID, "original");
-    let alice_rows = wait_for_query(
+    let expected = document_row_values(super::BOB_ID, "original");
+    wait_for_query(
         &alice,
         query,
         jazz::tools::ReadTier::LocalFirst,
@@ -2188,17 +2188,11 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
         "alice: local cache converged after rollback",
         |rows| {
             rows.iter()
-                .find(|(id, values)| *id == doc_id && *values == expected_row)
-                .map(|(_, values)| values.clone())
+                .any(|(id, values)| *id == doc_id && values == &expected)
+                .then_some(())
         },
     )
     .await;
-
-    assert_eq!(
-        alice_rows, expected_row,
-        "alice must see the rollback — the rejected title update should be \
-         reverted so she knows the mutation failed"
-    );
 
     alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
