@@ -546,7 +546,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
 
 /// An admission proof may hand its immutable compiler output to the first
-/// matching installer. No evaluator, binding, rows or subscription is retained.
+/// matching installer. No evaluator, live binding, rows or subscription is retained.
 /// Consuming the program leaves the cheap capability proof resident.
 #[derive(Clone, Debug)]
 pub(crate) struct SupportedQueryProgram {
@@ -655,8 +655,8 @@ where
             if program.is_none() {
                 return;
             }
-            // The compiler already recorded the proof. Remove that entry so
-            // admission can attach its one-use product with the same budget.
+            // The compiler already recorded the proof. Release any old product
+            // before attaching this one with the same handoff budget.
             entry.program = None;
         } else {
             // FIFO eviction only causes recompilation. There is no lifetime
@@ -728,38 +728,17 @@ where
         {
             return Ok(program);
         }
-        let result = self
-            .compile_query_program_request_without_admission_handoff(request, access_paths)
-            .await;
-        // The order can be reversed: a foreground installs locally before it
-        // receives RegisterShape. Its successful compilation is already the
-        // exact capability proof; later admission need not compile it again.
-        if result.is_ok()
-            && let Some(key) = key
+        let cache_key = query_program_cache_safe(&request)
+            .then(|| query_program_cache_key(&request, &access_paths));
+        if let Some(program) = cache_key
+            .as_ref()
+            .and_then(|key| self.query.compiled_query_program_cache.get(key))
         {
-            self.remember_supported_query_program(key, None);
-        }
-        result
-    }
-
-    async fn compile_query_program_request_without_admission_handoff(
-        &mut self,
-        request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
-    ) -> Result<QueryProgram, Error> {
-        if !query_program_cache_safe(&request) {
-            return self
-                .compile_query_program_request_with_inline_sources_and_access_paths(
-                    request,
-                    BTreeMap::new(),
-                    access_paths,
-                )
-                .await;
-        }
-
-        let cache_key = query_program_cache_key(&request, &access_paths);
-        if let Some(program) = self.query.compiled_query_program_cache.get(&cache_key) {
-            return Ok((**program).clone());
+            let program = (**program).clone();
+            if let Some(key) = key {
+                self.remember_supported_query_program(key, None);
+            }
+            return Ok(program);
         }
         let program = self
             .compile_query_program_request_with_inline_sources_and_access_paths(
@@ -768,21 +747,30 @@ where
                 access_paths,
             )
             .await?;
-        if self.query.compiled_query_program_cache.len() >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
-            && let Some(eviction_key) = self
-                .query
-                .compiled_query_program_cache
-                .keys()
-                .next()
-                .cloned()
-        {
+        if let Some(cache_key) = cache_key {
+            if self.query.compiled_query_program_cache.len()
+                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+                && let Some(eviction_key) = self
+                    .query
+                    .compiled_query_program_cache
+                    .keys()
+                    .next()
+                    .cloned()
+            {
+                self.query
+                    .compiled_query_program_cache
+                    .remove(&eviction_key);
+            }
             self.query
                 .compiled_query_program_cache
-                .remove(&eviction_key);
+                .insert(cache_key, Arc::new(program.clone()));
         }
-        self.query
-            .compiled_query_program_cache
-            .insert(cache_key, Arc::new(program.clone()));
+        // The order can be reversed: a foreground installs locally before it
+        // receives RegisterShape. Its successful compilation is already the
+        // exact capability proof; later admission need not compile it again.
+        if let Some(key) = key {
+            self.remember_supported_query_program(key, None);
+        }
         Ok(program)
     }
 
