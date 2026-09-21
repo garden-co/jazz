@@ -1796,8 +1796,9 @@ fn covered_input_for_version(
 
 /// Rebind a runtime terminal operation to its early-bound prepared layout.
 ///
-/// The runtime may tighten a root field from `Nullable(T)` to `T` after an
-/// inner proof.  That is not an alternate public layout: the prepared layout
+/// The runtime may tighten one or more nullable layers of a root field after
+/// an inner proof. Optional cells have both cell-presence and schema-null
+/// layers. That is not an alternate public layout: the prepared layout
 /// is the subscription's immutable decoding contract.  Re-encode only a
 /// root-level payload into that contract, preserving the source value as a
 /// present nullable cell. Nested edits address named collections and stable
@@ -1884,7 +1885,7 @@ fn terminal_descriptor_can_rebind_to_layout(
 
 fn terminal_field_can_rebind_to_layout(source: &ValueType, target: &ValueType) -> bool {
     source == target
-        || matches!(target, ValueType::Nullable(inner) if source == inner.as_ref())
+        || matches!(target, ValueType::Nullable(inner) if terminal_field_can_rebind_to_layout(source, inner))
         || RecordProjector::new_registry_rebound(
             RecordDescriptor::new([("value", source.clone())]),
             RecordDescriptor::new([("value", target.clone())]),
@@ -1925,9 +1926,11 @@ fn rebind_terminal_value(
         return Ok(value);
     }
     if let ValueType::Nullable(inner) = target
-        && source == inner.as_ref()
+        && terminal_field_can_rebind_to_layout(source, inner)
     {
-        return Ok(Value::Nullable(Some(Box::new(value))));
+        return Ok(Value::Nullable(Some(Box::new(rebind_terminal_value(
+            value, source, inner,
+        )?))));
     }
     if !terminal_field_can_rebind_to_layout(source, target) {
         return Err(super::Error::InvalidStoredValue(
@@ -4142,6 +4145,69 @@ mod tests {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x72).0)))),
             ]
         );
+    }
+
+    #[test]
+    // Internal boundary fixture: public query syntax cannot require a particular
+    // optimized terminal descriptor. An optional cell has both the CurrentRow
+    // presence wrapper and its schema null wrapper; inner joins can prove both.
+    fn terminal_operation_rebinds_fully_tightened_optional_cell() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_child",
+                ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Uuid)))),
+            ),
+        ]);
+        let row_uuid = row(0x71);
+        let child = row(0x72);
+        for insert in [true, false] {
+            let value = source
+                .create(&[Value::Uuid(row_uuid.0), Value::Uuid(child.0)])
+                .unwrap();
+            let key = row_uuid.0.as_bytes().to_vec();
+            let operation = TerminalOperation {
+                root_descriptor: source,
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: if insert {
+                    TerminalEdit::Insert {
+                        index: 0,
+                        key,
+                        value,
+                    }
+                } else {
+                    TerminalEdit::Update { key, value }
+                },
+            };
+            let rebound = rebind_terminal_operation_to_layout(operation, &layout(target)).unwrap();
+            assert_eq!(rebound.root_descriptor, target);
+            let value = match rebound.edit {
+                TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => value,
+                _ => panic!("payload edit retained"),
+            };
+            assert_eq!(
+                target.bind(&value).to_values().unwrap(),
+                vec![
+                    Value::Uuid(row_uuid.0),
+                    Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(
+                        Value::Uuid(child.0)
+                    )))))),
+                ]
+            );
+        }
+        assert!(!terminal_field_can_rebind_to_layout(
+            &ValueType::String,
+            &target.fields()[1].value_type
+        ));
+        assert!(!terminal_field_can_rebind_to_layout(
+            &target.fields()[1].value_type,
+            &ValueType::Uuid
+        ));
     }
 
     #[test]

@@ -41,28 +41,28 @@ const wequencerPermissions = s.definePermissions(
     policy.sessions.allowInsert.always();
     policy.sessions.allowUpdate.where({ "$createdBy.account": session.user.account });
     policy.sessions.allowDelete.where({ "$createdBy.account": session.user.account });
-    policy.session_members.allowRead.where(allowedTo.read("session_id"));
-    policy.session_members.allowInsert.where(allowedTo.update("session_id"));
+    policy.session_members.allowRead.where(allowedTo.read("session"));
+    policy.session_members.allowInsert.where(allowedTo.update("session"));
     policy.session_members.allowUpdate.never();
-    policy.session_members.allowDelete.where(allowedTo.update("session_id"));
+    policy.session_members.allowDelete.where(allowedTo.update("session"));
     policy.tracks.allowRead.where((row) => isMember(row.session_id));
     policy.tracks.allowInsert.where((row) => canEdit(row.session_id));
     policy.tracks.allowUpdate.where((row) => canEdit(row.session_id));
     policy.tracks.allowDelete.where((row) => isCreator(row.session_id));
-    policy.steps.allowRead.where(allowedTo.read("track_id"));
-    policy.steps.allowInsert.where(allowedTo.update("track_id"));
-    policy.steps.allowUpdate.where(allowedTo.update("track_id"));
-    policy.steps.allowDelete.where(allowedTo.update("track_id"));
+    policy.steps.allowRead.where(allowedTo.read("track"));
+    policy.steps.allowInsert.where(allowedTo.update("track"));
+    policy.steps.allowUpdate.where(allowedTo.update("track"));
+    policy.steps.allowDelete.where(allowedTo.update("track"));
     policy.transport_observations.allowRead.where((row) => isMember(row.session_id));
     policy.transport_observations.allowInsert.where((row) => canEdit(row.session_id));
     policy.transport_observations.allowUpdate.where((row) => canEdit(row.session_id));
     policy.transport_observations.allowDelete.where((row) => canEdit(row.session_id));
     policy.presence.allowRead.where((row) => isMember(row.session_id));
     policy.presence.allowInsert.where((row) =>
-      allOf([isMember(row.session_id), allowedTo.update("profile_id")]),
+      allOf([isMember(row.session_id), allowedTo.update("profile")]),
     );
     policy.presence.allowUpdate.where((row) =>
-      allOf([isMember(row.session_id), allowedTo.update("profile_id")]),
+      allOf([isMember(row.session_id), allowedTo.update("profile")]),
     );
     policy.presence.allowDelete.where({ "$createdBy.account": session.user.account });
   },

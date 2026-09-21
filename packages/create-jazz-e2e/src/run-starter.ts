@@ -10,6 +10,8 @@ import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev
 import type { WasmSchema } from "jazz-tools/backend";
 import type { CompiledPermissions } from "jazz-tools/permissions";
 
+import { startTransportFaultProxy } from "./transport-fault-proxy.js";
+
 import { getStarterConfig, type StarterName } from "./starters.js";
 
 const APP_NAME = "test-app";
@@ -542,6 +544,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
   const config = getStarterConfig(opts.starter);
   const durations: PhaseTiming[] = [];
   let server: LocalJazzServerHandle | undefined;
+  let transportProxy: Awaited<ReturnType<typeof startTransportFaultProxy>> | undefined;
   const ownsWorkDir = opts.workDir === undefined;
   const workDir = opts.workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `cje2e-${opts.starter}-`));
   fs.mkdirSync(workDir, { recursive: true });
@@ -655,7 +658,23 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
           }
         : {}),
     });
-    writeEnvFile(appDir, opts.starter, server, config);
+    if (opts.starter === "next-betterauth" && !opts.skipE2E) {
+      transportProxy = await startTransportFaultProxy(server.url);
+      // Internal fault controls belong to the harness, not the generated starter's tests.
+      fs.copyFileSync(
+        path.join(
+          opts.repoRoot,
+          "packages/create-jazz-e2e/fixtures/next-betterauth-transport-loss.spec.ts",
+        ),
+        path.join(appDir, "e2e/transport-loss.spec.ts"),
+      );
+    }
+    writeEnvFile(
+      appDir,
+      opts.starter,
+      transportProxy ? { ...server, url: transportProxy.url } : server,
+      config,
+    );
 
     await recordPhase("build", () =>
       runChild("pnpm", ["build"], {
@@ -684,6 +703,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
           env: {
             ...process.env,
             JAZZ_E2E_PROD: "1",
+            JAZZ_E2E_TRANSPORT_CONTROL_URL: transportProxy?.controlUrl ?? "",
             JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE: opts.cancelReopenSubscriptionProbe
               ? "1"
               : "",
@@ -704,6 +724,13 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   } finally {
+    if (transportProxy) {
+      try {
+        await transportProxy.stop();
+      } catch {
+        // Continue cleaning up the underlying server and temporary project.
+      }
+    }
     if (server) {
       try {
         await server.stop();
