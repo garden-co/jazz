@@ -117,7 +117,7 @@ describe("JazzClient runtime helpers", () => {
       new (
         runtime: Runtime,
         context: AppContext,
-        defaultDurabilityTier: "local" | "edge" | "global",
+        defaultDurabilityTier: "local" | "global",
       ): JazzClient;
     };
     const client = new JazzClientCtor(
@@ -128,7 +128,7 @@ describe("JazzClient runtime helpers", () => {
         serverUrl: "http://localhost:1625",
         backendSecret: "test-backend-secret",
       },
-      "edge",
+      "global",
     );
 
     const transactionId = client.beginTransaction("exclusive");

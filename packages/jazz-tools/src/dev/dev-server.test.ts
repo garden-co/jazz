@@ -142,7 +142,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               title: { type: "Text", value: "schema-source startup" },
               done: { type: "Boolean", value: false },
             });
-            await expect(inserted.wait({ tier: "edge" })).resolves.toBeDefined();
+            await expect(inserted.wait({ tier: "global" })).resolves.toBeDefined();
           } finally {
             await client?.shutdown();
             await server?.stop();

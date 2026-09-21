@@ -19,7 +19,7 @@ export function TodoList() {
   // #endregion where-subscription-react
 
   // #region reading-tier-react
-  const todosAtEdgeDurability = useAll(app.todos, { tier: "edge" });
+  const todosAtEdgeDurability = useAll(app.todos, { tier: "global" });
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
