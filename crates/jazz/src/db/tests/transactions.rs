@@ -2046,6 +2046,128 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
 }
 
 #[test]
+fn exclusive_include_deleted_filtered_read_rejects_concurrent_insert_then_delete() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let target = row(0xd8);
+    let prepared = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("target"))))
+        .unwrap();
+    let open = OpenTransactionId::new();
+    db.begin_exclusive(open).unwrap();
+
+    assert!(
+        db.exclusive_tx_ref(open)
+            .all_prepared_with_opts(
+                &prepared,
+                ReadOpts {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("target", false),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", target, Default::default()).unwrap();
+
+    let probe = OpenTransactionId::new();
+    db.begin_exclusive(probe).unwrap();
+    let include_deleted = db
+        .exclusive_tx_ref(probe)
+        .all_prepared_with_opts(
+            &prepared,
+            ReadOpts {
+                include_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(row_ids(&include_deleted), vec![target]);
+    assert!(
+        db.exclusive_tx_ref(probe)
+            .all_prepared(&prepared)
+            .unwrap()
+            .is_empty(),
+        "ordinary reads omit the deleted row"
+    );
+    db.abandon_exclusive_handle(probe).unwrap();
+
+    let staged = row(0xd9);
+    db.exclusive_tx_ref(open)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("mine", false),
+            InsertOptions {
+                row_id: Some(staged),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let error = db.commit_exclusive_handle(open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    db.abandon_exclusive_handle(open).unwrap();
+
+    let all_rows = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        db.read(&all_rows).unwrap().is_empty(),
+        "rejected exclusive writes remain invisible"
+    );
+}
+
+#[test]
+fn exclusive_include_deleted_filtered_read_ignores_unrelated_same_table_write() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("target"))))
+        .unwrap();
+    let open = OpenTransactionId::new();
+    db.begin_exclusive(open).unwrap();
+    assert!(
+        db.exclusive_tx_ref(open)
+            .all_prepared_with_opts(
+                &prepared,
+                ReadOpts {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("unrelated", false),
+        InsertOptions {
+            row_id: Some(row(0xda)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.exclusive_tx_ref(open)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("mine", false),
+            InsertOptions {
+                row_id: Some(row(0xdb)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let committed = db.commit_exclusive_handle(open).unwrap();
+    assert_eq!(db.write_state(committed).unwrap().fate, Fate::Accepted);
+}
+
+#[test]
 fn upsert_merges_existing_rows_but_writes_absent_rows_directly() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
