@@ -474,7 +474,7 @@ Jazz has no large-value-specific durable root registry. A Jazz version is an
 ordinary Groove physical record, and Groove's persisted record mutation owns
 the descriptor reference delta described in Groove chapter 9. Jazz updates and
 logical deletes append versions and therefore do not release old roots. The
-existing edge-cache eviction and rejected-version cleanup paths physically
+existing explicit client-cache eviction and rejected-version cleanup paths physically
 delete or move versions; their ordinary Groove batches account for descriptors
 like every other physical-record mutation.
 

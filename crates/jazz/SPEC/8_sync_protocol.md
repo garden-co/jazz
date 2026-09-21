@@ -51,7 +51,7 @@ Invariant digest:
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
-- `INV-SYNC-41`: A partial Edge MUST NOT authorize query or exact-version repair bytes using stale cached policy inputs. Delegated client scopes remain client-scoped across trusted links; Edge-owned SYSTEM query reconciliation MUST NOT create access-loss markers.
+- `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
 - `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
 - `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
 
@@ -159,7 +159,7 @@ repair responses.
 Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
 Core can emit a policy-only snapshot at the same write revision that v3 receivers
 reject. Therefore v2 peers fail the Hello handshake rather than reaching that
-semantic mismatch. Clients and Edge/Core servers must upgrade together. Existing
+semantic mismatch. Clients and Core servers must upgrade together. Existing
 message discriminants remain fixed, including retired tag 12; this wire boundary
 does not change storage formats or remove legacy storage upgrade paths.
 
@@ -481,8 +481,8 @@ remain implementation details (`INV-SYNC-7`, `INV-SYNC-36`, `INV-SYNC-44`).
 
 The authority filters disclosure under the exact admitted reader and query
 context before shipping any supporting version. Pending versions remain local
-to their author until accepted. A partial Edge consumes Core-authorized inputs
-for delegated client queries; possession of other cached rows is not authority
+to their author until accepted. A local client relay consumes Core-authorized inputs
+for its admitted client queries; possession of other cached rows is not authority
 to serve them to that reader (`INV-SYNC-12..14`, `INV-SYNC-41`).
 
 ### 8.4.1 Reconstructing results and repairing native bodies
@@ -799,7 +799,7 @@ effects. It does not claim that the receiver possesses unrelated transactions,
 and neither density nor numerical adjacency is required: the authority may
 advance one binding directly across arbitrarily many irrelevant commits. It may
 be reused within one process across reconnects
-or edges serving the same authoritative database lineage for known-state payload
+serving the same authoritative database lineage for known-state payload
 dedup and repair, but is never persisted or recovered. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
 the selected continuously live upstream connection has sent a fresh confirming
@@ -819,7 +819,7 @@ reach at least `p`. The same floor applies to fallback-staged or deferred
 updates marked ineligible for an authority receipt, even if their link becomes
 selected before the update is finally applied.
 
-Only cores are history-complete. An edge or client therefore tracks
+Only cores are history-complete. A client or its local relay therefore tracks
 `settled_through` per binding/subscription as proof that each exact result is
 materialized. A fresh subscription requires its own authoritative evaluation; a
 receipt for one binding says nothing about another binding's local result. A
@@ -904,8 +904,7 @@ not leak into row/version encoding.
 staged-batch seam rather than an `OrderedKvStorage` transaction. The wire
 envelope has no portable resume credentials or trace/replay ids, and the
 canonical cross-language fixture set is incomplete. The ordinary committed-unit
-path also remains primarily client-to-core; the client-to-edge-to-core topology
-is being exercised incrementally. Worker bridges have not yet converged on the
+path is client-to-Core, optionally through a local persistence relay. Worker bridges have not yet converged on the
 network wire-frame batches.
 
 ### Query-driven reconciliation of current inputs
@@ -938,7 +937,7 @@ still show the updated task. A live-exit push is an eager optimization; a missed
 push must not be the only opportunity to repair this query after reconnect.
 
 This exchange also crosses local foreground-to-worker links. A default local
-query may read through a durable worker before reaching an Edge or Core; the
+query may read through a durable worker before reaching Core; the
 immediate hop being Local does not disable reconciliation. Each hop retains its
 fresh endpoint epoch and authenticated session independently of whether its
 peer is an authority. An ordinary client need not advertise an authority in
@@ -1009,7 +1008,7 @@ is deferred.
 remote query and MUST NOT be implemented by telling another node to stop there.
 Every peer subscription with `propagate_upstream=false` MUST be rejected through
 the ordinary subscription rejection path, regardless of trust, SYSTEM identity,
-Core/Edge role or worker transport. This rule covers both RegisterShape and
+Core role or worker transport. This rule covers both RegisterShape and
 Subscribe admission. Local-only API execution remains available on every node.
 
 A browser foreground's strictly local query therefore reads its own cached and
@@ -1019,61 +1018,33 @@ its peer protocol from this invariant.
 
 ### Both trust boundaries and exact-version repair
 
-An Edge's own SYSTEM query can have a stale extra input after an offline query
-exit just as a client can. The trusted Edge-to-Core path must refresh that input
-without recording an access-loss marker in SYSTEM shared storage. A delegated
-client scope crossing the same trusted connection remains bound to its admitted
-client identity and immutable claims.
+Core evaluates read permissions for ordinary queries and exact-version repair.
+A local relay may own cached rows for multiple readers, but cache possession
+never authorizes disclosure. It forwards the admitted reader and immutable
+claims and consumes that reader's Core-authorized supporting inputs.
 
-On an untrusted client-to-Edge path, shared cache possession is never evidence
-of permission to disclose. A partial Edge may hold a fresh task fetched for
-SYSTEM and an obsolete grant permitting Alice. An explicit repair must not use that cached grant to authorize fresh bytes for
-Alice. Ordinary Edge evaluation uses its maintained local policy inputs and also
-honors verified Core access-loss decisions for the admitted reader.
-Exact-version repair is subject to the same current read authorization contract
-as ordinary repair at Core. Knowing a row/transaction coordinate is not a grant.
+Trusted backend SYSTEM requests and ordinary reader requests remain distinct.
+A backend's own query can refresh an extra input without recording access loss
+for another reader. Knowing a row/transaction coordinate is not a grant to read
+it. A client request cannot acquire SYSTEM authority by crossing a local relay.
 
-The pilot's bounded Core-backed repair gate must preserve legitimate missing-body
-recovery, rather than silently disabling repair. It may send only the requested
-versions authorized for the exact pending client request after a current
-Core-backed readable decision. Unknown is not authorization or access loss.
-Connection/claims replacement cancels pending repair; trusted SYSTEM and existing
-scope-isolated retained-repair semantics remain distinct. Current authorization
-does not promise recovery of historical bytes after actual access withdrawal.
+For example, Alice could read task T through grant G. Core revokes G while
+updating T, but T still matches Alice's task filter. Repair returns
+current-unavailable to Alice without T's new content. Her local view excludes
+T; another reader's access and shared cached bytes remain independent. A later
+verified readable decision clears Alice's exclusion. Unknown responses are
+neither permission nor access loss. Connection or claims replacement cancels
+pending repair and stale responses cannot authorize delivery.
 
 ### Host-admitted authority query delegation
 
 A verified Admin credential on a SYSTEM, non-bootstrap authority connection may
 receive the host-only `AuthorityQueryDelegate` capability. This permits immutable
-per-request query policy bindings on trusted Edge-to-Core links. Bare
-`TrustedAuthority`, bootstrap `TrustedAdmin`, raw peer roles, and wire claims do
-not grant this capability. Existing admission APIs default to no capability;
-write authorization and publication trust are unchanged.
-
-A server Edge evaluates ordinary admitted queries and their read policies over
-its local data. It forwards the subscription to keep inputs synchronized, but
-opening the local evaluator does not require the exact Core-selected result for
-that new query. A scope-isolated browser/native client relay has a different
-role: it still consumes the selected authority's exact inputs and does not
-re-evaluate permissions from an incomplete client cache.
-
-Extra-row and missing-body repairs remain Core-authorized under the admitted
-reader in this implementation. A verified current-unavailable decision excludes
-that physical row from the Edge's ordinary serving graph for that exact reader
-and claims, as well as from client-local reads in that context. It does not
-remove shared storage, constrain SYSTEM, or become an input to permission-proof
-evaluation. A later verified readable decision clears the exclusion. Unknown,
-connection replacement and stale replies retain the existing retry/cancellation
-rules. These are delegated reader decisions on a trusted transport, not a claim
-that the Edge's own SYSTEM identity lost access.
-
-For example, Alice can read task T through grant G. Core revokes G while updating
-T, but T still matches Alice's task filter. Repair must not fetch just T as
-SYSTEM and then apply an old cached G: that could disclose T's new content.
-The admitted Alice repair returns current-unavailable without that content;
-the Edge's serving graph excludes T for Alice. Other readers and SYSTEM retain
-their independent access. Fully local repair requires maintained coverage of
-all authorization inputs and is outside this bounded restoration.
+per-request query policy bindings for an authorized backend or Inspector.
+Bare `TrustedAuthority`, bootstrap `TrustedAdmin`, raw peer roles, and wire
+claims do not grant this capability. Admission APIs default to no capability;
+write authorization and publication trust are unchanged. This is an explicit
+host capability, not a remaining intermediary server role.
 
 Strict receivers retain the selected usage's deletion-layer CoveredInput facts
 and exact version bodies beside the content graph, since a tombstone contributes

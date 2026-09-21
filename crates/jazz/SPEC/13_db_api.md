@@ -43,7 +43,7 @@ Invariant digest:
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
-- `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
+- `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
 - `INV-API-34`: A client outbox MUST retain an upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and a Core-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted Core connection. Local persistence, hydrated state, staged/replayed updates, and receipts from detached or superseded connections MUST NOT release it.
@@ -74,7 +74,7 @@ browser client/worker boundary.
 
 A terminal server or protocol transport failure is not an authority fate. A
 durable browser worker MUST relay it only to currently initialized foreground
-peers so their active Edge/Global waits and remote subscriptions reject with
+peers so their active Global waits and remote subscriptions reject with
 that transport error; Local durability remains valid. The worker MUST NOT
 fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
 replay that transient foreground error to a peer attached later.

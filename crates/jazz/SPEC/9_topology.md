@@ -52,7 +52,8 @@ transaction ID, author and row versions. The normal locally-authored pending
 replay path resubmits it to Core, including after restart without an active
 query. Core may acknowledge an already-known identical unit, authorize and
 accept a new unit, or reject it through ordinary transaction reconciliation.
-The old edge acceptance is not evidence of present Core authorization.
+The old edge acceptance is not evidence of present Core authorization
+(`INV-SYNC-47`).
 Retired edge-authority publications are rejected even on privileged links;
 authenticating the sender cannot reinstate the removed admission shortcut.
 

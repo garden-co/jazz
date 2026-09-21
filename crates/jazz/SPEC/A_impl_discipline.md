@@ -12,7 +12,7 @@ Invariant digest:
 
 - `INV-DISC-1`: Node-core semantics MUST be deterministic under explicit driver inputs and remain directly simulatable.
 - `INV-DISC-2`: Every cross-node semantic concept MUST have an exhaustive, serializable representation in the protocol, storage, or both.
-- `INV-DISC-3`: Relay, edge, and core roles MUST share one node and message model rather than separate semantic implementations.
+- `INV-DISC-3`: Client, local relay, and Core roles MUST share one node and message model rather than separate semantic implementations.
 - `INV-DISC-4`: Commit, fate, and view ingestion MUST be idempotent and detect conflicting replays.
 - `INV-DISC-5`: State with ordering or lattice semantics MUST use distinct types and monotone transitions.
 - `INV-DISC-6`: Replicated state MUST remain structurally distinct from derived current state, which MUST be recomputed rather than replicated, and its provenance MUST remain attributable to its transaction.

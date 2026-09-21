@@ -3129,3 +3129,24 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 }
+// The current API cannot author a legacy edge receipt. Only this test fixture
+// writes the retired tag; the replay tests use normal Db reopen and transport.
+impl<S: OrderedKvStorage> NodeState<S> {
+    pub(crate) async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
+        let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
+        let mut values = transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            Fate::Accepted,
+            None,
+            DurabilityTier::Local,
+            Value::Nullable(None),
+        ).unwrap();
+        values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
+        let mut batch = self.database.open_batch();
+        batch.update("jazz_transactions", values);
+        let applied = self.database.apply_batch(batch).await.unwrap();
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted).unwrap();
+    }
+}

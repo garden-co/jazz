@@ -256,7 +256,7 @@ source and do not perform a deletion anti-join (`INV-HIST-17`).
 The combined global-current table is the source of truth for `Global`
 current-row reads and sync snapshots on a node that has observed the accepted
 version. It carries only settled winner references and projected cells, so a
-global current read is O(current) in the rows and values returned. Local/edge
+global current read is O(current) in the rows and values returned. Local
 tiers use corresponding combined current state or a bounded overlay above this
 base; neither rehydrates the global baseline from either immutable history.
 

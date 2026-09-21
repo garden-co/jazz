@@ -4561,3 +4561,164 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
         "successful refresh must acknowledge the retained generation"
     );
 }
+
+/// Only the retired receipt is planted internally: current APIs cannot create
+/// it. Everything after that uses durable reopen, ordinary connections and
+/// transaction waits, with no query that could independently trigger repair.
+fn assert_legacy_edge_receipt_replays_to_core(known_to_core: bool, permission_revoked: bool) {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc6; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = |author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            DbIdentity { author, ..identity },
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open(author);
+    let tx_id = client
+        .insert(
+            "todos",
+            cells("original offline payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe6)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let pump = |client: &Db<RocksDbStorage>| {
+        client.tick().unwrap();
+        core.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let settle = |client: &Db<RocksDbStorage>| {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
+            *observed.borrow_mut() = Some(outcome)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.borrow().is_none() && std::time::Instant::now() < deadline {
+            pump(client);
+            std::thread::yield_now();
+        }
+        let outcome = result
+            .borrow_mut()
+            .take()
+            .expect("reopen must settle the original write without a query");
+        outcome
+    };
+    let original_global_time = if known_to_core {
+        let (up, down) = duplex();
+        let upstream = block_on(client.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, author);
+        assert_eq!(settle(&client).unwrap(), tx_id);
+        drop(upstream);
+        drop(subscriber);
+        core.node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .global_time
+    } else {
+        None
+    };
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(tx_id),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    // Sharing a durable store does not let another account replay this author.
+    let other = open(other_author);
+    {
+        let (up, down) = duplex();
+        let _upstream = block_on(other.connect_upstream(up));
+        let _subscriber = core.accept_subscriber(down, other_author);
+        for _ in 0..16 {
+            pump(&other);
+        }
+        assert!(
+            other.node.outbox.borrow().iter().next().is_none(),
+            "recovery must remain author-scoped"
+        );
+        if !known_to_core {
+            assert!(core.node().borrow_mut().transaction_record(tx_id).is_none());
+        }
+    }
+    block_on(other.close()).unwrap();
+    drop(other);
+
+    let client = open(author);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .transaction_state_settled(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    // A changed provider claim represents permission loss since the old receipt.
+    let claims = test_provider_claims(if permission_revoked {
+        other_author
+    } else {
+        author
+    });
+    let _subscriber = core.accept_subscriber_with_claims(down, author, claims);
+    let outcome = settle(&client);
+    if permission_revoked {
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+        assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+    } else {
+        assert_eq!(outcome.unwrap(), tx_id);
+        let audit = core.node().borrow_mut().transaction_record(tx_id).unwrap();
+        assert_eq!(audit.made_by, author);
+        assert_eq!(audit.tx_id, tx_id);
+        assert_eq!(audit.n_total_writes, 1);
+        assert_eq!(audit.fate, Fate::Accepted);
+        assert_eq!(audit.durability, DurabilityTier::Global);
+        assert!(audit.global_time.is_some());
+        if known_to_core {
+            assert_eq!(audit.global_time, original_global_time);
+        }
+        let rows = core.read(&Query::from("todos")).unwrap();
+        assert_eq!(row_ids(&rows), vec![row(0xe6)]);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "title"),
+            Some(Value::String("original offline payload".to_owned()))
+        );
+    }
+    block_on(client.close()).unwrap();
+}
+
+#[test]
+fn legacy_edge_receipt_reopens_and_uploads_without_query() {
+    assert_legacy_edge_receipt_replays_to_core(false, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_preserves_existing_core_acceptance() {
+    assert_legacy_edge_receipt_replays_to_core(true, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_obeys_current_core_permissions() {
+    assert_legacy_edge_receipt_replays_to_core(false, true);
+}
