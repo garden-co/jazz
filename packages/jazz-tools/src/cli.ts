@@ -10,7 +10,6 @@ import {
   createMigration as createCatalogueMigration,
   deploy as deployCatalogue,
   exportSchema as exportCatalogueSchema,
-  getCurrentSchemaHash,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -29,10 +28,6 @@ export interface SchemaExportOptions {
   appId?: string;
   serverUrl?: string;
   adminSecret?: string;
-}
-
-export interface SchemaHashOptions {
-  schemaDir: string;
 }
 
 const PERMISSIONS_LIFECYCLE_NOTE =
@@ -72,12 +67,6 @@ export async function validate(options: BuildOptions): Promise<void> {
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
   const result = await exportCatalogueSchema(options);
   process.stdout.write(`${JSON.stringify(result.schema, null, 2)}\n`);
-}
-
-export async function schemaHash(options: SchemaHashOptions): Promise<void> {
-  const result = await getCurrentSchemaHash(options);
-  console.log(`Loaded schema from ${result.schemaFile}.`);
-  console.log(`Current schema hash: ${shortSchemaHash(result.hash)}`);
 }
 
 export interface MigrationCommandOptions {
@@ -465,15 +454,12 @@ function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
-  console.log("\nSchema hash options:");
-  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("\nSchema export options:");
   console.log(
     "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
@@ -527,15 +513,7 @@ if (isMainModule()) {
     });
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
-    if (subcommand === "hash") {
-      const commandArgs = args.slice(2);
-      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
-      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      schemaHash({ schemaDir }).catch((err) => {
-        console.error(err.message);
-        process.exit(1);
-      });
-    } else if (subcommand === "export") {
+    if (subcommand === "export") {
       const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
       const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
       const schemaHashFlag = getFlagValue(commandArgs, "--schema-hash");
@@ -559,7 +537,7 @@ if (isMainModule()) {
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
+      console.error("Usage: node dist/cli.js schema export [--schema-dir <path>] [...]");
       process.exit(1);
     }
   } else if (command === "migrations") {
