@@ -3,6 +3,7 @@
 pub mod loopback;
 pub mod middleware;
 pub mod server;
+mod tcp;
 
 pub use middleware::AuthConfig;
 pub use server::{
@@ -111,7 +112,7 @@ pub async fn run(
         phase
     });
     let mut serve_task = tokio::spawn(async move {
-        serve(listener, built.app)
+        serve(tcp::low_latency_listener(listener), built.app)
             .with_graceful_shutdown(async {
                 let _ = serve_shutdown_rx.await;
             })
