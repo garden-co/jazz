@@ -2194,7 +2194,6 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     )
     .await;
 
-
     alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
     server.shutdown().await;
