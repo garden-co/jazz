@@ -452,7 +452,7 @@ mod tests {
         sender.charge(ChannelClass::Requests, 7).unwrap();
         receiver.consumed(ChannelClass::Requests, 7).unwrap();
         let bytes = receiver.peek_grant().unwrap().unwrap();
-        assert_eq!(hex::encode(&bytes), "05030100010080800100");
+        assert_eq!(hex::encode(&bytes), "05040100010080800100");
         assert_eq!(receiver.peek_grant().unwrap().unwrap(), bytes);
         let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
             panic!("credit frame")

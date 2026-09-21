@@ -64,8 +64,10 @@ fn merge_receiver_version_bundle_ref(
     existing_tx_identity.n_total_writes = 0;
     let mut incoming_tx_identity = incoming.tx.clone();
     incoming_tx_identity.n_total_writes = 0;
-    if existing_tx_identity != incoming_tx_identity
-        || existing.fate != incoming.fate
+    if !known_transaction_payload_matches_redacted_evidence_permission_subject(
+        &existing_tx_identity,
+        &incoming_tx_identity,
+    ) || existing.fate != incoming.fate
         || existing.global_time != incoming.global_time
         || existing.durability != incoming.durability
     {
@@ -451,7 +453,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            if !known_transaction_payload_matches_redacted_evidence_permission_subject(
+                &stored_identity,
+                &incoming_identity,
+            ) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
             let stored_versions = self.query_versions_for_tx(*tx_id).await?;
@@ -1693,10 +1698,11 @@ where
                 let mut tx = transaction_without_permission_subject(bundle.tx);
                 tx.n_total_writes = 0;
                 self.admit_contribution_merge_for_storage(&tx)?;
-                if headers
-                    .get(&tx.tx_id)
-                    .is_some_and(|previous| !known_transaction_payload_matches(previous, &tx))
-                {
+                if headers.get(&tx.tx_id).is_some_and(|previous| {
+                    !known_transaction_payload_matches_redacted_evidence_permission_subject(
+                        previous, &tx,
+                    )
+                }) {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
                 headers.insert(tx.tx_id, tx);
@@ -1707,7 +1713,9 @@ where
             if let Some(stored) = self.query_transaction(tx_id).await? {
                 let mut identity = transaction_without_permission_subject(&stored.tx);
                 identity.n_total_writes = 0;
-                if !known_transaction_payload_matches(&identity, &tx) {
+                if !known_transaction_payload_matches_redacted_evidence_permission_subject(
+                    &identity, &tx,
+                ) {
                     return Err(Error::ConflictingCommitUnit(tx_id));
                 }
             } else {
@@ -2392,7 +2400,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            if !known_transaction_payload_matches_redacted_evidence_permission_subject(
+                &stored_identity,
+                &incoming_identity,
+            ) {
                 return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
             }
         }
