@@ -9,6 +9,9 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) depends_on_context: Option<bool>,
     /// Immutable graph classification, not a proof that runtime state is ready.
     pub(super) has_hydration_state_ancestor: Option<bool>,
+    /// Structural proof obligations, never cached answers about live state.
+    pub(super) readiness_frontier: Option<Arc<[NodeId]>>,
+    pub(super) terminal_lineage: Option<Arc<evaluator::TerminalLineage>>,
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
     pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,

@@ -99,6 +99,20 @@ error in a later stage, remaining rows still execute preceding stages so an
 earlier-stage error wins. Cancellation drops all task-local work. These physical
 plans and continuations have no storage or wire encoding.
 
+Hydration memo reuse compiles its structural producer requirements once per
+installed node, then checks the live scope, tick/sub-tick, input generation and
+producer state on every reuse attempt. Stateless ancestry is not rediscovered
+per hit. A recursive producer ends the caller's structural walk: its completion
+proof owns child-scope readiness. Arrangement demand remains live because new
+consumers can require a physical index without changing the producer's ancestry.
+The requirement list is not itself proof that any producer is ready.
+
+Terminal publication likewise caches only ordered candidate nodes and the
+presence of a public root. Current per-evaluation terminal deltas are always
+consulted; the cache never stores a selected terminal or a publication. Both
+structural summaries retire with existing node metadata and do not keep nodes
+or subscriptions alive.
+
 Within a private task, total projections compose field routes back to the last
 materialized input. Field selections, nested record paths, encoded constants and
 nullable wrapping need no intermediate row encoding. Predicates use the same
