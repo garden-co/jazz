@@ -457,7 +457,6 @@ fn print_storage_report(storage: &StorageConfig) {
 fn role_name(role: NodeRole) -> &'static str {
     match role {
         NodeRole::Relay => "relay",
-        NodeRole::Edge => "edge",
         NodeRole::Core => "core",
     }
 }

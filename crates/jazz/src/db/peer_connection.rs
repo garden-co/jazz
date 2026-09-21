@@ -1666,15 +1666,6 @@ where
         }
     }
 
-    /// Set only by the serving shell's host-owned Edge role at admission.
-    #[cfg(any(test, feature = "runtime"))]
-    pub(crate) fn set_partial_edge_query_host(&mut self) {
-        if let ConnectionLink::Subscriber(state) = &mut self.link {
-            state.partial_edge_query_host = true;
-            self.node.borrow_mut().enable_edge_query_serving();
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {

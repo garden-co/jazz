@@ -1,5 +1,8 @@
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
 use crate::middleware::AuthConfig;
@@ -131,23 +134,6 @@ impl ServerTopology {
     }
 }
 
-/// Operational state of an edge server's owned upstream connector.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EdgeUpstreamHealth {
-    /// This server has no owned upstream connector.
-    NotConfigured,
-    /// Bootstrap or socket establishment is in progress.
-    Connecting,
-    /// The ordinary upstream wire is attached.
-    Connected,
-    /// A recoverable outcome is waiting for its next attempt.
-    Reconnecting { reason: String },
-    /// A fatal outcome stopped the connector generation.
-    Failed { reason: String },
-    /// Shutdown cancelled and joined the connector.
-    Stopped,
-}
-
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub(crate) accounts: Option<accounts::AccountRegistryOwner>,
@@ -189,27 +175,7 @@ pub struct ServerState {
     runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// Whether the current Edge shell generation has a fully installed,
-    /// validated catalogue and local projection registry. A durable Ready
-    /// generation remains usable offline; blank and refreshing generations do
-    /// not admit new downstream sessions.
-    dynamic_edge_catalogue_ready: AtomicBool,
-    edge_upstream_health: StdRwLock<EdgeUpstreamHealth>,
-    edge_upstream_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub shutdown: ShutdownController,
-}
-
-impl Drop for ServerState {
-    fn drop(&mut self) {
-        let task = self
-            .edge_upstream_task
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
-            task.abort();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -253,18 +219,10 @@ fn with_client_shell_snapshot_before_lock_hook<T>(
 /// async task, but it is read while the shell lock is held. Dynamic bootstrap
 /// updates both values under that same write lock, so a client cannot pair the
 /// old generation's `true` with the newly published shell.
-fn client_shell_snapshot<T: Clone>(
-    topology: ServerTopology,
-    shell: &StdRwLock<Option<T>>,
-    dynamic_edge_catalogue_ready: &AtomicBool,
-) -> Option<T> {
+fn client_shell_snapshot<T: Clone>(shell: &StdRwLock<Option<T>>) -> Option<T> {
     #[cfg(test)]
     run_client_shell_snapshot_before_lock_hook();
-    let shell = shell.read().unwrap();
-    if topology == ServerTopology::Edge && !dynamic_edge_catalogue_ready.load(Ordering::Acquire) {
-        return None;
-    }
-    shell.clone()
+    shell.read().unwrap().clone()
 }
 
 impl ServerState {
@@ -328,19 +286,6 @@ impl ServerState {
         self.runtime_for_client().is_some()
     }
 
-    /// Test-only adoption hook for exercising the interval between catalogue
-    /// installation and normal upstream-peer admission with a real server.
-    #[cfg(feature = "test")]
-    #[doc(hidden)]
-    pub fn start_dynamic_edge_shell_for_test(
-        &self,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
-    ) -> Result<(), String> {
-        self.start_dynamic_edge_shell(snapshot, edge_cache_budget)
-            .map(|_| ())
-    }
-
     /// Test-only readback of the installed authority catalogue.
     #[cfg(feature = "test")]
     #[doc(hidden)]
@@ -358,85 +303,9 @@ impl ServerState {
         self.core_server_shell.read().unwrap().clone()
     }
 
-    /// Return the runtime eligible for an ordinary downstream client session.
-    /// Bootstrap code may inspect [`Self::runtime`], but a blank or refreshing dynamic Edge
-    /// remains RetryLater until a complete catalogue generation is installed.
+    /// Return the Core runtime eligible for a client session.
     pub fn runtime_for_client(&self) -> Option<ServerRuntimeHandle> {
-        client_shell_snapshot(
-            self.topology,
-            &self.core_server_shell,
-            &self.dynamic_edge_catalogue_ready,
-        )
-    }
-
-    pub(crate) fn mark_dynamic_edge_catalogue_ready(&self) -> Result<(), String> {
-        // Serialize this Ready transition with dynamic shell publication and
-        // client snapshots. Callers reach this only after catalogue adoption
-        // and any required projection-registry rebuild have returned.
-        let _shell = self.core_server_shell.read().unwrap();
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge readiness publication".to_owned());
-        }
-        self.dynamic_edge_catalogue_ready
-            .store(true, Ordering::Release);
-        Ok(())
-    }
-
-    fn mark_dynamic_edge_catalogue_refreshing(&self) {
-        // Serialize the transition with downstream shell snapshots. A failed
-        // registry install leaves this generation gated until a later complete
-        // authenticated refresh succeeds.
-        let _shell = self.core_server_shell.write().unwrap();
-        self.dynamic_edge_catalogue_ready
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) async fn refresh_dynamic_edge_catalogue(
-        &self,
-        shell: &ServerRuntimeHandle,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-    ) -> Result<(), String> {
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge catalogue refresh".to_owned());
-        }
-        self.mark_dynamic_edge_catalogue_refreshing();
-        shell.apply_trusted_catalogue_snapshot(snapshot).await?;
-        // Applying the snapshot returns only after a semantic transition has
-        // rebuilt its local projections. The newly validated durable
-        // generation may therefore serve offline even if normal upstream
-        // attachment is still retrying.
-        self.mark_dynamic_edge_catalogue_ready()
-    }
-
-    pub fn edge_upstream_health(&self) -> EdgeUpstreamHealth {
-        self.edge_upstream_health.read().unwrap().clone()
-    }
-
-    pub(crate) fn set_edge_upstream_health(&self, health: EdgeUpstreamHealth) {
-        *self.edge_upstream_health.write().unwrap() = health;
-    }
-
-    pub(crate) fn own_edge_upstream_task(&self, task: tokio::task::JoinHandle<()>) {
-        let replaced = self.edge_upstream_task.lock().unwrap().replace(task);
-        debug_assert!(replaced.is_none(), "edge upstream task is installed once");
-    }
-
-    async fn stop_edge_upstream_task(&self) {
-        let task = self.edge_upstream_task.lock().unwrap().take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-            && !error.is_cancelled()
-        {
-            tracing::error!(%error, "edge upstream lifecycle task failed");
-        }
-        if self.topology == ServerTopology::Edge
-            && !matches!(
-                self.edge_upstream_health(),
-                EdgeUpstreamHealth::Failed { .. }
-            )
-        {
-            self.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
-        }
+        client_shell_snapshot(&self.core_server_shell)
     }
 
     pub(crate) fn start_core_server_shell(
@@ -460,49 +329,6 @@ impl ServerState {
             storage_config,
             self.storage_factory.clone(),
         )?;
-        *core_server_shell = Some(started.clone());
-        Ok(started)
-    }
-
-    /// Atomically publish a normal edge runtime after its independent
-    /// authenticated catalogue bootstrap completed. Holding the state lock
-    /// across construction makes downstream admission observe either no shell
-    /// (retry later) or the fully adopted ready shell, never a half-ready one.
-    pub(crate) fn start_dynamic_edge_shell(
-        &self,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
-    ) -> Result<ServerRuntimeHandle, String> {
-        if self.topology != ServerTopology::Edge {
-            return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
-        }
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
-        let storage_config = self
-            .core_server_shell_storage_config
-            .clone()
-            .ok_or_else(|| "server shell storage is not configured".to_owned())?;
-        let mut core_server_shell = self.core_server_shell.write().unwrap();
-        if let Some(existing) = core_server_shell.clone() {
-            return Ok(existing);
-        }
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
-        let started = ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
-            storage_config,
-            self.storage_factory.clone(),
-            edge_cache_budget,
-            snapshot,
-        )?;
-        self.dynamic_edge_catalogue_ready
-            .store(false, Ordering::Release);
-        if self.shutdown.is_shutting_down() {
-            drop(core_server_shell);
-            drop(started);
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -535,7 +361,6 @@ impl ServerState {
 
     async fn finalize_shutdown(&self) -> ShutdownPhase {
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
-        self.stop_edge_upstream_task().await;
         let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
         if !websockets_drained {

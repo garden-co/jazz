@@ -3068,3 +3068,65 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
     assert_eq!(indexes, expected_indexes);
     storage.close().unwrap();
 }
+
+#[test]
+fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
+    // Internal fixture construction is necessary: the new public API must not
+    // create edge acceptance. Plant the old persisted state, then exercise reopen.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id;
+    {
+        let mut writer = open_node_at(&temp_dir, schema.clone());
+        tx_id = writer
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(9), 10).cells(title_cells("legacy local edit")),
+            )
+            .unwrap();
+        let stored = writer.query_transaction(tx_id).unwrap().unwrap();
+        let values = transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+            Value::Nullable(None),
+        )
+        .unwrap();
+        let mut batch = writer.database.open_batch();
+        batch.update("jazz_transactions", values);
+        let applied = crate::db::block_on(writer.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        writer.database.finish_persistence(persisted).unwrap();
+    }
+    let mut reopened = open_node_at(&temp_dir, schema);
+    assert_eq!(
+        reopened.transaction_state_settled(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+    let audit = reopened.transaction_record(tx_id).unwrap();
+    assert_eq!(audit.fate, Fate::Pending);
+    assert_eq!(audit.durability, DurabilityTier::Local);
+    assert!(
+        reopened
+            .pending_transaction_ids_for_author(audit.made_by)
+            .unwrap()
+            .contains(&tx_id)
+    );
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(9), title_cells("legacy local edit"))])
+    );
+    reopened
+        .finalize_local_mergeable_commit_settled(tx_id)
+        .unwrap();
+    assert!(matches!(
+        reopened.transaction_state_settled(tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}

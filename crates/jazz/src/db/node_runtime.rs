@@ -1111,26 +1111,6 @@ where
         Ok(())
     }
 
-    /// Restore complete accepted authority publications, without waiting for
-    /// the originating clients to reconnect. Only an edge host calls this.
-    #[cfg(any(test, feature = "runtime"))]
-    pub(super) async fn restore_edge_authority_uploads(&self) -> Result<(), Error> {
-        let mut node = self.node.lock().await;
-        let pending = node.pending_edge_authority_transaction_ids().await?;
-        let mut covered = BTreeSet::new();
-        // Newer frontier publications already include their unsettled parents.
-        // Do not reconstruct one growing ancestry prefix per historical edit.
-        for tx_id in pending.into_iter().rev() {
-            if covered.contains(&tx_id) {
-                continue;
-            }
-            let publication = node.edge_authority_publication_for(tx_id).await?;
-            covered.extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
-            self.queue_pending_upload(tx_id, Some(SyncMessage::AuthorityPublication(publication)));
-        }
-        Ok(())
-    }
-
     async fn restore_local_subscriber(
         &self,
         author: AuthorSubject,

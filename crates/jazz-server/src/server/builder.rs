@@ -1,15 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use jazz::groove::storage::StorageFactory;
-use jazz::ids::AuthorSubject;
-use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
-use jazz::serving::{NodeRole, ServerUpstreamTerminalReason, StorageConfig};
-use tracing::{error, info};
+use jazz::serving::{NodeRole, StorageConfig};
+use tracing::info;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
@@ -18,12 +15,9 @@ use crate::middleware::auth::{
 use crate::server::routes;
 use crate::server::{
     CatalogueForwardingPolicy, CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
-    EdgeUpstreamHealth, ServerState, ServerTopology, StoredCatalogue,
+    ServerState, ServerTopology, StoredCatalogue,
 };
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::{
-    NativeTransportConnector, NativeTransportError, NativeTransportRequest, NativeTransportTerminal,
-};
 #[allow(deprecated)]
 use jazz::tools::public_schema::Schema;
 #[cfg(test)]
@@ -32,10 +26,6 @@ use jazz::tools::sync::DurabilityTier;
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const EDGE_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(100);
-const EDGE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
-const EDGE_RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(30);
-
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
     pub state: Arc<ServerState>,
@@ -88,11 +78,8 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     core_server_shell_schema: Option<JazzSchema>,
-    upstream_url: Option<String>,
     catalogue_list_response_limit_bytes: usize,
-    edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
-    native_transport_connector: Option<Arc<dyn NativeTransportConnector>>,
     storage_factory: Option<Arc<dyn StorageFactory>>,
 }
 
@@ -109,12 +96,9 @@ impl ServerBuilder {
                 path: PathBuf::from("./data"),
             },
             core_server_shell_schema: None,
-            upstream_url: None,
             catalogue_list_response_limit_bytes:
                 crate::server::DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
-            edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            native_transport_connector: None,
             storage_factory: None,
         }
     }
@@ -129,18 +113,9 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
-        self.upstream_url = Some(upstream_url.into());
-        self
-    }
     /// Configure the maximum body accepted from the forwarded `/schemas` list.
     pub fn with_catalogue_list_response_limit_bytes(mut self, limit: usize) -> Self {
         self.catalogue_list_response_limit_bytes = limit;
-        self
-    }
-
-    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
-        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -171,47 +146,10 @@ impl ServerBuilder {
         self
     }
 
-    /// Select the target-owned connector used by an edge's upstream link.
-    pub fn with_native_transport_connector(
-        mut self,
-        connector: Arc<dyn NativeTransportConnector>,
-    ) -> Self {
-        self.native_transport_connector = Some(connector);
-        self
-    }
-
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
-        let topology = if self.upstream_url.is_some() {
-            ServerTopology::Edge
-        } else {
-            ServerTopology::Core
-        };
-        let upstream_http_url = match self.upstream_url.as_deref() {
-            Some(upstream_url) => Some(upstream_http_url(upstream_url, self.app_id)?),
-            None => None,
-        };
+        let topology = ServerTopology::Core;
         validate_server_config(&auth_config, topology)?;
-        if topology == ServerTopology::Edge {
-            if let Some(connector) = self.native_transport_connector.as_ref() {
-                connector
-                    .validate_catalogue_bootstrap_url(
-                        self.upstream_url
-                            .as_deref()
-                            .expect("edge topology has an upstream URL"),
-                        self.app_id,
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
-            if self.native_transport_connector.is_none() {
-                // Library unit tests exercise edge catalogue state without a
-                // target-owned socket implementation. Native process shells
-                // and all outward transport receipts supply their connector
-                // at the composition boundary.
-                #[cfg(not(test))]
-                return Err("edge server requires a native transport connector".to_owned());
-            }
-        }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
@@ -230,10 +168,7 @@ impl ServerBuilder {
         let core_server_shell = self.build_core_server_shell(
             latest_catalogue_schema,
             core_server_shell_storage_config.clone(),
-            topology,
         )?;
-        let dynamic_edge_catalogue_ready =
-            topology != ServerTopology::Edge || core_server_shell.is_some();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let accounts = if topology == ServerTopology::Core {
@@ -263,7 +198,7 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            upstream_http_url,
+            upstream_http_url: None,
             topology,
             jwt_verifier,
             http_client,
@@ -279,39 +214,13 @@ impl ServerBuilder {
             runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
             #[cfg(test)]
             runtime_catalogue_after_permissions_read_hook: std::sync::Mutex::new(None),
-            // A validated durable catalogue remains usable while its core is
-            // offline. Blank edges have no such generation and stay behind
-            // RetryLater until authenticated bootstrap completes.
-            dynamic_edge_catalogue_ready: AtomicBool::new(dynamic_edge_catalogue_ready),
-            edge_upstream_health: std::sync::RwLock::new(EdgeUpstreamHealth::NotConfigured),
-            edge_upstream_task: std::sync::Mutex::new(None),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
-        // Recovery normalizes legacy runtime selections to revision zero. Restore
-        // the durable administrative selection before any snapshot can be served.
-        // Edges adopt their authority's selection through authenticated bootstrap.
-        if topology == ServerTopology::Core {
-            super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
-                .await
-                .map_err(|error| format!("restore active schema before serving: {error}"))?;
-        }
-
-        if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret), Some(connector)) = (
-            topology,
-            self.upstream_url.clone(),
-            state.auth_config.admin_secret.clone(),
-            self.native_transport_connector,
-        ) {
-            spawn_edge_upstream_connector(
-                state.clone(),
-                upstream_url,
-                self.app_id,
-                admin_secret,
-                self.edge_cache_budget,
-                connector,
-            );
-        }
+        // Restore the durable administrative selection before serving snapshots.
+        super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
+            .await
+            .map_err(|error| format!("restore active schema before serving: {error}"))?;
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
@@ -354,12 +263,8 @@ impl ServerBuilder {
         &self,
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
-        topology: ServerTopology,
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
-        let role = match topology {
-            ServerTopology::Core => NodeRole::Core,
-            ServerTopology::Edge => NodeRole::Edge,
-        };
+        let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
@@ -368,7 +273,7 @@ impl ServerBuilder {
                     storage_config,
                     self.storage_factory.clone(),
                     role,
-                    self.edge_cache_budget,
+                    None,
                 )?,
             ));
         }
@@ -378,13 +283,6 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => latest_catalogue_schema,
         };
         let Some(schema) = schema else {
-            if topology == ServerTopology::Edge {
-                return crate::server::ServerRuntimeHandle::try_start_dynamic_edge_from_storage(
-                    storage_config?,
-                    self.storage_factory.clone(),
-                    self.edge_cache_budget,
-                );
-            }
             return Ok(None);
         };
         let storage_config = storage_config?;
@@ -396,7 +294,7 @@ impl ServerBuilder {
                 storage_config,
                 self.storage_factory.clone(),
                 role,
-                self.edge_cache_budget,
+                None,
             )?,
         ))
     }
@@ -449,308 +347,13 @@ impl ServerBuilder {
 
     #[cfg(test)]
     fn local_durability_tier(&self) -> DurabilityTier {
-        if self.upstream_url.is_some() {
-            DurabilityTier::EdgeServer
-        } else {
-            DurabilityTier::GlobalServer
-        }
+        DurabilityTier::GlobalServer
     }
 }
 
 #[cfg(test)]
 fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
-}
-
-#[derive(Debug)]
-enum EdgeConnectorOutcome {
-    Retryable(String),
-    Reconnect(String),
-    Fatal(String),
-    Stopped,
-}
-
-fn native_transport_outcome(error: NativeTransportError) -> EdgeConnectorOutcome {
-    EdgeConnectorOutcome::Retryable(error.to_string())
-}
-
-fn connected_transport_outcome(reason: ServerUpstreamTerminalReason) -> EdgeConnectorOutcome {
-    match reason {
-        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::PeerClosed(
-            reason,
-        )) => EdgeConnectorOutcome::Reconnect(reason),
-        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::OwnerDropped) => {
-            EdgeConnectorOutcome::Stopped
-        }
-        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::Failed(error)) => {
-            EdgeConnectorOutcome::Reconnect(error.to_string())
-        }
-        ServerUpstreamTerminalReason::TransportFailed(reason) => {
-            EdgeConnectorOutcome::Reconnect(reason)
-        }
-        ServerUpstreamTerminalReason::ProtocolFailed(reason) => EdgeConnectorOutcome::Fatal(reason),
-        // A local owner cancellation is shutdown/control flow, not a remote
-        // close that should create another connection generation.
-        ServerUpstreamTerminalReason::Cancelled => EdgeConnectorOutcome::Stopped,
-        ServerUpstreamTerminalReason::RuntimeStopped => {
-            EdgeConnectorOutcome::Fatal("server shell upstream driver stopped".to_owned())
-        }
-    }
-}
-
-fn edge_reconnect_delay(attempt: u32) -> Duration {
-    let multiplier = 1_u32 << attempt.saturating_sub(1).min(6);
-    EDGE_RECONNECT_BASE_DELAY
-        .checked_mul(multiplier)
-        .unwrap_or(EDGE_RECONNECT_MAX_DELAY)
-        .min(EDGE_RECONNECT_MAX_DELAY)
-}
-
-fn spawn_edge_upstream_connector(
-    state: Arc<ServerState>,
-    upstream_url: String,
-    app_id: AppId,
-    admin_secret: String,
-    edge_cache_budget: Option<EdgeCacheBudget>,
-    connector: Arc<dyn NativeTransportConnector>,
-) {
-    state.set_edge_upstream_health(EdgeUpstreamHealth::Connecting);
-    let weak_state = Arc::downgrade(&state);
-    let shutdown = state.shutdown.clone();
-    let task = tokio::spawn(async move {
-        let mut recovery_attempts = 0_u32;
-        loop {
-            let auth = jazz::tools::websocket_prelude_auth::AuthConfig {
-                admin_secret: Some(admin_secret.clone()),
-                ..Default::default()
-            };
-            let bootstrap = connector.bootstrap_catalogue(NativeTransportRequest {
-                requested_link:
-                    jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
-                server_url: upstream_url.clone(),
-                app_id,
-                peer_identity: AuthorSubject::SYSTEM,
-                auth: auth.clone(),
-                wake: Arc::new(|| {}),
-            });
-            let snapshot = tokio::select! {
-                biased;
-                _ = shutdown.wait_requested() => return,
-                result = bootstrap => match result {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        let outcome = native_transport_outcome(error);
-                        if !handle_edge_connector_outcome(
-                            &weak_state,
-                            &shutdown,
-                            outcome,
-                            &mut recovery_attempts,
-                        ).await {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-            };
-
-            let Some(state) = weak_state.upgrade() else {
-                return;
-            };
-            let shell = match state.runtime() {
-                Some(shell) => {
-                    let refresh = state.refresh_dynamic_edge_catalogue(&shell, snapshot);
-                    let refreshed = tokio::select! {
-                        biased;
-                        _ = shutdown.wait_requested() => return,
-                        result = refresh => result,
-                    };
-                    match refreshed {
-                        Ok(()) => shell,
-                        Err(error) => {
-                            drop(state);
-                            if !handle_edge_connector_outcome(
-                                &weak_state,
-                                &shutdown,
-                                EdgeConnectorOutcome::Fatal(format!(
-                                    "edge catalogue refresh failed: {error}"
-                                )),
-                                &mut recovery_attempts,
-                            )
-                            .await
-                            {
-                                return;
-                            }
-                            continue;
-                        }
-                    }
-                }
-                None => match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
-                    Ok(shell) => shell,
-                    Err(_) if shutdown.is_shutting_down() => return,
-                    Err(error) => {
-                        drop(state);
-                        if !handle_edge_connector_outcome(
-                            &weak_state,
-                            &shutdown,
-                            EdgeConnectorOutcome::Fatal(format!(
-                                "edge catalogue bootstrap failed: {error}"
-                            )),
-                            &mut recovery_attempts,
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-            };
-            drop(state);
-
-            let wake_shell = shell.clone();
-            let wake = Arc::new(move || wake_shell.notify_activity());
-            let connect = connector.connect(NativeTransportRequest {
-                requested_link:
-                    jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
-                server_url: upstream_url.clone(),
-                app_id,
-                peer_identity: AuthorSubject::SYSTEM,
-                auth,
-                wake,
-            });
-            let connected = tokio::select! {
-                biased;
-                _ = shutdown.wait_requested() => return,
-                result = connect => match result {
-                    Ok(connected) => connected,
-                    Err(error) => {
-                        let outcome = native_transport_outcome(error);
-                        if !handle_edge_connector_outcome(
-                            &weak_state,
-                            &shutdown,
-                            outcome,
-                            &mut recovery_attempts,
-                        ).await {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-            };
-            let connection = tokio::select! {
-                biased;
-                _ = shutdown.wait_requested() => return,
-                result = shell.connect_upstream_wire_with_delegated_sessions(
-                    connected.transport,
-                    connected.terminal,
-                    connected.protocol_version,
-                    connected.features,
-                    connected.session_context,
-                    connected.permits_delegated_sessions,
-                ) => match result {
-                    Ok(connection) => connection,
-                    Err(error) => {
-                        if !handle_edge_connector_outcome(
-                            &weak_state,
-                            &shutdown,
-                            EdgeConnectorOutcome::Fatal(format!(
-                                "edge upstream attachment failed: {error}"
-                            )),
-                            &mut recovery_attempts,
-                        ).await {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-            };
-
-            let Some(state) = weak_state.upgrade() else {
-                return;
-            };
-            if let Err(error) = state.mark_dynamic_edge_catalogue_ready() {
-                if shutdown.is_shutting_down() {
-                    return;
-                }
-                state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
-                    reason: error.clone(),
-                });
-                error!(%error, "edge upstream lifecycle failed");
-                return;
-            }
-            state.set_edge_upstream_health(EdgeUpstreamHealth::Connected);
-            shell.notify_activity();
-            drop(state);
-
-            let connected_at = Instant::now();
-            let terminal = tokio::select! {
-                biased;
-                _ = shutdown.wait_requested() => return,
-                terminal = connection.terminal() => terminal,
-            };
-            if connected_at.elapsed() >= EDGE_RECONNECT_STABLE_AFTER {
-                recovery_attempts = 0;
-            }
-            let outcome = connected_transport_outcome(terminal);
-            if !handle_edge_connector_outcome(
-                &weak_state,
-                &shutdown,
-                outcome,
-                &mut recovery_attempts,
-            )
-            .await
-            {
-                return;
-            }
-        }
-    });
-    state.own_edge_upstream_task(task);
-}
-
-async fn handle_edge_connector_outcome(
-    state: &std::sync::Weak<ServerState>,
-    shutdown: &crate::server::ShutdownController,
-    outcome: EdgeConnectorOutcome,
-    recovery_attempts: &mut u32,
-) -> bool {
-    let (reason, reconnect) = match outcome {
-        EdgeConnectorOutcome::Stopped => {
-            if let Some(state) = state.upgrade() {
-                state.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
-            }
-            return false;
-        }
-        EdgeConnectorOutcome::Fatal(reason) => {
-            if let Some(state) = state.upgrade() {
-                state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
-                    reason: reason.clone(),
-                });
-            }
-            error!(%reason, "edge upstream lifecycle stopped");
-            return false;
-        }
-        EdgeConnectorOutcome::Retryable(reason) => (reason, false),
-        EdgeConnectorOutcome::Reconnect(reason) => (reason, true),
-    };
-    *recovery_attempts = recovery_attempts.saturating_add(1);
-    let delay = edge_reconnect_delay(*recovery_attempts);
-    if let Some(state) = state.upgrade() {
-        state.set_edge_upstream_health(EdgeUpstreamHealth::Reconnecting {
-            reason: reason.clone(),
-        });
-    } else {
-        return false;
-    }
-    if reconnect {
-        info!(%reason, ?delay, "edge upstream disconnected; reconnecting");
-    } else {
-        info!(%reason, ?delay, "edge upstream unavailable; retrying");
-    }
-    tokio::select! {
-        biased;
-        _ = shutdown.wait_requested() => false,
-        _ = tokio::time::sleep(delay) => true,
-    }
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
@@ -899,46 +502,6 @@ fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
         auth_config.admin_secret.is_some(),
         topology
     );
-}
-
-pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(base_url)
-        .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
-
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("upstream URL must not include query parameters or a fragment".to_string());
-    }
-
-    let scheme = match url.scheme() {
-        "http" => "http",
-        "https" => "https",
-        "ws" => "http",
-        "wss" => "https",
-        other => {
-            return Err(format!(
-                "unsupported upstream URL scheme '{other}'; expected http, https, ws, or wss"
-            ));
-        }
-    };
-    url.set_scheme(scheme)
-        .map_err(|_| format!("failed to set upstream URL scheme to {scheme}"))?;
-
-    let app_ws_path = format!("/apps/{app_id}/ws");
-    let normalized_path = url.path().trim_end_matches('/').to_string();
-    if normalized_path == app_ws_path.trim_end_matches('/') {
-        url.set_path("/");
-    } else if let Some(prefix) = normalized_path.strip_suffix(&app_ws_path) {
-        let prefix_path = if prefix.is_empty() {
-            "/".to_string()
-        } else {
-            format!("{}/", prefix.trim_end_matches('/'))
-        };
-        url.set_path(&prefix_path);
-    } else if normalized_path.is_empty() {
-        url.set_path("/");
-    }
-
-    Ok(url.to_string())
 }
 
 #[cfg(test)]

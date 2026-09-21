@@ -214,7 +214,6 @@ impl fmt::Debug for InMemoryServerShellConfig {
 #[derive(Debug)]
 pub struct InMemoryServerShell {
     db: ShellDb,
-    role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
     upstream_connections: Vec<ShellPeerConnection>,
     wire_upstream_connections: BTreeMap<u64, ShellPeerConnection>,
@@ -424,61 +423,6 @@ impl ShellDb {
         }
     }
 
-    fn open_catalogue_uninitialized_edge(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<&dyn StorageFactory>,
-        row_id_seed: Option<u64>,
-    ) -> ShellResult<Self> {
-        let schema = JazzSchema::empty();
-        match storage_config {
-            StorageConfig::InMemory => {
-                let refs = schema.column_families();
-                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-                let mut config = DbConfig::new(
-                    schema,
-                    BoxedStorage::new(
-                        MemoryStorage::new(&refs).expect("valid memory storage families"),
-                    ),
-                    identity,
-                );
-                if let Some(seed) = row_id_seed {
-                    config = config.with_id_source(SeededRowIdSource::new(seed));
-                }
-                Ok(Self::Memory(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
-                )?))
-            }
-            StorageConfig::RocksDb { path } => {
-                let refs = schema.column_families();
-                let factory = storage_factory.ok_or_else(|| {
-                    ShellError::Storage(
-                        "durable server storage requires a target-shell storage factory".into(),
-                    )
-                })?;
-                let mut config = DbConfig::new(
-                    schema,
-                    crate::db::block_on(factory.open(
-                        path,
-                        refs,
-                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                    ))
-                    .map_err(db_storage_error)?,
-                    identity,
-                );
-                if let Some(seed) = row_id_seed {
-                    config = config.with_id_source(SeededRowIdSource::new(seed));
-                }
-                Ok(Self::Durable(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
-                )?))
-            }
-            StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
-                storage: storage_config,
-            }),
-        }
-    }
-
     fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
@@ -509,28 +453,6 @@ impl ShellDb {
             Self::Memory(db) => db.set_catalogue_activation_failpoint(failpoint),
             Self::Durable(db) => db.set_catalogue_activation_failpoint(failpoint),
         }
-    }
-
-    fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
-        match self {
-            Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-            Self::Durable(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-        }
-    }
-
-    fn catalogue_bootstrap_is_ready(&self) -> bool {
-        match self {
-            Self::Memory(db) => db.catalogue_bootstrap_is_ready(),
-            Self::Durable(db) => db.catalogue_bootstrap_is_ready(),
-        }
-    }
-
-    fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
-            Self::Durable(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
-        }
-        Ok(())
     }
 
     fn enable_authoritative_scalar_exit_refresh(&self) {
@@ -744,27 +666,6 @@ impl ShellDb {
         }
     }
 
-    fn accept_edge_authority_subscriber_with_claims_and_trust(
-        &self,
-        transport: Box<dyn crate::db::Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        trust: CommitUnitTrust,
-    ) -> ShellPeerConnection {
-        match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport, identity, claims, trust,
-                ),
-            ),
-            Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport, identity, claims, trust,
-                ),
-            ),
-        }
-    }
-
     fn detach_connection(&self, connection: &ShellPeerConnection) -> bool {
         match (self, connection) {
             (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
@@ -826,14 +727,6 @@ impl ShellPeerConnection {
         match self {
             Self::Memory(connection) | Self::Durable(connection) => {
                 crate::db::block_on(connection.lock()).admit_authority_query_delegate()
-            }
-        }
-    }
-
-    fn set_partial_edge_query_host(&self) {
-        match self {
-            Self::Memory(connection) | Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).set_partial_edge_query_host()
             }
         }
     }
@@ -955,7 +848,6 @@ impl InMemoryServerShell {
 
         let mut shell = Self {
             db,
-            role,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
             wire_upstream_connections: BTreeMap::new(),
@@ -973,81 +865,6 @@ impl InMemoryServerShell {
         Ok(shell)
     }
 
-    /// Start from a blank dynamic-edge store, atomically adopt the supplied
-    /// authenticated authority snapshot, then expose the ordinary ready shell.
-    /// No application session can be admitted during this construction.
-    pub fn start_dynamic_edge_with_catalogue_snapshot(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> ShellResult<Self> {
-        let db = ShellDb::open_catalogue_uninitialized_edge(
-            identity,
-            storage_config,
-            storage_factory.as_deref(),
-            Some(0x5e),
-        )?;
-        db.apply_trusted_catalogue_snapshot(snapshot)?;
-        let structural = db.trusted_current_catalogue_schema()?;
-        let mut db = db;
-        db.select_schema_view(structural)?;
-        db.set_edge_cache_budget(edge_cache_budget);
-        Ok(Self {
-            db,
-            role: NodeRole::Edge,
-            sessions: Vec::new(),
-            upstream_connections: Vec::new(),
-            wire_upstream_connections: BTreeMap::new(),
-            next_wire_upstream_connection_id: 1,
-            resume_cursors: BTreeMap::new(),
-            next_resume_token: 1,
-            next_session_generation: 1,
-            runtime_schema_state: RuntimeSchemaState::default(),
-            metrics: InMemoryServerShellMetrics::default(),
-            drain_state: DrainState::Running,
-        })
-    }
-
-    /// Reopen an already-adopted dynamic edge without contacting upstream.
-    /// Returns `None` for a genuinely blank store so the owner can run the
-    /// authenticated bootstrap driver; malformed durable state remains an
-    /// error and is never treated as blank.
-    pub fn try_start_dynamic_edge_from_storage(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-    ) -> ShellResult<Option<Self>> {
-        let db = ShellDb::open_catalogue_uninitialized_edge(
-            identity,
-            storage_config,
-            storage_factory.as_deref(),
-            Some(0x5e),
-        )?;
-        if !db.catalogue_bootstrap_is_ready() {
-            return Ok(None);
-        }
-        let schema = db.trusted_current_catalogue_schema()?;
-        let mut db = db;
-        db.select_schema_view(schema)?;
-        db.set_edge_cache_budget(edge_cache_budget);
-        Ok(Some(Self {
-            db,
-            role: NodeRole::Edge,
-            sessions: Vec::new(),
-            upstream_connections: Vec::new(),
-            wire_upstream_connections: BTreeMap::new(),
-            next_wire_upstream_connection_id: 1,
-            resume_cursors: BTreeMap::new(),
-            next_resume_token: 1,
-            next_session_generation: 1,
-            runtime_schema_state: RuntimeSchemaState::default(),
-            metrics: InMemoryServerShellMetrics::default(),
-            drain_state: DrainState::Running,
-        }))
-    }
     /// Return the complete authority catalogue for the authenticated
     /// snapshot-only websocket exchange.
     pub(crate) fn trusted_catalogue_snapshot(
@@ -1268,9 +1085,6 @@ impl InMemoryServerShell {
             None,
             session_context,
         ));
-        // Only public sessions are Edge authority writes. Trusted native and
-        // backend links retain ordinary local Edge admission, which remains
-        // available while the Core authority is disconnected.
         let connection = if let ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } =
             link_admission
         {
@@ -1283,14 +1097,6 @@ impl InMemoryServerShell {
                 claims,
                 admission_epoch,
             )
-        } else if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
-            self.db
-                .accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport_adapter,
-                    identity,
-                    claims,
-                    trust,
-                )
         } else {
             self.db.accept_subscriber_with_claims_and_trust(
                 transport_adapter,
@@ -1301,9 +1107,6 @@ impl InMemoryServerShell {
         };
         if link_admission == ServerLinkAdmission::AuthorityQueryDelegate {
             connection.admit_authority_query_delegate();
-        }
-        if self.role == NodeRole::Edge {
-            connection.set_partial_edge_query_host();
         }
         let auxiliary_pump = connection.io_pump();
         let session_state = ServerSessionState {
@@ -1908,8 +1711,6 @@ fn db_storage_error(error: impl fmt::Display) -> ShellError {
 pub enum NodeRole {
     /// Stateless protocol relay with no fate authority.
     Relay,
-    /// Edge node that can cache and broker traffic near clients.
-    Edge,
     /// Durable core node that owns authoritative storage.
     Core,
 }
@@ -2266,7 +2067,7 @@ pub fn validate_config(config: &ServerConfig) -> Result<()> {
     if matches!(config.profile, DeploymentProfile::Production) && !config.storage.is_durable() {
         return Err(ConfigError::ProductionRequiresDurableStorage);
     }
-    if matches!(config.role, NodeRole::Core | NodeRole::Edge)
+    if matches!(config.role, NodeRole::Core)
         && matches!(config.profile, DeploymentProfile::Production)
         && !config.drain_on_shutdown
     {

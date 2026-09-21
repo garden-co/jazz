@@ -165,14 +165,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Upstream server URL. When set, this server runs as an edge.
-        #[arg(long, env = "JAZZ_UPSTREAM_URL")]
-        upstream_url: Option<String>,
-
-        /// Edge cache eviction byte budget. Absent disables automatic edge eviction.
-        #[arg(long, env = "JAZZ_EDGE_CACHE_BUDGET_BYTES")]
-        edge_cache_budget_bytes: Option<u64>,
-
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
             long,
@@ -230,8 +222,6 @@ async fn main() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
-            upstream_url,
-            edge_cache_budget_bytes,
             shutdown_timeout_secs,
             bound_port_file,
         } => {
@@ -272,15 +262,12 @@ async fn main() {
                 admin_secret,
                 ..Default::default()
             };
-            let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
             if let Err(e) = commands::server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
                 auth_config,
-                upstream_url,
-                edge_cache_budget,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
             )
@@ -297,8 +284,6 @@ async fn main() {
 
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
-        upstream_url,
-        admin_secret,
         jwks_url,
         jwt_public_key,
         jwt_issuer,
@@ -308,10 +293,6 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     else {
         return Ok(());
     };
-
-    if upstream_url.is_some() && admin_secret.is_none() {
-        return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
-    }
 
     let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
     if external_jwt_key_configured {
@@ -676,11 +657,7 @@ mod tests {
         .expect("server command should parse");
 
         match cli.command {
-            Commands::Server {
-                upstream_url,
-                admin_secret,
-                ..
-            } => {
+            Commands::Server { admin_secret, .. } => {
                 assert_eq!(upstream_url.as_deref(), Some("https://core.example.com"));
                 assert_eq!(admin_secret.as_deref(), Some("admin-secret"));
             }

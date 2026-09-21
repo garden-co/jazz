@@ -536,15 +536,6 @@ where
             .collect())
     }
 
-    /// Edge-host recovery includes accepted writes from every originating
-    /// client, plus edge-generated merges; it is not local-author recovery.
-    #[cfg(any(test, feature = "runtime"))]
-    pub(crate) async fn pending_edge_authority_transaction_ids(
-        &mut self,
-    ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(None, true, false).await
-    }
-
     async fn below_global_transaction_ids(
         &mut self,
         author: Option<AuthorSubject>,
