@@ -241,3 +241,13 @@ test("target changing during domain verification is not accepted", async () => {
   });
   await assert.rejects(promoteInspectorDeployment(options), /Timed out/);
 });
+
+for (const jobStatus of ["failed", "skipped"]) {
+  test(`a previous ${jobStatus} attempt permits a fresh promotion request`, async () => {
+    const { calls, options } = harness({
+      initial: { ...project, lastAliasRequest: { toDeploymentId: "dpl_test", jobStatus } },
+    });
+    await promoteInspectorDeployment(options);
+    assert.equal(calls.filter((call) => call.method === "POST").length, 1);
+  });
+}

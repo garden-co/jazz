@@ -85,13 +85,15 @@ export async function promoteInspectorDeployment({
   // target state and each verified production domain instead of requiring it.
   // API contracts: https://vercel.com/docs/rest-api/projects/retrieve-project-domains-by-project-by-id-or-name
   // and https://vercel.com/docs/rest-api/aliases/get-an-alias
-  async function productionIsVerified(current) {
+  async function productionIsVerified(current, { beforePromotion = false } = {}) {
     const target = current.targets?.production;
     const alias = current.lastAliasRequest;
     if (
       alias?.toDeploymentId === deployment.id &&
       ["failed", "skipped"].includes(alias.jobStatus)
     ) {
+      // A prior failed attempt must not prevent an explicit retry.
+      if (beforePromotion) return false;
       throw new Error(`Inspector promotion ${alias.jobStatus}.`);
     }
     if (
@@ -144,7 +146,7 @@ export async function promoteInspectorDeployment({
       confirmed.targets?.production?.id === deployment.id
     );
   }
-  if (await productionIsVerified(project)) {
+  if (await productionIsVerified(project, { beforePromotion: true })) {
     log("Inspector deployment is already the verified production target.");
     return;
   }
