@@ -168,15 +168,6 @@ interface ExportSchemaResult {
   snapshotPath: string | null;
 }
 
-interface CurrentSchemaHashOptions {
-  schemaDir: string;
-}
-
-interface CurrentSchemaHashResult {
-  schemaFile: string;
-  hash: string;
-}
-
 interface CreateMigrationOptions {
   appId?: string;
   serverUrl?: string;
@@ -281,16 +272,6 @@ export async function exportSchema(options: ExportSchemaOptions): Promise<Export
       options.migrationsDir,
       currentSchema,
     ),
-  };
-}
-
-export async function getCurrentSchemaHash(
-  options: CurrentSchemaHashOptions,
-): Promise<CurrentSchemaHashResult> {
-  const compiled = await loadCompiledSchema(options.schemaDir);
-  return {
-    schemaFile: compiled.schemaFile,
-    hash: await computeSchemaHash(compiled.wasmSchema),
   };
 }
 

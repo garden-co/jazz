@@ -32,7 +32,6 @@ import {
   loadEnvFile,
   readEnvFiles,
   resolveEnvVar,
-  schemaHash as rawSchemaHash,
   validate,
 } from "./cli.js";
 
@@ -56,7 +55,6 @@ function withAppId<T extends { appId?: string }>(options: T): T & { appId: strin
 
 const exportSchema = (options: Parameters<typeof rawExportSchema>[0]) =>
   rawExportSchema(withAppId(options));
-const schemaHash = (options: Parameters<typeof rawSchemaHash>[0]) => rawSchemaHash(options);
 const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
   rawCreateMigration(withAppId(options));
 const pushMigration = (
@@ -1027,18 +1025,6 @@ describe("cli schema export", () => {
       "title",
       "ownerId",
     ]);
-  });
-});
-
-describe("cli schema hash", () => {
-  it("prints the short hash of the current schema.ts without writing a snapshot", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-
-    const { logs } = await captureConsoleLogs(() => schemaHash({ schemaDir: root }));
-
-    expect(logs.some((line) => /[0-9a-f]{12}/i.test(line))).toBe(true);
-    expect(await fileExists(join(root, "migrations", "snapshots"))).toBe(false);
   });
 });
 
@@ -3529,15 +3515,10 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("renamed to `jazz-tools validate`");
   });
 
-  it("routes schema hash through the TypeScript CLI", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
-
-    const result = runBin(["schema", "hash", "--schema-dir", root]);
-
-    expect(result.status).toBe(0);
-    expect(result.stdout).toMatch(/[0-9a-f]{12}/i);
-    expect(await fileExists(join(root, "migrations", "snapshots"))).toBe(false);
+  it("rejects the removed schema hash command", () => {
+    const result = runBin(["schema", "hash"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("schema export");
   });
 
   it("routes schema export through the TypeScript CLI", async () => {

@@ -66,12 +66,7 @@ In practice, this lets you:
    pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
-   Both `schema.ts` and `permissions.ts` must be present. First deployments and
-   permission-only changes need no migration; compatible schema changes can use an
-   inferred migration. Changes requiring row transformations need a reviewed migration path.
-
-   `deploy` walks through the publish pipeline in one go:
-   1. Before publishing, it checks that permissions and any required migrations are present.
+   1. Before publishing, it checks that the schema, permissions and any required migrations are present. First deployments and permission-only changes need no migration.
    2. Publishes the current schema if the server does not already have it.
    3. If the server is on an older schema hash, asks the server whether
       it already has a migration path between the two hashes. If not, pushes the local migration
@@ -144,14 +139,6 @@ pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHa
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
 server and saves a snapshot in `migrations/snapshots/`.
-
-## Inspecting the local schema hash
-
-`pnpm dlx jazz-tools@alpha schema hash` prints the hash of the local `schema.ts` without contacting a server or writing a snapshot, giving you a simple way to compare your local schema against what's deployed.
-
-```bash
-pnpm dlx jazz-tools@alpha schema hash
-```
 
 ## Exporting the compiled schema
 
