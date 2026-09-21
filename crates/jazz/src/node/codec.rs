@@ -2641,18 +2641,14 @@ pub(super) fn owned_record_from_storage_values_with_descriptor(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ParkedIngressRole {
     Relay,
-    EdgeAuthority,
     Authority,
-    EdgeAccepted,
 }
 
 impl ParkedIngressRole {
     pub(super) fn strongest(self, other: Self) -> Self {
-        use ParkedIngressRole::{Authority, EdgeAccepted, EdgeAuthority, Relay};
+        use ParkedIngressRole::{Authority, Relay};
         match (self, other) {
-            (EdgeAccepted, _) | (_, EdgeAccepted) => EdgeAccepted,
             (Authority, _) | (_, Authority) => Authority,
-            (EdgeAuthority, _) | (_, EdgeAuthority) => EdgeAuthority,
             (Relay, Relay) => Relay,
         }
     }

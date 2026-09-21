@@ -1510,8 +1510,6 @@ pub struct CommitUnitIngestContext {
     pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
-    /// Whether this subscriber link is hosted by an edge authority.
-    pub edge_authority: bool,
     /// The authenticated connection admission path has already proved every
     /// terminal write clause against its immutable delegated session binding.
     /// This may only be set by the peer-connection authority path immediately
@@ -1530,9 +1528,8 @@ pub enum CommitUnitTrust {
     Relay,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
-    /// Authenticated authority control-plane link. Ordinary writes retain
-    /// their permission subject; only complete authority publications carry
-    /// a prior edge-admission proof. Never inferred from a wire identity.
+    /// Authenticated authority control-plane link. Never inferred from a
+    /// wire identity. This does not authorize retired edge publications.
     TrustedAuthority,
     /// Administrators may preserve provenance and bypass application write policies.
     TrustedAdmin,

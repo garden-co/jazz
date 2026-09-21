@@ -2072,19 +2072,6 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_edge_authority_mergeable_commit_unit(tx.clone(), versions.clone(), 20).resolve(),
-        Err(Error::CatalogueUninitialized)
-    ));
-    assert!(matches!(
-        edge.ingest_edge_authority_mergeable_commit_unit_with_identity(
-            tx.clone(),
-            versions.clone(),
-            20,
-            AuthorSubject::SYSTEM,
-        ).resolve(),
-        Err(Error::CatalogueUninitialized)
-    ));
-    assert!(matches!(
         edge.ingest_relay_commit_unit(tx.clone(), versions).resolve(),
         Err(Error::CatalogueUninitialized)
     ));

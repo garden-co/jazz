@@ -866,27 +866,12 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                if unit.ingress_role == ParkedIngressRole::EdgeAccepted {
-                    updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                    ).await?);
-                } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
-                    updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                        unit.ingest_context,
-                    ).await?);
-                } else {
-                    updates.extend(self.ingest_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                        unit.ingest_context,
-                    ).await?);
-                }
+                updates.extend(self.ingest_commit_unit_once(
+                    unit.tx,
+                    unit.versions,
+                    unit.now_ms,
+                    unit.ingest_context,
+                ).await?);
             }
         }
         Ok(updates)

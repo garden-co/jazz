@@ -655,40 +655,6 @@ fn malformed_version_receipts_fail_closed_at_direct_semantic_ingress() {
     }));
     assert_no_panic(received);
 
-    for edge_identity in [None, Some(AuthorSubject::SYSTEM)] {
-        let (_edge_dir, mut edge) = open_node();
-        let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let outcome = if let Some(identity) = edge_identity {
-                edge.ingest_edge_authority_mergeable_commit_unit_with_identity(
-                    tx.clone(),
-                    vec![malformed.clone()],
-                    10,
-                    identity,
-                )
-                .resolve()?
-            } else {
-                edge.ingest_edge_authority_mergeable_commit_unit(
-                    tx.clone(),
-                    vec![malformed.clone()],
-                    10,
-                )
-                .resolve()?
-            };
-            if matches!(
-                outcome.value.as_slice(),
-                [SyncMessage::FateUpdate {
-                    fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
-                    ..
-                }]
-            ) {
-                Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
-            } else {
-                Ok(())
-            }
-        }));
-        assert_no_panic(received);
-    }
-
     let (_relay_dir, mut relay) = open_node();
     assert_no_panic(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || {
@@ -734,7 +700,6 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
             Some(CommitUnitIngestContext {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
-                edge_authority: false,
                 admitted_write_authorization: false,
             }),
         )
@@ -842,7 +807,6 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     assert!(matches!(
@@ -921,7 +885,6 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let mut root = prepared
@@ -982,7 +945,6 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let start = receiver
@@ -1106,7 +1068,6 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let _ = receiver
@@ -1154,7 +1115,6 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let started = receiver
@@ -2779,4 +2739,35 @@ fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
         node.active_session_claim_scope_key(alice).is_none(),
         "cancelling a scoped query must restore the prior claim context"
     );
+}
+
+// The retired carrier cannot be authored through the application API. Exercise
+// the decoder/dispatch boundary directly, including privileged connections.
+#[test]
+fn retired_edge_publications_are_rejected_without_writes_for_every_trust_mode() {
+    let (_writer_dir, mut writer) = open_node();
+    let (_, unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row(0xa1), 10).cells(title_cells("must be readmitted")),
+    ).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("commit unit expected") };
+    let publication = crate::protocol::AuthorityPublication {
+        tx_id: tx.tx_id,
+        commits: vec![crate::protocol::AuthorityCommitUnit { tx: tx.clone(), versions }],
+    };
+    for trust in [None, Some(CommitUnitTrust::Session), Some(CommitUnitTrust::Relay),
+        Some(CommitUnitTrust::TrustedBackend), Some(CommitUnitTrust::TrustedAuthority),
+        Some(CommitUnitTrust::TrustedAdmin)] {
+        let (_receiver_dir, mut receiver) = open_node();
+        let context = trust.map(|trust| CommitUnitIngestContext {
+            identity: AuthorSubject::SYSTEM, trust, admitted_write_authorization: false,
+        });
+        let result = crate::db::block_on(receiver.apply_sync_message_with_ingest_context(
+            SyncMessage::AuthorityPublication(publication.clone()), context,
+        ));
+        assert!(matches!(result, Err(Error::UnsupportedSyncMessage(
+            "edge authority publications are no longer supported"
+        ))), "retired carrier must be rejected for {trust:?}");
+        assert!(receiver.query_transaction(tx.tx_id).unwrap().is_none());
+        assert!(receiver.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
+    }
 }

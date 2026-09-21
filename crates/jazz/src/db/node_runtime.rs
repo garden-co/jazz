@@ -2686,7 +2686,7 @@ where
                 CommitUnitIngestContext {
                     identity,
                     trust,
-                    edge_authority: false,
+
                     admitted_write_authorization: false,
                 },
                 claims,

@@ -261,7 +261,6 @@ where
                 Some(CommitUnitIngestContext {
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
-                    edge_authority: false,
                     admitted_write_authorization: false,
                 }),
             )

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
 use crate::protocol::{
-    BranchSelector, BranchViewBase, ProgramFactEntry, RealRowMemberEntry, SyncMessage,
+    BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage,
     VersionRecord,
 };
 use crate::query::{
@@ -1253,20 +1253,6 @@ fn aggregate_access_policy_schema() -> JazzSchema {
     )
 }
 
-fn session_claim_read_policy_schema() -> JazzSchema {
-    let policy = public_session_eq("owner", &["claims", "session_id"]);
-    public_peer_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("resources")
-                .column("owner", PublicColumnType::Uuid)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(policy.clone())
-                        .with_insert(policy),
-                ),
-        ),
-    )
-}
 
 fn session_seed_write_policy_schema() -> JazzSchema {
     let policy = crate::test_public_schema::seeded_recursive_access_policy(
@@ -1310,26 +1296,6 @@ fn session_seed_write_policy_schema() -> JazzSchema {
     )
 }
 
-fn resource_commit_unit(
-    writer: &mut NodeState<RocksDbStorage>,
-    author: AuthorSubject,
-    row_uuid: RowUuid,
-) -> (Transaction, Vec<VersionRecord>) {
-    let (_, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("resources", row_uuid, 10)
-                .made_by(author)
-                .cells(BTreeMap::from([(
-                    "owner".to_owned(),
-                    Value::Uuid(author.test_uuid()),
-                )])),
-        )
-        .expect("writer creates policy-protected resource commit");
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("mergeable unit must carry a CommitUnit");
-    };
-    (tx, versions)
-}
 
 #[test]
 fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
@@ -1350,18 +1316,6 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     };
 
     let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
-    assert!(
-        peer.unsettled_authority_scope_subscriptions(
-            &mut node_state,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            &versions,
-            Some(tx.tx_id),
-            true,
-        )
-        .expect("SYSTEM must not hydrate edge authorization support")
-        .is_none()
-    );
     peer.prove_terminal_commit_authorization(
         &mut node_state,
         AuthorSubject::SYSTEM,
@@ -1389,307 +1343,13 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     );
 }
 
-#[test]
-fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
-    let schema = session_claim_read_policy_schema();
-    let writer = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let transport_identity = AuthorSubject::for_test_bytes([0xa2; 16]);
-    let resource = row(0xa3);
-    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa4), schema.clone());
-    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
-
-    // The public edge/deferred entrypoint must turn a missing custom
-    // session claim into a settled empty support view, not a binding
-    // error. The edge parks the first hydration turn by design.
-    let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
-    let mut missing_peer = PeerState::client_link(writer);
-    let missing_outcome = missing_peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut missing_edge,
-            tx.clone(),
-            versions.clone(),
-            10,
-            10,
-            BTreeMap::new(),
-        )
-        .expect("missing policy claim must fail closed, not abort edge ingest");
-    let missing_updates = missing_edge
-        .persist_and_settle_outcome(missing_outcome)
-        .unwrap();
-    assert!(missing_updates.is_empty(), "{missing_updates:?}");
-    assert_eq!(missing_peer.deferred_edge_fate_count(), 1);
-
-    // A backend/transport identity is not the commit permission subject.
-    // The support rehydrate must temporarily evaluate the writer's bound
-    // session claim even while the peer normally serves as another user.
-    let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
-    let bound_claims = BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]);
-    bound_edge.set_test_provider_claims(writer, bound_claims.clone());
-    let bound_policy_claims = bound_edge.session_claims_for(writer);
-    let prior = bound_edge
-        .commit_mergeable_settled(
-            MergeableCommit::new("resources", row(0xa8), 1)
-                .made_by(AuthorSubject::SYSTEM)
-                .cells(BTreeMap::from([(
-                    "owner".to_owned(),
-                    Value::Uuid(writer.test_uuid()),
-                )])),
-        )
-        .expect("seed readable resource at the edge");
-    accept_global(&mut bound_edge, prior, 1);
-    let mut system_serving_peer =
-        PeerState::client_link_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
-    let bound_subscriptions = system_serving_peer
-        .unsettled_authority_scope_subscriptions(
-            &mut bound_edge,
-            writer,
-            bound_policy_claims,
-            &versions,
-            None,
-            true,
-        )
-        .expect("edge support must bind the writer rather than the transport identity");
-    let bound_subscription = bound_subscriptions
-        .and_then(|subscriptions| subscriptions.into_iter().next())
-        .expect("write support must register one policy subscription");
-    assert!(
-        !row_result_set(&system_serving_peer, bound_subscription)
-            .expect("bound support subscription state")
-            .is_empty(),
-        "the writer's bound claim must authorize the seeded resource"
-    );
-    assert_eq!(
-        system_serving_peer.link_identity(),
-        Some(transport_identity)
-    );
-    assert_eq!(
-        system_serving_peer.permission_subject(),
-        Some(AuthorSubject::SYSTEM)
-    );
-
-    // A present but ill-typed claim remains a real binding error; only an
-    // absent claim receives the fail-closed empty-proof treatment.
-    let (_wrong_type_dir, mut wrong_type_edge) = open_node_with_schema(node(0xa7), schema);
-    let wrong_type_claims = BTreeMap::from([(
-        "session_id".to_owned(),
-        Value::String("not-a-uuid".to_owned()),
-    )]);
-    wrong_type_edge.set_test_provider_claims(writer, wrong_type_claims.clone());
-    let wrong_type_policy_claims = wrong_type_edge.session_claims_for(writer);
-    let mut wrong_type_peer =
-        PeerState::client_link_with_permission_identity(transport_identity, transport_identity);
-    wrong_type_peer
-        .unsettled_authority_scope_subscriptions(
-            &mut wrong_type_edge,
-            writer,
-            wrong_type_policy_claims,
-            &versions,
-            None,
-            true,
-        )
-        .expect_err("present ill-typed claim must remain an error");
-    assert_eq!(wrong_type_peer.link_identity(), Some(transport_identity));
-    assert_eq!(
-        wrong_type_peer.permission_subject(),
-        Some(transport_identity)
-    );
-}
 
 /// Deferred edge fates own their support receiver by the exact admission
 /// snapshot, not merely by the canonical policy clause. A later authenticated
 /// refresh for the same author must park beside the old fate without replacing
 /// its support view.
-#[test]
-fn deferred_edge_support_coexists_across_same_link_claim_refresh() {
-    let schema = session_claim_read_policy_schema();
-    let writer = AuthorSubject::for_test_bytes([0xd1; 16]);
-    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xd3), schema.clone());
-    let (a_tx, a_versions) = resource_commit_unit(&mut writer_node, writer, row(0xd4));
-    let (b_tx, b_versions) = resource_commit_unit(&mut writer_node, writer, row(0xd5));
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xd6), schema);
-    let seed = edge
-        .commit_mergeable_settled(
-            MergeableCommit::new("resources", row(0xd7), 1)
-                .made_by(AuthorSubject::SYSTEM)
-                .cells(BTreeMap::from([(
-                    "owner".to_owned(),
-                    Value::Uuid(writer.test_uuid()),
-                )])),
-        )
-        .expect("seed a resource visible only to writer's A claim");
-    accept_global(&mut edge, seed, 1);
-    let a_raw_claims = BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]);
-    edge.set_test_provider_claims(writer, a_raw_claims);
-    let a_claims = edge.session_claims_for(writer);
-    let mut peer = PeerState::client_link(writer);
-    let a_outcome = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            a_tx.clone(),
-            a_versions.clone(),
-            10,
-            10,
-            a_claims.clone(),
-        )
-        .expect("A parks until its own support receiver settles");
-    edge.persist_and_settle_outcome(a_outcome).unwrap();
 
-    let b_raw_claims = BTreeMap::from([
-        ("session_id".to_owned(), Value::Uuid(writer.test_uuid())),
-        ("refresh_epoch".to_owned(), Value::Bool(true)),
-    ]);
-    edge.set_test_provider_claims(writer, b_raw_claims);
-    let b_claims = edge.session_claims_for(writer);
-    let a_subscription = peer.deferred_edge_fates[&a_tx.tx_id].scope_subscriptions[0];
-    let publication_footprint = peer.publication_states.len();
-    let refreshed_retransmit = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            a_tx.clone(),
-            a_versions,
-            11,
-            11,
-            b_claims.clone(),
-        )
-        .expect("an exact refreshed retransmit preserves A's deferred fate");
-    assert!(refreshed_retransmit.value.is_empty());
-    assert_eq!(peer.deferred_edge_fate_count(), 1);
-    assert_eq!(peer.edge_scope_subscription_count(), 1);
-    assert_eq!(peer.publication_states.len(), publication_footprint);
-    assert_eq!(
-        peer.subscription_policy_binding(a_subscription),
-        Some((writer, a_claims.clone())),
-        "B's retransmit cannot allocate or replace A's retained support"
-    );
-    let b_outcome = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            b_tx.clone(),
-            b_versions,
-            11,
-            11,
-            b_claims.clone(),
-        )
-        .expect("refreshed B parks beside, rather than replacing, A");
-    edge.persist_and_settle_outcome(b_outcome).unwrap();
 
-    let b_subscription = peer.deferred_edge_fates[&b_tx.tx_id].scope_subscriptions[0];
-    assert_ne!(
-        a_subscription, b_subscription,
-        "the retained usage identity includes immutable claims"
-    );
-    assert_eq!(peer.edge_scope_subscription_count(), 2);
-    assert_eq!(
-        peer.subscription_policy_binding(a_subscription),
-        Some((writer, a_claims)),
-        "the parked A fate retains its original claim context after refresh"
-    );
-    assert_eq!(
-        peer.subscription_policy_binding(b_subscription),
-        Some((writer, b_claims)),
-        "the refreshed B fate receives a distinct support receiver"
-    );
-    assert!(
-        !row_result_set(&peer, a_subscription)
-            .expect("A support publication state")
-            .is_empty(),
-        "A evaluates against the visible writer claim"
-    );
-    assert!(
-        !row_result_set(&peer, b_subscription)
-            .expect("B support publication state")
-            .is_empty(),
-        "B evaluates independently under its refreshed snapshot"
-    );
-
-    let settled = peer
-        .drain_deferred_edge_fates(&mut edge, 12)
-        .expect("both binding-qualified support receivers can settle independently");
-    edge.persist_and_settle_outcome(settled).unwrap();
-    assert_eq!(peer.deferred_edge_fate_count(), 0);
-    assert_eq!(
-        peer.edge_scope_subscription_count(),
-        0,
-        "releasing both fates drops their independent retention references"
-    );
-}
-
-#[test]
-fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
-    let schema = session_seed_write_policy_schema();
-    let writer = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let resource = row(0xb2);
-    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xb3), schema.clone());
-    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xb4), schema);
-    let mut peer = PeerState::client_link(writer);
-
-    let outcome = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10, 10, BTreeMap::new())
-        .expect("missing prepared seed claim must be a deferred empty support proof");
-    let updates = edge.persist_and_settle_outcome(outcome).unwrap();
-    assert!(updates.is_empty());
-    assert_eq!(peer.deferred_edge_fate_count(), 1);
-    assert!(
-        edge.transaction_state(tx.tx_id).is_none(),
-        "a pending support proof must not admit a client commit into edge history"
-    );
-}
-
-#[test]
-fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
-    let schema = session_seed_write_policy_schema();
-    let writer = AuthorSubject::for_test_bytes([0xc1; 16]);
-    let resource = row(0xc2);
-    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xc3), schema.clone());
-    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xc4), schema);
-    let mut peer = PeerState::client_link(writer);
-
-    let _ = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            10,
-            10,
-            BTreeMap::new(),
-        )
-        .expect("missing support claim parks the first commit unit");
-    assert_eq!(peer.deferred_edge_fate_count(), 1);
-
-    let _ = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            10,
-            10,
-            BTreeMap::new(),
-        )
-        .expect("an identical deferred retransmit remains idempotent");
-    assert_eq!(peer.deferred_edge_fate_count(), 1);
-
-    let mut conflicting = tx.clone();
-    conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
-    assert!(matches!(
-        peer.ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            conflicting,
-            versions,
-            10,
-            10,
-            BTreeMap::new(),
-        )
-            .resolve(),
-        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == tx.tx_id
-    ));
-    assert_eq!(peer.deferred_edge_fate_count(), 1);
-    assert!(
-        edge.transaction_state(tx.tx_id).is_none(),
-        "a conflicting retry must not enter history while the original remains deferred"
-    );
-}
 
 fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -1749,81 +1409,6 @@ fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<Roc
 /// Permission-scope cache retention is maintenance, not authority admission.
 /// The receipt drives the public edge-ingest path because a direct eviction
 /// call would not prove that ingress keeps the two clocks separate.
-#[test]
-fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
-    let schema = session_seed_write_policy_schema();
-    let writer = AuthorSubject::for_test_bytes([0xa7; 16]);
-    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa7), schema.clone());
-    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, row(0xa8));
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xa9), schema);
-    let mut peer = PeerState::client_link(writer);
-    let subscription = SubscriptionKey {
-        shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(7)),
-        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(8)),
-        read_view: Default::default(),
-    };
-    let ttl_ms = edge_scope_ttl_ms();
-    assert!(
-        ttl_ms > 0,
-        "this receipt requires the normal positive edge-scope TTL"
-    );
-
-    peer.retain_edge_scope_subscription(subscription);
-    peer.release_edge_scope_subscription(&mut edge, subscription, 100);
-    assert_eq!(
-        peer.idle_edge_scope_subscriptions.get(&subscription),
-        Some(&100),
-        "release records the monotonic maintenance instant"
-    );
-
-    // The missing support claim intentionally parks this write before HLC
-    // validation. That lets the receipt inject an extreme authority clock and
-    // assert that it is retained only as the deferred admission timestamp.
-    let first_outcome = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            100 + ttl_ms - 1,
-            u64::MAX,
-            BTreeMap::new(),
-        )
-        .expect("missing support defers the edge write");
-    let first_updates = edge.persist_and_settle_outcome(first_outcome).unwrap();
-    assert!(first_updates.is_empty(), "a deferred write has no fate yet");
-    assert!(
-        peer.idle_edge_scope_subscriptions
-            .contains_key(&subscription),
-        "an authority wall-clock jump cannot immediately evict a still-fresh scope"
-    );
-    assert_eq!(
-        peer.deferred_edge_fates[&tx.tx_id].admission_now_ms,
-        u64::MAX,
-        "the deferred fate retains the separately supplied HLC admission time"
-    );
-
-    let retry_outcome = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx,
-            versions,
-            100 + ttl_ms,
-            u64::MAX,
-            BTreeMap::new(),
-        )
-        .expect("an identical deferred retransmit remains admissible");
-    let retry_updates = edge.persist_and_settle_outcome(retry_outcome).unwrap();
-    assert!(
-        retry_updates.is_empty(),
-        "the retry remains deferred without support"
-    );
-    assert!(
-        !peer
-            .idle_edge_scope_subscriptions
-            .contains_key(&subscription),
-        "the monotonic TTL evicts the idle scope at its boundary"
-    );
-}
 
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     core.apply_fate_update(

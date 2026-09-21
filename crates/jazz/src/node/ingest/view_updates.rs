@@ -1,9 +1,3 @@
-#[derive(Clone, Copy)]
-pub(super) enum MergeAuthority {
-    Edge,
-    Core,
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -13,7 +7,7 @@ where
         records: &[VersionRecord],
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let rows = self.merge_rows_for_versions(records)?;
-        self.create_merge_versions_for_rows(rows, MergeAuthority::Core).await
+        self.create_merge_versions_for_rows(rows).await
     }
 
     fn merge_rows_for_versions(
@@ -47,12 +41,11 @@ where
     pub(super) async fn create_merge_versions_for_rows(
         &mut self,
         rows: Vec<(String, BranchKey, RowUuid)>,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
         for (table, branch_key, row_uuid) in rows {
             let created = self
-                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid, authority)
+                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
                 .await?;
             outcome.append_outcome(created);
         }
@@ -65,7 +58,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid, MergeAuthority::Core)
+        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid)
             .await
     }
 
@@ -74,7 +67,6 @@ where
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.active_schema.schema, table)?;
@@ -174,18 +166,7 @@ where
             .cells(cells);
         let publication = self.commit_mergeable_at(merge_commit, made_at).await?;
         let merge_tx = publication.tx_id;
-        let work = match authority {
-            MergeAuthority::Core => self.resident_commit_unit(merge_tx).await?,
-            // This is a locally generated, authority-validated merge, not an
-            // unfated remote write. Settle its persistence before accepting it
-            // at Edge durability; never run global admission on an edge.
-            MergeAuthority::Edge => SyncMessage::FateUpdate {
-                tx_id: merge_tx,
-                fate: Fate::Accepted,
-                global_time: None,
-                durability: Some(DurabilityTier::Edge),
-            },
-        };
+        let work = self.resident_commit_unit(merge_tx).await?;
         Ok(PublicationOutcome::published_then(
             Vec::new(),
             publication,

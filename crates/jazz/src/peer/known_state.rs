@@ -164,19 +164,6 @@ impl PeerState {
         self.ship_complete_exclusive_payloads = enabled;
     }
 
-    /// Snapshot peer-owned pin-set roots for edge-cache eviction.
-    pub fn eviction_pins(&self) -> PeerEvictionPins {
-        PeerEvictionPins {
-            deferred_edge_fate_txs: self.deferred_edge_fates.keys().copied().collect(),
-            referenced_scope_subscriptions: self
-                .edge_scope_subscription_refs
-                .keys()
-                .chain(self.idle_edge_scope_subscriptions.keys())
-                .copied()
-                .collect(),
-        }
-    }
-
     /// Forget complete-tx payload dedup markers for transactions whose local
     /// payloads were evicted, so a standard rehydrate may resend them.
     pub fn forget_evicted_versions(&mut self, tx_ids: impl IntoIterator<Item = TxId>) -> usize {

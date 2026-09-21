@@ -53,6 +53,8 @@ replay path resubmits it to Core, including after restart without an active
 query. Core may acknowledge an already-known identical unit, authorize and
 accept a new unit, or reject it through ordinary transaction reconciliation.
 The old edge acceptance is not evidence of present Core authorization.
+Retired edge-authority publications are rejected even on privileged links;
+authenticating the sender cannot reinstate the removed admission shortcut.
 
 Already globally confirmed transactions retain their fate and global position.
 Rejected transactions remain rejected. Reopening must not upload another
