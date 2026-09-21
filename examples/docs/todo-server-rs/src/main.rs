@@ -53,12 +53,12 @@ pub struct AppState {
 fn load_schema_from_cli(schema_dir: &str) -> Result<Schema, Box<dyn std::error::Error>> {
     let jazz_tools_bin = std::env::var("JAZZ_TOOLS_BIN").unwrap_or_else(|_| "jazz-tools".into());
     let output = Command::new(jazz_tools_bin)
-        .args(["schema", "export", "--schema-dir", schema_dir])
+        .args(["schema", "compile", "--schema-dir", schema_dir])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("schema export failed: {stderr}").into());
+        return Err(format!("schema compile failed: {stderr}").into());
     }
 
     Ok(serde_json::from_slice(&output.stdout)?)
