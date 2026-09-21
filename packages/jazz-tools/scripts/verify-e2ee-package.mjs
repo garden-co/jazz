@@ -32,12 +32,27 @@ try {
     await mkdir(dirname(destination), { recursive: true });
     await symlink(resolve(root, "node_modules", dependency), destination, "dir");
   }
+  await mkdir(resolve(modules, "@types"), { recursive: true });
+  await symlink(resolve(root, "node_modules/@types/node"), resolve(modules, "@types/node"), "dir");
   await writeFile(
     resolve(directory, "consumer.mts"),
     `
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
+    import { E2EeSodiumStream } from "jazz-napi";
+    export function streamRoundTrip(key: Uint8Array, context: Uint8Array, message: Uint8Array) {
+      const writer = new E2EeSodiumStream(key);
+      const reader = new E2EeSodiumStream(key, writer.header);
+      try {
+        const record = reader.pull(writer.push(message, context, false), context);
+        const final = reader.pull(writer.push(new Uint8Array(), context, true), context);
+        return { record, final };
+      } finally {
+        writer.dispose();
+        reader.dispose();
+      }
+    }
     export const browser: Promise<CryptoAdapters> = createBrowserCrypto();
     export const native: Promise<CryptoAdapters> = createNativeCrypto();
     export type StreamAdapter = LargeValueCipher;
@@ -55,6 +70,8 @@ try {
       "es2022",
       "--lib",
       "es2022,dom,esnext.disposable",
+      "--types",
+      "node",
       "consumer.mts",
     ],
     { cwd: directory },
@@ -70,6 +87,7 @@ try {
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import {
+      E2EeSodiumStream,
       e2eeSodiumDecrypt, e2eeSodiumEncrypt, e2eeSodiumHash, e2eeSodiumKeyPair,
       e2eeSodiumNonce, e2eeSodiumOpen, e2eeSodiumSeal,
     } from "jazz-napi";
@@ -96,6 +114,20 @@ try {
     const device = e2eeSodiumKeyPair();
     const sealedKey = e2eeSodiumSeal(device.publicKey, key);
     assert.deepEqual(e2eeSodiumOpen(device.publicKey, device.privateKey, sealedKey), key);
+    const streamWriter = new E2EeSodiumStream(key);
+    let streamReader;
+    try {
+      streamReader = new E2EeSodiumStream(key, streamWriter.header);
+      const record = streamReader.pull(streamWriter.push(plaintext, context, false), context);
+      assert.deepEqual(record.message, plaintext);
+      assert.equal(record.finalRecord, false);
+      const final = streamReader.pull(streamWriter.push(new Uint8Array(), context, true), context);
+      assert.deepEqual(final.message, new Uint8Array());
+      assert.equal(final.finalRecord, true);
+    } finally {
+      streamWriter.dispose();
+      streamReader?.dispose();
+    }
     for (const [writer, reader] of [[browser, native], [native, browser]]) {
       const cell = await writer.cellCipher.encrypt(key, context, plaintext);
       assert.deepEqual(await reader.cellCipher.decrypt(key, context, cell), plaintext);
