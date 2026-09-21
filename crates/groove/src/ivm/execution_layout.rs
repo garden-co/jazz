@@ -118,7 +118,7 @@ impl ExecutionLayout {
         &self.input_slots[self.input_offsets[slot]..self.input_offsets[slot + 1]]
     }
 
-    fn weight(&self) -> usize {
+    pub(super) fn weight(&self) -> usize {
         self.nodes.len() + self.dependent_slots.len() + self.input_slots.len()
     }
 }

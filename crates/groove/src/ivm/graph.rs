@@ -1493,6 +1493,7 @@ fn collect_projection_output_type(
 /// Deduplicated DAG of IVM node descriptors.
 #[derive(Clone, Debug, Default)]
 pub struct IvmGraph {
+    activations: super::activation::ActivationCache,
     execution_layouts: super::execution_layout::ExecutionLayoutCache,
     /// Deduplicated node specs. The `NodeId` is derived from the full
     /// descriptor, and insertion asserts that collisions do not merge specs.
@@ -1531,6 +1532,7 @@ impl IvmGraph {
             return id;
         }
 
+        self.activations.added(&descriptor.inputs);
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
@@ -1597,6 +1599,7 @@ impl IvmGraph {
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+        self.activations.clear();
         self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
     }
@@ -1609,9 +1612,21 @@ impl IvmGraph {
         &self,
         tables: impl IntoIterator<Item = &'a str>,
         bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
-    ) -> std::collections::HashSet<NodeId> {
-        let mut affected = std::collections::HashSet::new();
-        let mut pending = tables
+    ) -> std::sync::Arc<std::collections::HashSet<NodeId>> {
+        std::sync::Arc::clone(
+            &self
+                .activation_plan(tables, bindings)
+                .expect("graph source reachability is valid")
+                .affected,
+        )
+    }
+
+    pub(crate) fn activation_plan<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> Result<std::sync::Arc<super::activation::ActivationPlan>, NodeId> {
+        let sources = tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
             .chain(bindings.into_iter().flat_map(|binding| {
@@ -1623,15 +1638,7 @@ impl IvmGraph {
             }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect::<Vec<_>>();
-        while let Some(node) = pending.pop() {
-            if !affected.insert(node) {
-                continue;
-            }
-            if let Some(graph_node) = self.nodes.get(&node) {
-                pending.extend(graph_node.children.iter().copied());
-            }
-        }
-        affected
+        self.activations.get(self, sources)
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
@@ -1650,6 +1657,7 @@ impl IvmGraph {
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
+        self.activations.removed(id);
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
