@@ -230,8 +230,8 @@ pub(crate) fn take_required_sink_deltas(
 
 mod lowering;
 
-pub(crate) use lowering::PolicyAuthorizationGraph;
 use lowering::*;
+pub(crate) use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
 
 enum CurrentQueryProgramOutput {
     AppRows,
