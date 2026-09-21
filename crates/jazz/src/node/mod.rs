@@ -556,8 +556,6 @@ pub struct NodeState<S> {
     /// Disabled unless a core serving shell owns the complete policy inputs.
     /// This is runtime capability, never wire or durable authorization evidence.
     authoritative_scalar_exit_refresh: bool,
-    /// Host-selected Edge query serving; never inferred from peer declarations.
-    edge_query_serving: bool,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
@@ -1049,10 +1047,6 @@ struct QueryServing {
         query_eval::LocalAvailabilityRecord,
     >,
     local_availability_authorities: BTreeMap<PolicyBindingKey, (NodeUuid, u64)>,
-    /// A serving scope remains live while any maintained Edge view uses it.
-    edge_availability_owners:
-        BTreeMap<PolicyBindingKey, std::sync::Weak<query_eval::EdgeAvailabilityOwner>>,
-    edge_availability_retirements: std::sync::Arc<std::sync::Mutex<VecDeque<PolicyBindingKey>>>,
     /// Runtime-only, exact-context app-read exclusions. These do not change
     /// stored payloads or serving-side permission proofs.
     local_unavailable_inputs: BTreeMap<

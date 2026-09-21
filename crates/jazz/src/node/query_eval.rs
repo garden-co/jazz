@@ -10,7 +10,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
-pub(crate) use unavailable_inputs::EdgeAvailabilityOwner;
 
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
@@ -1414,7 +1413,7 @@ where
             // A serving node evaluates its complete authority program. A
             // `SettledBindingView` is a receiver-local CoveredInput source,
             // not a server-side cache or an alternate trusted read path.
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => None,
+            QueryAuthorizationMode::TrustedServing => None,
         };
         // Ordinary Edge/Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
@@ -2333,7 +2332,7 @@ where
                 self.prepare_client_subscription_binding(shape, binding, tier, identity)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+            QueryAuthorizationMode::TrustedServing => {
                 self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
                     .await
             }
@@ -2744,7 +2743,7 @@ where
                     self.query_rows_for_client(shape, binding, tier, identity)
                         .await?
                 }
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+                QueryAuthorizationMode::TrustedServing => {
                     self.query_rows_with_prepared_plan_for_identity(
                         shape, binding, tier, None, identity,
                     )
@@ -2762,7 +2761,7 @@ where
                 self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+            QueryAuthorizationMode::TrustedServing => {
                 self.query_relation_snapshot_for_serving_in_read_view(
                     shape, binding, tier, identity, read_view,
                 )
@@ -3260,15 +3259,9 @@ where
         )
     }
 
-    pub(crate) fn enable_edge_query_serving(&mut self) {
-        self.edge_query_serving = true;
-    }
-
     pub(crate) fn peer_query_authorization_mode(&self) -> QueryAuthorizationMode {
         if self.client_relay_scope().is_some() {
             QueryAuthorizationMode::ClientLocal
-        } else if self.edge_query_serving {
-            QueryAuthorizationMode::EdgeServing
         } else {
             QueryAuthorizationMode::TrustedServing
         }
@@ -3581,18 +3574,6 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Acquire before compiling the input graph, including across cold
-        // storage awaits. On failure the temporary owner drops; on success
-        // the maintained view retains it for its complete serving lifetime.
-        let edge_availability_owner = if authorization_mode == QueryAuthorizationMode::EdgeServing
-            || (self.edge_query_serving
-                && authorization_mode == QueryAuthorizationMode::ClientLocal)
-        {
-            unavailable_inputs::local_unavailable_policy_binding(&request)
-                .map(|scope| self.pin_edge_availability_scope(scope))
-        } else {
-            None
-        };
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
                 if let SourceExpr::SettledBindingView {
@@ -3764,7 +3745,6 @@ where
             .collect();
         maintained.targeted_refresh_tables = targeted_refresh_tables;
         maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
-        maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
         // from equal row UUIDs or a search for the first matching table label.

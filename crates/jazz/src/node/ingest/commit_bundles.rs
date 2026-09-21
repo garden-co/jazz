@@ -1387,6 +1387,44 @@ where
             }
         }
 
+        // A first snapshot belongs to one subscription, not to an empty
+        // database. Another subscription may already have supplied a newer
+        // accepted version. Keep history ingestion complete without rewinding
+        // the node-wide current winner. Empty-table probes preserve the cold
+        // load path: it does not need one resident lookup per incoming row.
+        let mut resident_tables = BTreeMap::new();
+        let mut winning_updates = BTreeMap::new();
+        for (key, (stored, global_time)) in current_updates {
+            let schema = self.schema_version_for_alias(stored.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+            let table = self.physical_current_table_for_schema(
+                schema, stored.table(), stored.layer(), PhysicalCurrentClass::Global,
+            )?;
+            let has_resident_rows = if let Some(present) = resident_tables.get(&table) {
+                *present
+            } else {
+                let present = self.database.table_has_stored_rows(&table).await?;
+                resident_tables.insert(table, present);
+                present
+            };
+            if has_resident_rows {
+                let previous = self.query_global_layer_winner_in_schema_and_branch(
+                    schema, stored.table(), stored.branch_key(), stored.row_uuid(), stored.layer(),
+                ).await?;
+                if let Some(previous) = previous.as_ref() {
+                    let previous_tx = self.version_tx_id(previous)?;
+                    let previous_made_at = self.version_made_at(previous).await?;
+                    if !version_wins_over_open_winner(
+                        &stored, self.version_tx_id(&stored)?, stored.tx_time(),
+                        Some((previous, previous_tx, previous_made_at)),
+                    ) {
+                        continue;
+                    }
+                }
+            }
+            winning_updates.insert(key, (stored, global_time));
+        }
+        let current_updates = winning_updates;
         for (stored, global_time) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_time)?;
         }

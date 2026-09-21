@@ -759,8 +759,6 @@ where
             query: QueryServing {
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
-                edge_availability_owners: BTreeMap::new(),
-                edge_availability_retirements: Default::default(),
                 local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
                 compiled_query_program_cache: BTreeMap::new(),
@@ -803,7 +801,6 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
-            edge_query_serving: false,
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),

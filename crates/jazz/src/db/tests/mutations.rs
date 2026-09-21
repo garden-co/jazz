@@ -1878,7 +1878,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1893,7 +1893,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -1931,7 +1931,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1946,7 +1946,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -2805,7 +2805,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 }
 
 #[test]
-fn session_upload_strips_forged_system_permission_before_storage_and_publication() {
+fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     let schema = schema();
     let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let edge_node = NodeUuid::from_bytes([0xe2; 16]);
@@ -2820,14 +2820,12 @@ fn session_upload_strips_forged_system_permission_before_storage_and_publication
         2,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            session_author,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
+    let _subscriber = edge.server.accept_subscriber_with_claims_and_trust(
+        edge_transport,
+        session_author,
+        BTreeMap::new(),
+        CommitUnitTrust::Session,
+    );
 
     let write = client
         .insert(
@@ -2867,31 +2865,10 @@ fn session_upload_strips_forged_system_permission_before_storage_and_publication
         "storage drops untrusted SYSTEM"
     );
 
-    crate::db::block_on(edge.node().borrow_mut().apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    ))
-    .unwrap();
     assert!(matches!(
         crate::db::block_on(edge.node().borrow_mut().transaction_state(tx_id)),
-        Some((Fate::Accepted, None, DurabilityTier::Edge))
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
-    let publication = edge
-        .node()
-        .borrow_mut()
-        .edge_authority_publication_for(tx_id)
-        .unwrap();
-    let published = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id == tx_id)
-        .expect("publication contains its anchor transaction");
-    assert_eq!(
-        published.tx.permission_subject, None,
-        "publication cannot re-emit a session-forged capability"
-    );
 }
 
 #[test]

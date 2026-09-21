@@ -695,7 +695,7 @@ where
                 ));
             }
             let snapshot = match authorization_mode {
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+                QueryAuthorizationMode::TrustedServing => {
                     node.query_relation_snapshot_for_serving_in_read_view(
                         &prepared.shape,
                         &prepared.binding,
@@ -734,10 +734,7 @@ where
                 )
                 .await
             }
-            (
-                false,
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing,
-            ) => {
+            (false, QueryAuthorizationMode::TrustedServing) => {
                 node.query_rows_with_prepared_plan_for_identity(
                     &prepared.shape,
                     &prepared.binding,

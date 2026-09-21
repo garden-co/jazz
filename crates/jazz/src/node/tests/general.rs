@@ -2510,8 +2510,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     assert_eq!(
@@ -2559,8 +2559,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
             },
             vec![wrong_partial.clone()],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
     assert_eq!(
@@ -2596,8 +2596,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
             },
             vec![wrong_partial, wrong_completion],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap_err();
     assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
@@ -2651,8 +2651,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     let wrong_partial = version_record(
@@ -2678,8 +2678,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
             },
             vec![wrong_partial.clone()],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
     let matching = version_record(
@@ -2705,8 +2705,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
             },
             vec![wrong_partial, matching],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
 

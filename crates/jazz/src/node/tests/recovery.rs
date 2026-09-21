@@ -2909,7 +2909,15 @@ fn transaction_status_projects_state_without_decoding_payloads() {
                 core.database.finish_persistence(persisted).unwrap();
                 assert_eq!(
                     core.transaction_state_settled(tx_id),
-                    Some((fate.clone(), global_time, durability))
+                    Some((
+                        if fate == Fate::Accepted && durability == DurabilityTier::Edge && global_time.is_none() {
+                            Fate::Pending
+                        } else {
+                            fate.clone()
+                        },
+                        global_time,
+                        if durability == DurabilityTier::Edge { DurabilityTier::Local } else { durability },
+                    ))
                 );
                 let audit = core.transaction_record(tx_id).unwrap();
                 assert_eq!(
