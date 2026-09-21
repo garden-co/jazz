@@ -46,6 +46,37 @@ enum PageReplacement {
     },
 }
 
+/// Choose the most byte-balanced boundary for which both encoded pages fit.
+/// Leaf boundaries retain every entry; internal boundaries promote one key
+/// out of the two children. A count midpoint is unsafe for variable-size cells.
+fn byte_balanced_split(
+    sizes: impl ExactSizeIterator<Item = usize> + Clone,
+    base_len: usize,
+    page_size: usize,
+    promote_separator: bool,
+) -> Option<usize> {
+    let count = sizes.len();
+    let mut left = base_len;
+    let mut right = base_len + sizes.clone().sum::<usize>();
+    let mut best = None;
+    for (index, size) in sizes.enumerate() {
+        right -= size;
+        if !promote_separator {
+            left += size;
+        }
+        if (promote_separator || index + 1 < count) && left <= page_size && right <= page_size {
+            let imbalance = left.abs_diff(right);
+            if best.is_none_or(|(_, previous)| imbalance < previous) {
+                best = Some((if promote_separator { index } else { index + 1 }, imbalance));
+            }
+        }
+        if promote_separator {
+            left += size;
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 pub enum WriteOperation {
     Set { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
@@ -955,7 +986,19 @@ impl<S: PageStore> TreeCore<S> {
                     page_size: self.options.page_size,
                 });
             }
-            let right_entries = entries.split_off(entries.len() / 2);
+            let split = byte_balanced_split(
+                entries
+                    .iter()
+                    .map(|(key, value)| page::leaf_entry_len(key, value)),
+                page::LEAF_BASE_LEN,
+                self.options.page_size,
+                false,
+            )
+            .ok_or(Error::PageTooLarge {
+                page_id,
+                page_size: self.options.page_size,
+            })?;
+            let right_entries = entries.split_off(split);
             let separator = right_entries[0].0.clone();
             PageReplacement::Split {
                 left: self.allocate_page(Page::Leaf { entries })?,
@@ -1016,7 +1059,16 @@ impl<S: PageStore> TreeCore<S> {
                         else {
                             unreachable!()
                         };
-                        let middle = keys.len() / 2;
+                        let middle = byte_balanced_split(
+                            keys.iter().map(|key| page::internal_key_len(key)),
+                            page::INTERNAL_BASE_LEN,
+                            self.options.page_size,
+                            true,
+                        )
+                        .ok_or(Error::PageTooLarge {
+                            page_id: parent_id,
+                            page_size: self.options.page_size,
+                        })?;
                         let separator = keys.remove(middle);
                         let right_keys = keys.split_off(middle);
                         let right_children = children.split_off(middle + 1);
