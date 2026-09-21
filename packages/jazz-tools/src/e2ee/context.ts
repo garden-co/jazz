@@ -27,7 +27,9 @@ const REQUIRED = new Set<string>(["application", "policy", "scope", "identifier"
 
 /** Canonical context format 1; semantic field selection belongs to the common E2EE layer. */
 export function encodeCryptoContext(context: CryptoContext): Uint8Array {
-  if (Object.keys(context).some((field) => !FIELD_NAMES.has(field))) {
+  if (
+    Reflect.ownKeys(context).some((field) => typeof field !== "string" || !FIELD_NAMES.has(field))
+  ) {
     throw new Error("Unknown E2EE context field");
   }
   const encoder = new TextEncoder();

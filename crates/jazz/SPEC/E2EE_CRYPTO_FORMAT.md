@@ -35,9 +35,10 @@ order: application, policy, scope, identifier, table, row, column, epoch, recipi
 Each field is a four-byte unsigned big-endian byte length followed by its UTF-8
 bytes. Application, policy, scope, identifier and epoch must be non-empty.
 Unused table/row/column/recipient fields have zero length; omitted and empty
-optional fields mean the same thing. Unknown fields are rejected. Each field
-is limited to 65,535 UTF-8 bytes. Unpaired UTF-16 surrogates are rejected rather
-than replaced; no Unicode, case or identifier normalisation takes place.
+optional fields mean the same thing. Unknown own fields are rejected, including
+non-enumerable properties and symbol keys. Each field is limited to 65,535 UTF-8
+bytes. Unpaired UTF-16 surrogates are rejected rather than replaced; no Unicode,
+case or identifier normalisation takes place.
 
 The common E2EE layer supplies all IDs applicable to the operation; cell contexts
 include table, row and column. Key contexts identify their owner scope and epoch
