@@ -79,10 +79,10 @@ pub(super) struct IncrementalEvaluation<'a> {
     work_queue: EvaluationWorkQueue,
     /// Graph slice whose state is staged by this evaluation. Unrelated
     /// runtime state remains live and is merged only when the tick commits.
-    relevant_nodes: HashSet<NodeId>,
+    relevant_nodes: Arc<HashSet<NodeId>>,
     published_subscriptions: HashSet<SubscriptionId>,
     affected_subscriptions: HashSet<SubscriptionId>,
-    affected_nodes: HashSet<NodeId>,
+    affected_nodes: Arc<HashSet<NodeId>>,
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
@@ -347,6 +347,16 @@ impl EvaluationWorkQueue {
         roots: impl IntoIterator<Item = NodeId>,
         hydrate_sources: bool,
     ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+        let queue = Self::discover_frame(graph, node_meta, roots, hydrate_sources)?;
+        Ok((queue.layout.nodes.iter().copied().collect(), queue))
+    }
+
+    fn discover_frame(
+        graph: &IvmGraph,
+        node_meta: &HashMap<NodeId, NodeRuntimeMeta>,
+        roots: impl IntoIterator<Item = NodeId>,
+        hydrate_sources: bool,
+    ) -> Result<Self, IvmRuntimeError> {
         let layout = graph
             .execution_layout(roots)
             .map_err(IvmRuntimeError::GraphNodeNotFound)?;
@@ -432,8 +442,7 @@ impl EvaluationWorkQueue {
                 queue.make_slot_runnable(slot);
             }
         }
-        let relevant_nodes = queue.layout.nodes.iter().copied().collect();
-        Ok((relevant_nodes, queue))
+        Ok(queue)
     }
 
     fn requests(&self) -> impl Iterator<Item = &EvaluationRequestKey> {
@@ -810,8 +819,8 @@ impl<'a> IncrementalEvaluation<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         self.node_meta.retain(|node, _| !nodes.contains(node));
-        self.relevant_nodes.retain(|node| !nodes.contains(node));
-        self.affected_nodes.retain(|node| !nodes.contains(node));
+        Arc::make_mut(&mut self.relevant_nodes).retain(|node| !nodes.contains(node));
+        Arc::make_mut(&mut self.affected_nodes).retain(|node| !nodes.contains(node));
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
@@ -882,7 +891,7 @@ impl<'a> IncrementalEvaluation<'a> {
         // Retainers are owned by graph lifecycle operations, not by this
         // evaluation snapshot. Preserve their current live value when a
         // suspended continuation resumes after lifecycle activity.
-        for node in &self.relevant_nodes {
+        for node in self.relevant_nodes.iter() {
             match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
                 (Some(meta), Some(live)) => {
                     meta.retainers = live.retainers.clone();
@@ -2492,22 +2501,19 @@ impl IvmRuntime {
             .iter()
             .map(|delta| &delta.key)
             .collect::<HashSet<_>>();
-        let affected_nodes = self.graph.affected_nodes(
-            changed_tables.iter().copied(),
-            changed_bindings.iter().copied(),
-        );
+        let activation = self
+            .graph
+            .activation_plan(
+                changed_tables.iter().copied(),
+                changed_bindings.iter().copied(),
+            )
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let affected_nodes = Arc::clone(&activation.affected);
         // Capture only the graph slice reached from changed inputs. The
         // evaluator may need unchanged sibling inputs (for example the other
         // side of a join), so discovery walks ancestors of every affected
         // node, while unrelated graph state remains in the live runtime.
-        let relevant_nodes = self
-            .graph
-            .execution_layout(affected_nodes.iter().copied())
-            .map_err(IvmRuntimeError::GraphNodeNotFound)?
-            .nodes
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>();
+        let relevant_nodes = Arc::clone(&activation.relevant);
         // Capture by graph key, never by filtering global retained maps. Root
         // state is the only durable evaluator state; recursive child scopes
         // are scratch and are removed before publication.
@@ -2526,7 +2532,7 @@ impl IvmRuntime {
             .collect::<HashMap<_, _>>();
         let mut arrangement_states = HashMap::default();
         let mut arrangement_keys_by_input = HashMap::default();
-        for input in &relevant_nodes {
+        for input in relevant_nodes.iter() {
             let Some(keys) = self.arrangement_keys_by_input.get(input) else {
                 continue;
             };
@@ -2551,22 +2557,14 @@ impl IvmRuntime {
             .collect::<HashMap<_, _>>();
         let mut table_frontiers = HashMap::default();
         let mut binding_frontiers = HashMap::default();
-        for node in &relevant_nodes {
-            let Some(graph_node) = self.graph.node(*node) else {
-                continue;
-            };
-            match &graph_node.descriptor.operator {
-                OpType::TableSource(source) => {
-                    if let Some(frontier) = self.table_frontiers.get(&source.table) {
-                        table_frontiers.insert(source.table.clone(), *frontier);
-                    }
-                }
-                OpType::BindingSource(source) => {
-                    if let Some(frontier) = self.binding_frontiers.get(&source.key) {
-                        binding_frontiers.insert(source.key.clone(), *frontier);
-                    }
-                }
-                _ => {}
+        for table in &activation.tables {
+            if let Some(frontier) = self.table_frontiers.get(table) {
+                table_frontiers.insert(table.clone(), *frontier);
+            }
+        }
+        for binding in &activation.bindings {
+            if let Some(frontier) = self.binding_frontiers.get(binding) {
+                binding_frontiers.insert(binding.clone(), *frontier);
             }
         }
         let current_tick = self.current_tick + 1;
@@ -2577,7 +2575,7 @@ impl IvmRuntime {
             .sum::<usize>();
         self.tick_durable_nodes(
             &table_deltas,
-            &affected_nodes,
+            &activation.durable,
             current_tick,
             storage.as_ref(),
             &mut operator_states,
@@ -2635,21 +2633,18 @@ impl IvmRuntime {
                 }
             }
         }
-        let mut retained_roots = affected_nodes
+        let retained_roots = activation
+            .ephemeral
             .iter()
             .filter(|node| {
                 self.node_meta.get(node).is_some_and(|meta| {
                     meta.retainers
                         .iter()
                         .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
-                }) && self
-                    .graph
-                    .node(**node)
-                    .is_some_and(|node| !node.is_durable())
+                })
             })
             .copied()
             .collect::<Vec<_>>();
-        retained_roots.sort_unstable();
         let mut active_roots = affected_subscriptions
             .iter()
             .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
@@ -2662,15 +2657,11 @@ impl IvmRuntime {
                     .flatten()
             })
             .collect::<Vec<_>>();
-        active_roots.sort_unstable();
-        active_roots.dedup();
         active_roots.extend(retained_roots.iter().copied());
-        active_roots.sort_unstable();
-        active_roots.dedup();
         let requests = EvaluationRequests::new();
         let evaluation_inputs = Some(EvaluationInputs::default());
-        let (_, work_queue) =
-            EvaluationWorkQueue::discover(&self.graph, &self.node_meta, active_roots, false)?;
+        let work_queue =
+            EvaluationWorkQueue::discover_frame(&self.graph, &self.node_meta, active_roots, false)?;
         eval_memo.set_layout(Arc::clone(&work_queue.layout));
         Ok(IncrementalEvaluation {
             table_deltas,
@@ -2920,7 +2911,7 @@ impl IvmRuntime {
     async fn tick_durable_nodes(
         &self,
         table_deltas: &[TableDelta],
-        affected_nodes: &std::collections::HashSet<NodeId>,
+        durable_nodes: &[NodeId],
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
         operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
@@ -2934,19 +2925,10 @@ impl IvmRuntime {
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
         durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
-        let durable_nodes = affected_nodes
-            .iter()
-            .copied()
-            .filter(|node| {
-                self.graph
-                    .node(*node)
-                    .is_some_and(|graph_node| graph_node.is_durable())
-            })
-            .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
-        for node in durable_nodes {
+        for &node in durable_nodes {
             let graph_node = self
                 .graph
                 .node(node)
@@ -3112,10 +3094,13 @@ fn bump_input_frontiers_staged(
     if changed_tables.is_empty() && changed_bindings.is_empty() {
         return;
     }
-    for node in graph.affected_nodes(
-        changed_tables.iter().copied(),
-        changed_bindings.iter().copied(),
-    ) {
+    for &node in graph
+        .affected_nodes(
+            changed_tables.iter().copied(),
+            changed_bindings.iter().copied(),
+        )
+        .iter()
+    {
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
     }

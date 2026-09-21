@@ -2,6 +2,58 @@
 
 use super::*;
 
+#[futures_test::test]
+async fn repeated_source_ticks_include_new_consumers_and_survive_subscription_churn() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    let primary = db.subscribe_one_sink(graph.clone()).await.unwrap();
+    assert!(primary.recv().unwrap().to_values().unwrap().is_empty());
+    let mut previous = None;
+    for stamp in [10, 20, 30] {
+        // The second consumer is attached after earlier ticks warmed activation
+        // planning for this exact table source. It must not miss later writes.
+        let extra = db
+            .subscribe_one_sink(
+                graph
+                    .clone()
+                    .filter(PredicateExpr::gt("stamp", Value::U64(0))),
+            )
+            .await
+            .unwrap();
+        let row = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+        assert_eq!(
+            extra.recv().unwrap().to_values().unwrap(),
+            previous
+                .map(|stamp| vec![(row(stamp), 1)])
+                .unwrap_or_default()
+        );
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "value"));
+        db.commit_batch(batch).await.unwrap();
+        for changes in [primary.recv().unwrap(), extra.recv().unwrap()] {
+            let changes = changes.to_values().unwrap();
+            assert_eq!(changes.len(), if previous.is_some() { 2 } else { 1 });
+            assert!(changes.contains(&(row(stamp), 1)));
+            if let Some(old) = previous {
+                assert!(changes.contains(&(row(old), -1)));
+            }
+        }
+        assert!(db.unsubscribe(extra.id()));
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(row(stamp), 1)]
+        );
+        previous = Some(stamp);
+    }
+}
+
 /// Exact public results cover shared producer state; the test-only allocation
 /// counter additionally proves that resident stateful kernels do not silently
 /// fall back to an async interpreter (result equality cannot prove this).
