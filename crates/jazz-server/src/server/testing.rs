@@ -375,7 +375,7 @@ impl JazzServer {
             phase
         });
         let task = tokio::spawn(async move {
-            axum::serve(listener, built.app)
+            axum::serve(crate::tcp::low_latency_listener(listener), built.app)
                 .with_graceful_shutdown(async {
                     let _ = serve_shutdown_rx.await;
                 })
