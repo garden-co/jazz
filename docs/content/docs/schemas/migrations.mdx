@@ -123,17 +123,10 @@ When a newer schema drops a column that older clients still expect, define a bac
 
 To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged; Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
 
-## Migrating historical schemas
+## Choosing migration endpoints
 
-If your database already contains rows under a historical schema that is disconnected from
-other schema versions, those rows remain stored but cannot be read through a schema with no
-migration path to them. Create a migration to connect that historical schema to the schema
-your app uses.
-
-This is a recovery workflow for existing disconnected schemas. `deploy` requires a complete
-migration path when changing the deployed schema; it does not let you skip a required migration.
-
-To do so, you'll need to **create the migration using explicit to/from schema hashes**:
+By default, `migrations create` compares the latest local snapshot with the current `schema.ts`.
+Use explicit schema hashes to choose different endpoints, for example when connecting schemas developed on separate branches:
 
 ```bash
 pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
@@ -141,7 +134,8 @@ pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHa
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
-server and saves a snapshot in `migrations/snapshots/`.
+server and saves a snapshot in `migrations/snapshots/`. Remote lookup requires the app ID, server URL, and admin secret;
+provide the server URL and secret through `--server-url` and `--admin-secret` or their environment variables.
 
 ## Compiling the schema
 
