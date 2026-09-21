@@ -2,13 +2,40 @@
 
 use super::*;
 
+/// A predicate reads fields, not necessarily a materialized intermediate row.
+/// Implementations retain the same typed comparison and SQL-null semantics.
+pub(super) trait PredicateRecord: Copy {
+    fn value(self, field: &str) -> Result<Value, IvmRuntimeError>;
+    fn literal_ordering(
+        self,
+        field: &str,
+        value: &LiteralValue,
+    ) -> Result<FieldLiteralOrdering, IvmRuntimeError>;
+}
+
+impl PredicateRecord for BorrowedRecord<'_> {
+    fn value(self, field: &str) -> Result<Value, IvmRuntimeError> {
+        let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
+            .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
+        self.get_idx(index).map_err(Into::into)
+    }
+
+    fn literal_ordering(
+        self,
+        field: &str,
+        value: &LiteralValue,
+    ) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
+        let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+        record_field_literal_ordering(self, index, value)
+    }
+}
+
 fn resolved_record_value(
-    record: BorrowedRecord<'_>,
+    record: impl PredicateRecord,
     field: &str,
 ) -> Result<Value, IvmRuntimeError> {
-    let index = super::record_projection::resolve_field_name(&record.descriptor(), field)
-        .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
-    record.get_idx(index).map_err(Into::into)
+    record.value(field)
 }
 
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
@@ -310,15 +337,13 @@ pub(super) fn record_field_key_parts(
 }
 
 pub(super) fn compare_record_field(
-    record: BorrowedRecord<'_>,
+    record: impl PredicateRecord,
     field: &str,
     value: &LiteralValue,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
     comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
-    let field_idx = super::record_projection::resolve_field_name(&record.descriptor(), field)
-        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
-    match record_field_literal_ordering(record, field_idx, value)? {
+    match record.literal_ordering(field, value)? {
         FieldLiteralOrdering::Compared(ordering) => return Ok(predicate(ordering)),
         FieldLiteralOrdering::SqlNull => return Ok(false),
         FieldLiteralOrdering::Unsupported => {}
@@ -334,7 +359,7 @@ pub(super) enum FieldLiteralOrdering {
     Unsupported,
 }
 
-fn record_field_literal_ordering(
+pub(super) fn record_field_literal_ordering(
     record: BorrowedRecord<'_>,
     field_idx: usize,
     value: &LiteralValue,
@@ -463,7 +488,7 @@ pub(super) fn ordering<T: PartialOrd + ?Sized>(actual: &T, expected: &T) -> Fiel
 }
 
 pub(super) fn compare_record_fields(
-    record: BorrowedRecord<'_>,
+    record: impl PredicateRecord,
     field: &str,
     value_field: &str,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
@@ -475,7 +500,7 @@ pub(super) fn compare_record_fields(
 }
 
 pub(super) fn contains_record_field(
-    record: BorrowedRecord<'_>,
+    record: impl PredicateRecord,
     field: &str,
     value: &LiteralValue,
     comparison: ValueComparison,
@@ -486,7 +511,7 @@ pub(super) fn contains_record_field(
 }
 
 pub(super) fn contains_record_field_value(
-    record: BorrowedRecord<'_>,
+    record: impl PredicateRecord,
     field: &str,
     needle_field: &str,
     comparison: ValueComparison,
