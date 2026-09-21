@@ -755,6 +755,7 @@ describe("cli validate", () => {
   it("warns with an exact Jazz provenance replacement", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(logs.filter((line) => line.includes("built-in $createdAt"))).toEqual([
       expect.stringContaining("s.allowExternalProvenanceName(...)"),
@@ -764,6 +765,7 @@ describe("cli validate", () => {
   it("promotes conventional provenance guidance to an error in strict mode", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await expect(validate({ schemaDir: root, strictProvenance: true })).rejects.toThrow(
       /forbidden by --strict-provenance[\s\S]*\$createdAt/i,
     );
@@ -772,6 +774,7 @@ describe("cli validate", () => {
   it("allows explicitly marked external provenance without false positives", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithExternalProvenance());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     const { logs } = await captureConsoleLogs(() =>
       validate({ schemaDir: root, strictProvenance: true }),
     );
@@ -781,6 +784,7 @@ describe("cli validate", () => {
   it("preserves external provenance allowances from raw schema exports", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rawRootSchemaWithExternalProvenance());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     const { logs } = await captureConsoleLogs(() =>
       validate({ schemaDir: root, strictProvenance: true }),
     );
@@ -790,6 +794,7 @@ describe("cli validate", () => {
   it("validates root schema.ts without generating SQL or app artifacts", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
 
     await validate({ schemaDir: root });
 
@@ -842,9 +847,11 @@ describe("cli validate", () => {
     await validate({ schemaDir: root });
   });
 
-  it("reports each denied table when permissions.ts is missing", async () => {
+  it("reports each denied table when permissions.ts explicitly grants nothing", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
@@ -3388,6 +3395,8 @@ describe("bin integration", () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
 
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+
     const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
@@ -3423,6 +3432,21 @@ describe("bin integration", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Missing value for --schema-dir.");
   });
+
+  it.each(["", "\nexport const permissions = {};\n"])(
+    "rejects missing permissions.ts even if schema.ts exports permissions (%j)",
+    async (permissionsExport) => {
+      const { root } = await createWorkspace();
+      await writeFile(
+        join(root, "schema.ts"),
+        rootSchemaWithoutInlinePermissions(distIndexPath) + permissionsExport,
+      );
+      const result = runBin(["validate", "--schema-dir", root]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Create a permissions.ts file");
+      expect(result.stdout).not.toContain("Validated");
+    },
+  );
 
   it("loads root permissions.ts through the validate command", async () => {
     const { root } = await createWorkspace();

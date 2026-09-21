@@ -233,9 +233,12 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
   permissions: NonNullable<LoadedSchemaProject["permissions"]>;
   permissionsFile: string;
 } {
-  if (!compiled.permissions || !compiled.permissionsFile) {
+  if (
+    !compiled.permissions ||
+    compiled.permissionsFile !== join(compiled.rootDir, "permissions.ts")
+  ) {
     throw new Error(
-      "No permissions found for this app. Create a permissions.ts file before deploying.",
+      "Missing permissions.ts for this app. Create a permissions.ts file before validating or deploying.",
     );
   }
 
@@ -248,7 +251,7 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
 export async function validateProject(
   options: ValidateProjectOptions,
 ): Promise<ValidateProjectResult> {
-  const compiled = await loadCompiledSchema(options.schemaDir);
+  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   return {
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
