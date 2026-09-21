@@ -4,7 +4,7 @@ import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
-import type { JazzClient, TransactionalRuntime } from "./client.js";
+import { ExclusiveWriteHandle, type JazzClient, type TransactionalRuntime } from "./client.js";
 import type { Db } from "./db.js";
 import { beginDbTransactionAfter } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -278,7 +278,10 @@ it.each(["mergeable", "exclusive"] as const)(
     const committed = tx.commit();
 
     await expect(reading).rejects.toBe(failure);
-    const waiting = kind === "exclusive" ? committed.wait() : committed.wait({ tier: "local" });
+    const waiting =
+      committed instanceof ExclusiveWriteHandle
+        ? committed.wait()
+        : committed.wait({ tier: "local" });
     await expect(waiting).rejects.toBe(failure);
     await expect(db.all(app.documents, { tier: "local" })).resolves.toEqual([]);
     expect(() => tx.commit()).toThrow();
@@ -302,7 +305,10 @@ it.each(["mergeable", "exclusive"] as const)(
     const committed = tx.commit();
 
     await expect(reading).rejects.toBe(failure);
-    const waiting = kind === "exclusive" ? committed.wait() : committed.wait({ tier: "local" });
+    const waiting =
+      committed instanceof ExclusiveWriteHandle
+        ? committed.wait()
+        : committed.wait({ tier: "local" });
     await expect(waiting).rejects.toBe(failure);
     await expect(db.all(app.documents, { tier: "local" })).resolves.toEqual([]);
     expect(() => tx.commit()).toThrow();
