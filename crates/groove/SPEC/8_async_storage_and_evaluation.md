@@ -99,6 +99,22 @@ error in a later stage, remaining rows still execute preceding stages so an
 earlier-stage error wins. Cancellation drops all task-local work. These physical
 plans and continuations have no storage or wire encoding.
 
+Within a private task, total projections compose field routes back to the last
+materialized input. Field selections, nested record paths, encoded constants and
+nullable wrapping need no intermediate row encoding. Predicates use the same
+comparison kernel against either a real record or those routed fields, including
+SQL nulls, nested enum predicates and field-to-field comparisons. Only requested
+predicate values are decoded; ordinary scalar literal comparisons retain their
+encoded-field fast path. Final output uses the existing record framing writer.
+Byte-identical output continues sharing the original record bytes.
+
+Fallible constants and semantic enum conversions are not elided, even when their
+outputs are subsequently dropped or filtered away. They materialize the preceding
+virtual record and execute at their original semantic boundary. Resumable budget
+slots remain for composed stages, so deep chains cannot bypass cooperative yields.
+Composition assumes descriptor-valid input records, like ordinary compiler field
+selection composition; it does not introduce a new storage or wire representation.
+
 Hydration and incremental maintenance use the same owned evaluation session.
 Hydration is the initial delta from empty state; it is not a second evaluator
 or snapshot-shaped installation path. Incremental input can discover a newly

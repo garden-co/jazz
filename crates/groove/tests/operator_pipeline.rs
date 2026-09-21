@@ -21,6 +21,144 @@ fn rows() -> GraphBuilder {
 }
 
 #[test]
+fn composed_fields_cross_filters_with_exact_nested_nullable_and_constant_payloads() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let nested = RecordDescriptor::new([("text", ValueType::String)]);
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("details", ValueType::Record(Box::new(nested))),
+    ]);
+    let source = GraphBuilder::values(
+        descriptor,
+        (0..700).map(|id| {
+            vec![
+                Value::U64(id),
+                Value::Record(groove::records::OwnedRecord::new(
+                    nested
+                        .create(&[Value::String(format!("row-{id}"))])
+                        .unwrap(),
+                    nested,
+                )),
+            ]
+        }),
+    )
+    .unwrap();
+    let projected = source.project_fields([
+        ProjectField::named("id"),
+        ProjectField::record_field("details", ["text"], "label"),
+        ProjectField::literal("constant", Value::String("row-".into())),
+        ProjectField::nullable("id", "optional"),
+        ProjectField::null_typed("absent", ValueType::Nullable(Box::new(ValueType::U64))),
+    ]);
+    let graph = projected
+        .clone()
+        .filter(PredicateExpr::And(vec![
+            PredicateExpr::gt("id", Value::U64(100)),
+            PredicateExpr::ContainsField {
+                field: "label".into(),
+                needle_field: "constant".into(),
+            },
+            PredicateExpr::EqField {
+                field: "id".into(),
+                value_field: "optional".into(),
+            },
+            PredicateExpr::IsNull {
+                field: "absent".into(),
+            },
+        ]))
+        .project_fields([
+            ProjectField::named("label"),
+            ProjectField::nullable("optional", "twice"),
+            ProjectField::named("constant"),
+            ProjectField::named("absent"),
+        ])
+        .filter(PredicateExpr::IsNotNull {
+            field: "twice".into(),
+        });
+
+    // First execution has a private virtual prefix. Then attach an observer,
+    // forcing the very same prefix to become a real materialization boundary.
+    let first = db.subscribe([("result", graph.clone())]).unwrap();
+    let first_result = block_on(db.next_multisink_subscription(&first)).unwrap();
+    let observer = db.subscribe([("prefix", projected)]).unwrap();
+    assert_eq!(
+        block_on(db.next_multisink_subscription(&observer))
+            .unwrap()
+            .get("prefix")
+            .unwrap()
+            .deltas
+            .len(),
+        700
+    );
+    let second = db.subscribe([("result", graph.clone())]).unwrap();
+    let second_result = block_on(db.next_multisink_subscription(&second)).unwrap();
+    let one_shot = block_on(db.query_graph(graph)).unwrap();
+    let mut expected = (101..700)
+        .map(|id| {
+            (
+                vec![
+                    Value::String(format!("row-{id}")),
+                    Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(Value::U64(
+                        id,
+                    ))))))),
+                    Value::String("row-".into()),
+                    Value::Nullable(None),
+                ],
+                1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let sort = |rows: &mut Vec<(Vec<Value>, i64)>| {
+        rows.sort_by(|a, b| {
+            let (Value::String(a), Value::String(b)) = (&a.0[0], &b.0[0]) else {
+                panic!("label")
+            };
+            a.cmp(b)
+        })
+    };
+    sort(&mut expected);
+    for result in [
+        first_result.get("result").unwrap(),
+        second_result.get("result").unwrap(),
+        &one_shot,
+    ] {
+        let mut actual = result.to_values().unwrap();
+        sort(&mut actual);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn discarded_invalid_constant_is_not_hidden_by_a_virtual_filter() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let graph = rows()
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField::literal_typed(
+                "bad",
+                Value::String("not a number".into()),
+                ValueType::U64,
+            ),
+        ])
+        .filter(PredicateExpr::gt("id", Value::U64(99999)))
+        .project(["id"]);
+    let subscription = db.subscribe([("result", graph)]).unwrap();
+    let error = block_on(db.next_multisink_subscription(&subscription)).unwrap_err();
+    assert!(
+        error.to_string().contains("value does not match type U64"),
+        "{error}"
+    );
+}
+
+#[test]
 fn resident_unary_batches_yield_without_partial_results_and_preserve_shared_outputs() {
     let mut db = block_on(Database::new(
         DatabaseSchema::new([]),

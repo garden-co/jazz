@@ -4,6 +4,8 @@
 use super::evaluator::NodeMemoLookup;
 use super::*;
 use std::task::{Context, Poll};
+mod fields;
+use fields::FieldRoutes;
 
 pub(crate) fn supports_node(graph: &IvmGraph, id: NodeId) -> bool {
     let Some(node) = graph.node(id) else {
@@ -35,6 +37,11 @@ pub(crate) fn supports_node(graph: &IvmGraph, id: NodeId) -> bool {
 
 #[derive(Debug)]
 enum Stage {
+    /// A total projection was composed into subsequent field routes. Keep its
+    /// budget slot so arbitrarily deep chains still yield within a row.
+    VirtualProject,
+    RoutedFilter(FilterOp, FieldRoutes),
+    Materialize(FieldRoutes),
     Filter(FilterOp, RecordDescriptor),
     Project {
         project: MapProjectOp,
@@ -101,6 +108,35 @@ impl PendingPipeline {
                 _ => self.scratch[1].as_ref(),
             };
             let result = match stage {
+                Stage::VirtualProject => continue,
+                Stage::RoutedFilter(filter, routes) => filter
+                    .predicate
+                    .matches(routes.record(raw), filter.comparison),
+                Stage::Materialize(routes) => {
+                    if routes.reuses_input {
+                        continue;
+                    }
+                    if stage_index + 1 == self.plan.stages.len() {
+                        match routes.append(raw, &mut self.output) {
+                            Ok(span) => {
+                                self.spans.push((span, delta.weight));
+                                return true;
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        let [left, right] = &mut self.scratch;
+                        let (raw, destination) = match location {
+                            1 => (left.as_ref(), right),
+                            2 => (right.as_ref(), left),
+                            _ => (delta.raw(), left),
+                        };
+                        destination.clear();
+                        let result = routes.append(raw, destination);
+                        location = if location == 1 { 2 } else { 1 };
+                        result.map(|_| true)
+                    }
+                }
                 Stage::Filter(filter, descriptor) => filter
                     .predicate
                     .matches(BorrowedRecord::new(raw, descriptor), filter.comparison),
@@ -226,33 +262,60 @@ impl TickEvaluator<'_> {
         let input = self.graph.node(nodes[0])?.descriptor.inputs[0];
         let mut stages = Vec::with_capacity(nodes.len());
         let mut descriptor = self.graph.node(input)?.descriptor.output.records();
+        let mut routes = FieldRoutes::identity(descriptor);
+        let mut virtual_rows = false;
         for node in nodes.iter().copied() {
             let graph_node = self.graph.node(node)?;
             let output = graph_node.descriptor.output.records();
-            stages.push(match &graph_node.descriptor.operator {
+            let stage = match &graph_node.descriptor.operator {
+                OpType::Filter(filter) if virtual_rows => {
+                    Stage::RoutedFilter(filter.clone(), routes.clone())
+                }
                 OpType::Filter(filter) => Stage::Filter(filter.clone(), descriptor),
-                OpType::MapProject(project) => Stage::Project {
-                    project: project.clone(),
-                    input: descriptor,
-                    output,
-                    // If preparation itself fails, run the ordinary evaluator
-                    // to preserve empty-input and upstream error precedence.
-                    prepared: self
+                OpType::MapProject(project) => {
+                    let prepared = self
                         .raw_projection_fields(node, project, &descriptor, output)
-                        .ok()?,
-                    omit_unrepresentable: project.expressions.iter().any(|expression| {
-                        matches!(
-                            expression.expression,
-                            ProjectExpr::RecursiveEnumRemap {
-                                omit_unrepresentable: true,
-                                ..
-                            }
-                        )
-                    }),
-                },
+                        .ok()?;
+                    if let Some(composed) = prepared
+                        .as_ref()
+                        .and_then(|plan| routes.compose(output, plan))
+                    {
+                        routes = composed;
+                        virtual_rows = true;
+                        descriptor = output;
+                        stages.push(Stage::VirtualProject);
+                        continue;
+                    }
+                    if virtual_rows {
+                        stages.push(Stage::Materialize(routes));
+                    }
+                    routes = FieldRoutes::identity(output);
+                    virtual_rows = false;
+                    Stage::Project {
+                        project: project.clone(),
+                        input: descriptor,
+                        output,
+                        // If preparation itself fails, run the ordinary evaluator
+                        // to preserve empty-input and upstream error precedence.
+                        prepared,
+                        omit_unrepresentable: project.expressions.iter().any(|expression| {
+                            matches!(
+                                expression.expression,
+                                ProjectExpr::RecursiveEnumRemap {
+                                    omit_unrepresentable: true,
+                                    ..
+                                }
+                            )
+                        }),
+                    }
+                }
                 _ => return None,
-            });
+            };
+            stages.push(stage);
             descriptor = output;
+        }
+        if virtual_rows {
+            stages.push(Stage::Materialize(routes));
         }
         let plan = Arc::new(PreparedPipeline {
             nodes: Arc::clone(nodes),
