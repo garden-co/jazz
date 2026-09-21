@@ -3,6 +3,7 @@ export type CryptoMechanism = Readonly<{ id: string; version: number }>;
 
 function validateMechanism({ id, version }: CryptoMechanism): void {
   if (
+    typeof id !== "string" ||
     !/^[a-z0-9.-]{1,64}$/.test(id) ||
     !Number.isInteger(version) ||
     version < 1 ||
