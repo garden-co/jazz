@@ -24,11 +24,11 @@ type ExpectLike = (value: unknown) => {
 };
 type TestDbMethodCallback = (db: Db) => unknown;
 type PendingWrite = {
-  wait(options: { tier: "edge" }): Promise<unknown>;
+  wait(options: { tier: "global" }): Promise<unknown>;
 };
 type SeedWrite<T> = {
   readonly value: T;
-  wait(options: { tier: "local" | "edge" }): Promise<T>;
+  wait(options: { tier: "local" | "global" }): Promise<T>;
 };
 
 /** @internal */
@@ -39,7 +39,7 @@ export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
 /** @internal */
 export async function settlePolicySeedForSessionReads<T>(write: SeedWrite<T>): Promise<T> {
   await settlePolicySeed(write);
-  return write.wait({ tier: "edge" });
+  return write.wait({ tier: "global" });
 }
 
 /**
@@ -106,7 +106,7 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     expectDenied: {
       value: async (callback: (db: Db) => PendingWrite) => {
         const write = callback(db);
-        await expect(write.wait({ tier: "edge" })).rejects.toThrow(
+        await expect(write.wait({ tier: "global" })).rejects.toThrow(
           /AuthorizationDenied|Write rejected by server authorization/,
         );
       },

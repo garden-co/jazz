@@ -1474,7 +1474,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let queued_write_error = writer
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect_err("pre-permissions persisted create should be rejected");

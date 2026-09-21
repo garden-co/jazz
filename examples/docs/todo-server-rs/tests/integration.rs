@@ -851,7 +851,7 @@ async fn test_server_resync() {
         let query = Query::from("todos");
         let results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(DurabilityTier::EdgeServer)),
+            client.query(query, Some(DurabilityTier::GlobalServer)),
         )
         .await
         .expect("Query with EdgeServer tier should resolve within 10s")

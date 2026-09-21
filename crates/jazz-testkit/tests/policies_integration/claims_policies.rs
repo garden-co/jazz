@@ -596,7 +596,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .expect("blocked update has a transaction");
     let blocked_error = tokio::time::timeout(
         QUERY_TIMEOUT,
-        alice.wait_for_transaction(blocked_tx, DurabilityTier::EdgeServer),
+        alice.wait_for_transaction(blocked_tx, DurabilityTier::GlobalServer),
     )
     .await
     .expect("blocked update settles within timeout")

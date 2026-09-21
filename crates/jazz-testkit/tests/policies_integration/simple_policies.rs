@@ -1766,7 +1766,7 @@ async fn updates_require_read_and_update_permissions_inner() {
         .expect("update commits immediately");
     let error = tokio::time::timeout(
         QUERY_TIMEOUT,
-        bob.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+        bob.wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer),
     )
     .await
     .expect("server decides the read-only update")
@@ -1821,7 +1821,7 @@ async fn updates_require_read_and_update_permissions_inner() {
         .expect("update commits immediately");
     let error = tokio::time::timeout(
         QUERY_TIMEOUT,
-        alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+        alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer),
     )
     .await
     .expect("server decides the hidden-row update")

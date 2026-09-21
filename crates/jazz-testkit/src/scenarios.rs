@@ -564,7 +564,7 @@ pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[Transacti
     for &transaction_id in transaction_ids {
         tokio::time::timeout(
             Duration::from_secs(15),
-            client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
+            client.wait_for_transaction(transaction_id, DurabilityTier::GlobalServer),
         )
         .await
         .unwrap_or_else(|_| {

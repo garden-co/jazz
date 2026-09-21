@@ -1189,7 +1189,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     let protected_update = match transaction_id {
         Ok(Some(transaction_id)) => {
             alice
-                .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
+                .wait_for_transaction(transaction_id, DurabilityTier::GlobalServer)
                 .await
         }
         Ok(None) => panic!("chat update should commit immediately"),

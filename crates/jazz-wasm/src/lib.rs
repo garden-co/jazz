@@ -3234,7 +3234,6 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
     match tier {
         "None" | "none" => Ok(DurabilityTier::None),
         "Local" | "local" => Ok(DurabilityTier::Local),
-        "Edge" | "edge" => Ok(DurabilityTier::Global),
         "Global" | "global" => Ok(DurabilityTier::Global),
         other => Err(JsValue::from_str(&format!(
             "unknown durability tier {other}"

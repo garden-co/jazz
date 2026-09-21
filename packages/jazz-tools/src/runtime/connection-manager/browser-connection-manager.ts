@@ -230,7 +230,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
-    return tier === "edge" || tier === "global";
+    return tier === "global";
   }
   isExplicitlyOffline(): boolean {
     return this.disconnected;

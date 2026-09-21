@@ -181,7 +181,7 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
                 assert_eq!(ordinary_rows(result), vec![(probe, vec![Value::Text("fresh server row".into())])]);
                 {
                     use std::future::Future;
-                    let mut settlement = Box::pin(uploader.wait_for_transaction(upload, jazz::tools::DurabilityTier::EdgeServer));
+                    let mut settlement = Box::pin(uploader.wait_for_transaction(upload, jazz::tools::DurabilityTier::GlobalServer));
                     std::future::poll_fn(|cx| {
                         assert!(settlement.as_mut().poll(cx).is_pending(), "upload must remain incomplete until bulk credits return");
                         std::task::Poll::Ready(())

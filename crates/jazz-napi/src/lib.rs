@@ -4296,7 +4296,6 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
     match tier {
         "None" | "none" => Ok(CoreDurabilityTier::None),
         "Local" | "local" => Ok(CoreDurabilityTier::Local),
-        "Edge" | "edge" => Ok(CoreDurabilityTier::Global),
         "Global" | "global" => Ok(CoreDurabilityTier::Global),
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
@@ -7254,7 +7253,7 @@ mod tests {
         let Either3::A(payload) = payload else {
             panic!("expected delta payload");
         };
-        assert_eq!(payload.tier, "Edge");
+        assert_eq!(payload.tier, "Global");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
         assert_eq!(insert.root_key, vec![0, 255]);

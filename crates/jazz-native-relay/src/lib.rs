@@ -2823,7 +2823,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Global,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -2846,7 +2845,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Global,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -6345,15 +6343,16 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
+        if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
+            return Err(failure(
+                "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
+            ));
+        }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            (
-                "tier",
-                Some(
-                    "edge" | "Edge" | "remote" | "Remote" | "remote-if-possible"
-                    | "RemoteIfPossible",
-                ),
-            ) => Some("Edge"),
+            ("tier", Some("remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible")) => {
+                Some("Global")
+            }
             ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
             ("tier", Some("none" | "None")) => Some("None"),
             ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
@@ -8002,7 +8001,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
                 transaction: None,
             },
         );
@@ -8248,7 +8247,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
                 transaction: None,
             },
         );

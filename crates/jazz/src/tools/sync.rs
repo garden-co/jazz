@@ -1,12 +1,39 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
+/// Persistence tier: local storage or the authoritative Core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(from = "DurabilityEncoding", into = "DurabilityEncoding")]
 pub enum DurabilityTier {
+    Local,
+    GlobalServer,
+}
+
+// Preserve the facade's existing serialized tags, independently of the core
+// transaction encoding. The removed intermediate tier is decode-only.
+#[derive(Serialize, Deserialize)]
+enum DurabilityEncoding {
     Local,
     EdgeServer,
     GlobalServer,
+}
+
+impl From<DurabilityEncoding> for DurabilityTier {
+    fn from(value: DurabilityEncoding) -> Self {
+        match value {
+            DurabilityEncoding::Local | DurabilityEncoding::EdgeServer => Self::Local,
+            DurabilityEncoding::GlobalServer => Self::GlobalServer,
+        }
+    }
+}
+
+impl From<DurabilityTier> for DurabilityEncoding {
+    fn from(value: DurabilityTier) -> Self {
+        match value {
+            DurabilityTier::Local => Self::Local,
+            DurabilityTier::GlobalServer => Self::GlobalServer,
+        }
+    }
 }
 
 /// Product-level consistency choice for reads.
@@ -41,7 +68,7 @@ impl ReadTier {
     pub const fn legacy_durability_tier(self) -> DurabilityTier {
         match self {
             Self::LocalFirst => DurabilityTier::Local,
-            Self::Remote | Self::RemoteIfPossible => DurabilityTier::EdgeServer,
+            Self::Remote | Self::RemoteIfPossible => DurabilityTier::GlobalServer,
         }
     }
 }
@@ -70,5 +97,29 @@ impl Default for ClientId {
 impl std::fmt::Display for ClientId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durability_preserves_facade_encoding_without_an_edge_api() {
+        for (bytes, expected, encoded) in [
+            (vec![0], DurabilityTier::Local, vec![0]),
+            (vec![1], DurabilityTier::Local, vec![0]),
+            (vec![2], DurabilityTier::GlobalServer, vec![2]),
+        ] {
+            assert_eq!(
+                postcard::from_bytes::<DurabilityTier>(&bytes).unwrap(),
+                expected
+            );
+            assert_eq!(postcard::to_allocvec(&expected).unwrap(), encoded);
+        }
+        assert_eq!(
+            ReadTier::Remote.legacy_durability_tier(),
+            DurabilityTier::GlobalServer
+        );
     }
 }

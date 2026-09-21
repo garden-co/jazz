@@ -551,7 +551,7 @@ async fn wait_for_transaction_reaches_edge_and_global_tiers() {
             alice
                 .wait_for_transaction(
                     transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
+                    DurabilityTier::GlobalServer,
                 )
                 .await
                 .expect("edge wait_for_transaction should resolve from scheduled core progress");

@@ -342,7 +342,7 @@ export interface AuthConfig {
  * - `edge`: Persisted at edge server
  * - `global`: Persisted at global server
  */
-export type DurabilityTier = "local" | "edge" | "global";
+export type DurabilityTier = "local" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */
 export const ReadTier = {
   /** Cached local knowledge and pending writes; still syncs while connected. */
@@ -419,6 +419,9 @@ export function publicQueryExecutionOptions(
 ): QueryExecutionOptions | undefined {
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
+  if (candidate.tier === "edge") {
+    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
+  }
   const result: QueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
@@ -432,7 +435,6 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
     value === ReadTier.Remote ||
     value === ReadTier.RemoteIfPossible ||
     value === "local" ||
-    value === "edge" ||
     value === "global"
   );
 }
@@ -590,9 +592,9 @@ export function resolveDefaultDurabilityTier(
     return "local";
   }
 
-  // In non-browser environments, default to edge when connected to a server.
+  // In non-browser environments, default to Core confirmation when connected to a server.
   // For local/in-memory runtimes without a server, keep local semantics.
-  return context.serverUrl ? "edge" : "local";
+  return context.serverUrl ? "global" : "local";
 }
 
 export function resolveEffectiveQueryExecutionOptions(
@@ -610,13 +612,16 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-/** @internal Low-level runtimes retain the legacy three-tier wire contract. */
+/** @internal Lower product read choices to local or Core-confirmed reads. */
 export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
+  if ((tier as string) === "edge") {
+    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
+  }
   if (tier === "local-only") return "local";
   return tier === ReadTier.LocalFirst
     ? "local"
     : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
-      ? "edge"
+      ? "global"
       : tier;
 }
 

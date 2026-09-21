@@ -3233,7 +3233,6 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
 fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer => CoreDurabilityTier::Global,
         DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
@@ -3241,7 +3240,7 @@ fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
 fn core_legacy_read_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer | DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
+        DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
 
@@ -4847,11 +4846,11 @@ mod tests {
         );
         assert_eq!(
             ReadTier::Remote.legacy_durability_tier(),
-            DurabilityTier::EdgeServer
+            DurabilityTier::GlobalServer
         );
         assert_eq!(
             ReadTier::RemoteIfPossible.legacy_durability_tier(),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
             "the native facade has no explicit offline boundary"
         );
         assert_eq!(
@@ -4871,16 +4870,16 @@ mod tests {
             CoreDurabilityTier::Local
         );
         assert_eq!(
-            core_legacy_read_tier(DurabilityTier::EdgeServer),
+            core_legacy_read_tier(DurabilityTier::GlobalServer),
             CoreDurabilityTier::Global,
-            "legacy EdgeServer reads retain the ordinary settled remote view"
+            "remote reads use the Core-confirmed view"
         );
         assert_eq!(
             core_write_tier(DurabilityTier::Local),
             CoreDurabilityTier::Local
         );
         assert_eq!(
-            core_write_tier(DurabilityTier::EdgeServer),
+            core_write_tier(DurabilityTier::GlobalServer),
             CoreDurabilityTier::Global
         );
         assert_eq!(
@@ -6330,7 +6329,7 @@ mod tests {
         let unknown_error = client
             .wait_for_transaction_with_timeout_for_test(
                 unknown,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
@@ -6350,21 +6349,21 @@ mod tests {
         let timeout_error = client
             .wait_for_transaction_with_timeout_for_test(
                 transaction_id,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
             .expect_err("offline transaction cannot reach edge");
         assert!(
-            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach EdgeServer"),
+            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach GlobalServer"),
             "unexpected transaction timeout error: {timeout_error}"
         );
         assert_eq!(
             transaction_rejected_before_tier_message(
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 &CoreRejectionReason::AuthorizationDenied,
             ),
-            "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+            "transaction was rejected before reaching GlobalServer durability: authorization_denied",
         );
     }
 
