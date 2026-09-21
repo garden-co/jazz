@@ -63,6 +63,7 @@ fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
         Some((tx, position))
     );
     assert_eq!(block_on(bob.all(&prepared, opts)).unwrap(), received);
+}
 // These tests exercise physical FIFO/backpressure boundaries that a Db cannot
 // expose directly. The actual adapter and persistent codecs remain in use.
 fn receive_after_pumping<T: WireTransport, U: WireTransport>(
