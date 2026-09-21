@@ -17,6 +17,8 @@ pub(crate) struct ExecutionLayout {
     pub slots: FxHashMap<NodeId, usize>,
     pub roots: Vec<NodeId>,
     pub input_counts: Vec<usize>,
+    input_offsets: Vec<usize>,
+    input_slots: Vec<usize>,
     pub source_slots: Vec<usize>,
     /// Structural unary edges only. Live sharing/retainers are checked when a
     /// frame contracts them; those mutable facts never enter this cache.
@@ -53,11 +55,16 @@ impl ExecutionLayout {
         // Compressed adjacency: one allocation for every reverse edge, with
         // repeated inputs preserved (a self-join has two dependency edges).
         let mut dependent_offsets = vec![0; nodes.len() + 1];
+        let mut input_offsets = Vec::with_capacity(nodes.len() + 1);
+        let mut input_slots = Vec::new();
         for id in &nodes {
+            input_offsets.push(input_slots.len());
             for input in &graph.node(*id).ok_or(*id)?.descriptor.inputs {
+                input_slots.push(slots[input]);
                 dependent_offsets[slots[input] + 1] += 1;
             }
         }
+        input_offsets.push(input_slots.len());
         for slot in 0..nodes.len() {
             dependent_offsets[slot + 1] += dependent_offsets[slot];
         }
@@ -94,6 +101,8 @@ impl ExecutionLayout {
             slots,
             roots,
             input_counts,
+            input_offsets,
+            input_slots,
             source_slots,
             pipeline_predecessors,
             dependent_offsets,
@@ -105,8 +114,12 @@ impl ExecutionLayout {
         &self.dependent_slots[self.dependent_offsets[slot]..self.dependent_offsets[slot + 1]]
     }
 
+    pub fn inputs(&self, slot: usize) -> &[usize] {
+        &self.input_slots[self.input_offsets[slot]..self.input_offsets[slot + 1]]
+    }
+
     fn weight(&self) -> usize {
-        self.nodes.len() + self.dependent_slots.len()
+        self.nodes.len() + self.dependent_slots.len() + self.input_slots.len()
     }
 }
 
