@@ -44,16 +44,25 @@ non-empty final records and any bytes after the final record.
 
 Each plaintext record is returned only after authentication. A caller may
 consume this prefix, but must not report whole-file success until iteration
-finishes successfully. Missing or corrupted final authentication fails even
-after plaintext has been delivered. Wrong keys or contexts fail authentication.
+exhausts naturally after authenticating the empty final record and reaching
+upstream EOF. Missing or corrupted final authentication fails even after
+plaintext has been delivered. Wrong keys or contexts fail authentication.
+A successful early `return()` or `break` does not establish whole-file success.
 
 The adapters pull input only as needed for the current record. Working memory
 is bounded by record buffers, context and the current upstream chunk; an
 upstream producer can itself supply an arbitrarily large chunk. No file-sized
-plaintext collection is required. Cancellation interrupts a pending read and
-requests upstream cleanup without waiting indefinitely for an uncooperative
-source. The source remains responsible for stopping its own I/O. Ordinary
-source errors propagate. Early consumer return also requests source cleanup.
+plaintext collection is required. Aborting the supplied `AbortSignal` interrupts
+a pending read. Consumer `return()` does not interrupt an already pending
+`next()`; use the signal for that case.
+
+On early consumer return (including `break`), cancellation or failure, the
+adapters clear owned crypto state and request upstream cleanup at most once.
+They do not await the upstream `return()` promise, even without an
+`AbortSignal`. Cleanup rejections and synchronous cleanup errors are ignored;
+they must not replace successful early termination or the original failure.
+The source remains responsible for stopping its own I/O. Ordinary source
+read errors propagate. Natural exhaustion requires no additional cleanup call.
 
 Derived key buffers and owned crypto state are cleared on exit. Rust owns its
 state until explicit disposal or drop; the browser adapter clears and frees
