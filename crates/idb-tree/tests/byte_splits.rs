@@ -70,3 +70,34 @@ fn skewed_key_sizes_and_value_replacements_survive_multiple_levels() {
         }
     });
 }
+
+#[test]
+fn wide_separators_fit_after_skewed_parent_split() {
+    futures::executor::block_on(async {
+        for reverse in [false, true] {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let mut expected = BTreeMap::new();
+            let mut writes = Vec::new();
+            for ordinal in 0u32..2804 {
+                let rank = if reverse { 2803 - ordinal } else { ordinal };
+                let mut key = rank.to_be_bytes().to_vec();
+                key.resize(if rank < 2800 { 5 } else { 900 }, b'k');
+                let value = vec![(rank % 251) as u8];
+                expected.insert(key.clone(), value.clone());
+                writes.push(WriteOperation::Set { key, value });
+            }
+            // Keeping only the leaf fix is insufficient for this fixture:
+            // count-based parent splitting still produces an oversized page.
+            tree.write_many(writes).await.unwrap();
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(
+                reopened.range(&[], &[255; 5]).await.unwrap(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+    });
+}

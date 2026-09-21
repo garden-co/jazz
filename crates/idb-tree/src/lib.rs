@@ -65,9 +65,12 @@ fn byte_balanced_split(
             left += size;
         }
         if (promote_separator || index + 1 < count) && left <= page_size && right <= page_size {
-            let imbalance = left.abs_diff(right);
+            let boundary = if promote_separator { index } else { index + 1 };
+            // Preserve the count midpoint on equal-byte choices, particularly
+            // when wide separators permit only one key per internal page.
+            let imbalance = (left.abs_diff(right), boundary.abs_diff(count / 2));
             if best.is_none_or(|(_, previous)| imbalance < previous) {
-                best = Some((if promote_separator { index } else { index + 1 }, imbalance));
+                best = Some((boundary, imbalance));
             }
         }
         if promote_separator {
