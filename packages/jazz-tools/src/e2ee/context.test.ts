@@ -27,3 +27,11 @@ it("preserves a leading U+FEFF as identity data rather than interpreting it as a
     new Uint8Array([74, 69, 50, 67, 1, 0, 0, 0, 4, 239, 187, 191, 97]),
   );
 });
+
+it("rejects unknown own fields even when non-enumerable or symbol-keyed", () => {
+  for (const field of ["unexpected", Symbol("unexpected")]) {
+    const context = { application: "a", policy: "p", scope: "s", identifier: "i", epoch: "e" };
+    Object.defineProperty(context, field, { value: "different context" });
+    expect(() => encodeCryptoContext(context)).toThrow();
+  }
+});
