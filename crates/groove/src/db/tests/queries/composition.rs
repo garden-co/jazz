@@ -2,6 +2,67 @@
 
 use super::*;
 
+/// Exact public results cover shared producer state; the test-only allocation
+/// counter additionally proves that resident stateful kernels do not silently
+/// fall back to an async interpreter (result equality cannot prove this).
+#[futures_test::test]
+async fn resident_stateful_batches_share_inputs_without_async_node_frames() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let winners =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"]);
+    let joined = GraphBuilder::join(winners.clone(), winners, ["row"], ["row"]).project_fields([
+        ProjectField::renamed("left.row", "row"),
+        ProjectField::renamed("right.stamp", "stamp"),
+    ]);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::union([joined.clone(), joined]),
+        ["row", "stamp"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("copies".to_owned()),
+            output_identity: None,
+        }],
+    );
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "baseline"));
+    db.commit_batch(batch).await.unwrap();
+    let subscription = db.subscribe_one_sink(graph.clone()).await.unwrap();
+    let row = |stamp| vec![Value::U64(1), Value::U64(stamp), Value::U64(2)];
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(row(10), 1)]
+    );
+    crate::ivm::runtime::take_async_node_frame_count();
+    for stamp in [20, 30, 40] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "replacement"));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(10), -1)));
+        assert!(changes.contains(&(row(stamp), 1)));
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(row(stamp), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, stamp, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(stamp), -1)));
+        assert!(changes.contains(&(row(10), 1)));
+        assert_eq!(crate::ivm::runtime::take_async_node_frame_count(), 0);
+    }
+}
+
 /// Cached structural requirements must still check live producer state behind
 /// a deep stateless suffix, across mutation, one-shot probes and detachment.
 #[futures_test::test]
