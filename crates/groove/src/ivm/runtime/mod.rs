@@ -47,6 +47,7 @@ use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, S
 use thiserror::Error;
 
 mod aggregate;
+mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
 mod persist;
@@ -57,6 +58,7 @@ mod state;
 mod terminal;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
@@ -207,7 +209,7 @@ pub struct IvmRuntime {
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     memo_use_clock: u64,
@@ -272,7 +274,7 @@ impl IvmRuntime {
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
-            eval_memo: HashMap::default(),
+            eval_memo: EvaluationMemo::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,

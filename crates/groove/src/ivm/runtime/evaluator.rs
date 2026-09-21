@@ -694,17 +694,8 @@ pub(super) struct NodeMemoLookup {
     pub(super) depends_on_context: bool,
 }
 
-/// One completed batch in a private execution frame. This is not a retained
-/// cache: generation/context and live producer requirements are checked before
-/// a consumer can borrow it. It never crosses an evaluation boundary.
-pub(super) struct BatchRegister {
-    lookup: NodeMemoLookup,
-    records: Arc<RecordDeltas>,
-}
-
 pub(super) struct FrameInputs<'a> {
     pub(super) slots: &'a [usize],
-    pub(super) batches: &'a [Option<BatchRegister>],
 }
 
 pub(super) struct TickEvaluator<'a> {
@@ -718,7 +709,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
-    pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    pub(super) eval_memo: &'a mut EvaluationMemo,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
     pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
@@ -748,7 +739,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     pub(super) arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
-    pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    pub(super) eval_memo: &'a mut EvaluationMemo,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
     pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
@@ -772,7 +763,7 @@ fn graph_runtime_view<'a>(
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: &'a mut HashMap<NodeId, HashSet<ArrangementKey>>,
-    eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: &'a mut EvaluationMemo,
     eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
     binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
@@ -853,7 +844,7 @@ impl GraphRuntimeView<'_> {
         deltas: RecordDeltas,
         node: NodeId,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let mut isolated_memo = HashMap::default();
+        let mut isolated_memo = EvaluationMemo::default();
         let mut isolated_memo_bytes = 0usize;
         let mut context = EvalContext::with_binding_and_arrangement_mode(
             self.scope,
@@ -1547,43 +1538,31 @@ impl TickEvaluator<'_> {
         Ok(!requires_state_rebuild)
     }
 
-    pub(super) fn batch_register(
-        &mut self,
-        node: NodeId,
-        records: Arc<RecordDeltas>,
-    ) -> Result<BatchRegister, IvmRuntimeError> {
-        Ok(BatchRegister {
-            lookup: self.prepare_memo_lookup(node)?,
-            records,
-        })
-    }
-
-    fn register_input(
-        &mut self,
-        register: &BatchRegister,
-    ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
-        let node = register.lookup.key.node;
-        if register.lookup != self.prepare_memo_lookup(node)?
-            || !self.cached_result_state_is_current(node)?
-        {
-            return Ok(None);
-        }
-        Ok(Some(Arc::clone(&register.records)))
-    }
-
     pub(super) fn resolve_register_inputs(
         &mut self,
         inputs: FrameInputs<'_>,
     ) -> Result<Option<smallvec::SmallVec<[Arc<RecordDeltas>; 2]>>, IvmRuntimeError> {
         let mut resolved = smallvec::SmallVec::new();
         for &slot in inputs.slots {
-            let Some(register) = &inputs.batches[slot] else {
+            let Some((key, _)) = self.eval_memo.slot(slot) else {
                 return Ok(None);
             };
-            let Some(input) = self.register_input(register)? else {
+            let node = key.node;
+            let lookup = self.prepare_memo_lookup(node)?;
+            if self.eval_memo.slot(slot).is_none_or(|(key, entry)| {
+                *key != lookup.key || entry.input_watermark != lookup.input_watermark
+            }) || !self.cached_result_state_is_current(node)?
+            {
                 return Ok(None);
-            };
-            resolved.push(input);
+            }
+            // Readiness is checked live above, never stored in the register.
+            let (_, entry) = self.eval_memo.slot_mut(slot).expect("validated frame slot");
+            *self.memo_use_clock += 1;
+            entry.last_used = *self.memo_use_clock;
+            if self.context.eval_mode == EvalMode::Hydrate {
+                self.metrics.hydration_memo_hits += 1;
+            }
+            resolved.push(Arc::clone(&entry.records));
         }
         Ok(Some(resolved))
     }
