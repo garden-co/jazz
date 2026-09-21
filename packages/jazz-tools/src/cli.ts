@@ -24,10 +24,6 @@ export interface BuildOptions {
 export interface SchemaExportOptions {
   schemaDir: string;
   migrationsDir?: string;
-  schemaHash?: string;
-  appId?: string;
-  serverUrl?: string;
-  adminSecret?: string;
 }
 
 const PERMISSIONS_LIFECYCLE_NOTE =
@@ -461,16 +457,8 @@ function printHelp(): void {
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
   console.log("\nSchema export options:");
-  console.log(
-    "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-  );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("  --schema-hash <hash>  Export a stored schema by hash");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
-  console.log(
-    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-  );
-  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
   console.log("\nMigration options:");
   console.log(
     "  <appId>               Required for remote migration creation and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
@@ -514,24 +502,26 @@ if (isMainModule()) {
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "export") {
-      const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
-      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
-      const schemaHashFlag = getFlagValue(commandArgs, "--schema-hash");
-      if (schemaDirFlag && schemaHashFlag) {
-        console.error("--schema-dir and --schema-hash are mutually exclusive.");
-        process.exit(1);
+      const commandArgs = args.slice(2);
+      for (let i = 0; i < commandArgs.length; i += 2) {
+        if (!["--schema-dir", "--migrations-dir"].includes(commandArgs[i]!)) {
+          console.error(
+            `Unknown schema export argument: ${commandArgs[i]}. Only local schema export is supported.`,
+          );
+          process.exit(1);
+        }
+        if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
+          console.error(`Missing value for ${commandArgs[i]}.`);
+          process.exit(1);
+        }
       }
-
+      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
       const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
       exportSchema({
         schemaDir,
         migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
           ? resolve(process.cwd(), getFlagValue(commandArgs, "--migrations-dir")!)
           : undefined,
-        schemaHash: schemaHashFlag,
-        appId,
-        serverUrl: getFlagValue(commandArgs, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS),
-        adminSecret: getFlagValue(commandArgs, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
       }).catch((err) => {
         console.error(err.message);
         process.exit(1);

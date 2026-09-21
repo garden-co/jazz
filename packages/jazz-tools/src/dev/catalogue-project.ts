@@ -156,10 +156,6 @@ export interface ValidateProjectResult {
 interface ExportSchemaOptions {
   schemaDir: string;
   migrationsDir?: string;
-  schemaHash?: string;
-  appId?: string;
-  serverUrl?: string;
-  adminSecret?: string;
 }
 
 interface ExportSchemaResult {
@@ -260,10 +256,6 @@ export async function validateProject(
 }
 
 export async function exportSchema(options: ExportSchemaOptions): Promise<ExportSchemaResult> {
-  if (options.schemaHash) {
-    return resolveExportedSchemaByHash({ ...options, schemaHash: options.schemaHash });
-  }
-
   const currentSchema = await loadCurrentSchema(options.schemaDir);
   return {
     ...currentSchema,
@@ -552,23 +544,6 @@ async function resolveLocalSnapshotEntry(
   return storage.resolveSnapshot(hash, label);
 }
 
-async function loadLocalSnapshotSchema(
-  schemaDir: string,
-  migrationsDir: string | undefined,
-  hash: string,
-  label: string,
-): Promise<ResolvedSchemaInput | null> {
-  const entry = await resolveLocalSnapshotEntry(schemaDir, migrationsDir, hash, label);
-  if (!entry) {
-    return null;
-  }
-
-  return {
-    hash: entry.hash,
-    schema: entry.schema,
-  };
-}
-
 async function writeSnapshotSchema(
   schemaDir: string,
   migrationsDir: string | undefined,
@@ -616,54 +591,6 @@ function requireAppId(appId: string | undefined): string {
   throw new Error(
     "Missing app ID. Pass an <appId> positional argument or set JAZZ_APP_ID (or a framework-prefixed form such as VITE_JAZZ_APP_ID).",
   );
-}
-
-async function resolveExportedSchemaByHash(
-  options: ExportSchemaOptions & { schemaHash: string },
-): Promise<ExportSchemaResult> {
-  const schemaHash = normalizeSchemaHashInput(options.schemaHash, "schema hash");
-  const local = await loadLocalSnapshotSchema(
-    options.schemaDir,
-    options.migrationsDir,
-    schemaHash,
-    "schema hash",
-  );
-  if (local) {
-    return {
-      ...local,
-      snapshotPath: null,
-    };
-  }
-
-  const serverUrl = requireServerValue(options.serverUrl, "serverUrl");
-  const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
-  const appId = requireAppId(options.appId);
-  const resolvedHash =
-    schemaHash.length === 64
-      ? schemaHash
-      : resolveKnownSchemaHash(
-          schemaHash,
-          "schema hash",
-          (await fetchSchemaHashes(serverUrl, { appId, adminSecret })).hashes,
-        );
-  const storedSchema = await fetchStoredWasmSchema(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash: resolvedHash,
-  });
-  const snapshotPath = await writeSnapshotSchema(
-    options.schemaDir,
-    options.migrationsDir,
-    resolvedHash,
-    storedSchema.schema,
-    createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
-  );
-
-  return {
-    hash: resolvedHash,
-    schema: storedSchema.schema,
-    snapshotPath,
-  };
 }
 
 function normalizeMigrationName(name: string): string {
