@@ -132,6 +132,7 @@ pub struct FanoutFixture {
     streams: Vec<SubscriptionStream>,
     results: Vec<BTreeMap<RowUuid, String>>,
     settled: Vec<bool>,
+    read_opts: ReadOpts,
 }
 
 impl FanoutFixture {
@@ -187,6 +188,7 @@ impl FanoutFixture {
             streams: Vec::new(),
             results: Vec::new(),
             settled: Vec::new(),
+            read_opts: ReadOpts::default(),
         }
     }
 
@@ -213,8 +215,9 @@ impl FanoutFixture {
             let prepared = self.foreground.prepare_query(&query).unwrap();
             receipt.preparation += phase.elapsed();
             let phase = Instant::now();
-            self.streams
-                .push(block_on(self.foreground.subscribe(&prepared, ReadOpts::default())).unwrap());
+            self.streams.push(
+                block_on(self.foreground.subscribe(&prepared, self.read_opts.clone())).unwrap(),
+            );
             receipt.subscribe += phase.elapsed();
             self.results.push(BTreeMap::new());
             self.settled.push(false);
@@ -357,9 +360,20 @@ impl FanoutFixture {
             .finalize_local_mergeable_commit_for_test(revoke.mergeable_tx_id())
             .unwrap();
         block_on(revoke.wait(DurabilityTier::Global)).unwrap();
-        self.pump_until("revoke", |fixture| {
-            fixture.results.iter().all(BTreeMap::is_empty)
-        });
+        if self.read_opts.tier == DurabilityTier::Local {
+            // SPEC 16 §16.1.1: withdrawal is not deletion. Local-first may
+            // retain learned rows; strict remote must not.
+            for _ in 0..32 {
+                self.tick(&mut FanoutReceipt::default());
+                self.drain();
+            }
+            assert_eq!(self.results[0].len(), self.rows_per_team);
+            assert_eq!(self.results[0][&row_id(0x64, 0)], "edited");
+        } else {
+            self.pump_until("revoke", |fixture| {
+                fixture.results.iter().all(BTreeMap::is_empty)
+            });
+        }
     }
 
     fn pump_until(&mut self, phase: &str, done: impl Fn(&Self) -> bool) {
@@ -385,14 +399,21 @@ mod tests {
     use super::*;
 
     /// Alice's independent board lists share inherited team access, not Bob's
-    /// data. Core -> relay -> Alice must propagate both edits and revocation.
+    /// data. Core -> relay -> Alice propagates edits; revocation removes strict
+    /// remote rows but does not delete already learned local-first data.
     #[test]
     fn fanout_preserves_exact_membership_updates_and_revocation() {
-        for keyed_lists in [0, 3, GROUPS] {
-            let mut fixture = FanoutFixture::new(120, keyed_lists);
-            fixture.hydrate();
-            fixture.assert_initial_results();
-            fixture.assert_live_update_and_revocation();
+        for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+            for keyed_lists in [0, 3, GROUPS] {
+                let mut fixture = FanoutFixture::new(120, keyed_lists);
+                fixture.read_opts.tier = tier;
+                if tier == DurabilityTier::Global {
+                    fixture.read_opts.local_updates = LocalUpdates::Deferred;
+                }
+                fixture.hydrate();
+                fixture.assert_initial_results();
+                fixture.assert_live_update_and_revocation();
+            }
         }
     }
 }
