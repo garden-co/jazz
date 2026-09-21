@@ -131,8 +131,6 @@ pub enum NodeRole {
     Writer,
     /// Workload reader.
     Reader,
-    /// Edge node that terminates a client identity and relays to core.
-    Edge,
     /// Store-and-forward relay.
     Relay,
     /// Fate authority.
@@ -192,24 +190,6 @@ impl Topology {
             profile,
         });
         self
-    }
-
-    /// Add a bidirectional client↔edge↔core line.
-    pub fn client_edge_core_line(
-        self,
-        client: impl Into<String>,
-        edge: impl Into<String>,
-        core: impl Into<String>,
-        client_edge_profile: PeerProfile,
-        edge_core_profile: PeerProfile,
-    ) -> Self {
-        let client = client.into();
-        let edge = edge.into();
-        let core = core.into();
-        self.link(client.clone(), edge.clone(), client_edge_profile.clone())
-            .link(edge.clone(), client, client_edge_profile)
-            .link(edge.clone(), core.clone(), edge_core_profile.clone())
-            .link(core, edge, edge_core_profile)
     }
 
     fn link_profile(&self, from: &str, to: &str) -> Option<&PeerProfile> {

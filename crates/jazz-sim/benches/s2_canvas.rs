@@ -25,7 +25,6 @@ use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
-    settle_outcome,
 };
 use jazz_sim::public_schema_fixture::{all_operation_policies, compile_public_schema};
 use jazz_sim::view_accounting::{bytes_floor, version_bundle_refs, view_update_bytes};
@@ -178,10 +177,6 @@ struct LiveSummary {
     merges_of_merges: usize,
     core_tick: Histogram<u64>,
     history_rows_written: usize,
-    edge_acceptance: Histogram<u64>,
-    edge_hydration_bytes: u64,
-    edge_hydration_floor_bytes: u64,
-    edge_hydration_rows: usize,
 }
 
 #[derive(Debug)]
@@ -200,12 +195,8 @@ struct ConcurrentLiveSummary {
     merges_of_merges: usize,
     history_rows_written: usize,
     core_tick: Histogram<u64>,
-    edge_acceptance: Histogram<u64>,
     bytes_total: u64,
     bytes_floor: u64,
-    edge_hydration_bytes: u64,
-    edge_hydration_floor_bytes: u64,
-    edge_hydration_rows: usize,
     transport_metrics: serde_json::Map<String, JsonValue>,
     converged: bool,
     spy_rows: usize,
@@ -248,15 +239,6 @@ struct Participant {
     node: NodeState<RocksDbStorage>,
     _dir: tempfile::TempDir,
     peer: PeerState,
-    edge: EdgeRoute,
-}
-
-struct EdgeRoute {
-    name: String,
-    node: NodeState<RocksDbStorage>,
-    _dir: tempfile::TempDir,
-    core_peer: PeerState,
-    policy_peer: PeerState,
 }
 
 fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> LiveSummary {
@@ -290,12 +272,8 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
     let mut link_handoff_to_delivered = Histogram::new(3).unwrap();
     let mut delivered_to_applied = Histogram::new(3).unwrap();
     let mut core_tick = Histogram::new(3).unwrap();
-    let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut bytes_total = 0_u64;
     let mut floor_bytes = 0_u64;
-    let mut edge_hydration_bytes = 0_u64;
-    let mut edge_hydration_floor_bytes = 0_u64;
-    let mut edge_hydration_rows = 0_usize;
     let mut commits = 0_usize;
     let per_active = config.commits_per_active(coalesced);
     let mut pending_receives = Vec::with_capacity(participants.len());
@@ -317,73 +295,29 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             }
             let (tx_id, unit) =
                 commit_mergeable_unit_settled(&mut participants[active_idx].node, commit).unwrap();
-            let SyncMessage::CommitUnit { tx, versions } = unit else {
-                unreachable!();
-            };
-            ctx.send(
-                &participants[active_idx].name,
-                &participants[active_idx].edge.name,
-                SyncMessage::CommitUnit {
-                    tx: tx.clone(),
-                    versions: versions.clone(),
-                },
-            );
-            let delivered_to_edge = ctx.recv(&participants[active_idx].edge.name);
-            let SyncMessage::CommitUnit { tx, versions } = delivered_to_edge.message else {
-                unreachable!();
-            };
-            let edge_start = ctx.now_ms();
-            let active = &mut participants[active_idx];
-            let policy_claims = raw_claims(active.peer.identity());
-            let outcome = block_on(active.peer.ingest_edge_mergeable_commit_unit(
-                &mut active.edge.node,
-                tx,
-                versions,
-                u64::MAX,
-                u64::MAX,
-                policy_claims,
-            ))
-            .expect("edge ingest");
-            let updates =
-                settle_outcome(&mut active.edge.node, outcome).expect("settle edge ingest");
-            edge_acceptance
-                .record((ctx.now_ms() - edge_start) * 1_000)
-                .unwrap();
-            core_ingest_done
-                .record(submit_at.elapsed().as_micros() as u64)
-                .unwrap();
-            let _edge_fate_observed = updates.iter().any(|message| {
-                matches!(
-                    message,
-                    SyncMessage::FateUpdate {
-                        tx_id: seen,
-                        fate: Fate::Accepted,
-                        ..
-                    } if seen == &tx_id
-                )
-            });
-            let mut edge_commit = MergeableCommit::new(SHAPES, row_uuid, 20_000 + commits as u64)
-                .made_by(participant_author(active_idx))
-                .cells(shape_cells(canvas, shape_idx, x, y));
-            if let Some(parent) = current_content_parent(&mut active.edge.node, row_uuid) {
-                edge_commit = edge_commit.parents(vec![parent]);
-            }
-            let (_edge_tx_id, edge_unit) =
-                commit_mergeable_unit_settled(&mut active.edge.node, edge_commit).unwrap();
-            let SyncMessage::CommitUnit { tx, versions } = edge_unit else {
-                unreachable!();
-            };
-            ctx.send(
-                &active.edge.name,
-                "core",
-                SyncMessage::CommitUnit { tx, versions },
-            );
+            ctx.send(&participants[active_idx].name, "core", unit);
             let delivered_to_core = ctx.recv("core");
             let SyncMessage::CommitUnit { tx, versions } = delivered_to_core.message else {
                 unreachable!();
             };
             let core_start = Instant::now();
-            ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).expect("core ingest");
+            let fates =
+                ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).expect("core ingest");
+            for fate in fates {
+                ctx.send("core", &participants[active_idx].name, fate);
+                let delivered = ctx.recv(&participants[active_idx].name);
+                apply_sync_message_settled(&mut participants[active_idx].node, delivered.message)
+                    .unwrap();
+            }
+            assert_eq!(
+                block_on(participants[active_idx].node.transaction_state(tx_id))
+                    .unwrap()
+                    .0,
+                Fate::Accepted
+            );
+            core_ingest_done
+                .record(submit_at.elapsed().as_micros() as u64)
+                .unwrap();
             core_tick
                 .record(core_start.elapsed().as_micros() as u64)
                 .unwrap();
@@ -392,33 +326,14 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             pending_receives.clear();
             for (idx, participant) in participants.iter_mut().enumerate() {
                 let emit_start = Instant::now();
-                let core_update = block_on(
-                    participant
-                        .edge
-                        .core_peer
-                        .query_update(&mut core, &shape, &binding),
-                )
-                .expect("edge update");
-                edge_hydration_bytes += view_update_bytes(&core_update);
-                edge_hydration_floor_bytes += bytes_floor(&core_update);
-                edge_hydration_rows += result_output_count(&core_update, SHAPES);
-                ctx.send("core", &participant.edge.name, core_update);
-                let delivered_to_edge = ctx.recv(&participant.edge.name);
-                apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message)
-                    .expect("edge apply");
-                hydrate_edge_policy(ctx, &mut core, &mut participant.edge);
-                let update = block_on(participant.peer.query_update(
-                    &mut participant.edge.node,
-                    &shape,
-                    &binding,
-                ))
-                .expect("participant update");
+                let update = block_on(participant.peer.query_update(&mut core, &shape, &binding))
+                    .expect("participant update");
                 let emit_elapsed = emit_start.elapsed().as_micros() as u64;
                 emission_construct.record(emit_elapsed).unwrap();
                 bytes_total += view_update_bytes(&update);
                 floor_bytes += bytes_floor(&update);
                 let sent_at = Instant::now();
-                ctx.send(&participant.edge.name, &participant.name, update);
+                ctx.send("core", &participant.name, update);
                 pending_receives.push((idx, sent_at));
             }
             for &(idx, sent_at) in &pending_receives {
@@ -446,30 +361,15 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
         }
     }
     for participant in &mut participants {
-        let core_update = block_on(
+        let update = block_on(
             participant
-                .edge
-                .core_peer
+                .peer
                 .rehydrate_query(&mut core, &shape, &binding),
         )
-        .expect("final edge rehydrate");
-        edge_hydration_bytes += view_update_bytes(&core_update);
-        edge_hydration_floor_bytes += bytes_floor(&core_update);
-        edge_hydration_rows += result_output_count(&core_update, SHAPES);
-        ctx.send("core", &participant.edge.name, core_update);
-        let delivered_to_edge = ctx.recv(&participant.edge.name);
-        apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message)
-            .expect("final edge apply");
-        hydrate_edge_policy(ctx, &mut core, &mut participant.edge);
-        let update = block_on(participant.peer.rehydrate_query(
-            &mut participant.edge.node,
-            &shape,
-            &binding,
-        ))
         .expect("final participant rehydrate");
         bytes_total += view_update_bytes(&update);
         floor_bytes += bytes_floor(&update);
-        ctx.send(&participant.edge.name, &participant.name, update);
+        ctx.send("core", &participant.name, update);
         let delivered = ctx.recv(&participant.name);
         apply_sync_message_settled(&mut participant.node, delivered.message)
             .expect("final participant apply");
@@ -498,10 +398,6 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
         merges_of_merges,
         core_tick,
         history_rows_written: config.shapes + commits + merge_versions,
-        edge_acceptance,
-        edge_hydration_bytes,
-        edge_hydration_floor_bytes,
-        edge_hydration_rows,
     }
 }
 
@@ -522,8 +418,7 @@ impl ClientTiers {
 
 #[derive(Clone, Copy, Debug)]
 struct LinkDurations {
-    client_edge: Duration,
-    edge_core: Duration,
+    client_core: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -533,31 +428,15 @@ struct WorkItem {
     y: f64,
 }
 
-enum EdgeInbound {
-    WriterCommit {
-        writer_idx: usize,
-        deliver_at: Instant,
-        message: SyncMessage,
-    },
-    WriterDone {
-        writer_idx: usize,
-    },
-    CoreUpdate {
-        reader_idx: usize,
-        deliver_at: Instant,
-        message: SyncMessage,
-        final_rehydrate: bool,
-    },
-    CoreDone,
-}
-
 enum CoreInbound {
     Commit {
         writer_idx: usize,
         deliver_at: Instant,
         message: Box<SyncMessage>,
     },
-    Done,
+    WriterDone {
+        writer_idx: usize,
+    },
 }
 
 enum ReaderInbound {
@@ -570,11 +449,6 @@ enum ReaderInbound {
 
 struct WriterFate {
     message: SyncMessage,
-}
-
-struct ReaderEdgePeer {
-    peer: PeerState,
-    tx: mpsc::Sender<ReaderInbound>,
 }
 
 struct ReaderCorePeer {
@@ -593,28 +467,14 @@ struct ReaderActorArgs {
     binding: Binding,
 }
 
-struct PendingCoreCommit {
-    writer_idx: usize,
-    unit: SyncMessage,
-    parents: Vec<jazz::tx::TxId>,
-    accepted: bool,
-}
-
 struct WriterResult {
+    submitted_commits: usize,
     local_commit_visibility_us: Histogram<u64>,
 }
 
-struct EdgeResult {
-    accepted_commits: usize,
-    edge_acceptance: Histogram<u64>,
+struct CoreResult {
     bytes_total: u64,
     bytes_floor: u64,
-    edge_hydration_bytes: u64,
-    edge_hydration_floor_bytes: u64,
-    edge_hydration_rows: usize,
-}
-
-struct CoreResult {
     accepted_commits: usize,
     core_tick: Histogram<u64>,
     merge_versions: usize,
@@ -687,30 +547,13 @@ fn run_concurrent_live(
     install_participant_claims(&mut fixture_writer, config);
     seed_concurrent_fixture(&mut setup_ctx, config, &mut fixture_writer, &mut core);
 
-    let (edge_dir, mut edge_node) = open_node(node(240), schema.clone());
-    install_participant_claims(&mut edge_node, config);
     apply_core_binding(&mut core, &shape, &binding);
-    // This concurrent load fixture distributes one participant-0 read view
-    // (the peers below already use that identity). Register its exact scope
-    // at each receiver; an unscoped registration with the same handle would
-    // conflict when the serving peer installs its authenticated binding.
-    apply_binding(&mut edge_node, &shape, &binding, participant_author(0));
-    // This direct benchmark helper represents one SYSTEM-scoped policy
-    // reader, not a multiplexing transport relay.
-    let mut policy_peer = PeerState::new();
-    hydrate_edge_policy_direct(&mut core, &mut edge_node, &mut policy_peer);
-
     let mut writer_nodes = Vec::with_capacity(config.active);
-    let mut writer_edge_peers = BTreeMap::new();
     for writer_idx in 0..config.active {
         let (dir, mut writer_node) = open_node(node(20 + writer_idx as u8), schema.clone());
         install_claims(&mut writer_node, participant_author(writer_idx));
         apply_binding(&mut writer_node, &shape, &binding, participant_author(0));
         writer_nodes.push((dir, writer_node));
-        writer_edge_peers.insert(
-            writer_idx,
-            PeerState::client_link(participant_author(writer_idx)),
-        );
     }
 
     let mut reader_nodes = Vec::with_capacity(config.passive + 1);
@@ -735,37 +578,32 @@ fn run_concurrent_live(
     let invited_core_update =
         block_on(initial_core_peer.rehydrate_query(&mut core, &shape, &binding))
             .expect("invited core rehydrate");
-    apply_sync_message_settled(&mut edge_node, invited_core_update)
-        .expect("edge apply invited initial");
-    let mut writer_initial_edge_peer = PeerState::client_link(participant_author(0));
-    let writer_initial_update =
-        block_on(writer_initial_edge_peer.rehydrate_query(&mut edge_node, &shape, &binding))
-            .expect("writer initial edge rehydrate");
+    let writer_initial_update = invited_core_update;
     for (_, node) in &mut writer_nodes {
         apply_sync_message_settled(node, writer_initial_update.clone())
             .expect("writer initial apply");
     }
 
     let mut reader_core_peers = Vec::with_capacity(config.passive);
-    let mut reader_edge_peer_states = Vec::with_capacity(config.passive);
     for position in &passive_reader_positions {
         let mut core_peer = PeerState::client_link(participant_author(0));
-        let _ = block_on(core_peer.rehydrate_query(&mut core, &shape, &binding))
-            .expect("core reader initial rehydrate");
-        reader_core_peers.push(ReaderCorePeer { peer: core_peer });
-
-        let mut edge_peer = PeerState::client_link(participant_author(0));
         let reader_initial_update =
-            block_on(edge_peer.rehydrate_query(&mut edge_node, &shape, &binding))
-                .expect("edge reader initial rehydrate");
+            block_on(core_peer.rehydrate_query(&mut core, &shape, &binding))
+                .expect("core reader initial rehydrate");
+        reader_core_peers.push(ReaderCorePeer { peer: core_peer });
         let (_, _, _, _, _, node) = &mut reader_nodes[*position];
         apply_sync_message_settled(node, reader_initial_update).expect("reader initial apply");
-        reader_edge_peer_states.push(edge_peer);
     }
 
     let (spy_dir, mut spy_node) = open_node(node(90), schema.clone());
-    apply_binding(&mut spy_node, &shape, &binding, participant_author(0));
+    let spy_author = participant_author(90);
+    install_claims(&mut core, spy_author);
+    apply_binding(&mut spy_node, &shape, &binding, spy_author);
+    let mut spy_peer = PeerState::client_link(spy_author);
+    let spy_initial = block_on(spy_peer.rehydrate_query(&mut core, &shape, &binding)).unwrap();
+    apply_sync_message_settled(&mut spy_node, spy_initial).unwrap();
     assert!(rows(&mut spy_node, &shape, &binding).is_empty());
+    reader_core_peers.push(ReaderCorePeer { peer: spy_peer });
     reader_nodes.push((
         "spy".to_owned(),
         true,
@@ -775,11 +613,8 @@ fn run_concurrent_live(
         spy_node,
     ));
 
-    let (edge_tx, edge_rx) = mpsc::channel::<EdgeInbound>();
     let (core_tx, core_rx) = mpsc::channel::<CoreInbound>();
     let mut reader_txs = Vec::with_capacity(reader_nodes.len());
-    let mut reader_edge_peers = Vec::with_capacity(config.passive);
-    let mut reader_edge_peer_states = reader_edge_peer_states.into_iter();
     let mut reader_handles = Vec::with_capacity(reader_nodes.len());
     while epoch.elapsed().as_millis() == 0 {
         thread::yield_now();
@@ -789,14 +624,6 @@ fn run_concurrent_live(
         reader_nodes.into_iter().enumerate()
     {
         let (reader_tx, reader_rx) = mpsc::channel::<ReaderInbound>();
-        if !is_spy {
-            reader_edge_peers.push(ReaderEdgePeer {
-                peer: reader_edge_peer_states
-                    .next()
-                    .expect("edge reader peer state"),
-                tx: reader_tx.clone(),
-            });
-        }
         reader_txs.push(reader_tx);
         let reader_shape = shape.clone();
         let reader_binding = binding.clone();
@@ -808,7 +635,11 @@ fn run_concurrent_live(
                 &mut node,
                 &reader_shape,
                 &reader_binding,
-                participant_author(0),
+                if is_spy {
+                    participant_author(90)
+                } else {
+                    participant_author(0)
+                },
             );
             run_reader_actor(ReaderActorArgs {
                 name,
@@ -833,50 +664,10 @@ fn run_concurrent_live(
         writer_fate_rxs.push(rx);
     }
 
-    let edge_shape = shape.clone();
-    let edge_binding = binding.clone();
-    drop(edge_node);
-    let edge_handle = thread::spawn({
-        let core_tx = core_tx.clone();
-        let writer_fate_txs = writer_fate_txs.clone();
-        let transport_metrics = Arc::clone(&transport_metrics);
-        let edge_schema = schema.clone();
-        move || {
-            let mut edge_node = reopen_node(&edge_dir, node(240), edge_schema);
-            for writer_idx in 0..active_count {
-                install_claims(&mut edge_node, participant_author(writer_idx));
-            }
-            apply_binding(
-                &mut edge_node,
-                &edge_shape,
-                &edge_binding,
-                participant_author(0),
-            );
-            run_edge_actor(
-                edge_dir,
-                edge_node,
-                writer_edge_peers,
-                reader_edge_peers,
-                reader_txs,
-                edge_rx,
-                core_tx,
-                writer_fate_txs,
-                edge_shape,
-                edge_binding,
-                links,
-                transport_codec,
-                transport_metrics,
-                epoch,
-                active_count,
-            )
-        }
-    });
-
     let core_shape = shape.clone();
     let core_binding = binding.clone();
     drop(core);
     let core_handle = thread::spawn({
-        let edge_tx = edge_tx.clone();
         let writer_fate_txs = writer_fate_txs.clone();
         let transport_metrics = Arc::clone(&transport_metrics);
         let core_schema = schema.clone();
@@ -891,7 +682,7 @@ fn run_concurrent_live(
                 core,
                 reader_core_peers,
                 core_rx,
-                edge_tx,
+                reader_txs,
                 writer_fate_txs,
                 core_shape,
                 core_binding,
@@ -900,6 +691,7 @@ fn run_concurrent_live(
                 transport_metrics,
                 epoch,
                 shapes_count,
+                active_count,
             )
         }
     });
@@ -909,7 +701,7 @@ fn run_concurrent_live(
     for (writer_idx, ((dir, writer_node), items)) in
         writer_nodes.into_iter().zip(workload).enumerate()
     {
-        let tx = edge_tx.clone();
+        let tx = core_tx.clone();
         let fate_rx = writer_fate_rxs.remove(0);
         let transport_metrics = Arc::clone(&transport_metrics);
         let writer_shape = shape.clone();
@@ -946,20 +738,20 @@ fn run_concurrent_live(
             )
         }));
     }
-    drop(edge_tx);
     drop(core_tx);
     drop(writer_fate_txs);
 
     let mut local_commit_visibility_us = Histogram::new(3).unwrap();
+    let mut submitted_commits = 0;
     for handle in writer_handles {
         let result = handle.join().expect("writer actor joined");
+        submitted_commits += result.submitted_commits;
         merge_histogram(
             &mut local_commit_visibility_us,
             &result.local_commit_visibility_us,
         );
     }
 
-    let edge_result = edge_handle.join().expect("edge actor joined");
     let core_result = core_handle.join().expect("core actor joined");
 
     let mut receipt_latency_us = Histogram::new(3).unwrap();
@@ -986,9 +778,11 @@ fn run_concurrent_live(
 
     let wall_duration = start.elapsed();
     let wall_secs = wall_duration.as_secs_f64().max(f64::EPSILON);
-    let accepted_commits = core_result
-        .accepted_commits
-        .min(edge_result.accepted_commits);
+    let accepted_commits = core_result.accepted_commits;
+    assert_eq!(
+        accepted_commits, submitted_commits,
+        "every submitted write reaches Core"
+    );
     ConcurrentLiveSummary {
         offered_commits_per_sec,
         achieved_commits_per_sec: accepted_commits as f64 / wall_secs,
@@ -1004,12 +798,8 @@ fn run_concurrent_live(
         merges_of_merges: core_result.merges_of_merges,
         history_rows_written: core_result.history_rows_written,
         core_tick: core_result.core_tick,
-        edge_acceptance: edge_result.edge_acceptance,
-        bytes_total: edge_result.bytes_total,
-        bytes_floor: edge_result.bytes_floor,
-        edge_hydration_bytes: edge_result.edge_hydration_bytes,
-        edge_hydration_floor_bytes: edge_result.edge_hydration_floor_bytes,
-        edge_hydration_rows: edge_result.edge_hydration_rows,
+        bytes_total: core_result.bytes_total,
+        bytes_floor: core_result.bytes_floor,
         transport_metrics: transport_metrics
             .lock()
             .expect("transport metrics lock")
@@ -1026,7 +816,7 @@ fn run_writer_actor(
     _dir: tempfile::TempDir,
     mut node: NodeState<RocksDbStorage>,
     items: Vec<WorkItem>,
-    edge_tx: mpsc::Sender<EdgeInbound>,
+    core_tx: mpsc::Sender<CoreInbound>,
     fate_rx: mpsc::Receiver<WriterFate>,
     write_wait_tier: DurabilityTier,
     links: LinkDurations,
@@ -1039,6 +829,7 @@ fn run_writer_actor(
     _shape: ValidatedQuery,
     _binding: Binding,
 ) -> WriterResult {
+    let mut submitted_commits = 0;
     let mut local_commit_visibility_us = Histogram::new(3).unwrap();
     let slot_nanos = (1_000_000_000_u128 / rate_per_sec.max(1) as u128).max(1);
     for (step, item) in items.into_iter().enumerate() {
@@ -1061,282 +852,25 @@ fn run_writer_actor(
         local_commit_visibility_us
             .record(intent.elapsed().as_micros() as u64)
             .expect("local visibility sample");
-        edge_tx
-            .send(EdgeInbound::WriterCommit {
+        core_tx
+            .send(CoreInbound::Commit {
                 writer_idx,
-                deliver_at: Instant::now() + links.client_edge,
-                message: transport_loopback(transport_codec, unit, &transport_metrics),
+                deliver_at: Instant::now() + links.client_core,
+                message: Box::new(transport_loopback(
+                    transport_codec,
+                    unit,
+                    &transport_metrics,
+                )),
             })
-            .expect("edge actor open");
+            .expect("core actor open");
+        submitted_commits += 1;
         await_write_tier(&mut node, tx_id, write_wait_tier, &fate_rx);
     }
     park_until(start + duration);
-    let _ = edge_tx.send(EdgeInbound::WriterDone { writer_idx });
+    let _ = core_tx.send(CoreInbound::WriterDone { writer_idx });
     WriterResult {
+        submitted_commits,
         local_commit_visibility_us,
-    }
-}
-
-fn pending_core_commit(writer_idx: usize, unit: SyncMessage, accepted: bool) -> PendingCoreCommit {
-    let SyncMessage::CommitUnit { versions, .. } = &unit else {
-        unreachable!("core queue only stores commit units");
-    };
-    let parents = versions
-        .iter()
-        .flat_map(|version| version.parents())
-        .collect();
-    PendingCoreCommit {
-        writer_idx,
-        unit,
-        parents,
-        accepted,
-    }
-}
-
-fn commit_is_ready_for_core(
-    tx_id: jazz::tx::TxId,
-    pending: &PendingCoreCommit,
-    forwarded_to_core: &BTreeSet<jazz::tx::TxId>,
-) -> bool {
-    pending.accepted
-        && pending
-            .parents
-            .iter()
-            .all(|parent| parent.node != tx_id.node || forwarded_to_core.contains(parent))
-}
-
-fn drain_ready_core_commits(
-    pending_for_core: &mut BTreeMap<jazz::tx::TxId, PendingCoreCommit>,
-    forwarded_to_core: &mut BTreeSet<jazz::tx::TxId>,
-    core_tx: &mpsc::Sender<CoreInbound>,
-    links: LinkDurations,
-    transport_codec: SimulatorTransportCodec,
-    transport_metrics: &SharedMetrics,
-) -> usize {
-    let mut sent = 0;
-    loop {
-        let ready = pending_for_core.iter().find_map(|(tx_id, pending)| {
-            commit_is_ready_for_core(*tx_id, pending, forwarded_to_core).then_some(*tx_id)
-        });
-        let Some(tx_id) = ready else {
-            break;
-        };
-        let pending = pending_for_core
-            .remove(&tx_id)
-            .expect("ready commit still queued");
-        send_core_commit(
-            core_tx,
-            pending.writer_idx,
-            pending.unit,
-            links.edge_core,
-            transport_codec,
-            transport_metrics,
-        );
-        forwarded_to_core.insert(tx_id);
-        sent += 1;
-    }
-    sent
-}
-
-fn maybe_send_core_done(
-    writer_done: &[bool],
-    pending_for_core: &BTreeMap<jazz::tx::TxId, PendingCoreCommit>,
-    sent_core_done: &mut bool,
-    core_tx: &mpsc::Sender<CoreInbound>,
-) {
-    if !*sent_core_done && writer_done.iter().all(|done| *done) && pending_for_core.is_empty() {
-        let _ = core_tx.send(CoreInbound::Done);
-        *sent_core_done = true;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_edge_actor(
-    _dir: tempfile::TempDir,
-    mut edge_node: NodeState<RocksDbStorage>,
-    mut writer_peers: BTreeMap<usize, PeerState>,
-    mut reader_peers: Vec<ReaderEdgePeer>,
-    all_reader_txs: Vec<mpsc::Sender<ReaderInbound>>,
-    edge_rx: mpsc::Receiver<EdgeInbound>,
-    core_tx: mpsc::Sender<CoreInbound>,
-    writer_fate_txs: Vec<mpsc::Sender<WriterFate>>,
-    shape: ValidatedQuery,
-    binding: Binding,
-    links: LinkDurations,
-    transport_codec: SimulatorTransportCodec,
-    transport_metrics: SharedMetrics,
-    epoch: Instant,
-    writer_count: usize,
-) -> EdgeResult {
-    let mut accepted_commits = 0_usize;
-    let mut edge_acceptance = Histogram::new(3).unwrap();
-    let mut bytes_total = 0_u64;
-    let mut bytes_floor_total = 0_u64;
-    let mut edge_hydration_bytes = 0_u64;
-    let mut edge_hydration_floor_bytes = 0_u64;
-    let mut edge_hydration_rows = 0_usize;
-    let mut writer_done = vec![false; writer_count];
-    let mut pending_edge = Vec::new();
-    let mut pending_for_core = BTreeMap::new();
-    let mut forwarded_to_core = BTreeSet::new();
-    let mut sent_core_done = false;
-
-    while let Some(message) = recv_next_edge_message(&edge_rx, &mut pending_edge) {
-        match message {
-            EdgeInbound::WriterCommit {
-                writer_idx,
-                message,
-                ..
-            } => {
-                let SyncMessage::CommitUnit { tx, versions } = message else {
-                    unreachable!("writer sends commit units");
-                };
-                let tx_id = tx.tx_id;
-                let core_unit = SyncMessage::CommitUnit {
-                    tx: tx.clone(),
-                    versions: versions.clone(),
-                };
-                let start = Instant::now();
-                let writer_peer = writer_peers.get_mut(&writer_idx).expect("writer edge peer");
-                let now_ms = epoch.elapsed().as_millis() as u64;
-                let policy_claims = raw_claims(writer_peer.identity());
-                let outcome = block_on(writer_peer.ingest_edge_mergeable_commit_unit(
-                    &mut edge_node,
-                    tx,
-                    versions,
-                    now_ms,
-                    now_ms,
-                    policy_claims,
-                ))
-                .expect("edge ingest");
-                let mut updates =
-                    settle_outcome(&mut edge_node, outcome).expect("settle edge ingest");
-                let outcome =
-                    block_on(writer_peer.drain_deferred_edge_fates(&mut edge_node, now_ms))
-                        .expect("drain deferred edge fate after ingest");
-                updates.extend(
-                    settle_outcome(&mut edge_node, outcome).expect("settle deferred edge fates"),
-                );
-                edge_acceptance
-                    .record(start.elapsed().as_micros() as u64)
-                    .expect("edge acceptance sample");
-                let accepted =
-                    edge_fate_updates_accepted(writer_idx, tx_id, &updates, &writer_fate_txs);
-                pending_for_core
-                    .insert(tx_id, pending_core_commit(writer_idx, core_unit, accepted));
-                accepted_commits += drain_ready_core_commits(
-                    &mut pending_for_core,
-                    &mut forwarded_to_core,
-                    &core_tx,
-                    links,
-                    transport_codec,
-                    &transport_metrics,
-                );
-                maybe_send_core_done(
-                    &writer_done,
-                    &pending_for_core,
-                    &mut sent_core_done,
-                    &core_tx,
-                );
-            }
-            EdgeInbound::WriterDone { writer_idx } => {
-                writer_done[writer_idx] = true;
-                maybe_send_core_done(
-                    &writer_done,
-                    &pending_for_core,
-                    &mut sent_core_done,
-                    &core_tx,
-                );
-            }
-            EdgeInbound::CoreUpdate {
-                reader_idx,
-                message,
-                final_rehydrate,
-                ..
-            } => {
-                edge_hydration_bytes += view_update_bytes(&message);
-                edge_hydration_floor_bytes += bytes_floor(&message);
-                edge_hydration_rows += result_output_count(&message, SHAPES);
-                apply_sync_message_settled(&mut edge_node, message)
-                    .expect("edge apply core update");
-                let now_ms = epoch.elapsed().as_millis() as u64;
-                for writer_idx in 0..writer_count {
-                    let outcome = block_on(
-                        writer_peers
-                            .get_mut(&writer_idx)
-                            .expect("writer edge peer")
-                            .drain_deferred_edge_fates(&mut edge_node, now_ms),
-                    )
-                    .expect("drain deferred edge fates");
-                    let drained = settle_outcome(&mut edge_node, outcome)
-                        .expect("settle deferred edge fates");
-                    for update in drained {
-                        let tx_id = fate_tx_id(&update);
-                        if edge_fate_update_accepted(writer_idx, &update, &writer_fate_txs)
-                            && let Some(tx_id) = tx_id
-                            && let Some(pending) = pending_for_core.get_mut(&tx_id)
-                        {
-                            pending.accepted = true;
-                        }
-                    }
-                }
-                accepted_commits += drain_ready_core_commits(
-                    &mut pending_for_core,
-                    &mut forwarded_to_core,
-                    &core_tx,
-                    links,
-                    transport_codec,
-                    &transport_metrics,
-                );
-                maybe_send_core_done(
-                    &writer_done,
-                    &pending_for_core,
-                    &mut sent_core_done,
-                    &core_tx,
-                );
-                let update = if final_rehydrate {
-                    block_on(reader_peers[reader_idx].peer.rehydrate_query(
-                        &mut edge_node,
-                        &shape,
-                        &binding,
-                    ))
-                    .expect("edge reader final rehydrate")
-                } else {
-                    block_on(reader_peers[reader_idx].peer.query_update(
-                        &mut edge_node,
-                        &shape,
-                        &binding,
-                    ))
-                    .expect("edge reader query update")
-                };
-                bytes_total += view_update_bytes(&update);
-                bytes_floor_total += bytes_floor(&update);
-                let _ = reader_peers[reader_idx].tx.send(ReaderInbound::Update {
-                    deliver_at: Instant::now() + links.client_edge,
-                    message: Box::new(transport_loopback(
-                        transport_codec,
-                        update,
-                        &transport_metrics,
-                    )),
-                });
-            }
-            EdgeInbound::CoreDone => {
-                for reader in &all_reader_txs {
-                    let _ = reader.send(ReaderInbound::Done);
-                }
-                break;
-            }
-        }
-    }
-
-    EdgeResult {
-        accepted_commits,
-        edge_acceptance,
-        bytes_total,
-        bytes_floor: bytes_floor_total,
-        edge_hydration_bytes,
-        edge_hydration_floor_bytes,
-        edge_hydration_rows,
     }
 }
 
@@ -1346,7 +880,7 @@ fn run_core_actor(
     mut core: NodeState<RocksDbStorage>,
     mut reader_peers: Vec<ReaderCorePeer>,
     core_rx: mpsc::Receiver<CoreInbound>,
-    edge_tx: mpsc::Sender<EdgeInbound>,
+    reader_txs: Vec<mpsc::Sender<ReaderInbound>>,
     writer_fate_txs: Vec<mpsc::Sender<WriterFate>>,
     shape: ValidatedQuery,
     binding: Binding,
@@ -1355,7 +889,11 @@ fn run_core_actor(
     transport_metrics: SharedMetrics,
     epoch: Instant,
     shapes: usize,
+    writer_count: usize,
 ) -> CoreResult {
+    let mut writer_done = vec![false; writer_count];
+    let mut bytes_total = 0;
+    let mut bytes_floor_total = 0;
     let mut accepted_commits = 0_usize;
     let mut core_tick = Histogram::new(3).unwrap();
     while let Ok(message) = core_rx.recv() {
@@ -1367,7 +905,7 @@ fn run_core_actor(
             } => {
                 park_until(deliver_at);
                 let SyncMessage::CommitUnit { tx, versions } = *message else {
-                    unreachable!("edge sends commit units");
+                    unreachable!("writer sends commit units");
                 };
                 let start = Instant::now();
                 let updates = ingest_commit_unit_settled(
@@ -1388,26 +926,40 @@ fn run_core_actor(
                 for (reader_idx, reader) in reader_peers.iter_mut().enumerate() {
                     let update = block_on(reader.peer.query_update(&mut core, &shape, &binding))
                         .expect("core reader query update");
-                    let _ = edge_tx.send(EdgeInbound::CoreUpdate {
-                        reader_idx,
-                        deliver_at: Instant::now() + links.edge_core,
-                        message: transport_loopback(transport_codec, update, &transport_metrics),
-                        final_rehydrate: false,
+                    bytes_total += view_update_bytes(&update);
+                    bytes_floor_total += bytes_floor(&update);
+                    let _ = reader_txs[reader_idx].send(ReaderInbound::Update {
+                        deliver_at: Instant::now() + links.client_core,
+                        message: Box::new(transport_loopback(
+                            transport_codec,
+                            update,
+                            &transport_metrics,
+                        )),
                     });
                 }
             }
-            CoreInbound::Done => {
+            CoreInbound::WriterDone { writer_idx } => {
+                writer_done[writer_idx] = true;
+                if !writer_done.iter().all(|done| *done) {
+                    continue;
+                }
                 for (reader_idx, reader) in reader_peers.iter_mut().enumerate() {
                     let update = block_on(reader.peer.rehydrate_query(&mut core, &shape, &binding))
                         .expect("core final reader rehydrate");
-                    let _ = edge_tx.send(EdgeInbound::CoreUpdate {
-                        reader_idx,
-                        deliver_at: Instant::now() + links.edge_core,
-                        message: transport_loopback(transport_codec, update, &transport_metrics),
-                        final_rehydrate: true,
+                    bytes_total += view_update_bytes(&update);
+                    bytes_floor_total += bytes_floor(&update);
+                    let _ = reader_txs[reader_idx].send(ReaderInbound::Update {
+                        deliver_at: Instant::now() + links.client_core,
+                        message: Box::new(transport_loopback(
+                            transport_codec,
+                            update,
+                            &transport_metrics,
+                        )),
                     });
                 }
-                let _ = edge_tx.send(EdgeInbound::CoreDone);
+                for reader in &reader_txs {
+                    let _ = reader.send(ReaderInbound::Done);
+                }
                 break;
             }
         }
@@ -1416,6 +968,8 @@ fn run_core_actor(
     let (merge_versions, merges_of_merges) = merge_counters(&mut core, shapes);
     let state = shape_state(&mut core);
     CoreResult {
+        bytes_total,
+        bytes_floor: bytes_floor_total,
         accepted_commits,
         core_tick,
         merge_versions,
@@ -1494,19 +1048,6 @@ fn precompute_workload(config: &Config, coalesced: bool) -> Vec<Vec<WorkItem>> {
     per_writer
 }
 
-fn hydrate_edge_policy_direct(
-    core: &mut NodeState<RocksDbStorage>,
-    edge_node: &mut NodeState<RocksDbStorage>,
-    policy_peer: &mut PeerState,
-) {
-    let shape = Query::from(INVITES).validate(&schema()).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    apply_binding(edge_node, &shape, &binding, AuthorSubject::SYSTEM);
-    let update = block_on(policy_peer.rehydrate_query(core, &shape, &binding))
-        .expect("edge policy rehydrate");
-    apply_sync_message_settled(edge_node, update).expect("edge policy apply");
-}
-
 fn apply_core_binding(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
@@ -1544,118 +1085,10 @@ fn apply_core_binding(
 }
 
 fn link_durations(profile: &PeerProfile) -> LinkDurations {
-    let (client_edge_ms, edge_core_ms) = profile_leg_ms(&profile.name);
-    let overhead = profile.per_message_overhead_ms;
+    let latency_ms = client_core_latency_ms();
     LinkDurations {
-        client_edge: Duration::from_millis(client_edge_ms + overhead),
-        edge_core: Duration::from_millis(edge_core_ms + overhead),
+        client_core: Duration::from_millis(latency_ms + profile.per_message_overhead_ms),
     }
-}
-
-fn recv_next_edge_message(
-    rx: &mpsc::Receiver<EdgeInbound>,
-    pending: &mut Vec<EdgeInbound>,
-) -> Option<EdgeInbound> {
-    loop {
-        while let Ok(message) = rx.try_recv() {
-            pending.push(message);
-        }
-        if pending.is_empty() {
-            match rx.recv() {
-                Ok(message) => pending.push(message),
-                Err(_) => return None,
-            }
-        }
-        let (idx, deliver_at) = pending
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, message)| edge_deliver_at(message))
-            .map(|(idx, message)| (idx, edge_deliver_at(message)))
-            .expect("pending edge message");
-        let now = Instant::now();
-        if deliver_at <= now {
-            return Some(pending.swap_remove(idx));
-        }
-        match rx.recv_timeout(deliver_at - now) {
-            Ok(message) => pending.push(message),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Some(pending.swap_remove(idx));
-            }
-        }
-    }
-}
-
-fn edge_deliver_at(message: &EdgeInbound) -> Instant {
-    match message {
-        EdgeInbound::WriterCommit { deliver_at, .. }
-        | EdgeInbound::CoreUpdate { deliver_at, .. } => *deliver_at,
-        EdgeInbound::WriterDone { .. } | EdgeInbound::CoreDone => Instant::now(),
-    }
-}
-
-fn send_core_commit(
-    core_tx: &mpsc::Sender<CoreInbound>,
-    writer_idx: usize,
-    message: SyncMessage,
-    latency: Duration,
-    transport_codec: SimulatorTransportCodec,
-    transport_metrics: &SharedMetrics,
-) {
-    let _ = core_tx.send(CoreInbound::Commit {
-        writer_idx,
-        deliver_at: Instant::now() + latency,
-        message: Box::new(transport_loopback(
-            transport_codec,
-            message,
-            transport_metrics,
-        )),
-    });
-}
-
-fn edge_fate_updates_accepted(
-    writer_idx: usize,
-    tx_id: jazz::tx::TxId,
-    updates: &[SyncMessage],
-    writer_fate_txs: &[mpsc::Sender<WriterFate>],
-) -> bool {
-    updates.iter().any(|update| {
-        let accepted = matches!(
-            update,
-            SyncMessage::FateUpdate {
-                tx_id: seen,
-                fate: Fate::Accepted,
-                durability,
-                ..
-            } if *seen == tx_id && durability.is_some_and(|tier| tier >= DurabilityTier::Global)
-        );
-        if matches!(update, SyncMessage::FateUpdate { .. }) {
-            let _ = writer_fate_txs[writer_idx].send(WriterFate {
-                message: update.clone(),
-            });
-        }
-        accepted
-    })
-}
-
-fn edge_fate_update_accepted(
-    writer_idx: usize,
-    update: &SyncMessage,
-    writer_fate_txs: &[mpsc::Sender<WriterFate>],
-) -> bool {
-    if matches!(update, SyncMessage::FateUpdate { .. }) {
-        let _ = writer_fate_txs[writer_idx].send(WriterFate {
-            message: update.clone(),
-        });
-    }
-    matches!(
-        update,
-        SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
-            durability,
-            ..
-        } if durability.is_some_and(|tier| tier >= DurabilityTier::Global)
-    )
 }
 
 fn global_fate_update_accepted(
@@ -1676,13 +1109,6 @@ fn global_fate_update_accepted(
             ..
         } if durability.is_some_and(|tier| tier >= DurabilityTier::Global)
     )
-}
-
-fn fate_tx_id(update: &SyncMessage) -> Option<jazz::tx::TxId> {
-    match update {
-        SyncMessage::FateUpdate { tx_id, .. } => Some(*tx_id),
-        _ => None,
-    }
 }
 
 fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec<jazz::tx::TxId> {
@@ -1726,7 +1152,7 @@ fn await_write_tier(
 ) {
     match tier {
         DurabilityTier::None | DurabilityTier::Local => return,
-        DurabilityTier::Global | DurabilityTier::Global => {}
+        DurabilityTier::Global => {}
     }
     while let Ok(update) = fate_rx.recv() {
         let matches_tier = match &update.message {
@@ -2064,25 +1490,14 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
             install_participant_claims(&mut core, config);
         }
     }
-    let core_update = block_on(
+    let update = block_on(
         disconnected
-            .edge
-            .core_peer
+            .peer
             .rehydrate_query(&mut core, &shape, &binding),
     )
-    .expect("edge catch up rehydrate");
-    ctx.send("core", &disconnected.edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&disconnected.edge.name);
-    apply_sync_message_settled(&mut disconnected.edge.node, delivered_to_edge.message).unwrap();
-    hydrate_edge_policy(ctx, &mut core, &mut disconnected.edge);
-    let update = block_on(disconnected.peer.rehydrate_query(
-        &mut disconnected.edge.node,
-        &shape,
-        &binding,
-    ))
     .expect("catch up rehydrate");
     catchup_bytes += view_update_bytes(&update);
-    ctx.send(&disconnected.edge.name, &disconnected.name, update);
+    ctx.send("core", &disconnected.name, update);
     let delivered = ctx.recv(&disconnected.name);
     apply_sync_message_settled(&mut disconnected.node, delivered.message).unwrap();
     assert_eq!(shape_state(&mut disconnected.node), shape_state(&mut core));
@@ -2296,53 +1711,17 @@ fn hydrate(
     binding: &Binding,
 ) {
     install_claims(core, participant.peer.identity());
-    register_binding(ctx, core, &participant.edge.name, shape, binding);
-    apply_binding(
-        &mut participant.edge.node,
-        shape,
-        binding,
-        participant.peer.identity(),
-    );
+    register_binding(ctx, core, &participant.name, shape, binding);
     apply_binding(
         &mut participant.node,
         shape,
         binding,
         participant.peer.identity(),
     );
-    let core_update = block_on(
-        participant
-            .edge
-            .core_peer
-            .rehydrate_query(core, shape, binding),
-    )
-    .unwrap();
-    ctx.send("core", &participant.edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&participant.edge.name);
-    apply_sync_message_settled(&mut participant.edge.node, delivered_to_edge.message).unwrap();
-    hydrate_edge_policy(ctx, core, &mut participant.edge);
-    let update = block_on(participant.peer.rehydrate_query(
-        &mut participant.edge.node,
-        shape,
-        binding,
-    ))
-    .unwrap();
-    ctx.send(&participant.edge.name, &participant.name, update);
+    let update = block_on(participant.peer.rehydrate_query(core, shape, binding)).unwrap();
+    ctx.send("core", &participant.name, update);
     let delivered = ctx.recv(&participant.name);
     apply_sync_message_settled(&mut participant.node, delivered.message).unwrap();
-}
-
-fn hydrate_edge_policy(
-    ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
-) {
-    let shape = Query::from(INVITES).validate(&schema()).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    apply_binding(&mut edge.node, &shape, &binding, AuthorSubject::SYSTEM);
-    let update = block_on(edge.policy_peer.rehydrate_query(core, &shape, &binding)).unwrap();
-    ctx.send("core", &edge.name, update);
-    let delivered = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
 }
 
 fn apply_binding(
@@ -2447,26 +1826,13 @@ fn open_participant(
     schema: JazzSchema,
     identity: AuthorSubject,
 ) -> Participant {
-    let edge_schema = schema.clone();
     let (dir, mut participant_node) = open_node(node_uuid, schema);
-    let edge_uuid = node((node_uuid.as_bytes()[15]).saturating_add(100));
-    let (edge_dir, mut edge_node) = open_node(edge_uuid, edge_schema);
     install_claims(&mut participant_node, identity);
-    install_claims(&mut edge_node, identity);
     Participant {
         name: name.to_owned(),
         node: participant_node,
         _dir: dir,
         peer: PeerState::client_link(identity),
-        edge: EdgeRoute {
-            name: format!("{name}_edge"),
-            node: edge_node,
-            _dir: edge_dir,
-            core_peer: PeerState::client_link(identity),
-            // Policy hydration is invoked directly in this simulation. It
-            // never carries a downstream session through a relay transport.
-            policy_peer: PeerState::new(),
-        },
     }
 }
 
@@ -2720,21 +2086,6 @@ fn is_ancestor(
     false
 }
 
-fn result_output_count(update: &SyncMessage, table: &str) -> usize {
-    match update {
-        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            supporting_rows, ..
-        }) => supporting_rows
-            .added_rows()
-            .iter()
-            .filter(|input| input.version_table.as_str() == table)
-            .map(|input| input.row)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        _ => 0,
-    }
-}
-
 fn canvas_cells() -> BTreeMap<String, Value> {
     BTreeMap::from([("name".to_owned(), Value::String("canvas".to_owned()))])
 }
@@ -2757,65 +2108,28 @@ fn zipf_index(rng: &mut Lcg, len: usize) -> usize {
 
 fn topology(config: &Config, profile: PeerProfile) -> Topology {
     let schema = schema();
-    let (client_edge_ms, edge_core_ms) = profile_leg_ms(&profile.name);
-    let client_edge = PeerProfile::new(
-        format!("{}:client-edge", profile.name),
-        client_edge_ms,
+    let latency_ms = client_core_latency_ms();
+    let link = PeerProfile::new(
+        format!("{}:client-core", profile.name),
+        latency_ms,
         profile.jitter_ms,
         profile.per_message_overhead_ms,
     );
-    let edge_core = PeerProfile::new(
-        format!("{}:edge-core", profile.name),
-        edge_core_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
-    let mut topology = Topology::default()
-        .node("writer", schema.clone(), NodeRole::Writer)
-        .node("core", schema.clone(), NodeRole::Core)
-        .link("writer", "core", edge_core.clone())
-        .link("core", "writer", edge_core.clone());
-    for idx in 0..(config.active + config.passive) {
-        let name = format!("p{idx}");
-        let edge = format!("{name}_edge");
+    let mut topology = Topology::default().node("core", schema.clone(), NodeRole::Core);
+    let names = (0..config.active + config.passive)
+        .map(|idx| format!("p{idx}"))
+        .chain(["writer", "spy", "reconnect", "offline"].map(str::to_owned));
+    for name in names {
         topology = topology
             .node(&name, schema.clone(), NodeRole::Reader)
-            .node(&edge, schema.clone(), NodeRole::Edge)
-            .client_edge_core_line(&name, &edge, "core", client_edge.clone(), edge_core.clone());
+            .link(&name, "core", link.clone())
+            .link("core", &name, link.clone());
     }
     topology
-        .node("spy", schema.clone(), NodeRole::Reader)
-        .node("spy_edge", schema.clone(), NodeRole::Edge)
-        .client_edge_core_line(
-            "spy",
-            "spy_edge",
-            "core",
-            client_edge.clone(),
-            edge_core.clone(),
-        )
-        .node("reconnect", schema.clone(), NodeRole::Reader)
-        .node("reconnect_edge", schema.clone(), NodeRole::Edge)
-        .client_edge_core_line(
-            "reconnect",
-            "reconnect_edge",
-            "core",
-            client_edge.clone(),
-            edge_core.clone(),
-        )
-        .node("offline", schema.clone(), NodeRole::Reader)
-        .node("offline_edge", schema, NodeRole::Edge)
-        .client_edge_core_line("offline", "offline_edge", "core", client_edge, edge_core)
 }
 
-fn profile_leg_ms(profile_name: &str) -> (u64, u64) {
-    let total = env_u64("JAZZ_LINK_ONE_WAY_MS", 1);
-    let client_edge = env_u64("JAZZ_CLIENT_EDGE_ONE_WAY_MS", total.min(1));
-    let edge_core = env_u64(
-        "JAZZ_EDGE_CORE_ONE_WAY_MS",
-        total.saturating_sub(client_edge).max(1),
-    );
-    let _ = profile_name;
-    (client_edge, edge_core)
+fn client_core_latency_ms() -> u64 {
+    env_u64("JAZZ_LINK_ONE_WAY_MS", 2)
 }
 
 fn emit_live_summary(
@@ -2893,38 +2207,6 @@ fn emit_live_summary(
     );
     fields.extend(transport_metrics);
     emit_object(fields);
-
-    let mut edge_acceptance = metadata_fields("s2_canvas", driver, config.seed, &config.profile);
-    edge_acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
-    edge_acceptance.insert("coalesced_16ms".to_owned(), json!(coalesced));
-    edge_acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.50)),
-    );
-    edge_acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.95)),
-    );
-    edge_acceptance.insert("durability_tier".to_owned(), json!("Edge"));
-    emit_object(edge_acceptance);
-
-    let mut edge_hydration = metadata_fields("s2_canvas", driver, config.seed, &config.profile);
-    edge_hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
-    edge_hydration.insert("coalesced_16ms".to_owned(), json!(coalesced));
-    edge_hydration.insert("scope".to_owned(), json!("canvas_shape"));
-    edge_hydration.insert(
-        "hydration_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_floor_bytes".to_owned(),
-        json!(summary.edge_hydration_floor_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_rows".to_owned(),
-        json!(summary.edge_hydration_rows),
-    );
-    emit_object(edge_hydration);
 }
 
 fn emit_concurrent_live_summary(coalesced: bool, config: &Config, summary: &ConcurrentLiveSummary) {
@@ -2986,28 +2268,8 @@ fn emit_concurrent_live_summary(coalesced: bool, config: &Config, summary: &Conc
         "core_tick_p95_us".to_owned(),
         json!(summary.core_tick.value_at_quantile(0.95)),
     );
-    fields.insert(
-        "edge_acceptance_p50_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.50)),
-    );
-    fields.insert(
-        "edge_acceptance_p95_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.95)),
-    );
     fields.insert("bytes_total".to_owned(), json!(summary.bytes_total));
     fields.insert("bytes_floor".to_owned(), json!(summary.bytes_floor));
-    fields.insert(
-        "edge_hydration_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    fields.insert(
-        "edge_hydration_floor_bytes".to_owned(),
-        json!(summary.edge_hydration_floor_bytes),
-    );
-    fields.insert(
-        "edge_hydration_rows".to_owned(),
-        json!(summary.edge_hydration_rows),
-    );
     fields.insert("converged".to_owned(), json!(summary.converged));
     fields.insert("spy_rows".to_owned(), json!(summary.spy_rows));
     fields.insert("spy_updates".to_owned(), json!(summary.spy_updates));
