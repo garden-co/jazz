@@ -331,6 +331,7 @@ impl TickEvaluator<'_> {
         &mut self,
         nodes: &Arc<[NodeId]>,
         pending: &mut HashMap<NodeId, PendingPipeline>,
+        frame_inputs: super::evaluator::FrameInputs<'_>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         let tail = *nodes.last().expect("nonempty pipeline");
@@ -363,10 +364,18 @@ impl TickEvaluator<'_> {
             let Some(plan) = self.prepared_pipeline(nodes) else {
                 return self.compute_node(tail, lookup).as_mut().poll(cx);
             };
-            let input = match self
-                .prepare_memo_lookup(plan.input)
-                .and_then(|key| self.cached_node_records(&key))
-            {
+            let resident = match self.resolve_register_inputs(frame_inputs) {
+                Ok(Some(mut inputs)) => inputs.pop(),
+                Ok(None) => None,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            let input = match resident.map_or_else(
+                || {
+                    self.prepare_memo_lookup(plan.input)
+                        .and_then(|key| self.cached_node_records(&key))
+                },
+                |input| Ok(Some(input)),
+            ) {
                 Ok(Some(input)) => input,
                 Err(error) => return Poll::Ready(Err(error)),
                 Ok(None) => return self.compute_node(tail, lookup).as_mut().poll(cx),

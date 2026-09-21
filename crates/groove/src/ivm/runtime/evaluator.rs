@@ -687,11 +687,24 @@ pub(super) struct RootOrderingWindows {
 /// Ephemeral lookup inputs, not a cached proof of producer readiness. A miss
 /// may reuse these only within the same node evaluation, never across the
 /// postorder traversal that can rebuild its input state.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct NodeMemoLookup {
     key: EvalMemoKey,
     input_watermark: u64,
     pub(super) depends_on_context: bool,
+}
+
+/// One completed batch in a private execution frame. This is not a retained
+/// cache: generation/context and live producer requirements are checked before
+/// a consumer can borrow it. It never crosses an evaluation boundary.
+pub(super) struct BatchRegister {
+    lookup: NodeMemoLookup,
+    records: Arc<RecordDeltas>,
+}
+
+pub(super) struct FrameInputs<'a> {
+    pub(super) slots: &'a [usize],
+    pub(super) batches: &'a [Option<BatchRegister>],
 }
 
 pub(super) struct TickEvaluator<'a> {
@@ -939,6 +952,7 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
         pending: &mut HashMap<NodeId, PendingUnaryBatch>,
+        frame_inputs: FrameInputs<'_>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         use std::task::Poll;
@@ -952,11 +966,31 @@ impl TickEvaluator<'_> {
                 Err(error) => return Poll::Ready(Err(error)),
                 Ok(None) => {}
             }
-            let input = match self.ready_unary_input(node, &lookup) {
+            let resolved = if self.supports_resident_batch(node) {
+                match self.resolve_register_inputs(frame_inputs) {
+                    Ok(inputs) => inputs,
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
+            } else {
+                None
+            };
+            let ready_inputs = resolved.as_deref();
+            let resident_unary = ready_inputs.and_then(|inputs| {
+                matches!(
+                    self.graph.node(node)?.descriptor.operator,
+                    OpType::Filter(_) | OpType::MapProject(_)
+                )
+                .then(|| inputs.first().cloned())
+                .flatten()
+            });
+            let unary_input = resident_unary
+                .map(Ok)
+                .or_else(|| self.ready_unary_input(node, &lookup));
+            let input = match unary_input {
                 Some(Ok(input)) => input,
                 Some(Err(error)) => return Poll::Ready(Err(error)),
                 None => {
-                    if let Some(result) = self.compute_ready_batch(node, &lookup) {
+                    if let Some(result) = self.compute_ready_batch(node, &lookup, ready_inputs) {
                         return Poll::Ready(result);
                     }
                     return self.compute_node(node, lookup).as_mut().poll(cx);
@@ -1471,6 +1505,23 @@ impl TickEvaluator<'_> {
         {
             return Ok(None);
         }
+        if !self.cached_result_state_is_current(node)? {
+            return Ok(None);
+        }
+        if let Some(entry) = self.eval_memo.get_mut(&lookup.key)
+            && entry.input_watermark == current_watermark
+        {
+            *self.memo_use_clock += 1;
+            entry.last_used = *self.memo_use_clock;
+            if self.context.eval_mode == EvalMode::Hydrate {
+                self.metrics.hydration_memo_hits += 1;
+            }
+            return Ok(Some(Arc::clone(&entry.records)));
+        }
+        Ok(None)
+    }
+
+    fn cached_result_state_is_current(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         // A cached record batch is not proof that its producer-owned physical
         // index exists in this scope. Hydration can reuse records from a probe,
         // and recursive child state may have been retired independently.
@@ -1493,18 +1544,48 @@ impl TickEvaluator<'_> {
                 && !self.aggregate_arrangements_are_current(node)?)
             || (self.context.eval_mode == EvalMode::Tick
                 && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
-        if !requires_state_rebuild
-            && let Some(entry) = self.eval_memo.get_mut(&lookup.key)
-            && entry.input_watermark == current_watermark
+        Ok(!requires_state_rebuild)
+    }
+
+    pub(super) fn batch_register(
+        &mut self,
+        node: NodeId,
+        records: Arc<RecordDeltas>,
+    ) -> Result<BatchRegister, IvmRuntimeError> {
+        Ok(BatchRegister {
+            lookup: self.prepare_memo_lookup(node)?,
+            records,
+        })
+    }
+
+    fn register_input(
+        &mut self,
+        register: &BatchRegister,
+    ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
+        let node = register.lookup.key.node;
+        if register.lookup != self.prepare_memo_lookup(node)?
+            || !self.cached_result_state_is_current(node)?
         {
-            *self.memo_use_clock += 1;
-            entry.last_used = *self.memo_use_clock;
-            if self.context.eval_mode == EvalMode::Hydrate {
-                self.metrics.hydration_memo_hits += 1;
-            }
-            return Ok(Some(Arc::clone(&entry.records)));
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(Arc::clone(&register.records)))
+    }
+
+    pub(super) fn resolve_register_inputs(
+        &mut self,
+        inputs: FrameInputs<'_>,
+    ) -> Result<Option<smallvec::SmallVec<[Arc<RecordDeltas>; 2]>>, IvmRuntimeError> {
+        let mut resolved = smallvec::SmallVec::new();
+        for &slot in inputs.slots {
+            let Some(register) = &inputs.batches[slot] else {
+                return Ok(None);
+            };
+            let Some(input) = self.register_input(register)? else {
+                return Ok(None);
+            };
+            resolved.push(input);
+        }
+        Ok(Some(resolved))
     }
 
     /// Execute a node whose ordinary inputs have already been driven by the
@@ -1523,7 +1604,7 @@ impl TickEvaluator<'_> {
             Ok(Some(records)) => ReadyNodeEvaluation::ready(Ok(records)),
             Err(error) => ReadyNodeEvaluation::ready(Err(error)),
             Ok(None) => {
-                if let Some(result) = self.compute_ready_batch(node, &lookup) {
+                if let Some(result) = self.compute_ready_batch(node, &lookup, None) {
                     return ReadyNodeEvaluation::ready(result);
                 }
                 ReadyNodeEvaluation::Deferred(self.compute_node(node, lookup))
@@ -1769,6 +1850,7 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
         lookup: &NodeMemoLookup,
+        ready_inputs: Option<&[Arc<RecordDeltas>]>,
     ) -> Option<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         let graph_node = self.graph.node(node)?;
         if self.context.sub_tick > 1 && !lookup.depends_on_context {
@@ -1776,15 +1858,15 @@ impl TickEvaluator<'_> {
             self.note_hydration_compute(node);
             return Some(Ok(self.memoize_result(lookup, RecordDeltas::empty(output))));
         }
-        match &graph_node.descriptor.operator {
-            OpType::Recursive(_) | OpType::StreamingChecksum(_) => return None,
-            OpType::IndexSource(_)
-                if self.context.eval_mode != EvalMode::Hydrate
-                    || self.evaluation_inputs.is_none() =>
-            {
-                return None;
-            }
-            _ => {}
+        if !self.supports_resident_batch(node) {
+            return None;
+        }
+        if let Some(inputs) = ready_inputs {
+            self.note_hydration_compute(node);
+            return Some(
+                self.compute_batch(node, inputs)
+                    .map(|records| self.memoize_result(lookup, records)),
+            );
         }
         let mut inputs = smallvec::SmallVec::<[Arc<RecordDeltas>; 2]>::new();
         for input in &graph_node.descriptor.inputs {
@@ -1802,6 +1884,16 @@ impl TickEvaluator<'_> {
             self.compute_batch(node, &inputs)
                 .map(|records| self.memoize_result(lookup, records)),
         )
+    }
+
+    fn supports_resident_batch(&self, node: NodeId) -> bool {
+        match self.graph.node(node).map(|node| &node.descriptor.operator) {
+            None | Some(OpType::Recursive(_) | OpType::StreamingChecksum(_)) => false,
+            Some(OpType::IndexSource(_)) => {
+                self.context.eval_mode == EvalMode::Hydrate && self.evaluation_inputs.is_some()
+            }
+            Some(_) => true,
+        }
     }
 
     pub(super) fn memo_key(&self, node: NodeId, signature: &NodeInputSignature) -> EvalMemoKey {
