@@ -3565,18 +3565,10 @@ where
                                                 admitted.same_admitted_link(expected)
                                             })
                                         });
-                                let publication_fate = matches!(&message,
-                                    SyncMessage::FateUpdate { tx_id, .. }
-                                        if outbox.borrow().authority_members.contains(tx_id));
                                 let outbox_release_receipt_eligible =
                                     current_authority_receipt_eligible
-                                        || (!publication_fate
-                                            && authority_receipt_eligible
+                                        || (authority_receipt_eligible
                                             && expected_scope_authority.is_none());
-                                if publication_fate && !current_authority_receipt_eligible {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
                                 let routed_fate = match &message {
                                     SyncMessage::FateUpdate { tx_id, .. } => {
                                         Some((*tx_id, message.clone()))

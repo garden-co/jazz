@@ -35,6 +35,10 @@ dangling references.
 The IDs `INV-SYNC-18` and `INV-SYNC-22` are retired with server-edge admission.
 They must not be reused for unrelated behavior.
 
+The removed server-edge acceptance and topology contracts `INV-EDGE-8` and
+`INV-EDGE-12` are retired; their identifiers must not be reused. Core now
+authorizes every ordinary client write as specified in chapter 9.
+
 ## Open Questions
 
 None.

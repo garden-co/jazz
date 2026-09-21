@@ -2711,37 +2711,6 @@ fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
     );
 }
 
-// The retired carrier cannot be authored through the application API. Exercise
-// the decoder/dispatch boundary directly, including privileged connections.
-#[test]
-fn retired_edge_publications_are_rejected_without_writes_for_every_trust_mode() {
-    let (_writer_dir, mut writer) = open_node();
-    let (_, unit) = writer.commit_mergeable_unit_settled(
-        MergeableCommit::new("todos", row(0xa1), 10).cells(title_cells("must be readmitted")),
-    ).unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("commit unit expected") };
-    let publication = crate::protocol::AuthorityPublication {
-        tx_id: tx.tx_id,
-        commits: vec![crate::protocol::AuthorityCommitUnit { tx: tx.clone(), versions }],
-    };
-    for trust in [None, Some(CommitUnitTrust::Session), Some(CommitUnitTrust::Relay),
-        Some(CommitUnitTrust::TrustedBackend), Some(CommitUnitTrust::TrustedAuthority),
-        Some(CommitUnitTrust::TrustedAdmin)] {
-        let (_receiver_dir, mut receiver) = open_node();
-        let context = trust.map(|trust| CommitUnitIngestContext {
-            identity: AuthorSubject::SYSTEM, trust, admitted_write_authorization: false,
-        });
-        let result = crate::db::block_on(receiver.apply_sync_message_with_ingest_context(
-            SyncMessage::AuthorityPublication(publication.clone()), context,
-        ));
-        assert!(matches!(result, Err(Error::UnsupportedSyncMessage(
-            "edge authority publications are no longer supported"
-        ))), "retired carrier must be rejected for {trust:?}");
-        assert!(receiver.query_transaction(tx.tx_id).unwrap().is_none());
-        assert!(receiver.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
-    }
-}
-
 // Pin both supported encoding boundaries. Public durability has no Edge tier,
 // but old bytes must decode as Local without renumbering Global.
 #[test]

@@ -228,7 +228,7 @@ lifecycle mechanism differs from the browser's IndexedDB marker.
 ### 9.6 The Core/client boundary
 
 The core-client boundary is where the system binds a link to a user identity and
-applies the last-hop policy view. An core-client link terminates exactly one
+applies the last-hop policy view. A core-client link terminates exactly one
 client `AuthorSubject` as `PeerRole::ClientLink { identity }`, and downstream reads on
 that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 

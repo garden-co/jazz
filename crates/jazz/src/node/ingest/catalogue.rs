@@ -107,9 +107,7 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             match message {
-                SyncMessage::AuthorityPublication(_) => {
-                    Err(Error::UnsupportedSyncMessage("edge authority publications are no longer supported"))
-                }
+                SyncMessage::Reserved30(retired) => match retired {},
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,

@@ -1829,7 +1829,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
-        SyncMessage::AuthorityPublication(_) => "AuthorityPublication",
+        SyncMessage::Reserved30(retired) => match *retired {},
         SyncMessage::FateUpdate { .. } => "FateUpdate",
         SyncMessage::RegisterShape { .. } => "RegisterShape",
         SyncMessage::Subscribe(_) => "Subscribe",

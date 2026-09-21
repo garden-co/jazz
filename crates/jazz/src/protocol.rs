@@ -27,28 +27,6 @@ use crate::time::TxTime;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
-/// One complete transaction inside an edge-authority publication.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorityCommitUnit {
-    /// Canonical transaction envelope, including generated branch intent.
-    pub tx: Transaction,
-    /// Every row version in the transaction, never a query-scoped subset.
-    pub versions: Vec<VersionRecord>,
-}
-
-/// A coherent edge-authorized frontier for one admitted write.
-///
-/// Core admits every member before reconciling remaining concurrent heads.
-/// The group may include pending-global history dependencies and edge merges;
-/// it is not an additional application transaction or a query result.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorityPublication {
-    /// Admitted write whose upload/acknowledgement owns this publication.
-    pub tx_id: TxId,
-    /// Complete accepted transactions in increasing transaction-id order.
-    pub commits: Vec<AuthorityCommitUnit>,
-}
-
 /// Uninhabited payload preserving retired postcard discriminants.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -252,9 +230,8 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Complete edge-admitted frontier, accepted only on an authenticated
-    /// authority link. Core reconciles after all members have been admitted.
-    AuthorityPublication(AuthorityPublication),
+    /// Retired edge-publication tag. No current message may use this slot.
+    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -721,23 +698,14 @@ pub struct CatalogueSnapshot {
 }
 
 impl SyncMessage {
-    /// Complete uploaded versions, including every member of an authority
-    /// publication. Shared by chunk staging and upload validation.
+    /// Complete uploaded versions in an ordinary commit unit.
+    /// Shared by chunk staging and upload validation.
     pub fn uploaded_versions(&self) -> impl Iterator<Item = &VersionRecord> {
-        let single = match self {
-            Self::CommitUnit { versions, .. } => Some(versions),
-            _ => None,
-        };
-        let publication = match self {
-            Self::AuthorityPublication(publication) => Some(publication),
-            _ => None,
-        };
-        single.into_iter().flatten().chain(
-            publication
-                .into_iter()
-                .flat_map(|publication| &publication.commits)
-                .flat_map(|unit| &unit.versions),
-        )
+        match self {
+            Self::CommitUnit { versions, .. } => versions.as_slice(),
+            _ => &[],
+        }
+        .iter()
     }
 
     /// Optional wire capabilities required to serialize this semantic message.
@@ -747,7 +715,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorityPublication(_) => crate::wire::FEATURE_AUTHORITY_PUBLICATIONS,
             Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             }
@@ -771,12 +738,6 @@ impl SyncMessage {
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::CommitUnit { versions, .. } => validate_version_records(versions),
-            Self::AuthorityPublication(publication) => {
-                for unit in &publication.commits {
-                    validate_version_records(&unit.versions)?;
-                }
-                Ok(())
-            }
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
             }
