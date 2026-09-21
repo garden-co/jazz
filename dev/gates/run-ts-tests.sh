@@ -83,9 +83,14 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
     echo "prepared jazz-tools public export surface is incomplete; refusing to launch suites" >&2
     exit 1
   fi
+  if [[ ! -f packages/inspector/dist-embedded/embedded.html ]]; then
+    echo "prepared embedded inspector is missing; refusing to launch suites" >&2
+    exit 1
+  fi
   # Test children share this prepared public surface. A child that tries to
   # rebuild it fails before clean-dist can remove files another suite imports.
   export JAZZ_TEST_SEALED_TOOLS_DIST=1
+  export JAZZ_TEST_SEALED_INSPECTOR_DIST=1
 fi
 
 stop_log_monitor() {
