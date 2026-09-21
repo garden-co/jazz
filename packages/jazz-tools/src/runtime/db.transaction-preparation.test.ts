@@ -266,6 +266,54 @@ it("returns an inserted row immediately without overtaking earlier preparation",
   ]);
 });
 
+it.each(["mergeable", "exclusive"] as const)(
+  "terminalizes a %s transaction when a pending read fails",
+  async (kind) => {
+    const failure = new Error(`controlled ${kind} read failure`);
+    const runtime = source.client.getRuntime() as TransactionalRuntime;
+    vi.spyOn(runtime, "query").mockRejectedValueOnce(failure);
+    const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+    tx.insert(app.documents, { payload: new Uint8Array([7]) });
+    const reading = tx.all(app.documents, { tier: "local" });
+    const committed = tx.commit();
+
+    await expect(reading).rejects.toBe(failure);
+    const waiting = kind === "exclusive" ? committed.wait() : committed.wait({ tier: "local" });
+    await expect(waiting).rejects.toBe(failure);
+    await expect(db.all(app.documents, { tier: "local" })).resolves.toEqual([]);
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.insert(app.documents, { payload: new Uint8Array([8]) })).toThrow();
+    await expect(tx.all(app.documents, { tier: "local" })).rejects.toThrow();
+    await expect(tx.rollback()).resolves.toBe(false);
+  },
+);
+
+it.each(["mergeable", "exclusive"] as const)(
+  "preserves the pending read error when failed-read rollback rejects in a %s transaction",
+  async (kind) => {
+    const failure = new Error(`controlled ${kind} read failure`);
+    const cleanupFailure = new Error(`controlled ${kind} rollback failure`);
+    const runtime = source.client.getRuntime() as TransactionalRuntime;
+    vi.spyOn(runtime, "query").mockRejectedValueOnce(failure);
+    const rollback = vi.spyOn(runtime, "rollbackTransaction").mockRejectedValueOnce(cleanupFailure);
+    const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+    tx.insert(app.documents, { payload: new Uint8Array([9]) });
+    const reading = tx.all(app.documents, { tier: "local" });
+    const committed = tx.commit();
+
+    await expect(reading).rejects.toBe(failure);
+    const waiting = kind === "exclusive" ? committed.wait() : committed.wait({ tier: "local" });
+    await expect(waiting).rejects.toBe(failure);
+    await expect(db.all(app.documents, { tier: "local" })).resolves.toEqual([]);
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.insert(app.documents, { payload: new Uint8Array([10]) })).toThrow();
+    await expect(tx.all(app.documents, { tier: "local" })).rejects.toThrow();
+
+    rollback.mockRestore();
+    await expect(tx.rollback()).resolves.toBe(true);
+  },
+);
+
 it.each(
   ["update", "upsert", "delete"].flatMap((operation) =>
     ["mergeable", "exclusive"].map((kind) => ({ operation, kind })),
