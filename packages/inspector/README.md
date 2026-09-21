@@ -52,6 +52,18 @@ pnpm build:embedded
 The Jazz Vite and SvelteKit development integrations serve the embedded inspector as an in-app
 overlay by default. Set their `inspector` option to `false` to disable it.
 
+## Testing the embedded Inspector
+
+After producing the native correctness artifacts, `pnpm test:typescript-consumers`
+builds the embedded Inspector before starting either TypeScript test lane. Both
+lanes share those assets with `JAZZ_TEST_SEALED_INSPECTOR_DIST=1`: browser tests
+consume the prepared build, and Vite rejects embedded rebuilds before they can
+delete files another test is serving. Missing prepared assets stop both lanes.
+
+Outside that sealed run, `pnpm --filter inspector test:browser` builds the embedded
+Inspector before running Playwright. Native correctness-artifact admission still
+applies to both paths.
+
 ## Staging a release on Vercel
 
 The package-build workflow builds the web app against its already verified Jazz

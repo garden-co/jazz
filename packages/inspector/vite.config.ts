@@ -12,6 +12,10 @@ const sealedWasmAlias: Record<string, string> = sealedWasmPackage
 
 export default defineConfig(({ mode }): UserConfig => {
   if (mode === "embedded") {
+    if (process.env.JAZZ_TEST_SEALED_INSPECTOR_DIST === "1")
+      throw new Error(
+        "cannot rebuild the embedded inspector while test consumers share its assets",
+      );
     return {
       plugins: [react()],
       resolve: { alias: sealedWasmAlias },
