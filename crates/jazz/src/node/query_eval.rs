@@ -649,6 +649,42 @@ where
         self.compile_query_program_request(request).await
     }
 
+    async fn compile_snapshot_include_deleted_query_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        snapshot: &Snapshot,
+        identity: AuthorSubject,
+        output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        self.catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    shape.params(),
+                    &binding_claim_params_for_shape(&input_shape, shape.params()),
+                ),
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape, shape.params()),
+            ),
+            shape: input_shape,
+        };
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
+            policy: self.query_program_policy_context(identity),
+            input,
+            output: current_query_output_request(output, shape.query()),
+        };
+        self.compile_query_program_request(request).await
+    }
+
     async fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -1937,6 +1973,54 @@ where
         Ok(rows)
     }
 
+    pub(super) async fn query_rows_including_deleted_at_snapshot(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let lowered_shape =
+            inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
+        let binding = lowered_shape.bind(BTreeMap::new())?;
+        let program = self
+            .compile_snapshot_include_deleted_query_program(
+                &lowered_shape,
+                &binding,
+                snapshot,
+                AuthorSubject::SYSTEM,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .await?;
+        let deltas = self
+            .database
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .await
+            .map_err(Error::Groove)?;
+        let mut rows = if lowered_shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(
+                lowered_shape.query(),
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )?
+        } else {
+            let table = self
+                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .clone();
+            self.materialize_include_deleted_query_rows(table, deltas)?
+        };
+        self.finish_engine_query_rows_in_schema(
+            lowered_shape.query(),
+            lowered_shape.schema_version(),
+            &mut rows,
+        )?;
+        Ok(rows)
+    }
+
     pub(super) async fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
@@ -2976,6 +3060,11 @@ where
             shape: shape.query().clone(),
             binding_id: binding.binding_id(),
             binding_values: binding.values().clone(),
+            mode: if include_deleted {
+                crate::tx::PredicateReadMode::IncludeDeleted
+            } else {
+                crate::tx::PredicateReadMode::Visible
+            },
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
@@ -3018,6 +3107,8 @@ where
                 &materialization_app_row_schema(None, Some(&program))?,
                 &deltas,
             )?
+        } else if include_deleted {
+            self.materialize_include_deleted_query_rows(table, deltas)?
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)?
         };
@@ -3027,6 +3118,11 @@ where
             shape: shape.query().clone(),
             binding_id: binding.binding_id(),
             binding_values: binding.values().clone(),
+            mode: if include_deleted {
+                crate::tx::PredicateReadMode::IncludeDeleted
+            } else {
+                crate::tx::PredicateReadMode::Visible
+            },
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);

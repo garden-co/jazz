@@ -3762,25 +3762,21 @@ pub(super) fn rejected_root_for(fate: &Fate, tx_id: TxId) -> Option<TxId> {
         Fate::Pending | Fate::Accepted => None,
     }
 }
-
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
-    let mut redacted_existing = existing.clone();
-    redacted_existing.base_snapshot = None;
-    redacted_existing.row_read_set = None;
-    redacted_existing.absent_read_set = None;
-    redacted_existing.predicate_read_set = None;
-    let mut redacted_incoming = incoming.clone();
-    redacted_incoming.base_snapshot = None;
-    redacted_incoming.row_read_set = None;
-    redacted_incoming.absent_read_set = None;
-    redacted_incoming.predicate_read_set = None;
     existing == incoming
-        || &redacted_existing == incoming
-        || existing == &redacted_incoming
-        || redacted_existing == redacted_incoming
+}
+
+pub(super) fn known_transaction_payload_matches_redacted_evidence(
+    existing: &Transaction,
+    incoming: &Transaction,
+) -> bool {
+    existing.permission_subject == incoming.permission_subject
+        && known_transaction_payload_matches_redacted_evidence_permission_subject(
+            existing, incoming,
+        )
 }
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
@@ -3791,29 +3787,39 @@ pub(crate) fn transaction_without_permission_subject(tx: &Transaction) -> Transa
     tx
 }
 
-/// Compare a transaction retransmitted over an untrusted transport after
-/// removing its non-authoritative permission hint. The stored local copy keeps
-/// that hint for restart finalization; only the duplicate identity check is
-/// redacted.
 pub(crate) fn known_transaction_payload_matches_redacted_permission_subject(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
-    known_transaction_payload_matches(
-        &transaction_without_permission_subject(existing),
-        &transaction_without_permission_subject(incoming),
-    )
+    known_transaction_payload_matches_redacted_evidence_permission_subject(existing, incoming)
+        && existing.base_snapshot == incoming.base_snapshot
+        && existing.row_read_set == incoming.row_read_set
+        && existing.absent_read_set == incoming.absent_read_set
+        && existing.predicate_read_set == incoming.predicate_read_set
+}
+
+pub(super) fn known_transaction_payload_matches_redacted_evidence_permission_subject(
+    existing: &Transaction,
+    incoming: &Transaction,
+) -> bool {
+    existing.tx_id == incoming.tx_id
+        && existing.kind == incoming.kind
+        && existing.n_total_writes == incoming.n_total_writes
+        && existing.made_by == incoming.made_by
+        && existing.user_metadata_json == incoming.user_metadata_json
+        && existing.contribution_merge == incoming.contribution_merge
 }
 
 pub(super) fn known_transaction_payload_matches_redacted_cardinality(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
-    let mut existing = existing.clone();
-    existing.n_total_writes = 0;
-    let mut incoming = incoming.clone();
-    incoming.n_total_writes = 0;
-    known_transaction_payload_matches(&existing, &incoming)
+    existing.tx_id == incoming.tx_id
+        && existing.kind == incoming.kind
+        && existing.made_by == incoming.made_by
+        && existing.permission_subject == incoming.permission_subject
+        && existing.user_metadata_json == incoming.user_metadata_json
+        && existing.contribution_merge == incoming.contribution_merge
 }
 
 pub(super) fn rejection_reason_tag(fate: &Fate) -> Option<String> {

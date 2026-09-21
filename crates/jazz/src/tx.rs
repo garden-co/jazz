@@ -45,6 +45,16 @@ pub struct Transaction {
     pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
+impl Transaction {
+    pub(crate) fn has_complete_exclusive_evidence(&self) -> bool {
+        self.kind != TxKind::Exclusive
+            || (self.base_snapshot.is_some()
+                && self.row_read_set.is_some()
+                && self.absent_read_set.is_some()
+                && self.predicate_read_set.is_some())
+    }
+}
+
 /// Non-causal evidence attached to an ordinary calculated merge transaction.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContributionMergeProvenance {
@@ -926,6 +936,19 @@ pub struct AbsentRead {
     pub row_uuid: RowUuid,
 }
 
+/// Root-row visibility captured by an exclusive predicate read.
+///
+/// The mode is part of the recorded predicate identity: a visible-row read and
+/// an include-deleted read observe different row memberships and therefore
+/// cannot share validation evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum PredicateReadMode {
+    /// Only rows whose deletion register is not deleted.
+    Visible,
+    /// Root rows remain members when the deletion register wins.
+    IncludeDeleted,
+}
+
 /// Predicate read captured by an open exclusive transaction.
 ///
 /// M3 v0 records whole-table current-row reads as degenerate query shapes.
@@ -941,6 +964,8 @@ pub struct PredicateRead {
     pub binding_id: BindingId,
     /// Binding values carried so validators do not need a prior binding registration.
     pub binding_values: BTreeMap<String, Value>,
+    /// Root-row deletion visibility requested by the read.
+    pub mode: PredicateReadMode,
 }
 
 groove::define_record! {

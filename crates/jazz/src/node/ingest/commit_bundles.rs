@@ -565,7 +565,11 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         existing_versions.sort();
         Ok(
-            known_transaction_payload_matches_redacted_permission_subject(&existing.tx, tx)
+            (!matches!(existing.fate, Fate::Pending) || tx.has_complete_exclusive_evidence())
+                && known_transaction_payload_matches_redacted_evidence_permission_subject(
+                    &existing.tx,
+                    tx,
+                )
                 && existing_versions == canonical_versions(versions.to_vec()),
         )
     }
@@ -586,9 +590,11 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing_versions != versions
-            {
+            let matches = known_transaction_payload_matches_redacted_evidence_permission_subject(
+                &existing.tx,
+                &tx,
+            );
+            if !matches || existing_versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             return Ok(());
@@ -666,34 +672,28 @@ where
                 .map(PublicationOutcome::settled);
         }
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if tx.kind == TxKind::Exclusive || matches!(existing.fate, Fate::Rejected(_)) {
-                let matches = if redact_permission_subject {
-                    known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                } else {
-                    known_transaction_payload_matches(&existing.tx, &tx)
-                };
-                if !matches {
-                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                }
-                return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
-                    tx_id: tx.tx_id,
-                    fate: existing.fate.clone(),
-                    global_time: existing.global_time,
-                    durability: fate_update_durability_claim(&existing.fate, existing.durability),
-                }]));
-            }
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id).await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
+            if matches!(existing.fate, Fate::Pending) && !tx.has_complete_exclusive_evidence() {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
             let matches = if redact_permission_subject {
-                known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
+                known_transaction_payload_matches_redacted_evidence_permission_subject(
+                    &existing.tx,
+                    &tx,
+                )
             } else {
-                known_transaction_payload_matches(&existing.tx, &tx)
+                known_transaction_payload_matches_redacted_evidence(&existing.tx, &tx)
             };
-            if !matches || existing_versions != versions {
+            // A terminal rejection may retain only its audit row, not rejected
+            // versions. It can repeat the rejection but never admit new data.
+            let rejected_audit_only =
+                matches!(existing.fate, Fate::Rejected(_)) && existing_versions.is_empty();
+            if !matches || (!rejected_audit_only && existing_versions != versions) {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if tx.kind == TxKind::Mergeable && matches!(existing.fate, Fate::Pending) {
@@ -1025,10 +1025,13 @@ where
         let versions = canonical_versions(versions);
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.view_scoped_cardinality
-                    && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
-            {
+            let payload_matches =
+                known_transaction_payload_matches_redacted_evidence_permission_subject(
+                    &existing.tx,
+                    &tx,
+                ) || existing.view_scoped_cardinality
+                    && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx);
+            if !payload_matches {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             // Normalize aliases before establishing the batch's resident base.

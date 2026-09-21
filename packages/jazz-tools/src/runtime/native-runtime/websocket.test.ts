@@ -572,10 +572,10 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("accepts the exact v3 Core advertisement for deployment-aware snapshots", async () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(3);
+  it("accepts the exact v4 Core advertisement for deployment-aware snapshots", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(4);
     const { carrier, socket } = carrierForTest();
-    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 3)]));
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 4)]));
     await expect(carrier.ready()).resolves.toBeDefined();
     carrier.close();
   });
@@ -585,7 +585,7 @@ describe("websocket frame carrier", () => {
       [0, 1],
       [1, 2],
       [2, 2],
-      [2, 3],
+      [3, 3],
       [3, 15],
       [1, 15],
       [12, 12],

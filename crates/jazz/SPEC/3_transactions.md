@@ -301,12 +301,16 @@ recorded reads against current global state:
   separate from a write's own-layer CAS below and is covered by
   `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
-- a **predicate read** must not have gained or lost rows — for source-row
-  predicates, authority compares the `(RowUuid, TxId)` output set for that
-  shape+binding at the complete dotted `base_snapshot` against current global
-  output (`INV-TX-18`). Aggregate predicates are the exception: authority
-  compares stable synthetic group identities together with canonical public
-  aggregate payloads at the same two frontiers.
+- a **predicate read** must compare the exact mode-specific output identity at the complete
+  dotted `base_snapshot` against current global output (`INV-TX-18`). A visible read
+  compares `(RowUuid, content TxId)`. An include-deleted read compares
+  `(RowUuid, optional content TxId, optional deletion-register TxId, deleted)`; content
+  and deletion winners are retained independently, and a tombstone-only row is valid.
+  Missing required witness data is malformed evidence, not an absent row. The
+  include-deleted mode widens only root membership; joins/includes/access checks retain
+  their ordinary visibility.
+  Aggregate predicates remain compared by stable synthetic group identities
+  and canonical public aggregate payloads at both frontiers.
 - each **write** is first-committer-wins in its **written history layer**: a
   content version compares its parent to the row's current global content
   `TxId`, while a deletion or restore version compares its parent to the
@@ -332,14 +336,13 @@ _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
 
-Before publication, local validation compares a single-table source-row
-predicate's `(RowUuid, TxId)` output at the fixed base snapshot against a
-comparison snapshot that also covers newly visible non-rejected transactions,
-including local writes without an authority receipt. A row outside the
-predicate does not cause a conflict; a matching insert, removal, or changed
-output-row version does. For example, a read of `bucket = "destination"`
-may commit after an insert into `bucket = "unrelated"`, but must reject
-after an insert into `bucket = "destination"`.
+Before publication, local validation compares each single-table source-row predicate
+using the same mode-specific output identity defined above at the fixed base snapshot
+against a comparison snapshot that also covers newly visible non-rejected transactions,
+including local writes without an authority receipt. A row outside the predicate does
+not cause a conflict; a matching insert, removal, or changed output-row version does.
+For example, a read of `bucket = "destination"` may commit after an insert into
+`bucket = "unrelated"`, but must reject after an insert into `bucket = "destination"`.
 
 This local comparison only advances root-table history. Relational predicates,
 aggregate predicates, and degenerate whole-table predicates retain conservative
@@ -359,6 +362,17 @@ An unknown name, or a name reused for a different physical table, rejects the
 transaction as `ExclusiveConflict`; neither case may be treated as evidence
 that a row is absent. Supporting ambiguous name reuse would require additional
 read-set identity information.
+
+### 3.7.1 Restart limitation
+
+The current transaction storage contract leaves the four exclusive read-evidence
+slots empty. A restart can therefore recover a pending exclusive transaction without
+the proof captured by its original read. Such a transaction remains `Pending` and
+blocked; it MUST NOT be uploaded with weaker semantics. Complete evidence retained
+in memory can still use the existing replay paths. A proofless reconstructed unit
+received by an authority is rejected before it creates global rows. Durable restart
+recovery is deferred to [#3228](https://github.com/garden-co/jazz/issues/3228);
+this chapter makes no durable restart-resumption guarantee.
 
 ### 3.8 Rejection and cascade
 
