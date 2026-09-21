@@ -915,6 +915,13 @@ where
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl<S: OrderedKvStorage> NodeState<S> {
+    pub(crate) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
+    }
+}
+
 #[cfg(test)]
 impl<S> NodeState<S>
 where
@@ -935,10 +942,6 @@ where
 
     pub(super) fn reset_query_program_compilations_for_test(&mut self) {
         self.query_program_compilations = 0;
-    }
-
-    pub(super) fn query_program_compilations_for_test(&self) -> usize {
-        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {

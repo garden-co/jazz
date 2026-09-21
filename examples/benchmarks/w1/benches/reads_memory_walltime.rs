@@ -5,6 +5,18 @@ fn main() {
     divan::main();
 }
 
+/// Independent dashboard bindings through core -> relay -> foreground.
+#[divan::bench(args = [(600, 0), (600, 10), (600, 60), (6000, 60)], sample_count = 3)]
+fn subscription_fanout_memory(bencher: divan::Bencher<'_, '_>, (rows, lists): (usize, usize)) {
+    use jazz_example_benchmark_w1::subscription_fanout::FanoutFixture;
+    bencher
+        .with_inputs(|| FanoutFixture::new(rows, lists))
+        .bench_local_values(|mut fixture| {
+            let receipt = fixture.hydrate();
+            (fixture, receipt)
+        });
+}
+
 /// Query-engine microbenchmark. This deliberately excludes persistent-backend cost.
 #[divan::bench(sample_count = 10)]
 fn query_board_profile_s_memory(bencher: divan::Bencher<'_, '_>) {
