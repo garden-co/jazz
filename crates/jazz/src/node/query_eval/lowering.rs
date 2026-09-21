@@ -545,6 +545,27 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
 
+/// An admission proof may hand its immutable compiler output to the first
+/// matching installer. No evaluator, binding, rows or subscription is retained.
+/// Consuming the program leaves the cheap capability proof resident.
+#[derive(Clone, Debug)]
+pub(crate) struct SupportedQueryProgram {
+    fingerprint: [u8; 32],
+    program: Option<QueryProgram>,
+}
+
+fn admission_program_key(
+    request: &QueryProgramRequest,
+    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+) -> Option<[u8; 32]> {
+    (matches!(
+            request.authorization_mode,
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::ClientLocal
+        )
+        && query_program_sources_cache_safe(request))
+    .then(|| *blake3::hash(query_program_cache_key(request, access_paths).as_bytes()).as_bytes())
+}
+
 fn query_program_source_cache_safe(source: &RequestedSourceExpr) -> bool {
     match source {
         SourceExpr::VisibleCurrent {
@@ -591,10 +612,10 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Repeated wire admission checks need a capability proof, not a retained
-    /// executable graph. Build the request (including strict claims) on every
-    /// call; reuse only a successful exact-context stable-source compilation.
-    /// Actual installation still compiles and owns its exact receiver inputs.
+    /// Build the request (including strict claims) on every call. Remember a
+    /// successful exact-context proof and hand its compiler output to a matching
+    /// installer, which still owns its own evaluator and binding. Programs with
+    /// per-receiver covered inputs cannot use this handoff.
     pub(super) async fn ensure_query_program_request_supported(
         &mut self,
         request: QueryProgramRequest,
@@ -603,33 +624,81 @@ where
         // Branches, overlays, inline snapshots and covered inputs
         // likewise stay on the ordinary path. No data-sensitive source is
         // admitted from a remembered success.
-        let cacheable = matches!(
-            request.authorization_mode,
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::ClientLocal
-        ) && query_program_sources_cache_safe(&request);
-        let key = cacheable.then(|| {
-            // Process-local only, never stored or sent. BLAKE3 bounds retained
-            // memory without keeping full schema/policy debug strings alive.
-            *blake3::hash(query_program_cache_key(&request, &access_paths).as_bytes()).as_bytes()
-        });
-        if key
-            .as_ref()
-            .is_some_and(|key| self.query.supported_query_program_requests.contains(key))
-        {
+        let key = admission_program_key(&request, &access_paths);
+        if key.as_ref().is_some_and(|key| {
+            self.query
+                .supported_query_program_requests
+                .iter()
+                .any(|entry| &entry.fingerprint == key)
+        }) {
             return Ok(());
         }
-        self.compile_query_program_request_with_access_paths(request, access_paths)
+        let program = self
+            .compile_query_program_request_with_access_paths(request, access_paths)
             .await?;
         if let Some(key) = key {
+            self.remember_supported_query_program(key, Some(program));
+        }
+        Ok(())
+    }
+
+    fn remember_supported_query_program(&mut self, key: [u8; 32], program: Option<QueryProgram>) {
+        if let Some(entry) = self
+            .query
+            .supported_query_program_requests
+            .iter_mut()
+            .find(|entry| entry.fingerprint == key)
+        {
+            if program.is_none() {
+                return;
+            }
+            // The compiler already recorded the proof. Remove that entry so
+            // admission can attach its one-use product with the same budget.
+            entry.program = None;
+        } else {
             // FIFO eviction only causes recompilation. There is no lifetime
             // admission quota and failed/cancelled compilation is never cached.
             const MAX_ADMISSIONS: usize = 256;
             if self.query.supported_query_program_requests.len() == MAX_ADMISSIONS {
                 self.query.supported_query_program_requests.pop_front();
             }
-            self.query.supported_query_program_requests.push_back(key);
+            self.query
+                .supported_query_program_requests
+                .push_back(SupportedQueryProgram {
+                    fingerprint: key,
+                    program: None,
+                });
         }
-        Ok(())
+        if let Some(program) = program {
+            // Keep the existing small compiled-program budget independently
+            // of the larger proof budget. An abandoned admission cannot retain
+            // arbitrarily many executable descriptions; eviction only repeats
+            // compilation, never rejects a query. The first installer takes
+            // ownership, so used programs do not occupy this handoff budget.
+            if self
+                .query
+                .supported_query_program_requests
+                .iter()
+                .filter(|entry| entry.program.is_some())
+                .count()
+                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+            {
+                if let Some(oldest) = self
+                    .query
+                    .supported_query_program_requests
+                    .iter_mut()
+                    .find(|entry| entry.program.is_some())
+                {
+                    oldest.program = None;
+                }
+            }
+            self.query
+                .supported_query_program_requests
+                .iter_mut()
+                .find(|entry| entry.fingerprint == key)
+                .expect("proof inserted above")
+                .program = Some(program);
+        }
     }
 
     pub(super) async fn compile_query_program_request(
@@ -641,6 +710,36 @@ where
     }
 
     pub(super) async fn compile_query_program_request_with_access_paths(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<QueryProgram, Error> {
+        let key = admission_program_key(&request, &access_paths);
+        if let Some(key) = key
+            && let Some(program) = self
+                .query
+                .supported_query_program_requests
+                .iter_mut()
+                .find(|entry| entry.fingerprint == key)
+                .and_then(|entry| entry.program.take())
+        {
+            return Ok(program);
+        }
+        let result = self
+            .compile_query_program_request_without_admission_handoff(request, access_paths)
+            .await;
+        // The order can be reversed: a foreground installs locally before it
+        // receives RegisterShape. Its successful compilation is already the
+        // exact capability proof; later admission need not compile it again.
+        if result.is_ok()
+            && let Some(key) = key
+        {
+            self.remember_supported_query_program(key, None);
+        }
+        result
+    }
+
+    async fn compile_query_program_request_without_admission_handoff(
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
@@ -756,6 +855,25 @@ where
         #[cfg(any(test, feature = "testing"))]
         {
             self.query_program_compilations += 1;
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if std::env::var_os("JAZZ_COMPILE_SHAPES").is_some() {
+            // Opt-in work classification only. Never emit queries, claims,
+            // literals or row contents; these process-local hashes are not
+            // cache identities and are not a serialization contract.
+            let fingerprint = |value: String| blake3::hash(value.as_bytes()).to_hex().to_string();
+            eprintln!(
+                "JAZZ_COMPILE_SHAPES node={} mode={:?} request={} structure={} sources={} binding={} paths={} inline={} covered={}",
+                fingerprint(format!("{:?}", self.node_uuid)),
+                request.authorization_mode,
+                fingerprint(format!("{request:?}")),
+                fingerprint(format!("{:?}", (&request.input.shape, &request.output))),
+                fingerprint(format!("{:?}", (&request.reads, &request.policy))),
+                fingerprint(format!("{:?}", request.input.binding)),
+                fingerprint(format!("{access_paths:?}")),
+                inline_sources.len(),
+                covered_input_sources.len()
+            );
         }
         self.restore_expired_policy_compilation_state();
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
