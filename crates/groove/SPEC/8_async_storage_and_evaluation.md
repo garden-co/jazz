@@ -107,6 +107,22 @@ proof owns child-scope readiness. Arrangement demand remains live because new
 consumers can require a physical index without changing the producer's ancestry.
 The requirement list is not itself proof that any producer is ready.
 
+Ordinary operators execute as synchronous batch kernels after the driver has
+resolved their inputs. This includes arrangements, joins, winner selection,
+aggregates and collectors, not only private unary pipelines. Input resolution
+still verifies memo generations and physical-producer readiness. A missing
+input uses the scoped rebuild driver; I/O index sources, streaming checksums and
+recursive child evaluation retain explicit async boundaries. Both entry paths
+call the same resident kernels. A resident kernel never recursively schedules
+its own predecessors. This separation does not yet bound every stateful kernel's
+CPU work or replace the transactional state maps.
+
+Join output compiles source field layouts and exact type compatibility once,
+then copies selected encoded spans into its batch allocation. Each execution
+still validates source row headers and selected offsets. The compiled plan is
+in-memory only and emits the existing record byte format; it is not a new codec
+or authority for interpreting arbitrary descriptors.
+
 Terminal publication likewise caches only ordered candidate nodes and the
 presence of a public root. Current per-evaluation terminal deltas are always
 consulted; the cache never stores a selected terminal or a publication. Both

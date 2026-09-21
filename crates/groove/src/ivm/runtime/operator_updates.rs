@@ -18,7 +18,7 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) pipeline: Option<Arc<pipeline::PreparedPipeline>>,
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
-    pub(super) join_output_mapping: Option<Arc<[(usize, usize)]>>,
+    pub(super) join_output: Option<Arc<crate::records::PreparedRecordCopy>>,
     pub(super) aggregate_group_fields: Option<Arc<[String]>>,
 }
 
