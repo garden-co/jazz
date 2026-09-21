@@ -935,6 +935,25 @@ impl RecordDescriptor {
         output: &mut BytesMut,
         mut evaluate: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
     ) -> Result<std::ops::Range<usize>, E> {
+        self.write_projected_fields_into(output, |target_idx, output| {
+            append_projected_field(
+                source,
+                source_record,
+                &fields[target_idx],
+                target_idx,
+                output,
+                &mut evaluate,
+            )
+        })
+    }
+
+    /// The same record framing for ordinary and composed field projections.
+    /// This is an execution interface, not a new record encoding.
+    pub(crate) fn write_projected_fields_into<E: From<Error>>(
+        &self,
+        output: &mut BytesMut,
+        mut append: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
+    ) -> Result<std::ops::Range<usize>, E> {
         let start = output.len();
         let fixed_size = self.fixed_size();
         let variable_count = self.variable_count();
@@ -943,14 +962,7 @@ impl RecordDescriptor {
         // ends are patched as their bytes arrive: no per-row span/scratch vector.
         for target_idx in &self.layout.logical_by_physical {
             if matches!(self.layout.fields[*target_idx], FieldLayout::Static { .. }) {
-                append_projected_field(
-                    source,
-                    source_record,
-                    &fields[*target_idx],
-                    *target_idx,
-                    output,
-                    &mut evaluate,
-                )?;
+                append(*target_idx, output)?;
             }
         }
         let offset_start = output.len();
@@ -959,14 +971,7 @@ impl RecordDescriptor {
             let FieldLayout::Variable { variable_idx } = self.layout.fields[*target_idx] else {
                 continue;
             };
-            append_projected_field(
-                source,
-                source_record,
-                &fields[*target_idx],
-                *target_idx,
-                output,
-                &mut evaluate,
-            )?;
+            append(*target_idx, output)?;
             if variable_idx + 1 < variable_count {
                 let end = usize_to_u32(output.len() - start)?;
                 let offset = start + fixed_size + variable_idx * 4;

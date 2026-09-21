@@ -4,12 +4,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::*;
 
 fn resolved_record_value(
-    record: BorrowedRecord<'_>,
+    record: impl super::key_encoding::PredicateRecord,
     field: &str,
 ) -> Result<Value, IvmRuntimeError> {
-    let index = super::record_projection::resolve_field_name(&record.descriptor(), field)
-        .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
-    record.get_idx(index).map_err(Into::into)
+    record.value(field)
 }
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
@@ -533,7 +531,7 @@ impl PredicateExpr {
 
     pub(super) fn matches(
         &self,
-        record: BorrowedRecord<'_>,
+        record: impl super::key_encoding::PredicateRecord,
         comparison: ValueComparison,
     ) -> Result<bool, IvmRuntimeError> {
         match self {
