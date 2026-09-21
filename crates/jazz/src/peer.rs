@@ -43,6 +43,7 @@ use crate::tx::{DurabilityTier, TxId};
 
 mod subscription_state;
 
+pub use subscription_state::PeerRole;
 #[cfg(test)]
 use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
@@ -51,7 +52,6 @@ use subscription_state::{
     fast_authorization_progress, fast_current_membership_position,
     fast_cursor_requires_authoritative_reset, member_settle_position,
 };
-pub use subscription_state::{PeerEvictionPins, PeerRole};
 
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]

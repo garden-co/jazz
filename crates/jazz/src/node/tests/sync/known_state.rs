@@ -1744,7 +1744,7 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
         "advertising cached payloads must not restore live authority"
     );
 
-    let report = reopened.evict_cold(&PeerEvictionPins::default()).unwrap();
+    let report = reopened.evict_cold().unwrap();
     assert_eq!(report.row_versions_evictable, 1);
     let declaration = reopened
         .known_state_declaration_for_subscription(
@@ -1760,7 +1760,7 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
 }
 
 #[test]
-fn two_table_edge_budget_counts_shared_physical_history_once_without_eviction() {
+fn two_table_client_cache_budget_counts_shared_physical_history_once_without_eviction() {
     // This is intentionally an internal storage-boundary receipt: the edge
     // budget is the observable policy seam, but only the backing storage can
     // provide an independent byte count for its shared physical history class.
@@ -1818,9 +1818,8 @@ fn two_table_edge_budget_counts_shared_physical_history_once_without_eviction() 
         .expect("memory storage meters its physical history class");
     assert!(physical_history_bytes > 0);
     let report = reader
-        .enforce_edge_cache_budget(
-            &PeerEvictionPins::default(),
-            EdgeCacheBudget::new(physical_history_bytes),
+        .enforce_client_cache_budget(
+            ClientCacheBudget::new(physical_history_bytes),
         )
         .resolve()
         .unwrap();
@@ -1942,13 +1941,13 @@ fn assert_eviction_failure_contract(
     match path {
         EvictionFailurePath::ManualBatch => {
             reader
-                .evict_cold(&PeerEvictionPins::default())
+                .evict_cold()
                 .resolve()
                 .expect_err("manual eviction must reach the injected persistence failure");
         }
         EvictionFailurePath::BudgetedPerCandidate => {
             reader
-                .enforce_edge_cache_budget(&PeerEvictionPins::default(), EdgeCacheBudget::new(0))
+                .enforce_client_cache_budget(ClientCacheBudget::new(0))
                 .resolve()
                 .expect_err("budgeted eviction must reach the injected persistence failure");
         }
@@ -2099,7 +2098,7 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
 
     storage.fail_nth_following_write_many(1);
     reader
-        .evict_cold(&PeerEvictionPins::default())
+        .evict_cold()
         .resolve()
         .expect_err("body deletion failure must preserve native history");
 
@@ -2567,12 +2566,12 @@ fn fresh_delivery_generation_advances_after_live_body_eviction() {
         assert!(required_after > 0);
         if budgeted {
             reader
-                .enforce_edge_cache_budget(&PeerEvictionPins::default(), EdgeCacheBudget::new(0))
+                .enforce_client_cache_budget(ClientCacheBudget::new(0))
                 .resolve()
                 .unwrap();
         } else {
             reader
-                .evict_cold(&PeerEvictionPins::default())
+                .evict_cold()
                 .resolve()
                 .unwrap();
         }

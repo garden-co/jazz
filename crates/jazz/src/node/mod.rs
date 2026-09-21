@@ -353,7 +353,7 @@ use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
 
-pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
+pub use eviction::{ClientCacheBudget, ClientCacheBudgetReport, ClientCacheClass, EvictColdReport};
 
 /// Test/bench-only attribution for durable-state work performed while opening a node.
 #[cfg(feature = "testing")]

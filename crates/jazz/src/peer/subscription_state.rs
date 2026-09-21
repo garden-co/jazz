@@ -280,25 +280,6 @@ impl CachedPeerQueryPlan {
     }
 }
 
-/// Peer-owned inputs to the edge eviction pin set.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeerEvictionPins {
-    /// Transactions currently parked on edge fate assignment.
-    pub deferred_edge_fate_txs: BTreeSet<TxId>,
-    /// Permission-scope subscriptions retained by active edge acceptance gates.
-    pub referenced_scope_subscriptions: BTreeSet<SubscriptionKey>,
-}
-
-impl PeerEvictionPins {
-    /// Merge another peer's pin roots into this aggregate pin set.
-    pub fn extend(&mut self, other: Self) {
-        self.deferred_edge_fate_txs
-            .extend(other.deferred_edge_fate_txs);
-        self.referenced_scope_subscriptions
-            .extend(other.referenced_scope_subscriptions);
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MemberSlot {
     pub(super) member: ResultMemberEntry,

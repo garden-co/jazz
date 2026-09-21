@@ -3576,14 +3576,7 @@ fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
 
     assert!(worker.detach_connection(&worker_upstream));
     assert!(core.server.detach_connection(&core_subscriber));
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(
         eviction.row_versions_evictable > 0,
         "the accepted parent must be evictable while the pending child remains pinned"
@@ -3764,14 +3757,7 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
         .unwrap();
     let child_tx = child.mergeable_tx_id();
     assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(eviction.row_versions_evictable > 0);
 
     let foreground = open_db(0xcd, author, &schema);
