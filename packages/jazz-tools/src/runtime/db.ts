@@ -1185,6 +1185,16 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
+  private failedRead = false;
+  private failedReadCleanupComplete = false;
+  private assertUsable(operation: string): void {
+    if (this.failedRead && operation !== "rollback") {
+      throw new Error(`DbTransaction.${operation}() cannot run after a pending read failed`);
+    }
+    if (this.committing) {
+      throw new Error(`DbTransaction.${operation}() cannot run after commit has been requested`);
+    }
+  }
 
   constructor(
     readonly kind: TKind,
@@ -1199,6 +1209,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private bindTable<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
     table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
   ): DbTransactionHandleBinding {
+    this.assertUsable("table operation");
     const client = this.resolveClient(table._schema);
     if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
     return this.requireBinding("table operation");
@@ -1209,9 +1220,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private requireBinding(operation: string): DbTransactionHandleBinding {
-    if (this.committing) {
-      throw new Error(`DbTransaction.${operation}() cannot run after commit has been requested`);
-    }
+    this.assertUsable(operation);
     return getDbTxHandleBinding(this, operation);
   }
 
@@ -1237,6 +1246,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (this.pendingReads.size > 0) {
       txId = Promise.all(this.pendingReads).then(
         () => ownerClient.commitTransaction(openTransactionId).txId,
+        async (error) => {
+          this.failedRead = true;
+          try {
+            await ownerClient.rollbackTransaction(openTransactionId);
+            this.failedReadCleanupComplete = true;
+          } catch {
+            // Preserve the original pending read error.
+          }
+          throw error;
+        },
       );
     } else {
       txId = ownerClient.commitTransaction(openTransactionId).txId;
@@ -1263,6 +1282,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   rollback(): Promise<boolean> {
     const { ownerClient, openTransactionId } = this.requireBinding("rollback");
+    if (this.failedReadCleanupComplete) return Promise.resolve(false);
     return ownerClient.rollbackTransaction(openTransactionId);
   }
 
