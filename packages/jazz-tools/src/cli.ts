@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 import {
   createMigration as createCatalogueMigration,
   deploy as deployCatalogue,
-  exportSchema as exportCatalogueSchema,
+  compileSchema as compileCatalogueSchema,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -21,7 +21,7 @@ export interface BuildOptions {
   strictProvenance?: boolean;
 }
 
-export interface SchemaExportOptions {
+export interface SchemaCompileOptions {
   schemaDir: string;
   migrationsDir?: string;
 }
@@ -60,8 +60,8 @@ export async function validate(options: BuildOptions): Promise<void> {
   );
 }
 
-export async function exportSchema(options: SchemaExportOptions): Promise<void> {
-  const result = await exportCatalogueSchema(options);
+export async function compileSchema(options: SchemaCompileOptions): Promise<void> {
+  const result = await compileCatalogueSchema(options);
   process.stdout.write(`${JSON.stringify(result.schema, null, 2)}\n`);
 }
 
@@ -450,13 +450,13 @@ function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log("  schema export         Print the compiled schema as JSON");
+  console.log("  schema compile        Print the compiled schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
-  console.log("\nSchema export options:");
+  console.log("\nSchema compile options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
   console.log("\nMigration options:");
@@ -501,12 +501,12 @@ if (isMainModule()) {
     });
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
-    if (subcommand === "export") {
+    if (subcommand === "compile") {
       const commandArgs = args.slice(2);
       for (let i = 0; i < commandArgs.length; i += 2) {
         if (!["--schema-dir", "--migrations-dir"].includes(commandArgs[i]!)) {
           console.error(
-            `Unknown schema export argument: ${commandArgs[i]}. Only local schema export is supported.`,
+            `Unknown schema compile argument: ${commandArgs[i]}. Only local schema compilation is supported.`,
           );
           process.exit(1);
         }
@@ -517,7 +517,7 @@ if (isMainModule()) {
       }
       const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
       const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      exportSchema({
+      compileSchema({
         schemaDir,
         migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
           ? resolve(process.cwd(), getFlagValue(commandArgs, "--migrations-dir")!)
@@ -527,7 +527,7 @@ if (isMainModule()) {
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema export [--schema-dir <path>] [...]");
+      console.error("Usage: node dist/cli.js schema compile [--schema-dir <path>] [...]");
       process.exit(1);
     }
   } else if (command === "migrations") {

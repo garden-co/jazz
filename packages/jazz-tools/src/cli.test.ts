@@ -27,7 +27,7 @@ import {
   SERVER_URL_ENV_VARS,
   createMigration as rawCreateMigration,
   deploy as rawDeploy,
-  exportSchema as rawExportSchema,
+  compileSchema,
   loadDotEnv,
   loadEnvFile,
   readEnvFiles,
@@ -53,7 +53,6 @@ function withAppId<T extends { appId?: string }>(options: T): T & { appId: strin
   return { appId: APP_ID, ...options };
 }
 
-const exportSchema = rawExportSchema;
 const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
   rawCreateMigration(withAppId(options));
 const pushMigration = (
@@ -936,7 +935,7 @@ describe("cli validate", () => {
   });
 });
 
-describe("cli schema export", () => {
+describe("cli schema compile", () => {
   it("prints the compiled schema representation as JSON and writes a snapshot", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
@@ -952,7 +951,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root });
+      await compileSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -982,8 +981,8 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root });
-      await exportSchema({ schemaDir: root });
+      await compileSchema({ schemaDir: root });
+      await compileSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -1012,7 +1011,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root });
+      await compileSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -3514,13 +3513,13 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("renamed to `jazz-tools validate`");
   });
 
-  it("rejects the removed schema hash command", () => {
-    const result = runBin(["schema", "hash"]);
+  it.each(["hash", "export"])("rejects the removed schema %s command", (command) => {
+    const result = runBin(["schema", command]);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("schema export");
+    expect(result.stderr).toContain("schema compile");
   });
 
-  it("routes schema export through the TypeScript CLI", async () => {
+  it("routes schema compile through the TypeScript CLI", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
     await writeFile(
@@ -3528,7 +3527,7 @@ describe("bin integration", () => {
       rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
-    const result = runBin(["schema", "export", "--schema-dir", root]);
+    const result = runBin(["schema", "compile", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     const exported = JSON.parse(String(result.stdout));
@@ -3538,11 +3537,11 @@ describe("bin integration", () => {
   });
 
   it.each(["--schema-hash", "--server-url", "--admin-secret", APP_ID])(
-    "rejects removed schema export argument %s",
+    "rejects removed schema compile argument %s",
     (argument) => {
-      const result = runBin(["schema", "export", argument, "unused"]);
+      const result = runBin(["schema", "compile", argument, "unused"]);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("Only local schema export is supported.");
+      expect(result.stderr).toContain("Only local schema compilation is supported.");
     },
   );
 
@@ -3586,7 +3585,7 @@ exit 0
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("validate");
-    expect(result.stdout).toContain("schema export");
+    expect(result.stdout).toContain("schema compile");
     expect(result.stdout).toContain("deploy");
     expect(result.stdout).not.toContain("migrations push");
     expect(result.stdout).not.toContain("permissions status");

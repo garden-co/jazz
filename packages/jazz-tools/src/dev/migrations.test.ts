@@ -451,7 +451,7 @@ describe("migration stub generation", () => {
   });
 
   it("exports snapshots and creates relation migrations with lossless bigint and bytes defaults", async () => {
-    const { exportSchema, createMigration } = await import("./catalogue-project.js");
+    const { compileSchema, createMigration } = await import("./catalogue-project.js");
     const root = await mkdtemp(join(tmpdir(), "jazz-default-snapshots-"));
     const migrationsDir = join(root, "migrations");
     const schemaPath = join(root, "schema.ts");
@@ -465,7 +465,7 @@ export const app = s.defineApp({
     try {
       await writeFile(join(root, "package.json"), '{"type":"module"}');
       await writeFile(schemaPath, source(false));
-      const before = await exportSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
+      const before = await compileSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
       const exported = JSON.parse(await readFile(before.snapshotPath!, "utf8"));
       expect(wasmSchemasEqual(exported, before.schema)).toBe(true);
       const initial = await createMigration({ schemaDir: root, migrationsDir });
@@ -486,7 +486,7 @@ export const app = s.defineApp({
           .replace("export default", "return"),
       )(s);
       expect(wasmSchemasEqual(s.defineApp(migration.from).wasmSchema, before.schema)).toBe(true);
-      const after = await exportSchema({ schemaDir: root, migrationsDir });
+      const after = await compileSchema({ schemaDir: root, migrationsDir });
       expect(wasmSchemasEqual(s.defineApp(migration.to).wasmSchema, after.schema)).toBe(true);
       expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
       expect(await createMigration({ schemaDir: root, migrationsDir })).toEqual({

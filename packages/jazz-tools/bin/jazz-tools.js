@@ -129,7 +129,7 @@ function printWrapperHelp() {
   console.log("");
   console.log("Commands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log("  schema export         Print schema JSON from local schema.ts");
+  console.log("  schema compile        Print schema JSON from local schema.ts");
   console.log("  deploy                Publish schema, permissions, and required migrations");
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",

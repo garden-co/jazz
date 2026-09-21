@@ -153,12 +153,12 @@ export interface ValidateProjectResult {
   warnings: string[];
 }
 
-interface ExportSchemaOptions {
+interface CompileSchemaOptions {
   schemaDir: string;
   migrationsDir?: string;
 }
 
-interface ExportSchemaResult {
+interface CompileSchemaResult {
   schema: WasmSchema;
   hash: string;
   snapshotPath: string | null;
@@ -255,7 +255,7 @@ export async function validateProject(
   };
 }
 
-export async function exportSchema(options: ExportSchemaOptions): Promise<ExportSchemaResult> {
+export async function compileSchema(options: CompileSchemaOptions): Promise<CompileSchemaResult> {
   const currentSchema = await loadCurrentSchema(options.schemaDir);
   return {
     ...currentSchema,

@@ -117,7 +117,7 @@ When a newer schema drops a column that older clients still expect, define a bac
 
 ## Adding relations to existing UUID columns
 
-Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
+To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged; Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
 
 ## Migrating historical schemas
 
@@ -138,17 +138,17 @@ pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHa
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
 server and saves a snapshot in `migrations/snapshots/`.
 
-## Exporting the compiled schema
+## Compiling the schema
 
-`pnpm dlx jazz-tools@alpha schema export` prints the compiled schema as JSON to stdout. It
+`pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
-pnpm dlx jazz-tools@alpha schema export
-pnpm dlx jazz-tools@alpha schema export --schema-dir ./packages/app
+pnpm dlx jazz-tools@alpha schema compile
+pnpm dlx jazz-tools@alpha schema compile --schema-dir ./packages/app
 ```
 
-The command exports the current local `schema.ts`. To create migrations against a historical
+The command compiles the current local `schema.ts`. To create migrations against a historical
 schema, use `migrations create --fromHash <hash>`; it fetches and saves missing snapshots as needed.
 
 | Flag                   | Default           | Description                                      |
