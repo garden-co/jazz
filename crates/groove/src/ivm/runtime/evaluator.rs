@@ -39,6 +39,13 @@ pub(super) enum ReadyNodeEvaluation<'a> {
     Deferred(StorageFuture<'a, Result<Arc<RecordDeltas>, IvmRuntimeError>>),
 }
 
+/// Immutable candidate order; publication presence is checked on every use.
+#[derive(Debug)]
+pub(super) struct TerminalLineage {
+    candidates: Vec<(NodeId, bool)>,
+    has_public_root: bool,
+}
+
 impl std::future::Future for ReadyNodeEvaluation<'_> {
     type Output = Result<Arc<RecordDeltas>, IvmRuntimeError>;
 
@@ -1157,35 +1164,20 @@ impl TickEvaluator<'_> {
     }
 
     pub(super) fn terminal_delta_node_for_output(
-        &self,
+        &mut self,
         node: NodeId,
     ) -> Result<Option<NodeId>, IvmRuntimeError> {
-        let mut pending = vec![node];
-        let mut seen = HashSet::new();
+        let lineage = self.terminal_lineage(node)?;
         let mut fallback = None;
-        let mut has_public_root = false;
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            let graph_node = self
-                .graph
-                .node(node)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            let is_public_root = matches!(
-                &graph_node.descriptor.operator,
-                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
-            );
-            has_public_root |= is_public_root;
+        for &(node, is_public_root) in &lineage.candidates {
             if self.terminal_deltas.contains_key(&node) {
                 if is_public_root {
                     return Ok(Some(node));
                 }
                 fallback.get_or_insert(node);
             }
-            pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        Ok((!has_public_root).then_some(fallback).flatten())
+        Ok((!lineage.has_public_root).then_some(fallback).flatten())
     }
 
     pub(super) fn terminal_deltas_for_consumer(
@@ -1207,26 +1199,44 @@ impl TickEvaluator<'_> {
         output_is_structured_collect_by(self.graph, node)
     }
 
-    pub(super) fn output_has_public_root(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        let mut pending = vec![node];
+    pub(super) fn output_has_public_root(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        Ok(self.terminal_lineage(node)?.has_public_root)
+    }
+
+    fn terminal_lineage(&mut self, root: NodeId) -> Result<Arc<TerminalLineage>, IvmRuntimeError> {
+        if let Some(lineage) = self
+            .node_meta
+            .get(&root)
+            .and_then(|meta| meta.terminal_lineage.as_ref())
+        {
+            return Ok(Arc::clone(lineage));
+        }
+        let mut lineage = TerminalLineage {
+            candidates: Vec::new(),
+            has_public_root: false,
+        };
+        let mut pending = vec![root];
         let mut seen = HashSet::new();
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
                 continue;
             }
-            let node = self
+            let graph_node = self
                 .graph
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            if matches!(
-                &node.descriptor.operator,
-                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
-            ) {
-                return Ok(true);
+            // CollectBy is the only operator publishing into terminal_deltas.
+            // Preserve the old depth-first/input-reverse priority exactly.
+            if let OpType::CollectBy(collect_by) = &graph_node.descriptor.operator {
+                let public = collect_by.mode == CollectByMode::Root;
+                lineage.has_public_root |= public;
+                lineage.candidates.push((node, public));
             }
-            pending.extend(node.descriptor.inputs.iter().copied());
+            pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        Ok(false)
+        let lineage = Arc::new(lineage);
+        self.node_meta.entry(root).or_default().terminal_lineage = Some(Arc::clone(&lineage));
+        Ok(lineage)
     }
 
     fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -1270,17 +1280,57 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
     ) -> Result<bool, IvmRuntimeError> {
-        self.aggregate_arrangements_are_current_inner(node, &mut HashSet::new())
+        let frontier = self.readiness_frontier(node)?;
+        for &producer in frontier.iter() {
+            if !self.producer_state_is_current(producer)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
-    fn aggregate_arrangements_are_current_inner(
-        &mut self,
-        node: NodeId,
-        seen: &mut HashSet<NodeId>,
-    ) -> Result<bool, IvmRuntimeError> {
-        if !seen.insert(node) {
-            return Ok(true);
+    fn readiness_frontier(&mut self, root: NodeId) -> Result<Arc<[NodeId]>, IvmRuntimeError> {
+        if let Some(frontier) = self
+            .node_meta
+            .get(&root)
+            .and_then(|meta| meta.readiness_frontier.as_ref())
+        {
+            return Ok(Arc::clone(frontier));
         }
+        let mut frontier = Vec::new();
+        let mut pending = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            match &graph_node.descriptor.operator {
+                OpType::Recursive(_) => {
+                    // Child scopes are owned by this producer. Its live proof
+                    // includes completion, input generation and step readiness.
+                    frontier.push(node);
+                    continue;
+                }
+                OpType::Arrange(_)
+                | OpType::ArgMinBy(_)
+                | OpType::ArgMaxBy(_)
+                | OpType::Aggregate(_) => frontier.push(node),
+                _ => {}
+            }
+            // Match the original recursive walk's input order, including the
+            // first occurrence of a shared producer. No dynamic fact is saved.
+            pending.extend(graph_node.descriptor.inputs.iter().rev().copied());
+        }
+        let frontier: Arc<[NodeId]> = frontier.into();
+        self.node_meta.entry(root).or_default().readiness_frontier = Some(Arc::clone(&frontier));
+        Ok(frontier)
+    }
+
+    fn producer_state_is_current(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let graph = self.graph;
         let graph_node = graph
             .node(node)
@@ -1352,11 +1402,6 @@ impl TickEvaluator<'_> {
                 .and_then(AsOf::as_of)
                 != Some(self.arrangement_sub_tick(&arrangement_key))
             {
-                return Ok(false);
-            }
-        }
-        for input in inputs {
-            if !self.aggregate_arrangements_are_current_inner(*input, seen)? {
                 return Ok(false);
             }
         }

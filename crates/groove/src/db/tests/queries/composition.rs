@@ -2,6 +2,83 @@
 
 use super::*;
 
+/// Cached structural requirements must still check live producer state behind
+/// a deep stateless suffix, across mutation, one-shot probes and detachment.
+#[futures_test::test]
+async fn deep_shared_readiness_frontiers_recheck_winners_after_detach() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let mut graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    for _ in 0..48 {
+        graph = graph.filter(PredicateExpr::gt("stamp", Value::U64(0)));
+    }
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let prepared = db
+        .prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("deep_row", params),
+                graph.clone(),
+                ["row"],
+                ["row"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.row", "row"),
+                ProjectField::renamed("right.stamp", "stamp"),
+            ]),
+            "deep_row",
+            params,
+            ["row"],
+        )
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first baseline"));
+    batch.insert("history", history_values(2, 15, 1, "second baseline"));
+    db.commit_batch(batch).await.unwrap();
+    let row = |id, stamp| vec![Value::U64(id), Value::U64(stamp)];
+    let other = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(2)])
+        .await
+        .unwrap();
+    assert_eq!(
+        other.recv().unwrap().to_values().unwrap(),
+        [(row(2, 15), 1)]
+    );
+    for stamp in [20, 30, 40] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "new winner"));
+        db.commit_batch(batch).await.unwrap();
+        let snapshot = db
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.contains(&(row(1, stamp), 1)));
+        assert!(snapshot.contains(&(row(2, 15), 1)));
+        let subscription = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            [(row(1, stamp), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, stamp, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(1, stamp), -1)));
+        assert!(changes.contains(&(row(1, 10), 1)));
+        assert!(matches!(other.try_recv(), Err(TryRecvError::Empty)));
+        assert!(db.unsubscribe(subscription.id()));
+    }
+}
+
 /// Alice takes first results before and alongside Bob's retained extrema
 /// subscription, using the exact same graph and prepared parameter domain.
 /// probe -> bind -> probe other binding -> delete winner -> probe -> delete runner-up.
