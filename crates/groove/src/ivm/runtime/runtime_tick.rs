@@ -2369,6 +2369,46 @@ impl IvmRuntime {
         self.pending_incremental.is_pending()
     }
 
+    /// Whether an admitted evaluation can still change this receiver's
+    /// terminal. An already-consumed initial batch is not a progress fence:
+    /// later storage publications may still be suspended. Check the actual
+    /// consumer, not global runtime idleness (an unrelated cold graph must
+    /// not hold a ready subscription's opening hostage).
+    pub(crate) fn subscription_has_pending_progress(&self, id: SubscriptionId) -> bool {
+        // A missing/failed receiver cannot prove a completed terminal.
+        if self.pending_incremental_polling
+            || self
+                .multisink_subscriptions
+                .get(&id)
+                .is_none_or(|s| s.failed)
+        {
+            return true;
+        }
+        self.pending_incremental
+            .0
+            .borrow()
+            .evaluations
+            .values()
+            .any(|evaluation| {
+                match evaluation {
+                    PendingEvaluation::SubscriptionHydration(hydration) => {
+                        hydration.subscription_id == id
+                    }
+                    // Even computed output may still be buffered until the
+                    // evaluation commits. Do not use published_subscriptions as
+                    // evidence that the receiver has actually received it.
+                    PendingEvaluation::Incremental(evaluation) => {
+                        evaluation.affected_subscriptions.contains(&id)
+                    }
+                }
+            })
+            || self.deferred_notifications.values().any(|notifications| {
+                notifications
+                    .iter()
+                    .any(|(subscription, _)| *subscription == id)
+            })
+    }
+
     /// Whether the last suspended owner turn retained a cooperative CPU
     /// continuation rather than a cold storage request.
     pub(crate) fn has_resident_continuation(&self) -> bool {

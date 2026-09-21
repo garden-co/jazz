@@ -185,6 +185,15 @@ impl Database {
         self.ivm_runtime.has_pending_incremental()
     }
 
+    /// Whether already-admitted work can still change this subscription's
+    /// terminal. This does not poll, consume queued results, or predict future
+    /// writes. A caller must drain the receiver before treating it as current.
+    /// Missing/failed subscription IDs return true rather than proving readiness.
+    pub fn subscription_has_pending_progress(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_progress(subscription)
+    }
+
     /// Drive every suspended incremental evaluation until the runtime is
     /// either quiescent or waiting for storage.
     ///
