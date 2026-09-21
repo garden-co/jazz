@@ -117,6 +117,17 @@ call the same resident kernels. A resident kernel never recursively schedules
 its own predecessors. This separation does not yet bound every stateful kernel's
 CPU work or replace the transactional state maps.
 
+The execution layout also compiles forward input slots, preserving duplicate
+edges. An evaluation's private batch registers carry completed canonical batches
+and their generation/context keys. Ordinary kernels and private pipelines read
+these slots directly after checking the same live physical-producer requirements
+as memo reuse. Missing or stale slots fall back to the scoped resolver. Registers
+are resolved only after a node's own memo misses, so an unused predecessor is not
+driven or validated merely because the output is already available. Suspended
+evaluations never share registers; recursive child scopes retain their own
+context-keyed resolver. Registers do not enter the retained memo or durable
+storage as a separate cache.
+
 Join output compiles source field layouts and exact type compatibility once,
 then copies selected encoded spans into its batch allocation. Each execution
 still validates source row headers and selected offsets. The compiled plan is

@@ -328,6 +328,7 @@ enum EvaluationEntry {
 }
 
 struct EvaluationWorkQueue {
+    batches: Vec<Option<evaluator::BatchRegister>>,
     unary_batches: HashMap<NodeId, evaluator::PendingUnaryBatch>,
     pipelines: HashMap<NodeId, Arc<[NodeId]>>,
     pipeline_batches: HashMap<NodeId, pipeline::PendingPipeline>,
@@ -351,6 +352,7 @@ impl EvaluationWorkQueue {
             .execution_layout(roots)
             .map_err(IvmRuntimeError::GraphNodeNotFound)?;
         let mut queue = Self {
+            batches: (0..layout.nodes.len()).map(|_| None).collect(),
             unary_batches: HashMap::default(),
             pipelines: HashMap::default(),
             pipeline_batches: HashMap::default(),
@@ -438,6 +440,47 @@ impl EvaluationWorkQueue {
 
     fn requests(&self) -> impl Iterator<Item = &EvaluationRequestKey> {
         self.request_dependents.keys()
+    }
+
+    /// Dispatch with direct compiled input slots. Registers belong to this
+    /// private frame, never the graph cache. Producer state remains a live
+    /// requirement: missing/stale registers use the normal scoped resolver.
+    fn poll_node(
+        &mut self,
+        evaluator: &mut TickEvaluator<'_>,
+        node: NodeId,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        let slot = self.layout.slots[&node];
+        let result = if let Some(pipeline) = self.pipelines.get(&node) {
+            let head = self.layout.slots[&pipeline[0]];
+            evaluator.poll_pipeline(
+                pipeline,
+                &mut self.pipeline_batches,
+                evaluator::FrameInputs {
+                    slots: self.layout.inputs(head),
+                    batches: &self.batches,
+                },
+                cx,
+            )
+        } else {
+            evaluator.poll_ready_node(
+                node,
+                &mut self.unary_batches,
+                evaluator::FrameInputs {
+                    slots: self.layout.inputs(slot),
+                    batches: &self.batches,
+                },
+                cx,
+            )
+        };
+        if let Poll::Ready(Ok(records)) = &result {
+            self.batches[slot] = Some(match evaluator.batch_register(node, Arc::clone(records)) {
+                Ok(register) => register,
+                Err(error) => return Poll::Ready(Err(error)),
+            });
+        }
+        result
     }
 
     fn dependency_ready(&mut self, node: NodeId) {
@@ -915,11 +958,7 @@ impl<'a> IncrementalEvaluation<'a> {
 
         let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
-            let result = if let Some(pipeline) = self.work_queue.pipelines.get(&node) {
-                evaluator.poll_pipeline(pipeline, &mut self.work_queue.pipeline_batches, cx)
-            } else {
-                evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx)
-            };
+            let result = self.work_queue.poll_node(&mut evaluator, node, cx);
             match result {
                 Poll::Ready(Ok(_)) => self.work_queue.complete(node),
                 Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)) => {
@@ -1482,11 +1521,7 @@ impl<'a> EvaluationSession<'a> {
                         terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
-                    let poll = if let Some(pipeline) = self.work_queue.pipelines.get(&node) {
-                        evaluator.poll_pipeline(pipeline, &mut self.work_queue.pipeline_batches, cx)
-                    } else {
-                        evaluator.poll_ready_node(node, &mut self.work_queue.unary_batches, cx)
-                    };
+                    let poll = self.work_queue.poll_node(&mut evaluator, node, cx);
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                     match poll {
                         // A future which cooperatively yielded has not registered a
