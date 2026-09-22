@@ -1,4 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "files": ["tests/browser/todo-app.test.ts"]
-}

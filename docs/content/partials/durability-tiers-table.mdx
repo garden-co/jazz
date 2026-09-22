@@ -1,6 +1,0 @@
-Write waits distinguish local persistence from Core acceptance. Synchronization continues with either choice.
-
-| Tier       | Where       | What confirmation means                                                                             |
-| ---------- | ----------- | --------------------------------------------------------------------------------------------------- |
-| `"local"`  | This device | Saved by the local persistence driver, without waiting for the network.                             |
-| `"global"` | Core        | Authorized and durably accepted by Core. Other clients receive updates through their subscriptions. |

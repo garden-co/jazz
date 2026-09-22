@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# cargo-codspeed 5.0.1 does not forward --timings. Intercept only its Cargo
-# build subprocess; metadata, install and all compiler options are unchanged.
-set -euo pipefail
-: "${JAZZ_REAL_CARGO:?set the absolute Cargo executable before adding this directory to PATH}"
-if [[ "${1:-}" == build ]]; then
-  exec "$JAZZ_REAL_CARGO" "$@" --timings
-fi
-exec "$JAZZ_REAL_CARGO" "$@"
