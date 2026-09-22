@@ -452,6 +452,48 @@ pub(super) async fn publish_schema_handler(
         .into_response()
 }
 
+pub(super) async fn migration_graph_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    if state.topology.is_edge() {
+        return match forward_catalogue_request(
+            &state,
+            admin_secret.expect("validated admin secret"),
+            reqwest::Method::GET,
+            "/admin/migrations/graph",
+            None,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+    }
+
+    match state.catalogue.migration_graph(&state.catalogue_store) {
+        Ok(graph) => (StatusCode::OK, Json(graph)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read migration graph: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
 pub(super) async fn permissions_head_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,

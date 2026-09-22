@@ -52,6 +52,22 @@ pub(crate) struct ActiveSchema {
     pub permissions: HashMap<TableName, TablePolicies>,
 }
 
+/// HTTP graph inventory, captured under one catalogue index lock.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MigrationGraph {
+    active_schema_hash: Option<String>,
+    schemas: Vec<String>,
+    migrations: Vec<MigrationGraphEdge>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationGraphEdge {
+    from_hash: String,
+    to_hash: String,
+}
+
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -100,6 +116,7 @@ impl std::error::Error for CatalogueError {}
 pub struct ServerCatalogue;
 
 pub(crate) trait CatalogueStore {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError>;
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
@@ -610,6 +627,28 @@ fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String,
 }
 
 impl CatalogueStore for StoredCatalogue {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut schemas: Vec<_> = index.schemas.keys().map(ToString::to_string).collect();
+        schemas.sort();
+        let mut migrations: Vec<_> = index
+            .lenses
+            .values()
+            .map(|lens| MigrationGraphEdge {
+                from_hash: lens.source_hash.to_string(),
+                to_hash: lens.target_hash.to_string(),
+            })
+            .collect();
+        migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
+        Ok(MigrationGraph {
+            active_schema_hash: index
+                .active_schema
+                .map(|active| active.schema_hash.to_string()),
+            schemas,
+            migrations,
+        })
+    }
+
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.known_schema_hashes())
@@ -767,6 +806,13 @@ impl CatalogueStore for StoredCatalogue {
 }
 
 impl ServerCatalogue {
+    pub(crate) fn migration_graph(
+        &self,
+        store: &impl CatalogueStore,
+    ) -> Result<MigrationGraph, CatalogueError> {
+        store.migration_graph()
+    }
+
     pub(crate) fn known_schema_hashes(
         &self,
         store: &impl CatalogueStore,

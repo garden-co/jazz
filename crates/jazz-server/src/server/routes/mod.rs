@@ -31,9 +31,9 @@ use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
-    permissions_handler, permissions_head_handler, publish_migration_handler,
-    publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
-    schema_handler, schema_hashes_handler,
+    migration_graph_handler, permissions_handler, permissions_head_handler,
+    publish_migration_handler, publish_permissions_handler, publish_schema_handler,
+    schema_connectivity_handler, schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
@@ -95,6 +95,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(permissions_handler).post(publish_permissions_handler),
         )
         .route("/migrations", post(publish_migration_handler))
+        .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
@@ -1188,6 +1189,159 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).expect("permissions json");
         assert!(json["head"].is_null());
         assert!(json["permissions"].is_null());
+    }
+
+    async fn read_migration_graph(app: &axum::Router) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/admin/migrations/graph"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn migration_graph_requires_admin_and_returns_empty_inventory() {
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let app = make_test_router(state);
+        for secret in [None, Some("wrong-secret")] {
+            let mut request =
+                axum::http::Request::builder().uri(test_app_route("/admin/migrations/graph"));
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Admin-Secret", secret);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            read_migration_graph(&app).await,
+            serde_json::json!({
+                "activeSchemaHash": null, "schemas": [], "migrations": []
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
+        let schema = |column| {
+            SchemaBuilder::new()
+                .table(TableSchema::builder("users").column(column, ColumnType::Text))
+                .build()
+        };
+        let v1 = schema("email");
+        let v2 = schema("email_address");
+        let isolated = schema("unrelated");
+        let from = SchemaHash::compute(&v1).to_string();
+        let to = SchemaHash::compute(&v2).to_string();
+        let isolated_hash = SchemaHash::compute(&isolated).to_string();
+        let app = make_test_router(make_state_with_schema(v1).await);
+        publish_schema_for_test(&app, v2).await;
+        publish_schema_for_test(&app, isolated).await;
+        assert_eq!(
+            read_migration_graph(&app).await["migrations"],
+            serde_json::json!([])
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/migrations"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "fromHash": from, "toHash": to,
+                            "forward": [{"table": "users", "operations": [{
+                                "type": "rename", "column": "email", "value": "email_address"
+                            }]}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let graph = read_migration_graph(&app).await;
+        let mut hashes = vec![from.clone(), to.clone(), isolated_hash];
+        hashes.sort();
+        assert_eq!(graph["schemas"], serde_json::json!(hashes));
+        assert_eq!(
+            graph["migrations"],
+            serde_json::json!([{ "fromHash": from, "toHash": to }])
+        );
+        assert_eq!(read_migration_graph(&app).await, graph);
+
+        let permissions = std::collections::HashMap::<String, TablePolicies>::new();
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/permissions"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "schemaHash": to, "permissions": permissions,
+                            "expectedParentBundleObjectId": null
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let active = read_migration_graph(&app).await;
+        assert_eq!(active["activeSchemaHash"], to);
+        assert_eq!(active["schemas"], graph["schemas"]);
+        assert_eq!(active["migrations"], graph["migrations"]);
+    }
+
+    #[tokio::test]
+    async fn migration_graph_on_edge_reads_authority_inventory() {
+        let authority = make_test_router(
+            make_state_with_schema(
+                SchemaBuilder::new()
+                    .table(TableSchema::builder("authority").column("name", ColumnType::Text))
+                    .build(),
+            )
+            .await,
+        );
+        let expected = read_migration_graph(&authority).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, authority).await.unwrap();
+        });
+        let edge = make_test_router(
+            make_edge_state_with_schema(SchemaBuilder::new().build(), format!("http://{address}"))
+                .await,
+        );
+        assert_eq!(read_migration_graph(&edge).await, expected);
+        task.abort();
     }
 
     #[tokio::test]
