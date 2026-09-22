@@ -57,6 +57,7 @@ mod rank_index;
 mod recursion;
 mod state;
 mod terminal;
+mod typed_template;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
 use evaluation_memo::EvaluationMemo;

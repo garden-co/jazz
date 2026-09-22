@@ -118,7 +118,26 @@ impl QueryProgramTemplateCache {
                 &source_parameters,
             )
             .ok()
-            .map(Arc::new);
+            .map(|mut program| {
+                let mut graphs = program
+                    .lowered
+                    .terminals
+                    .iter()
+                    .map(|terminal| terminal.graph.clone())
+                    .collect::<Vec<_>>();
+                graphs.extend(program.lowered.internal_app_rows_graph.iter().cloned());
+                if let Ok(typed) = groove::ivm::compile_template_graphs(&graphs) {
+                    let mut typed = typed.into_iter();
+                    for terminal in &mut program.lowered.terminals {
+                        terminal.graph = typed.next().expect("typed terminal");
+                    }
+                    if program.lowered.internal_app_rows_graph.is_some() {
+                        program.lowered.internal_app_rows_graph = typed.next();
+                    }
+                    trace_template("typed_compiled");
+                }
+                Arc::new(program)
+            });
             if self.entries.len() == 64 {
                 self.entries.pop_front();
             }

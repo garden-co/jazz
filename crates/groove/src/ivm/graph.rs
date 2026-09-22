@@ -150,6 +150,11 @@ use super::op_types::*;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {
+    /// Prevalidated operator definitions with instance-owned source bindings.
+    TypedTemplate {
+        program: Arc<super::template::TypedGraphTemplate>,
+        inputs: Vec<Arc<GraphBuilder>>,
+    },
     /// A typed, compilation-only input of an immutable query template. Binding
     /// supplies a descriptor-checked graph, not rows or authority. Compilation
     /// rechecks its output contract and emits no execution operator. An
@@ -723,6 +728,9 @@ impl GraphBuilder {
             }
             pending.push((graph, true));
             match graph {
+                Self::TypedTemplate { inputs, .. } => {
+                    pending.extend(inputs.iter().map(|input| (input.as_ref(), false)));
+                }
                 Self::TemplateInput { input, .. } => {
                     if let Some(input) = input {
                         pending.push((input, false));
@@ -775,6 +783,7 @@ impl GraphBuilder {
     /// Visit immediate immutable inputs without walking or cloning their DAGs.
     pub(crate) fn visit_inputs<'a>(&'a self, mut visit: impl FnMut(&'a Arc<Self>)) {
         match self {
+            Self::TypedTemplate { inputs, .. } => inputs.iter().for_each(visit),
             Self::TemplateInput { input, .. } => {
                 if let Some(input) = input {
                     visit(input);
@@ -824,6 +833,11 @@ impl GraphBuilder {
     pub(crate) fn map_inputs(&self, mut map: impl FnMut(&Arc<Self>) -> Arc<Self>) -> Self {
         let mut graph = self.clone();
         match &mut graph {
+            Self::TypedTemplate { inputs, .. } => {
+                for input in inputs {
+                    *input = map(input);
+                }
+            }
             Self::TemplateInput { input, .. } => {
                 if let Some(input) = input {
                     *input = map(input);

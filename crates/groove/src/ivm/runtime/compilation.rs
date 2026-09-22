@@ -310,6 +310,18 @@ impl IvmRuntime {
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
+            GraphBuilder::TypedTemplate { program, inputs } => {
+                let compiled = inputs
+                    .iter()
+                    .map(|input| {
+                        compiled_memo
+                            .get(&graph_builder_key(input))
+                            .cloned()
+                            .ok_or(IvmRuntimeError::UnsupportedOperator)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.install_typed_template(program, &compiled, inputs)
+            }
             GraphBuilder::TemplateInput { input, output, .. } => {
                 let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
                 let compiled = self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;

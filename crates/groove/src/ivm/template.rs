@@ -7,6 +7,74 @@ use super::GraphBuilder;
 use crate::records::RecordDescriptor;
 use std::{collections::HashMap, sync::Arc};
 
+/// A typed, source-independent installation program. Its identity and contents
+/// are process-local compiler state, never a storage or wire representation.
+#[derive(Clone, Debug)]
+pub struct TypedGraphTemplate {
+    pub(crate) identity: u64,
+    pub(crate) nodes: Vec<TemplateNode>,
+    pub(crate) inputs: Vec<RecordDescriptor>,
+    pub(crate) output: RecordDescriptor,
+    pub(crate) root: TemplateNodeRef,
+    pub(crate) ordering: Option<TemplateNodeRef>,
+    pub(crate) terminal: bool,
+    pub(crate) fallback: GraphBuilder,
+}
+
+impl PartialEq for TypedGraphTemplate {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+impl Eq for TypedGraphTemplate {}
+impl TypedGraphTemplate {
+    pub fn output_descriptor(&self) -> RecordDescriptor {
+        self.output
+    }
+
+    /// Reconstruct the declarative equivalent for diagnostics and compiler
+    /// fallbacks. Ordinary typed installation does not pay for this walk.
+    pub fn bind_declarative(
+        &self,
+        inputs: &[Arc<GraphBuilder>],
+    ) -> Result<GraphBuilder, TemplateBindingError> {
+        let inputs = inputs
+            .iter()
+            .zip(&self.inputs)
+            .map(|(graph, output)| {
+                TemplateGraphInput::with_output_contract((**graph).clone(), *output)
+            })
+            .collect::<Vec<_>>();
+        Ok(bind_template_graphs(std::slice::from_ref(&self.fallback), &inputs)?.remove(0))
+    }
+}
+impl std::hash::Hash for TypedGraphTemplate {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity.hash(state);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TemplateNodeRef {
+    Input(usize),
+    Node(usize),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TemplateNode {
+    pub(crate) descriptor: super::NodeDescriptor,
+    pub(crate) inputs: Vec<TemplateNodeRef>,
+}
+
+/// Compile source-slot graphs once into typed operator definitions. The
+/// compiler uses an empty scratch runtime: it cannot capture a caller's rows,
+/// subscriptions, schema catalogue, or source capabilities.
+pub fn compile_template_graphs(
+    graphs: &[GraphBuilder],
+) -> Result<Vec<GraphBuilder>, super::IvmRuntimeError> {
+    super::runtime::IvmRuntime::compile_template_graphs(graphs)
+}
+
 /// A graph with an explicit output contract. This does not prove that
 /// the source is valid or remains live: installation checks source lifetime,
 /// ownership and current schema. Callers cannot substitute a different graph

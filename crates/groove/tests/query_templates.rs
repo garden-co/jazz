@@ -164,3 +164,133 @@ async fn declared_template_contract_is_rechecked_before_execution() {
         vec![(vec![Value::U64(7)], 1)]
     );
 }
+
+#[futures_test::test]
+async fn typed_templates_bind_fresh_rows_and_preserve_live_private_inputs() {
+    let mut db = database().await;
+    let blueprint = template().filter(groove::ivm::PredicateExpr::gt("id", Value::U64(10)));
+    let typed = groove::ivm::compile_template_graphs(std::slice::from_ref(&blueprint)).unwrap();
+    assert!(matches!(typed[0], GraphBuilder::TypedTemplate { .. }));
+    let first = db.allocate_input_source(descriptor());
+    let second = db.allocate_input_source(descriptor());
+    let bind_input = |id| {
+        bind_template_graphs(
+            &typed,
+            &[groove::ivm::TemplateGraphInput::with_output_contract(
+                GraphBuilder::input_source(id, descriptor()),
+                descriptor(),
+            )],
+        )
+        .unwrap()
+        .remove(0)
+    };
+    let first_graph = bind_input(first);
+    let second_graph = bind_input(second);
+    for (id, value) in [(first, 11), (second, 22)] {
+        db.replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor: descriptor(),
+            records: vec![descriptor().create(&[Value::U64(value)]).unwrap()],
+        }])
+        .await
+        .unwrap();
+    }
+    let subscription = db.subscribe_one_sink(first_graph.clone()).await.unwrap();
+    assert_eq!(
+        db.next_subscription(&subscription)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(11)], 1)]
+    );
+    assert_eq!(
+        db.query_graph(second_graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(22)], 1)]
+    );
+    db.replace_input_sources([InputSourceReplacement {
+        id: first,
+        descriptor: descriptor(),
+        records: vec![descriptor().create(&[Value::U64(9)]).unwrap()],
+    }])
+    .await
+    .unwrap();
+    assert_eq!(
+        db.next_subscription(&subscription)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(11)], -1)]
+    );
+    assert_eq!(
+        db.query_graph(second_graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(22)], 1)]
+    );
+    db.unsubscribe(subscription.id());
+    db.retire_input_sources([first]).await.unwrap();
+    assert!(matches!(
+        db.subscribe_one_sink(first_graph).await,
+        Err(groove::db::Error::IvmRuntime(
+            IvmRuntimeError::InputSourceRetired
+        ))
+    ));
+}
+
+#[futures_test::test]
+async fn typed_templates_reject_forged_contracts_and_preserve_ordered_sources() {
+    let mut db = database().await;
+    let typed = groove::ivm::compile_template_graphs(&[template()]).unwrap();
+    let wrong = GraphBuilder::values(
+        RecordDescriptor::new([("id", ColumnType::String)]),
+        [vec![Value::String("wrong".into())]],
+    )
+    .unwrap();
+    let bad = bind_template_graphs(
+        &typed,
+        &[groove::ivm::TemplateGraphInput::with_output_contract(
+            wrong,
+            descriptor(),
+        )],
+    )
+    .unwrap()
+    .remove(0);
+    assert!(matches!(
+        db.query_graph(bad).await,
+        Err(groove::db::Error::IvmRuntime(
+            IvmRuntimeError::GraphOutputMismatch
+        ))
+    ));
+    let input =
+        GraphBuilder::values(descriptor(), [vec![Value::U64(22)], vec![Value::U64(11)]]).unwrap();
+    let source = GraphBuilder::top_by(
+        input,
+        [] as [&str; 0],
+        [groove::ivm::TopByOrder::asc("id")],
+        ["id"],
+        0,
+        groove::ivm::TopByLimit::Finite(1),
+    );
+    let expected = db
+        .query_graph(source.clone().project(["id"]))
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    let graph = bind_template_graphs(&typed, &[db.describe_template_input(source).unwrap()])
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        db.query_graph(graph).await.unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(expected, vec![(vec![Value::U64(11)], 1)]);
+}

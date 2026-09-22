@@ -617,6 +617,12 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
     let mut contains_collect = HashMap::default();
     for node in graph.postorder() {
         let children_contain_collect = match node {
+            GraphBuilder::TypedTemplate { inputs, .. } => contains(
+                inputs
+                    .iter()
+                    .map(|input| input.as_ref() as *const GraphBuilder),
+                &contains_collect,
+            ),
             GraphBuilder::TemplateInput { input, .. } => input.as_ref().is_some_and(|input| {
                 contains([input.as_ref() as *const GraphBuilder], &contains_collect)
             }),
@@ -681,7 +687,9 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
         }
         contains_collect.insert(
             node as *const GraphBuilder as usize,
-            children_contain_collect || matches!(node, GraphBuilder::CollectBy { .. }),
+            children_contain_collect
+                || matches!(node, GraphBuilder::CollectBy { .. })
+                || matches!(node, GraphBuilder::TypedTemplate { program, .. } if program.terminal),
         );
     }
     Ok(())

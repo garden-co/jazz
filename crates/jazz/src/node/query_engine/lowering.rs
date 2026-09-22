@@ -493,6 +493,9 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
         };
         let fields = match node {
             GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output),
+            GraphBuilder::TypedTemplate { program, .. } => {
+                descriptor_named_fields(&program.output_descriptor())
+            }
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
@@ -933,6 +936,9 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
         }
         pending.push((node, true));
         match node {
+            GraphBuilder::TypedTemplate { inputs, .. } => {
+                pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
+            }
             GraphBuilder::TemplateInput { input, .. } => {
                 if let Some(input) = input {
                     pending.push((input, false));
