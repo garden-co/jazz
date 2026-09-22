@@ -45,6 +45,9 @@ imports' private buffers are cleared; a successful import transfers owned privat
 buffers to the recovery operation, which must clear them afterwards. Importing
 material alone does not establish recovery authority: use must match both public
 keys to an accepted root and validate its history before enrolling a device.
+Both recovery use and status inspection report material-import failures as
+`E2eeRecoveryError` with code `recovery-material-unusable`. Parser and private-key
+adapter diagnostics are replaced, without retaining their messages or causes.
 
 `__e2ee_recovery_deliveries` has ordinary named columns `rootId`, `epochId` and
 `envelope`, plus an independent row ID. The envelope seals the 32-byte account
@@ -81,8 +84,10 @@ only when paired with an accepted recovery-backed public approval; all existing
 challenge, proof, signature and account-key checks still apply. Generated
 private and public signatures are verified before publication. The client waits
 for approval acceptance, opens and checks its own final device envelope, and
-waits for delivery acceptance before successful completion. Faulty BYOC output
-must reject rather than publish an invalid private signature or device envelope.
+unwraps its ciphertext-bound delivery verifier to check the exact 32-byte zero
+marker before publishing the delivery. It waits for delivery acceptance before
+successful completion. Faulty BYOC output must reject rather than publish an
+invalid private signature, device envelope or delivery verifier.
 
 ### Local-first recovery material protection, version 1
 
