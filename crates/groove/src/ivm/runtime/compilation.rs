@@ -310,6 +310,14 @@ impl IvmRuntime {
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
+            GraphBuilder::TemplateInput { input, output, .. } => {
+                let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                let compiled = self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
+                if compiled.output != *output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(compiled)
+            }
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
             | GraphBuilder::InputSource { .. }

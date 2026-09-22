@@ -781,6 +781,15 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
         let mut hasher = DefaultHasher::new();
         std::mem::discriminant(node).hash(&mut hasher);
         match node {
+            GraphBuilder::TemplateInput {
+                slot,
+                output,
+                input,
+            } => {
+                slot.hash(&mut hasher);
+                output.hash(&mut hasher);
+                input.as_ref().map(|input| child!(input)).hash(&mut hasher);
+            }
             GraphBuilder::Table {
                 table,
                 scan,
@@ -969,6 +978,22 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
         match (left, right) {
+            (
+                GraphBuilder::TemplateInput {
+                    slot: a,
+                    output: b,
+                    input: c,
+                },
+                GraphBuilder::TemplateInput {
+                    slot: x,
+                    output: y,
+                    input: z,
+                },
+            ) if a == x && b == y => match (c, z) {
+                (Some(c), Some(z)) => pending.push((c, z)),
+                (None, None) => {}
+                _ => return false,
+            },
             (
                 GraphBuilder::Table {
                     table: a,
@@ -2034,7 +2059,7 @@ fn lift_literal_filter_node(
                 value: lifted.value,
             }))
         }
-        GraphBuilder::CollectBy { .. } => Ok(None),
+        GraphBuilder::CollectBy { .. } | GraphBuilder::TemplateInput { .. } => Ok(None),
         GraphBuilder::Aggregate {
             input,
             group_cols,
@@ -2320,6 +2345,9 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             continue;
         }
         let output = match node {
+            GraphBuilder::TemplateInput { output, .. } => {
+                output.field_index(binding_field).is_some()
+            }
             GraphBuilder::BindingSource { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::InputSource { output, .. }
@@ -2508,6 +2536,7 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
+        | GraphBuilder::TemplateInput { .. }
         | GraphBuilder::Recursive { .. }
         | GraphBuilder::ArgMaxBy { .. }
         | GraphBuilder::ArgMinBy { .. }
@@ -3993,6 +4022,14 @@ impl IvmRuntime {
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
+            GraphBuilder::TemplateInput { output, input, .. } => {
+                let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                let actual = self.infer_builder_output_cached(input, output_memo)?;
+                if actual != *output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(*output)
+            }
             GraphBuilder::Table {
                 table,
                 variant_projection,

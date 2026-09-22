@@ -48,8 +48,8 @@ use super::query_engine::{
     SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
     UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
     aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, prepare_and_lower_query_program,
-    query_program_source_requests, right_field, route_param_field, user_column_field,
+    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
+    right_field, route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -1129,6 +1129,7 @@ where
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
         self.query.supported_query_program_requests.clear();
     }
 

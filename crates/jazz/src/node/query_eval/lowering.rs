@@ -898,8 +898,20 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let mut result =
-            Box::pin(prepare_and_lower_query_program(compilation, &mut resolver)).await;
+        let mut result = match Box::pin(crate::node::query_engine::prepare_query_program_sources(
+            &compilation,
+            &mut resolver,
+        ))
+        .await
+        {
+            Ok((sources, explain)) => resolver.node.query.query_program_templates.lower(
+                compilation,
+                sources,
+                explain,
+                |graph| resolver.node.database.describe_template_input(graph),
+            ),
+            Err(error) => Err(error),
+        };
         if let Ok(program) = result.as_mut() {
             program
                 .lowered

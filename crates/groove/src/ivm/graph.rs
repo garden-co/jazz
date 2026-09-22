@@ -150,6 +150,15 @@ use super::op_types::*;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {
+    /// A typed, compilation-only input of an immutable query template. Binding
+    /// supplies a descriptor-checked graph, not rows or authority. Compilation
+    /// rechecks its output contract and emits no execution operator. An
+    /// unbound slot cannot execute. Neither slots nor bindings are serialized.
+    TemplateInput {
+        slot: u32,
+        output: RecordDescriptor,
+        input: Option<Arc<GraphBuilder>>,
+    },
     Table {
         table: String,
         scan: Option<StaticScanSpec>,
@@ -714,6 +723,11 @@ impl GraphBuilder {
             }
             pending.push((graph, true));
             match graph {
+                Self::TemplateInput { input, .. } => {
+                    if let Some(input) = input {
+                        pending.push((input, false));
+                    }
+                }
                 Self::Filter { input, .. }
                 | Self::Project { input, .. }
                 | Self::StreamingChecksum { input, .. }
@@ -761,6 +775,11 @@ impl GraphBuilder {
     /// Visit immediate immutable inputs without walking or cloning their DAGs.
     pub(crate) fn visit_inputs<'a>(&'a self, mut visit: impl FnMut(&'a Arc<Self>)) {
         match self {
+            Self::TemplateInput { input, .. } => {
+                if let Some(input) = input {
+                    visit(input);
+                }
+            }
             Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::StreamingChecksum { input, .. }
@@ -799,6 +818,56 @@ impl GraphBuilder {
             | Self::FrontierSource { .. }
             | Self::BindingSource { .. } => {}
         }
+    }
+
+    /// Rewrite immediate inputs only; the caller owns traversal and sharing.
+    pub(crate) fn map_inputs(&self, mut map: impl FnMut(&Arc<Self>) -> Arc<Self>) -> Self {
+        let mut graph = self.clone();
+        match &mut graph {
+            Self::TemplateInput { input, .. } => {
+                if let Some(input) = input {
+                    *input = map(input);
+                }
+            }
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::StreamingChecksum { input, .. }
+            | Self::UnwrapNullable { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::VariantProject { input, .. }
+            | Self::ArgMaxBy { input, .. }
+            | Self::ArgMinBy { input, .. }
+            | Self::TopBy { input, .. }
+            | Self::CollectBy { input, .. }
+            | Self::Aggregate { input, .. } => *input = map(input),
+            Self::Union { inputs } => inputs.iter_mut().for_each(|input| *input = map(input)),
+            Self::Join { left, right, .. }
+            | Self::SemiJoin { left, right, .. }
+            | Self::AntiJoin { left, right, .. } => {
+                *left = map(left);
+                *right = map(right);
+            }
+            Self::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                *seed = map(seed);
+                *step = map(step);
+                if let Some(witness) = step_witness {
+                    *witness = map(witness);
+                }
+            }
+            Self::RecursiveStepWitness { recursive } => *recursive = map(recursive),
+            Self::Table { .. }
+            | Self::InlineRecords { .. }
+            | Self::InputSource { .. }
+            | Self::Index { .. }
+            | Self::FrontierSource { .. }
+            | Self::BindingSource { .. } => {}
+        }
+        graph
     }
 
     pub fn join(

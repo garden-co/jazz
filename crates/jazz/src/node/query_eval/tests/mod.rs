@@ -67,6 +67,11 @@ fn collect_binding_source_descriptor_fields(
     descriptors_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
 ) {
     match graph {
+        GraphBuilder::TemplateInput { input, .. } => {
+            if let Some(input) = input {
+                collect_binding_source_descriptor_fields(input, descriptors_by_shape);
+            }
+        }
         GraphBuilder::BindingSource { shape, output } => {
             let fields = output
                 .fields()
@@ -122,6 +127,11 @@ fn collect_binding_source_projected_fields(
     projected_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
 ) {
     match graph {
+        GraphBuilder::TemplateInput { input, .. } => {
+            if let Some(input) = input {
+                collect_binding_source_projected_fields(input, projected_by_shape);
+            }
+        }
         GraphBuilder::Project { input, fields } => {
             if let GraphBuilder::BindingSource { shape, .. } = input.as_ref() {
                 projected_by_shape.entry(shape.clone()).or_default().insert(

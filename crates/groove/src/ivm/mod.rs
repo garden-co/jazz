@@ -9,6 +9,8 @@
 
 mod activation;
 mod execution_layout;
+mod template;
+pub use template::{TemplateBindingError, TemplateGraphInput, bind_template_graphs};
 pub mod graph;
 pub mod op_types;
 pub mod planner;

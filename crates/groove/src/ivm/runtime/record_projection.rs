@@ -617,6 +617,9 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
     let mut contains_collect = HashMap::default();
     for node in graph.postorder() {
         let children_contain_collect = match node {
+            GraphBuilder::TemplateInput { input, .. } => input.as_ref().is_some_and(|input| {
+                contains([input.as_ref() as *const GraphBuilder], &contains_collect)
+            }),
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::StreamingChecksum { input, .. }

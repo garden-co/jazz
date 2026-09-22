@@ -1070,6 +1070,7 @@ struct QueryServing {
     /// Lowered cache-safe storage-backed query programs keyed by their complete
     /// request and access-path identity. Dynamic source graphs never enter it.
     compiled_query_program_cache: BTreeMap<String, Arc<query_engine::QueryProgram>>,
+    query_program_templates: query_engine::QueryProgramTemplateCache,
     /// Bounded exact-context admission proofs with optional immutable compiler
     /// output for a one-use handoff. No evaluator, rows or permission decisions.
     supported_query_program_requests: VecDeque<query_eval::SupportedQueryProgram>,

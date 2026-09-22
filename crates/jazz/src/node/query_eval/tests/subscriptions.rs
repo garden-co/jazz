@@ -385,6 +385,9 @@ fn subscribe_query_binding_as_system_with_opts(
 
 fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
     match graph {
+        GraphBuilder::TemplateInput { input, .. } => input
+            .as_ref()
+            .is_some_and(|input| graph_contains_point_scan(input)),
         GraphBuilder::Table {
             scan: Some(groove::ivm::StaticScanSpec::Point(_)),
             ..
