@@ -1955,9 +1955,9 @@ fn run_warm(
         None,
     );
     first = run_connect_and_subscribe("warm", seeded, relay, client, expected, config);
-    assert!(
-        first.relay_known_state_declared > 0,
-        "warm relay reconnect must declare known-state to core"
+    assert_eq!(
+        first.relay_known_state_declared, 0,
+        "reopened relay must not recover known-state from persisted rows"
     );
     first
 }
@@ -2215,10 +2215,9 @@ fn run_connect_and_subscribe(
         }
     }
     if label == "warm" {
-        // Warm readiness is relay-local, but the benchmark also asserts that
-        // the hot relay declares known state when it reconnects upstream. Drive
-        // one post-readiness relay/core cycle so the queued coverage subscribe
-        // reaches the core without changing the client readiness condition.
+        // Drain a post-readiness relay/core cycle before inspecting reconnect
+        // diagnostics. Persisted rows survive reopening, but known-state
+        // receipts never do: the restarted relay must reacquire scope from Core.
         #[cfg(feature = "cold-settle-attribution")]
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
