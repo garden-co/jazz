@@ -873,8 +873,12 @@ where
             );
         }
         let policy_replacement_lease = std::rc::Rc::new(());
+        let compilation = QueryProgramCompilation::analyze(request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        let request = compilation.request();
         let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
-            &request,
+            request,
+            compilation.sources(),
             &access_paths,
             &policy_replacement_lease,
         ))
@@ -894,7 +898,8 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let mut result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        let mut result =
+            Box::pin(prepare_and_lower_query_program(compilation, &mut resolver)).await;
         if let Ok(program) = result.as_mut() {
             program
                 .lowered
@@ -919,11 +924,10 @@ where
     async fn prepare_query_program_policy_dependencies(
         &mut self,
         request: &QueryProgramRequest,
+        source_requests: &[SourceRequest],
         outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
         lease: &std::rc::Rc<()>,
     ) -> Result<PolicyDependencyFootprint, Error> {
-        let source_requests = query_program_source_requests(request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         // A deletion terminal carries the raw register but must be gated by
         // the same source occurrence resolved with its deleted preimage.
         // Preload that policy dependency before the source preparer reaches
