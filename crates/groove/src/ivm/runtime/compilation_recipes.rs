@@ -17,13 +17,15 @@ pub(super) struct RecipeKey {
     // builder's parameter representation avoids a second operator-definition
     // language which could omit a future semantic field.
     definition: GraphBuilder,
-    inputs: Vec<(usize, bool)>,
+    inputs: Vec<(usize, bool, RecordDescriptor)>,
+    projection_context: Vec<(OpType, NodeOutput)>,
 }
 
 impl RecipeKey {
     pub(super) fn for_builder(
         graph: &GraphBuilder,
         compiled: &HashMap<usize, CompiledNode>,
+        runtime_graph: &IvmGraph,
     ) -> Option<(Self, Vec<CompiledNode>)> {
         match graph {
             // These leaves are cheap, registry-sensitive or contain row data.
@@ -38,10 +40,6 @@ impl RecipeKey {
             | GraphBuilder::Recursive { .. }
             | GraphBuilder::RecursiveStepWitness { .. }
             | GraphBuilder::CollectBy { .. }
-            // Projection composition and join pruning inspect surrounding
-            // operators, not just input types. Keep those rewrites outside
-            // this typed recipe; the pure projection plan is already cached.
-            | GraphBuilder::Project { .. }
             | GraphBuilder::Filter { .. }
             | GraphBuilder::Union { .. } => return None,
             // Direct-table ArgBy also validates the schema's primary key, not
@@ -62,7 +60,7 @@ impl RecipeKey {
                 .iter()
                 .position(|other| other.node == value.node)
                 .unwrap_or(bindings.len());
-            inputs.push((alias, value.root_ordering_node.is_some()));
+            inputs.push((alias, value.root_ordering_node.is_some(), value.output));
             bindings.push(value.clone());
             *input = Arc::new(GraphBuilder::InlineRecords {
                 output: value.output,
@@ -71,7 +69,8 @@ impl RecipeKey {
             Some(())
         };
         match &mut definition {
-            GraphBuilder::StreamingChecksum { input, .. }
+            GraphBuilder::Project { input, .. }
+            | GraphBuilder::StreamingChecksum { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
             | GraphBuilder::VariantProject { input, .. }
@@ -87,7 +86,95 @@ impl RecipeKey {
             }
             _ => return None,
         }
-        Some((Self { definition, inputs }, bindings))
+        let mut projection_context = Vec::new();
+        if matches!(graph, GraphBuilder::Project { .. }) {
+            // A projection's recipe also depends on the exact static context
+            // inspected by composition / join pruning. Bind those ancestors
+            // as extra slots; never retain their concrete IDs in the key.
+            let mut cursor = bindings[0].node;
+            loop {
+                let descriptor = &runtime_graph.node(cursor)?.descriptor;
+                match &descriptor.operator {
+                    OpType::MapProject(project) => {
+                        if projection_context.len() >= 64 {
+                            return None;
+                        }
+                        projection_context.push((descriptor.operator.clone(), descriptor.output));
+                        if project.expressions.is_empty()
+                            || !project
+                                .expressions
+                                .iter()
+                                .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+                        {
+                            break;
+                        }
+                        cursor = *descriptor.inputs.first()?;
+                        Self::bind_context_input(
+                            runtime_graph,
+                            cursor,
+                            &mut inputs,
+                            &mut bindings,
+                        )?;
+                    }
+                    OpType::Join(join)
+                        if join.residual_predicate.is_none()
+                            && matches!(join.kind, JoinOpKind::Inner) =>
+                    {
+                        projection_context.push((descriptor.operator.clone(), descriptor.output));
+                        for arrangement in &descriptor.inputs {
+                            let descriptor = &runtime_graph.node(*arrangement)?.descriptor;
+                            projection_context
+                                .push((descriptor.operator.clone(), descriptor.output));
+                            Self::bind_context_input(
+                                runtime_graph,
+                                *arrangement,
+                                &mut inputs,
+                                &mut bindings,
+                            )?;
+                            Self::bind_context_input(
+                                runtime_graph,
+                                *descriptor.inputs.first()?,
+                                &mut inputs,
+                                &mut bindings,
+                            )?;
+                        }
+                        break;
+                    }
+                    // Composition stops here and pruning does nothing. The
+                    // operator's predicate/source identity is a binding, not
+                    // part of the projection's static recipe.
+                    _ => break,
+                }
+            }
+        }
+        Some((
+            Self {
+                definition,
+                inputs,
+                projection_context,
+            },
+            bindings,
+        ))
+    }
+
+    fn bind_context_input(
+        graph: &IvmGraph,
+        node: NodeId,
+        inputs: &mut Vec<(usize, bool, RecordDescriptor)>,
+        bindings: &mut Vec<CompiledNode>,
+    ) -> Option<()> {
+        let output = graph.node(node)?.descriptor.output.records();
+        let alias = bindings
+            .iter()
+            .position(|input| input.node == node)
+            .unwrap_or(bindings.len());
+        inputs.push((alias, false, output));
+        bindings.push(CompiledNode {
+            node,
+            output,
+            root_ordering_node: None,
+        });
+        Some(())
     }
 }
 
@@ -303,6 +390,8 @@ impl CompilationRecipes {
         let mut hash = PayloadHasher::default();
         key.definition.hash(&mut hash);
         let slot = hash.finish() as usize % SLOTS;
+        key.inputs.hash(&mut hash);
+        key.projection_context.hash(&mut hash);
         nodes.hash(&mut hash);
         // Bound retained definitions as well as entry count. Descriptors are
         // interned immutable handles; this is not a live-heap accounting claim.

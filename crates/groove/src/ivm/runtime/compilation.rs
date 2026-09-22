@@ -286,7 +286,8 @@ impl IvmRuntime {
         if let Some(compiled) = compiled_memo.get(&key) {
             return Ok(compiled.clone());
         }
-        let recipe_key = compilation_recipes::RecipeKey::for_builder(graph, compiled_memo);
+        let recipe_key =
+            compilation_recipes::RecipeKey::for_builder(graph, compiled_memo, &self.graph);
         if let Some(recipe) = recipe_key
             .as_ref()
             .and_then(|(key, _)| self.compilation_recipes.get_mut().lookup(key))

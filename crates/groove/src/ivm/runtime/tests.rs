@@ -197,6 +197,30 @@ async fn typed_recipes_bind_fresh_ordering_and_preserve_join_input_aliases() {
     assert!(runtime.compilation_recipes.borrow().hits > 0);
 }
 
+#[futures_test::test]
+async fn projection_recipe_distinguishes_equal_types_with_different_composition_contexts() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("a", ValueType::U64), ("b", ValueType::U64)]);
+    for (first, second, expected) in [("a", "b", 2), ("b", "a", 3), ("a", "b", 2)] {
+        let graph = GraphBuilder::inline_records(
+            descriptor,
+            [descriptor.create(&[Value::U64(2), Value::U64(3)]).unwrap()],
+        )
+        .project_fields([
+            ProjectField::renamed(first, "x"),
+            ProjectField::renamed(second, "y"),
+        ])
+        .project(["x"]);
+        let rows = runtime.query_snapshot(graph, &storage).await.unwrap();
+        assert_eq!(
+            rows.to_values().unwrap(),
+            vec![(vec![Value::U64(expected)], 1)]
+        );
+    }
+    assert!(runtime.compilation_recipes.borrow().hits > 0);
+}
+
 #[test]
 fn touched_unbounded_membership_matches_full_window_diff_for_signed_bags() {
     // Internal oracle intentionally exercises negative intermediate bag weights
