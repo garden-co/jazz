@@ -233,6 +233,90 @@ fn local_membership_update_refreshes_policy_dependent_subscription() {
 }
 
 #[test]
+fn live_array_claim_subscriptions_do_not_share_membership_or_teardown() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::In {
+                        column: "owner".to_owned(),
+                        session_path: vec!["claims".to_owned(), "owners".to_owned()],
+                    }),
+                ),
+        ),
+    );
+    let db = open_db(0x95, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0x96; 16]);
+    let bob = AuthorSubject::for_test_bytes([0x97; 16]);
+    let alice_row = row(0x98);
+    let bob_row = row(0x99);
+    for (identity, row_id) in [(alice, alice_row), (bob, bob_row)] {
+        db.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("owners"),
+                Value::Array(vec![Value::String(identity.test_uuid().to_string())]),
+            )]),
+        );
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("initial".to_owned())),
+                ("owner".to_owned(), Value::Uuid(identity.test_uuid())),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut first =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(first.next_raw()).unwrap())),
+        vec![alice_row],
+    );
+    let mut second =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), bob)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(second.next_raw()).unwrap())),
+        vec![bob_row],
+    );
+    assert!(first.try_next_event().is_none());
+    db.update(
+        "todos",
+        bob_row,
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(second.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert_eq!(row_ids(&updated), vec![bob_row]);
+    assert!(removed.is_empty());
+    assert!(first.try_next_event().is_none());
+    drop(first);
+    db.update(
+        "todos",
+        bob_row,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("after teardown".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(second.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert_eq!(row_ids(&updated), vec![bob_row]);
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn maintained_physical_point_subscriptions_keep_policy_scopes_live() {
     let schema = owner_read_schema();
     let db = open_db(0xa0, AuthorSubject::SYSTEM, &schema);
