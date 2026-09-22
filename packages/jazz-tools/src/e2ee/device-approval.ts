@@ -1196,6 +1196,7 @@ export class DeviceApproval {
         this.deliveryContext(challenge, delivered),
         new Uint8Array(32),
       );
+      await this.marker(secret, this.deliveryContext(challenge, delivered), verificationOfDelivery);
       this.assertOpen();
       await this.db
         .insert(
