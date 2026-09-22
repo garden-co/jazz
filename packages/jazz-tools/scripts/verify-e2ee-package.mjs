@@ -50,11 +50,12 @@ try {
       ...deviceRequestSchema,
       notes: s.table({ body: s.string() }, {}),
     });
+    const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
+    });
     export const permissions = {
       ...deviceRequestPermissions,
-      ...s.definePermissions(app, ({ policy, session }) => {
-        policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
-      }),
+      notes: applicationPermissions.notes!,
     };
     export function deviceState(device: DeviceInfo): "pending" | "active" | "revoked" {
       return device.state;
