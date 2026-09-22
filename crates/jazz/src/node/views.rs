@@ -2185,7 +2185,6 @@ where
             .get(&authority_result_key)
             .is_some_and(|state| state.initial_hydration)
             && version_bundles_is_empty
-            && (!reset_input_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
             && !opening_pending
         {
