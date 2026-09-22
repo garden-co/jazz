@@ -52,7 +52,9 @@ interface DeployResponse {
 
 - A merged schema needs valid incoming migrations from both branch tips. Resolve column identities and validate incoming mappings together before fixing the target's physical mapping; do not infer identity from matching names or silently remove the existing conflict check. Define how this works for an already-published target, or reject it explicitly. Multiple paths must not silently disagree about projected values. Keep bidirectional lenses for reads, but do not use backward reachability to satisfy deployment convergence. When projecting an ancestor schema into the active target, select a value-preserving forward path rather than a shorter backward detour that drops and reintroduces branch-added columns.
 
-4. **Commit atomically; retry by refreshing state.**
+4. **Serialize deployment; defer cross-storage failure handling.**
+
+- For the current implementation, assume storage writes succeed. Complete all schema, lens, permission, graph, physical-mapping, and encoding validation before the first persistent write. Use the existing catalogue records; do not add a deployment recovery record or replay protocol. Cross-storage failure atomicity is deferred; the atomicity and uncertain-outcome requirements below describe the eventual design.
 
 - Serialize deployments per app. Under the same serialization boundary, validate the combined catalogue against current server state and commit; validating against an earlier graph read is insufficient. Accept concurrent changes when the resulting deployment remains valid. Permissions from the last successful deployment take effect, including for concurrent permission-only deployments.
 - Persist artifacts, permissions, and active-schema selection as one recoverable deployment, exposing it only after successful validation and commit. A failure or restart must leave either the previous deployment or the complete new deployment available.

@@ -117,7 +117,7 @@ impl LensOp {
 }
 
 /// A lens transform containing a sequence of operations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LensTransform {
     /// Ordered list of operations.
     pub ops: Vec<LensOp>,
@@ -167,7 +167,7 @@ impl LensTransform {
 }
 
 /// A complete lens mapping between two schema versions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Lens {
     /// Hash of the source schema.
     pub source_hash: SchemaHash,

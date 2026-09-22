@@ -2,6 +2,9 @@
 //! current stored state under the same serialization boundary as the eventual
 //! commit. A prepared value is not a concurrency token or a publication receipt.
 
+mod runtime;
+pub use runtime::prepare_runtime_snapshot;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::node::migration_validation::{

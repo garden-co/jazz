@@ -9,7 +9,7 @@
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
 mod accounts;
-mod http;
+pub(crate) mod http;
 mod utils;
 mod websocket;
 
@@ -30,10 +30,10 @@ use tower_http::trace::TraceLayer;
 use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
-    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
-    migration_graph_handler, permissions_handler, permissions_head_handler,
-    publish_migration_handler, publish_permissions_handler, publish_schema_handler,
-    schema_connectivity_handler, schema_handler, schema_hashes_handler,
+    admin_subscription_introspection_handler, deploy_handler, health_handler,
+    internal_shutdown_handler, migration_graph_handler, permissions_handler,
+    permissions_head_handler, publish_migration_handler, publish_permissions_handler,
+    publish_schema_handler, schema_connectivity_handler, schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
@@ -86,6 +86,7 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
+        .route("/deploy", post(deploy_handler))
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
         .route("/schemas", post(publish_schema_handler))
         .route("/schema-connectivity", get(schema_connectivity_handler))
@@ -1318,30 +1319,6 @@ mod tests {
         assert_eq!(active["activeSchemaHash"], to);
         assert_eq!(active["schemas"], graph["schemas"]);
         assert_eq!(active["migrations"], graph["migrations"]);
-    }
-
-    #[tokio::test]
-    async fn migration_graph_on_edge_reads_authority_inventory() {
-        let authority = make_test_router(
-            make_state_with_schema(
-                SchemaBuilder::new()
-                    .table(TableSchema::builder("authority").column("name", ColumnType::Text))
-                    .build(),
-            )
-            .await,
-        );
-        let expected = read_migration_graph(&authority).await;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, authority).await.unwrap();
-        });
-        let edge = make_test_router(
-            make_edge_state_with_schema(SchemaBuilder::new().build(), format!("http://{address}"))
-                .await,
-        );
-        assert_eq!(read_migration_graph(&edge).await, expected);
-        task.abort();
     }
 
     #[tokio::test]

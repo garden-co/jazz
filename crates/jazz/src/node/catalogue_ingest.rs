@@ -378,6 +378,9 @@ where
             Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
         }
         for schema in plan.catalogue.catalogue_schemas.values() {
+            if previous_catalogue.catalogue_schemas.get(&schema.id) == Some(schema) {
+                continue;
+            }
             batch.update(
                 "jazz_catalogue",
                 vec![
@@ -389,6 +392,14 @@ where
         }
         for (schema_version, mapping) in &plan.catalogue.physical_mappings {
             let alias = plan.catalogue.schema_version_aliases[schema_version];
+            if previous_catalogue.physical_mappings.get(schema_version) == Some(mapping)
+                && previous_catalogue
+                    .schema_version_aliases
+                    .get(schema_version)
+                    == Some(&alias)
+            {
+                continue;
+            }
             Self::write_schema_version_mapping_to_batch(
                 &mut batch,
                 alias,
@@ -463,6 +474,13 @@ where
             publications: drained.publications,
             post_settlement_work: drained.post_settlement_work,
         })
+    }
+
+    pub(crate) fn validate_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error> {
+        self.plan_trusted_catalogue_snapshot(snapshot).map(|_| ())
     }
 
     fn plan_trusted_catalogue_snapshot(

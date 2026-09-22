@@ -65,9 +65,9 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PublishMigrationRequest {
-    from_hash: String,
-    to_hash: String,
+pub(crate) struct PublishMigrationRequest {
+    pub(crate) from_hash: String,
+    pub(crate) to_hash: String,
     forward: Vec<PublishTableLens>,
 }
 
@@ -387,6 +387,7 @@ pub(super) async fn publish_schema_handler(
         }
     }
 
+    let _publication = state.runtime_catalogue_publication.lock().await;
     if request.permissions.is_some() {
         return (
             StatusCode::BAD_REQUEST,
@@ -426,7 +427,7 @@ pub(super) async fn publish_schema_handler(
                 .into_response();
         }
     };
-    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue_locked(
         &state,
         std::slice::from_ref(&schema),
         &[],
@@ -702,6 +703,117 @@ pub(super) async fn publish_permissions_handler(
 ///
 /// Requires a valid admin secret. The source and target schemas must already be
 /// known to the server; only the lens edge itself is created here.
+pub(crate) fn lower_migration(
+    request: PublishMigrationRequest,
+    source_schema: &Schema,
+    target_schema: &Schema,
+) -> Result<Lens, String> {
+    let source_hash = parse_schema_hash_param(&request.from_hash)?;
+    let target_hash = parse_schema_hash_param(&request.to_hash)?;
+    let tables = request.forward;
+    let mut forward = LensTransform::new();
+    for table_lens in tables {
+        let table_name = table_lens.table;
+        if table_lens.added && table_lens.removed {
+            return Err(format!(
+                "table {} cannot be both added and removed",
+                table_name
+            ));
+        }
+        if (table_lens.added || table_lens.removed) && table_lens.renamed_from.is_some() {
+            return Err(format!(
+                "table {} cannot combine added/removed markers with renamedFrom",
+                table_name
+            ));
+        }
+        if (table_lens.added || table_lens.removed) && !table_lens.operations.is_empty() {
+            return Err(format!(
+                "table {} cannot combine added/removed markers with column operations",
+                table_name
+            ));
+        }
+        if table_lens.added {
+            let target_table_name = TableName::from(table_name.clone());
+            let schema = match target_schema.get(&target_table_name) {
+                Some(schema) => schema.clone(),
+                None => {
+                    return Err(format!(
+                        "createTables references unknown target table {}",
+                        table_name
+                    ));
+                }
+            };
+            forward.push(
+                LensOp::AddTable {
+                    table: table_name.clone(),
+                    schema,
+                },
+                false,
+            );
+        }
+        if table_lens.removed {
+            let source_table_name = TableName::from(table_name.clone());
+            let schema = match source_schema.get(&source_table_name) {
+                Some(schema) => schema.clone(),
+                None => {
+                    return Err(format!(
+                        "dropTables references unknown source table {}",
+                        table_name
+                    ));
+                }
+            };
+            forward.push(
+                LensOp::RemoveTable {
+                    table: table_name.clone(),
+                    schema,
+                },
+                false,
+            );
+        }
+        if let Some(renamed_from) = table_lens.renamed_from {
+            forward.push(
+                LensOp::RenameTable {
+                    old_name: renamed_from,
+                    new_name: table_name.clone(),
+                },
+                false,
+            );
+        }
+        for operation in table_lens.operations {
+            let op = match operation {
+                PublishLensOp::Introduce {
+                    column,
+                    column_type,
+                    value,
+                } => LensOp::AddColumn {
+                    table: table_name.clone(),
+                    column,
+                    column_type,
+                    default: value,
+                },
+                PublishLensOp::Drop {
+                    column,
+                    column_type,
+                    value,
+                } => LensOp::RemoveColumn {
+                    table: table_name.clone(),
+                    column,
+                    column_type,
+                    default: value,
+                },
+                PublishLensOp::Rename { column, value } => LensOp::RenameColumn {
+                    table: table_name.clone(),
+                    old_name: column,
+                    new_name: value,
+                },
+            };
+            forward.push(op, false);
+        }
+    }
+
+    Ok(Lens::new(source_hash, target_hash, forward))
+}
+
 pub(super) async fn publish_migration_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -718,6 +830,7 @@ pub(super) async fn publish_migration_handler(
         }
     }
 
+    let _publication = state.runtime_catalogue_publication.lock().await;
     let source_hash = match parse_schema_hash_param(&request.from_hash) {
         Ok(hash) => hash,
         Err(message) => {
@@ -792,127 +905,18 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let mut forward = LensTransform::new();
-    for table_lens in request.forward {
-        let table_name = table_lens.table;
-        if table_lens.added && table_lens.removed {
+    let from_hash = request.from_hash.clone();
+    let to_hash = request.to_hash.clone();
+    let lens = match lower_migration(request, &source_schema, &target_schema) {
+        Ok(lens) => lens,
+        Err(message) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(format!(
-                    "table {} cannot be both added and removed",
-                    table_name
-                ))),
+                Json(ErrorResponse::bad_request(message)),
             )
                 .into_response();
         }
-        if (table_lens.added || table_lens.removed) && table_lens.renamed_from.is_some() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(format!(
-                    "table {} cannot combine added/removed markers with renamedFrom",
-                    table_name
-                ))),
-            )
-                .into_response();
-        }
-        if (table_lens.added || table_lens.removed) && !table_lens.operations.is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(format!(
-                    "table {} cannot combine added/removed markers with column operations",
-                    table_name
-                ))),
-            )
-                .into_response();
-        }
-        if table_lens.added {
-            let target_table_name = TableName::from(table_name.clone());
-            let schema = match target_schema.get(&target_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::bad_request(format!(
-                            "createTables references unknown target table {}",
-                            table_name
-                        ))),
-                    )
-                        .into_response();
-                }
-            };
-            forward.push(
-                LensOp::AddTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if table_lens.removed {
-            let source_table_name = TableName::from(table_name.clone());
-            let schema = match source_schema.get(&source_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::bad_request(format!(
-                            "dropTables references unknown source table {}",
-                            table_name
-                        ))),
-                    )
-                        .into_response();
-                }
-            };
-            forward.push(
-                LensOp::RemoveTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if let Some(renamed_from) = table_lens.renamed_from {
-            forward.push(
-                LensOp::RenameTable {
-                    old_name: renamed_from,
-                    new_name: table_name.clone(),
-                },
-                false,
-            );
-        }
-        for operation in table_lens.operations {
-            let op = match operation {
-                PublishLensOp::Introduce {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::AddColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Drop {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::RemoveColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Rename { column, value } => LensOp::RenameColumn {
-                    table: table_name.clone(),
-                    old_name: column,
-                    new_name: value,
-                },
-            };
-            forward.push(op, false);
-        }
-    }
-
-    let lens = Lens::new(source_hash, target_hash, forward);
+    };
     let object_id = match state.catalogue.publish_lens(&state.catalogue_store, &lens) {
         Ok(object_id) => object_id,
         Err(err) => {
@@ -926,7 +930,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue_locked(
         &state,
         &[],
         std::slice::from_ref(&lens),
@@ -956,8 +960,8 @@ pub(super) async fn publish_migration_handler(
         StatusCode::CREATED,
         Json(PublishMigrationResponse {
             object_id: object_id.to_string(),
-            from_hash: request.from_hash,
-            to_hash: request.to_hash,
+            from_hash,
+            to_hash,
         }),
     )
         .into_response()
@@ -1107,5 +1111,42 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json, serde_json::json!({ "status": "healthy" }));
+    }
+}
+/// Commit a complete, validated deployment. Detached execution makes request
+/// cancellation independent of the durable commit/activation boundary.
+pub(super) async fn deploy_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: Result<
+        Json<crate::server::deployment::DeployRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+    if let Err((status, message)) = validate_admin_secret(secret, &state.auth_config) {
+        return (status, Json(ErrorResponse::unauthorized(message))).into_response();
+    }
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                error.status()
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
+        }
+    };
+    match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
+        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Err(error)) => (error.status, Json(error.body)).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(error.to_string())),
+        )
+            .into_response(),
     }
 }

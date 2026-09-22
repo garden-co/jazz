@@ -134,7 +134,7 @@ pub(crate) async fn publish_permissions_and_runtime(
     Ok(head)
 }
 
-async fn publish_runtime_catalogue_locked(
+pub(crate) async fn publish_runtime_catalogue_locked(
     state: &ServerState,
     schemas: &[Schema],
     lenses: &[Lens],

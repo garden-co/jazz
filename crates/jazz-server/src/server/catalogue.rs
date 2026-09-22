@@ -1,3 +1,6 @@
+mod deployment;
+pub(crate) use deployment::DeploymentResponse;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -286,7 +289,7 @@ fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct CatalogueIndex {
     schemas: HashMap<SchemaHash, Schema>,
     schema_published_at: HashMap<SchemaHash, u64>,
@@ -299,7 +302,12 @@ struct CatalogueIndex {
 impl CatalogueIndex {
     fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
-        for entry in storage.scan_catalogue_entries()? {
+        let mut entries = storage.scan_catalogue_entries()?;
+        // Read references first so an empty schema used by an active selection
+        // or migration is distinguished from a legacy initialization sentinel.
+        entries
+            .sort_by_key(|entry| entry.object_type() == Some(ObjectType::CatalogueSchema.as_str()));
+        for entry in entries {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
             }
@@ -432,7 +440,14 @@ impl CatalogueIndex {
                 let schema = decode_schema(&entry.content).map_err(|error| {
                     corrupt_catalogue_entry(entry, format!("decode schema payload: {error}"))
                 })?;
-                if schema.is_empty() {
+                if schema.is_empty()
+                    && self
+                        .active_schema
+                        .is_none_or(|active| active.schema_hash != SchemaHash::compute(&schema))
+                    && !self.lens_edges.iter().any(|(from, to)| {
+                        *from == SchemaHash::compute(&schema) || *to == SchemaHash::compute(&schema)
+                    })
+                {
                     // Old servers could write the empty-schema sentinel before
                     // initialization. It is a valid, forward-compatible value
                     // that must remain invisible to rehydration.
@@ -682,9 +697,9 @@ impl CatalogueStore for StoredCatalogue {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
         let object_id = entry.object_id;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry)?;
         index.schema_published_at.insert(schema_hash, published_at);
         Ok(object_id)
@@ -783,8 +798,8 @@ impl CatalogueStore for StoredCatalogue {
         }
         let entry = lens_entry(self.app_id, lens);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage.upsert_catalogue_entry(&entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        storage.upsert_catalogue_entry(&entry)?;
         index.apply_entry(&entry)?;
         Ok(entry.object_id)
     }
