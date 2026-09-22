@@ -102,6 +102,66 @@ fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
         result_member_removes: Vec::new(),
     }
 }
+struct ResidentInventoryFixture {
+    _reader_dir: tempfile::TempDir,
+    reader: NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+    global_time: GlobalTime,
+    durability: DurabilityTier,
+    subscription: SubscriptionKey,
+    source_closure: Vec<crate::protocol::SupportingRow>,
+}
+
+fn resident_inventory_fixture() -> ResidentInventoryFixture {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
+
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_time: Some(global_time),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let source_closure = versions
+        .iter()
+        .map(|version| todos_covered_input(tx_id, version))
+        .collect();
+
+    ResidentInventoryFixture {
+        _reader_dir: reader_dir,
+        reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    }
+}
 
 #[test]
 fn cold_and_warm_complete_snapshots_ingest_same_versions() {
@@ -1068,39 +1128,19 @@ fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
 
 #[test]
 fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(2));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    register_whole_table_receiver(&mut reader, "todos");
-
-    let row_uuid = row(1);
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected commit unit");
-    };
-    let [fate] = core
-        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let SyncMessage::FateUpdate {
-        global_time: Some(global_time),
-        durability: Some(durability),
-        ..
-    } = fate
-    else {
-        panic!("expected accepted fate");
-    };
-    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let ResidentInventoryFixture {
+        _reader_dir,
+        mut reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    } = resident_inventory_fixture();
     // The preceding reset supplies the manifest; this live frame adds rows only.
-    let source_closure = versions
-        .iter()
-        .map(|version| todos_covered_input(tx_id, version))
-        .collect();
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -1166,38 +1206,18 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 
 #[test]
 fn receiver_inventory_only_reset_finishes_initial_sync_cadence() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(2));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    register_whole_table_receiver(&mut reader, "todos");
-
-    let row_uuid = row(1);
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected commit unit");
-    };
-    let [fate] = core
-        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let SyncMessage::FateUpdate {
-        global_time: Some(global_time),
-        durability: Some(durability),
-        ..
-    } = fate
-    else {
-        panic!("expected accepted fate");
-    };
-    let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let source_closure: Vec<crate::protocol::SupportingRow> = versions
-        .iter()
-        .map(|version| todos_covered_input(tx_id, version))
-        .collect();
+    let ResidentInventoryFixture {
+        _reader_dir,
+        mut reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    } = resident_inventory_fixture();
 
     // Admit the exact transaction body before the target reset. The target
     // frame below is the first frame using this process's relaxed cadence.
@@ -1250,6 +1270,8 @@ fn receiver_inventory_only_reset_finishes_initial_sync_cadence() {
         .unwrap();
 
     reader.set_initial_sync_flush_cadence(2).unwrap();
+    // Private hydration and cadence state is intentional here: public row
+    // results cannot observe whether initial-sync cadence has completed.
     assert!(!reader.initial_sync_flush_active);
     assert!(!reader.initial_sync_flush_completed);
 
