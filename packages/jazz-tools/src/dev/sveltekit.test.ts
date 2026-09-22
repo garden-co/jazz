@@ -397,20 +397,51 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19999, adminSecret: "build-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("build"));
+    const viteServer = makeViteServer("build");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
   });
 
   it("does not start a server when server:false", async () => {
     const spy = vi.spyOn(devServer, "startLocalJazzServer");
 
     const plugin = jazzSvelteKit({ server: false });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
+    const viteServer = makeViteServer("serve");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
+  });
+
+  it("does not install the inspector overlay when inspector:false", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000238",
+      port: 19986,
+      url: "http://127.0.0.1:19986",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug238"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzSvelteKit({
+      inspector: false,
+      server: { port: 19986, adminSecret: "bug238-admin" },
+    });
+    const viteServer = makeViteServer("serve");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
+    for (const close of viteServer.closeHandlers) await close();
   });
 
   it("injects BACKEND_SECRET from the server handle", async () => {

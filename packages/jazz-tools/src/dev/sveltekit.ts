@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
+import { wireInspectorOverlay } from "./inspector-overlay/serve.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
   JazzServerOptions as BaseJazzServerOptions,
@@ -195,6 +196,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL =
           resolvedRuntime.telemetryCollectorUrl;
       }
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
+
+      viteServer.httpServer?.once("close", async () => {
+        await runtime.dispose();
+      });
     },
   };
 }
