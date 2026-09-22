@@ -6,8 +6,7 @@ pub mod server;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, EdgeUpstreamHealth, ServerBuilder, ServerState, ServerTopology,
-    ShutdownController, ShutdownPhase, StorageBackend,
+    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
@@ -19,9 +18,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::serve;
-use jazz::node::EdgeCacheBudget;
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::NativeTransportConnector;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -35,11 +32,8 @@ pub async fn run(
     data_dir: &str,
     in_memory: bool,
     auth_config: AuthConfig,
-    upstream_url: Option<String>,
-    edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
-    native_transport: std::sync::Arc<dyn NativeTransportConnector>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     let app_id_string = app_id.to_string();
@@ -50,25 +44,9 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
-    let edge_catalogue_list_limit = catalogue_list_limit_from_env(upstream_url.is_some(), || {
-        std::env::var("JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES")
-    })?;
     let builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout)
-        .with_native_transport_connector(native_transport);
-    let builder = match upstream_url {
-        Some(url) => builder.with_upstream_url(url),
-        None => builder,
-    };
-    let builder = match edge_catalogue_list_limit {
-        Some(limit) => builder.with_catalogue_list_response_limit_bytes(limit),
-        None => builder,
-    };
-    let builder = match edge_cache_budget {
-        Some(budget) => builder.with_edge_cache_budget(budget),
-        None => builder,
-    };
+        .with_shutdown_timeout(shutdown_timeout);
     let built = if in_memory {
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
@@ -184,62 +162,6 @@ pub async fn run(
     }
     abort_task(&mut sigterm_task).await;
     Ok(())
-}
-
-fn catalogue_list_limit_from_env(
-    edge: bool,
-    read: impl FnOnce() -> Result<String, std::env::VarError>,
-) -> Result<Option<usize>, String> {
-    if !edge {
-        return Ok(None);
-    }
-    match read() {
-        Ok(value) => {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                "JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES must be a positive decimal usize"
-                    .to_owned()
-            })?;
-            if parsed == 0 {
-                return Err(
-                    "JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES must be a positive decimal usize"
-                        .to_owned(),
-                );
-            }
-            Ok(Some(parsed))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(format!(
-            "failed to read JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES: {error}"
-        )),
-    }
-}
-
-#[cfg(test)]
-mod environment_tests {
-    use super::catalogue_list_limit_from_env;
-
-    #[test]
-    fn catalogue_limit_environment_is_edge_only() {
-        assert_eq!(
-            catalogue_list_limit_from_env(false, || Ok("not-a-limit".to_owned())).unwrap(),
-            None
-        );
-    }
-    #[test]
-    fn catalogue_limit_environment_validates_edge_values() {
-        assert_eq!(
-            catalogue_list_limit_from_env(true, || Ok("12345".to_owned())).unwrap(),
-            Some(12345)
-        );
-        assert_eq!(
-            catalogue_list_limit_from_env(true, || Err(std::env::VarError::NotPresent)).unwrap(),
-            None
-        );
-        assert!(catalogue_list_limit_from_env(true, || Ok("0".to_owned())).is_err());
-        assert!(
-            catalogue_list_limit_from_env(true, || Ok("usize-max-overflow".to_owned())).is_err()
-        );
-    }
 }
 
 fn install_signal_before_readiness<T, E>(

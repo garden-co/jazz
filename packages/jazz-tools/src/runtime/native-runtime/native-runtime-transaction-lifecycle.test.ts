@@ -1069,7 +1069,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     null,
     "00000000-0000-0000-0000-000000000043",
   );
-  const wait = runtime.waitForTransaction(txId, "edge");
+  const wait = runtime.waitForTransaction(txId, "global");
   await Promise.resolve();
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());

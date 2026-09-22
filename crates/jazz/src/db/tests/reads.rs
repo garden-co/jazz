@@ -3026,12 +3026,12 @@ fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
 }
 
 #[test]
-fn edge_read_opts_and_wait_honor_edge_durability() {
+fn global_read_and_wait_require_core_confirmation() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let write = db
         .insert(
             "todos",
-            doctest_support::todo_cells("edge observed", false),
+            doctest_support::todo_cells("core confirmed", false),
             Default::default(),
         )
         .unwrap();
@@ -3040,19 +3040,19 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
 
     assert_eq!(
         effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         }),
-        DurabilityTier::Edge
+        DurabilityTier::Global
     );
     assert!(
         doctest_support::block_on(db.all_for_identity(
             &prepared_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 local_updates: LocalUpdates::Immediate,
                 propagation: Propagation::LocalOnly,
                 include_deleted: false,
@@ -3063,23 +3063,23 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
         .unwrap()
         .is_empty()
     );
-    let not_observed = doctest_support::block_on(write.wait(DurabilityTier::Edge)).unwrap_err();
+    let not_observed = doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap_err();
     assert_eq!(not_observed.code, ErrorCode::NotObserved);
 
-    // E1: edge-accept produced directly; E2 wires the acceptance path.
+    // Simulate the Core confirmation received after local persistence.
     db.node
         .node
         .borrow_mut()
         .apply_fate_update(
             write.mergeable_tx_id(),
             Fate::Accepted,
-            None,
-            Some(DurabilityTier::Edge),
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
         )
         .unwrap();
 
     assert_eq!(
-        doctest_support::block_on(write.wait(DurabilityTier::Edge)).unwrap(),
+        doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap(),
         write.mergeable_tx_id()
     );
     assert_eq!(
@@ -3087,7 +3087,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
             &doctest_support::block_on(db.all_for_identity(
                 &prepared_query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     local_updates: LocalUpdates::Immediate,
                     propagation: Propagation::LocalOnly,
                     include_deleted: false,

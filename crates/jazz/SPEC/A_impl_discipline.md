@@ -12,7 +12,7 @@ Invariant digest:
 
 - `INV-DISC-1`: Node-core semantics MUST be deterministic under explicit driver inputs and remain directly simulatable.
 - `INV-DISC-2`: Every cross-node semantic concept MUST have an exhaustive, serializable representation in the protocol, storage, or both.
-- `INV-DISC-3`: Relay, edge, and core roles MUST share one node and message model rather than separate semantic implementations.
+- `INV-DISC-3`: Client, local relay, and Core roles MUST share one node and message model rather than separate semantic implementations.
 - `INV-DISC-4`: Commit, fate, and view ingestion MUST be idempotent and detect conflicting replays.
 - `INV-DISC-5`: State with ordering or lattice semantics MUST use distinct types and monotone transitions.
 - `INV-DISC-6`: Replicated state MUST remain structurally distinct from derived current state, which MUST be recomputed rather than replicated, and its provenance MUST remain attributable to its transaction.
@@ -33,7 +33,7 @@ randomness. Time enters only as an explicit `now_ms` parameter
 (`TxTime::tick(register, now_ms)`, authority ingest's `now_ms`), and `Node` /
 `PeerState` advance synchronously through explicit methods (`INV-DISC-1`).
 Threading and channels belong only to integration drivers
-(`threaded_four_tier`), never to node logic.
+(`threaded_client_relay`), never to node logic.
 
 **Implementation status (verified).**
 `m3_seeded_run_is_deterministic_for_fixed_seed` exercises fixed-seed replay.
@@ -57,15 +57,16 @@ serializable `SyncMessage` fixtures.
 
 ### A.3 Roles, not separate implementations
 
-Relay, edge, and core are roles over a shared node model, not separate semantic
-implementations (`INV-DISC-3`, ch. 9). The same `Node` + `PeerState` machinery
-serves all tiers: relay ingest stores pending units without assigning fate,
-`PeerRole` controls link identity and read narrowing, and the four-tier tests
-run every tier through the same types.
+Core, clients, and local persistence relays share the node and message model
+(`INV-DISC-3`, ch. 9). Relay ingestion stores pending units without assigning
+fate; Core authorizes and settles them. There is no intermediate server role.
 
 **Implementation status (verified).**
-`four_tier_topology_relays_pending_units_and_core_fates` exercises the shared
-topology.
+`local_persistence_forwards_pending_writes_and_core_fates` exercises durable
+local forwarding, worker reopen, duplicate fate application, Core acceptance
+and rejection. `core_peer_terminates_client_identity_and_narrows_reads` checks
+Core's reader-specific result. Real relay transport and admission are covered
+separately by the native-relay integration suite.
 
 ### A.4 Idempotent, conflict-detecting ingestion
 

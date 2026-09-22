@@ -682,7 +682,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,
             global_time: Some(GlobalTime(44)),
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }]))
         .unwrap();
     client.tick().unwrap();

@@ -43,7 +43,7 @@ use crate::node::CurrentRowBindingRole;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, TransactionBranchRowState, ViewUpdateParts,
@@ -56,7 +56,7 @@ use crate::protocol::{
     CoverageKey, CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction,
     PermissionAdviceRequestId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
@@ -76,7 +76,7 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 pub(crate) mod channel_endpoint;
@@ -1928,8 +1928,6 @@ struct PendingLocalPublication {
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
 type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
-const MAX_EDGE_FATE_ROUTES: usize = 1024;
-const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 
 #[derive(Default)]
 struct AuthorityViewReceipts {
@@ -1956,51 +1954,6 @@ struct PendingAuthorityViewUpdate {
     parts: ViewUpdateParts,
     authority_receipt_eligible: bool,
 }
-
-struct EdgeFateRoute {
-    authority: Option<AuthorityContext>,
-    queue: Weak<RefCell<Vec<SyncMessage>>>,
-    /// The edge-local acceptance has already been emitted to this exact
-    /// downstream session.  The later Core terminal fate remains separately
-    /// routable through the same retained obligation.
-    edge_acknowledged: bool,
-}
-
-/// The immutable identity of a client commit while its edge fate obligation is
-/// live.  An edge intentionally keeps a pre-proof upload out of durable
-/// transaction history, but it must still enforce history's one-payload-per-id
-/// rule across all client connections.  Normalize version order here because
-/// transport ordering is not semantically meaningful.
-#[derive(Clone, Debug)]
-struct EdgeFateCommitIdentity {
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-}
-
-impl EdgeFateCommitIdentity {
-    fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
-        let mut versions = versions.to_vec();
-        versions.sort();
-        let mut tx = tx.clone();
-        // An edge route compares durable commit identity across a local staged
-        // write and redacted carrier retransmissions. Its local policy hint is
-        // deliberately excluded from that identity.
-        tx.permission_subject = None;
-        Self { tx, versions }
-    }
-
-    fn matches(&self, other: &Self) -> bool {
-        self.tx == other.tx && self.versions == other.versions
-    }
-}
-
-/// The shared edge obligation for one transaction.
-struct EdgeFateObligation {
-    identity: EdgeFateCommitIdentity,
-    routes: Vec<EdgeFateRoute>,
-}
-
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
 
 pub(super) struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
@@ -2260,38 +2213,6 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
-/// Deliver the edge's own admission fate through the same route registry that
-/// later carries the selected Core fate.  This avoids a direct-response path
-/// that would acknowledge only the tick currently handling the upload (and
-/// would duplicate a retransmitted upload), while a rejection retires the
-/// obligation because there is no admitted unit for Core to settle.
-fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMessage) {
-    let terminal = matches!(
-        fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Rejected(_),
-            ..
-        }
-    );
-    let mut routes = routes.borrow_mut();
-    let Some(obligation) = routes.get_mut(&tx_id) else {
-        return;
-    };
-    obligation.routes.retain_mut(|route| {
-        let Some(queue) = route.queue.upgrade() else {
-            return false;
-        };
-        if terminal || !route.edge_acknowledged {
-            queue.borrow_mut().push(fate.clone());
-            route.edge_acknowledged = true;
-        }
-        !terminal
-    });
-    if obligation.routes.is_empty() {
-        routes.remove(&tx_id);
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 
 enum LocalReplayStatus {
@@ -2513,26 +2434,6 @@ where
     Ok(())
 }
 
-/// A parked fate either awaits its first admitted upstream or belongs to one
-/// admitted upstream epoch. Drop routes for departed/replaced sessions (and
-/// dead subscriber queues) eagerly: retaining a weak queue alone would let
-/// arbitrary uploads grow this registry forever.
-fn prune_edge_fate_routes(
-    routes: &mut BTreeMap<TxId, EdgeFateObligation>,
-    admitted: Option<AuthorityContext>,
-) {
-    routes.retain(|_, obligation| {
-        obligation.routes.retain(|route| {
-            route.queue.upgrade().is_some()
-                && match (route.authority, admitted) {
-                    (None, _) => true,
-                    (Some(route), Some(admitted)) => admitted.same_admitted_link(route),
-                    (Some(_), None) => false,
-                }
-        });
-        !obligation.routes.is_empty()
-    });
-}
 type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
@@ -2933,18 +2834,12 @@ pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
-    authority_members: HashSet<TxId>,
-    authority_receipts: HashSet<TxId>,
 }
 
 impl UploadOutbox {
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
-        }
-        if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-            self.authority_members
-                .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
         }
         self.entries.push_back(pending);
         true
@@ -2963,44 +2858,9 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
-        self.reindex_authority_members();
-    }
-
-    fn reindex_authority_members(&mut self) {
-        self.authority_members.clear();
-        for pending in &self.entries {
-            if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-                self.authority_members
-                    .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
-            }
-        }
-        self.authority_receipts
-            .retain(|tx_id| self.authority_members.contains(tx_id));
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
-        if !self.authority_members.is_empty() {
-            self.authority_receipts.extend(
-                released
-                    .iter()
-                    .filter(|tx_id| self.authority_members.contains(tx_id))
-                    .copied(),
-            );
-            let completed = self
-                .entries
-                .iter()
-                .filter(|pending| match &pending.unit {
-                    Some(SyncMessage::AuthorityPublication(publication)) => publication
-                        .commits
-                        .iter()
-                        .all(|unit| self.authority_receipts.contains(&unit.tx.tx_id)),
-                    _ => released.contains(&pending.tx_id),
-                })
-                .map(|pending| pending.tx_id)
-                .collect::<HashSet<_>>();
-            self.retain(|pending| !completed.contains(&pending.tx_id));
-            return completed;
-        }
         // Ordinary single-transaction uploads retain their prefix fast path.
         let completed = released.clone();
         while self
@@ -3047,7 +2907,6 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
         // but before subscriber ingest queues the exact inbound unit. The
         // canonical payload must win even when both entries have a body.
         pending.unit = Some(unit);
-        outbox.reindex_authority_members();
         return true;
     }
     outbox.push(PendingUpload { tx_id, unit });
@@ -3270,7 +3129,6 @@ use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
 mod row_availability;
-mod row_version_repairs;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
@@ -4705,7 +4563,7 @@ where
         let state = self.write_state().await?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
-            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+            Fate::Pending if tier >= DurabilityTier::Global => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
             )),
@@ -5007,7 +4865,7 @@ impl SubscriptionSender {
         index: &RelationSnapshotIndex,
     ) -> Result<Option<SubscriptionPublicationSnapshot>, Error> {
         let publication = self.publication.borrow();
-        if tier >= DurabilityTier::Edge
+        if tier >= DurabilityTier::Global
             && !settled
             && publication.opened
             && publication.deferred.is_none()
@@ -5053,11 +4911,11 @@ impl SubscriptionSender {
         let mut publication = self.publication.borrow_mut();
         if !publishable
             || !materialized
-            || (self.requested_tier >= DurabilityTier::Edge && !settled)
+            || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
             if publication.opened
                 && publication.deferred.is_none()
-                && self.requested_tier >= DurabilityTier::Edge
+                && self.requested_tier >= DurabilityTier::Global
             {
                 publication.deferred = Some(before.ok_or_else(|| {
                     Error::new(
@@ -5070,7 +4928,7 @@ impl SubscriptionSender {
             // immediate delivery. Do not checkpoint those updates. If local
             // required cells are actually missing, resume with a canonical
             // reset when the maintained result becomes materialized again.
-            publication.reset |= reset || self.requested_tier < DurabilityTier::Edge;
+            publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
@@ -5622,7 +5480,7 @@ impl PreparedQuery {
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
-            DurabilityTier::None | DurabilityTier::Edge => None,
+            DurabilityTier::None => None,
         }
     }
 
@@ -5674,7 +5532,7 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .upstream_subscription_handles
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
-                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Edge {
+                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
                         let event = subscription_delta_event(
                             state_ref.read_tier,
                             false,
@@ -7081,3 +6939,6 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use crate::{protocol::VersionRecord, tx::Transaction};

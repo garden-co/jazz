@@ -48,8 +48,8 @@ shared coordination surface small:
 - **Placement.** Every non-global row is assigned to a schema-declared shard
   ownership key, likely a reference path to a root (workspace/org/warehouse).
 - **Mergeable authority.** Mergeable transactions require permission
-  evaluation rather than total ordering, so per-shard authority follows the same
-  shape as edge mergeable authority (ch. 9).
+  evaluation at the owning Core. How this authority composes across shards
+  remains exploratory; there is no intermediary edge authority (ch. 9).
 - **Exclusive authority.** **Exclusive transactions are single-shard only**
   unless an explicit cross-shard serialization mechanism is specified. S4's
   per-warehouse cap discipline (appendix B) is exactly this
@@ -64,8 +64,8 @@ shared coordination surface small:
   frontiers, while a future wall-time query may apply one requested physical
   time to every participating shard.
 - **Cross-shard via subscriptions.** Shard-core ↔ shard-core subscriptions carry
-  permission closures and query assembly; edges subscribe to every shard-core a
-  downstream shape touches.
+  permission closures and query assembly. Routing a client query to all of its
+  owning shard-cores remains part of the future design.
 - **Rebalancing is a handoff.** Because history is append-only and self-contained
   _per partition_, moving a partition between shard-cores is "ship its history,
   flip ownership in the catalogue" — no in-place state surgery. Ownership must not

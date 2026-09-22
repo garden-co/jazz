@@ -18,13 +18,13 @@ export function assertCoreObservation(observation, runNonce) {
 }
 
 const harnessRoot = resolve(import.meta.dirname, "../../..");
-const harnessCargoArgs = ["-p", "jazz-native-relay", "--example", "rn_edge_session_harness"];
+const harnessCargoArgs = ["-p", "jazz-native-relay", "--example", "rn_server_session_harness"];
 
 export function boundedHarnessOutput(output) {
   // Keep readiness/control lines bounded and private to the driver. Retain
   // token redaction defensively for any authentication diagnostics upstream.
   return output
-    .replace(/^JAZZ_RN_EDGE_SESSION .+$/gm, "JAZZ_RN_EDGE_SESSION [redacted]")
+    .replace(/^JAZZ_RN_SERVER_SESSION .+$/gm, "JAZZ_RN_SERVER_SESSION [redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-token]")
     .slice(-4_096);
 }
@@ -47,16 +47,16 @@ function harnessDiagnostic({ child, stdout, stderr, device }) {
   ].join("; ");
 }
 
-/** Start the host-only multi-thread Edge/Core fixture for the seed phase; stop
+/** Start the host-only multi-thread Core fixture for the seed phase; stop
  * it before offline verification. The fixture emits fresh JWTs at runtime; this
  * driver passes them directly to the native fixture and never writes
  * them to source, Gradle config, logs, or a receipt. */
-export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
+export async function startLocalServerSessionHarness({ device, runNonce, host }) {
   if (!isDeviceRunNonce(runNonce)) throw new Error("invalid device run nonce");
   // `cargo run` includes compilation. On a cold hosted runner that can take
   // longer than the service-readiness allowance and, with --quiet, produces no
   // marker at all. Make build failure explicit and reserve the timer for the
-  // already-built process reaching a listening Edge/Core session.
+  // already-built process reaching a listening Core session.
   execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs], {
     cwd: harnessRoot,
     stdio: "inherit",
@@ -112,7 +112,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       resolveSession(value);
     };
     const timeout = setTimeout(
-      () => fail("local Edge/Core harness timed out waiting for readiness"),
+      () => fail("local Core harness timed out waiting for readiness"),
       60_000,
     );
     child.stdout.on("data", (chunk) => {
@@ -131,34 +131,34 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       const line = stdout
         .split(/\r?\n/)
         .slice(0, -1)
-        .find((item) => item.startsWith("JAZZ_RN_EDGE_SESSION "));
+        .find((item) => item.startsWith("JAZZ_RN_SERVER_SESSION "));
       if (!line) return;
       try {
-        succeed(JSON.parse(line.slice("JAZZ_RN_EDGE_SESSION ".length)));
+        succeed(JSON.parse(line.slice("JAZZ_RN_SERVER_SESSION ".length)));
       } catch {
-        fail("local Edge/Core harness emitted invalid readiness JSON");
+        fail("local Core harness emitted invalid readiness JSON");
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr = retainHarnessOutput(stderr, chunk);
     });
     child.once("error", (error) => {
-      fail(`could not spawn local Edge/Core harness (${error.message})`);
+      fail(`could not spawn local Core harness (${error.message})`);
     });
     child.once("exit", (code, signal) => {
       fail(
-        `local Edge/Core harness exited before readiness (code=${code ?? "none"}, signal=${signal ?? "none"})`,
+        `local Core harness exited before readiness (code=${code ?? "none"}, signal=${signal ?? "none"})`,
       );
     });
   });
   if (
-    Object.keys(session).some((key) => key !== "edge_port") ||
-    !Number.isInteger(session.edge_port) ||
-    session.edge_port < 1 ||
-    session.edge_port > 65_535
+    Object.keys(session).some((key) => key !== "server_port") ||
+    !Number.isInteger(session.server_port) ||
+    session.server_port < 1 ||
+    session.server_port > 65_535
   ) {
     await terminateHarness(child);
-    throw new Error("local Edge/Core harness emitted malformed session material");
+    throw new Error("local Core harness emitted malformed session material");
   }
   return {
     child,
@@ -174,16 +174,16 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       }
       return assertCoreObservation(observation, runNonce);
     },
-    stopForOfflineRestart: () => stopForOfflineRestart(child, session.edge_port),
+    stopForOfflineRestart: () => stopForOfflineRestart(child, session.server_port),
     terminate: () => terminateHarness(child),
     async interruptAndRecover() {
-      child.stdin.write("interrupt-edge\n");
-      await waitForLine("JAZZ_RN_EDGE_INTERRUPTED ");
-      await assertEndpointRefused(session.edge_port);
-      child.stdin.write("recover-edge\n");
-      await waitForLine("JAZZ_RN_EDGE_RECOVERED ");
+      child.stdin.write("interrupt-server\n");
+      await waitForLine("JAZZ_RN_SERVER_INTERRUPTED ");
+      await assertEndpointRefused(session.server_port);
+      child.stdin.write("recover-server\n");
+      await waitForLine("JAZZ_RN_SERVER_RECOVERED ");
     },
-    endpoint: `http://${host}:${session.edge_port}`,
+    endpoint: `http://${host}:${session.server_port}`,
   };
 }
 
@@ -226,7 +226,7 @@ export async function terminateHarness(child, timeoutMs = 5_000, processInfo = p
   if (!(await waitForGroupExit(timeoutMs))) {
     signal("SIGKILL");
     if (!(await waitForGroupExit(timeoutMs))) {
-      throw new Error("local Edge/Core harness process group survived SIGKILL");
+      throw new Error("local Core harness process group survived SIGKILL");
     }
   }
 }
@@ -236,7 +236,7 @@ function assertEndpointRefused(port) {
     const socket = createConnection({ host: "127.0.0.1", port });
     socket.once("connect", () => {
       socket.destroy();
-      reject(new Error("interrupted Edge remained reachable"));
+      reject(new Error("interrupted server remained reachable"));
     });
     socket.once("error", (error) => {
       socket.destroy();
@@ -244,13 +244,13 @@ function assertEndpointRefused(port) {
     });
     socket.setTimeout(1_000, () => {
       socket.destroy();
-      reject(new Error("interrupted Edge refusal timed out"));
+      reject(new Error("interrupted server refusal timed out"));
     });
   });
 }
 
 /** Fail closed: a stopped process alone is insufficient if a descendant still
- * serves Edge. Preserve the original endpoint for the native SQLite scope. */
+ * serves Core. Preserve the original endpoint for the native SQLite scope. */
 export async function stopForOfflineRestart(child, port, terminate = terminateHarness) {
   await terminate(child);
   await new Promise((resolve, reject) => {

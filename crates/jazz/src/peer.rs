@@ -15,7 +15,7 @@ use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::records::Value;
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use groove::storage::OrderedKvStorage;
 use web_time::Instant;
 
 use crate::authorization_scope::AuthorityScopeAggregate;
@@ -24,7 +24,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     ResultTransitions,
 };
-use crate::node::{Error, NodeState, PublicationOutcome};
+use crate::node::{Error, NodeState};
 #[cfg(test)]
 use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
@@ -39,20 +39,19 @@ use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;
-use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
+use crate::tx::{DurabilityTier, TxId};
 
 mod subscription_state;
 
+pub use subscription_state::PeerRole;
 #[cfg(test)]
 use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
-    CachedPeerQueryPlan, DeferredEdgeFate, MaintainedRehydrateRequest,
-    MaintainedSubscriptionViewSubscription, MemberIndexKey, MemberSlot, PeerSubscriptionState,
-    RehydratePurpose, RowKey, edge_scope_ttl_ms, fast_authorization_progress,
-    fast_current_membership_position, fast_cursor_requires_authoritative_reset,
-    member_settle_position,
+    CachedPeerQueryPlan, MaintainedRehydrateRequest, MaintainedSubscriptionViewSubscription,
+    MemberIndexKey, MemberSlot, PeerSubscriptionState, RehydratePurpose, RowKey,
+    fast_authorization_progress, fast_current_membership_position,
+    fast_cursor_requires_authoritative_reset, member_settle_position,
 };
-pub use subscription_state::{PeerEvictionPins, PeerRole};
 
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
@@ -78,9 +77,6 @@ pub struct PeerState {
     /// that declared them. A shared canonical coverage output must never adopt
     /// one subscriber's cursor.
     downstream_known_states: BTreeMap<SubscriptionKey, KnownStateDeclaration>,
-    deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
-    edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
-    idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
     /// Completed authority-local aggregate proofs used by terminal commit
     /// admission.  This is intentionally separate from ordinary views.
     authority_scope_proofs: u64,
@@ -107,9 +103,6 @@ impl Default for PeerState {
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
             downstream_known_states: BTreeMap::new(),
-            deferred_edge_fates: BTreeMap::new(),
-            edge_scope_subscription_refs: BTreeMap::new(),
-            idle_edge_scope_subscriptions: BTreeMap::new(),
             authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),

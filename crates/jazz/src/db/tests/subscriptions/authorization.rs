@@ -1248,7 +1248,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
         &client,
         &Query::from("res_i"),
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Deferred,
             ..ReadOpts::default()
         },
@@ -1429,7 +1429,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let remote_opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         ..ReadOpts::default()
     };
@@ -1608,7 +1608,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
         &client,
         &Query::from("res_i_child"),
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Deferred,
             ..ReadOpts::default()
         },

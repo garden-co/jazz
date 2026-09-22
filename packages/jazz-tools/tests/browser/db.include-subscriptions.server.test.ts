@@ -127,8 +127,8 @@ describe("websocket include subscriptions", () => {
     await ensureNativeRuntimeAdapterReady(owner);
     await ensureNativeRuntimeAdapterReady(observer);
 
-    const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "edge" });
-    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "edge" })).toMatchObject([
+    const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "global" });
+    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "global" })).toMatchObject([
       { id: org.id },
     ]);
     const write = await owner.exclusiveTransaction((transaction) => {
@@ -154,7 +154,7 @@ describe("websocket include subscriptions", () => {
         (rows) => {
           subscribedTodoIds = rows.map((row) => row.id);
         },
-        { tier: "edge" },
+        { tier: "global" },
       ),
     );
     let cancelledUpdates = 0;
@@ -163,15 +163,15 @@ describe("websocket include subscriptions", () => {
       () => {
         cancelledUpdates += 1;
       },
-      { tier: "edge" },
+      { tier: "global" },
     );
     cancelBeforeOpening();
 
     const [todos, checks, notes] = await withTimeout(
       Promise.all([
-        observer.all(app.todos.where({ org_id: org.id }), { tier: "edge" }),
-        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "edge" }),
-        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "edge" }),
+        observer.all(app.todos.where({ org_id: org.id }), { tier: "global" }),
+        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "global" }),
+        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "global" }),
       ]),
       20_000,
       "concurrent strict-edge query coverage did not settle",

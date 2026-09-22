@@ -1,4 +1,4 @@
-//! Local-only Edge/Core harness for Android/iOS installed-artifact acceptance.
+//! Local-only Core harness for Android/iOS installed-artifact acceptance.
 //! The device retains its own accounts; the host supplies only endpoint/control metadata.
 
 use std::{
@@ -14,8 +14,8 @@ use jazz::query::Query;
 
 use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Value};
 use jazz_native_relay as _;
-use jazz_server::{EdgeUpstreamHealth, JazzServer, TestJwtIssuer};
-use jazz_testkit::{connect, native_connector, wait_for_query};
+use jazz_server::{JazzServer, TestJwtIssuer};
+use jazz_testkit::{connect, wait_for_query};
 
 fn main() {
     if std::env::args().any(|arg| arg == "--print-fixture") {
@@ -29,7 +29,7 @@ fn main() {
         .worker_threads(4)
         .enable_all()
         .build()
-        .expect("build local Edge/Core harness runtime")
+        .expect("build local Core harness runtime")
         .block_on(tokio::task::LocalSet::new().run_until(run()));
 }
 
@@ -39,39 +39,19 @@ async fn run() {
     let issuer = TestJwtIssuer::start().await;
     let app_id = AppId::from_name("jazz-device-acceptance");
     let schema = device_fixture::schema();
+    let server_storage = tempfile::tempdir().expect("persistent Core storage");
     let core = JazzServer::builder()
         .with_app_id(app_id)
+        .with_data_dir(server_storage.path())
+        .with_storage_factory(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        ))
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())
-        .with_native_transport_connector(native_connector())
         .start()
         .await
         .expect("start test server");
-    let edge = JazzServer::builder()
-        .with_app_id(core.app_id())
-        .with_schema(schema.clone())
-        .with_jwks_url(issuer.endpoint())
-        .with_admin_secret(core.admin_secret().to_owned())
-        .with_upstream_url(core.base_url())
-        .with_native_transport_connector(native_connector())
-        .start()
-        .await
-        .expect("start test server");
-
-    for _ in 0..300 {
-        if edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        edge.server_state().edge_upstream_health(),
-        EdgeUpstreamHealth::Connected,
-        "local Edge must attach Core before the device starts"
-    );
-
-    // A fresh, read-only observer attaches directly to Core, never Edge or
-    // device SQLite. It cannot seed the acceptance marker itself. The device
+    // A fresh, read-only observer attaches directly to Core, never device SQLite. It cannot seed the acceptance marker itself. The device
     // is the only writer of this run-specific high-level foreground title.
     let observer_storage = tempfile::tempdir().expect("observer scratch directory");
     let observer = connect(AppContext {
@@ -91,12 +71,12 @@ async fn run() {
     .expect("connect read-only Core observer");
 
     // Android reaches the host loopback listener through 10.0.2.2. The
-    // driver derives that endpoint from `edge_port`; keeping it out of this
+    // driver derives that endpoint from `server_port`; keeping it out of this
     // process means the same harness remains usable by non-Android hosts.
     let receipt = serde_json::json!({
-        "edge_port": edge.port(),
+        "server_port": core.port(),
     });
-    println!("JAZZ_RN_EDGE_SESSION {receipt}");
+    println!("JAZZ_RN_SERVER_SESSION {receipt}");
     std::io::stdout().flush().expect("flush harness receipt");
 
     let row_id = wait_for_query(
@@ -121,8 +101,8 @@ async fn run() {
     std::io::stdout().flush().expect("flush Core observation");
 
     // The installed-app driver owns this narrow control protocol. It lets the
-    // existing foreground stay alive while Edge is genuinely absent, then
-    // recreates Edge at the identical configured endpoint.
+    // existing foreground stay alive while Core is genuinely absent, then
+    // reopens Core from the same persistent store at the identical configured endpoint.
     let mut line = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).unwrap();
@@ -130,14 +110,17 @@ async fn run() {
     })
     .await
     .expect("join control reader");
-    assert_eq!(line.trim(), "interrupt-edge");
-    let edge_port = edge.port();
+    assert_eq!(line.trim(), "interrupt-server");
+    let server_port = core.port();
+    let admin_secret = core.admin_secret().to_owned();
     assert_eq!(
-        edge.shutdown().await,
+        core.shutdown().await,
         jazz_server::ShutdownPhase::StorageClosed
     );
-    println!("JAZZ_RN_EDGE_INTERRUPTED {{\"edge_port\":{edge_port}}}");
-    std::io::stdout().flush().expect("flush Edge interruption");
+    println!("JAZZ_RN_SERVER_INTERRUPTED {{\"server_port\":{server_port}}}");
+    std::io::stdout()
+        .flush()
+        .expect("flush server interruption");
     line = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).unwrap();
@@ -145,28 +128,20 @@ async fn run() {
     })
     .await
     .expect("join control reader");
-    assert_eq!(line.trim(), "recover-edge");
-    let edge = JazzServer::builder()
-        .with_port(edge_port)
-        .with_app_id(core.app_id())
+    assert_eq!(line.trim(), "recover-server");
+    let core = JazzServer::builder()
+        .with_port(server_port)
+        .with_app_id(app_id)
+        .with_data_dir(server_storage.path())
+        .with_storage_factory(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        ))
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())
-        .with_admin_secret(core.admin_secret().to_owned())
-        .with_upstream_url(core.base_url())
-        .with_native_transport_connector(native_connector())
+        .with_admin_secret(admin_secret)
         .start()
         .await
-        .expect("start test server");
-    for _ in 0..300 {
-        if edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        edge.server_state().edge_upstream_health(),
-        EdgeUpstreamHealth::Connected
-    );
+        .expect("reopen persistent Core before the recovery write");
     let writer_storage = tempfile::tempdir().expect("Core writer scratch directory");
     let core_writer = connect(AppContext {
         app_id: core.app_id(),
@@ -201,8 +176,8 @@ async fn run() {
         )
         .await
         .expect("Core commits post-recovery marker");
-    println!("JAZZ_RN_EDGE_RECOVERED {{\"edge_port\":{edge_port}}}");
-    std::io::stdout().flush().expect("flush Edge recovery");
+    println!("JAZZ_RN_SERVER_RECOVERED {{\"server_port\":{server_port}}}");
+    std::io::stdout().flush().expect("flush server recovery");
 
     // The parent owns process lifetime. It kills this local-only fixture after
     // both installed-app launches, which also ensures credentials cannot be

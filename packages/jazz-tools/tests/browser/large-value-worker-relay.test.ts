@@ -158,7 +158,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "direct-memory reader did not receive the persistent-worker receipt",
       20_000,
-      "edge",
+      "global",
     );
     expect(directValues.find((row) => row.name === "streamed-text")?.text).toBe(text);
     expect(directValues.find((row) => row.name === "streamed-bytes")?.bytes).toEqual(bytes);
@@ -169,7 +169,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "persistent reader did not receive a direct-memory-verified streamed receipt",
       20_000,
-      "edge",
+      "global",
     );
     const receivedText = values.find((row) => row.name === "streamed-text");
     const receivedBytes = values.find((row) => row.name === "streamed-bytes");
@@ -232,7 +232,7 @@ describe("browser persistent-worker large-value relay", () => {
     );
 
     const documents = await withTimeout(
-      writer.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      writer.all(transactionApp.documents, { branch: "main", tier: "global" }),
       20_000,
       "writer could not read its globally settled large document",
     );
@@ -250,7 +250,7 @@ describe("browser persistent-worker large-value relay", () => {
       "reopened writer did not attach to persisted IndexedDB storage",
     );
     const reopenedDocuments = await withTimeout(
-      reopened.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      reopened.all(transactionApp.documents, { branch: "main", tier: "global" }),
       20_000,
       "reopened writer could not hydrate the settled large document",
     );

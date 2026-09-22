@@ -1,8 +1,7 @@
 //! Physical channel progress must not depend on a suspended semantic query.
 use jazz::query::Query;
 use jazz::tools::native_transport_connector::{
-    NativeCatalogueBootstrapFuture, NativeTransportConnector, NativeTransportFuture,
-    NativeTransportRequest,
+    NativeTransportConnector, NativeTransportFuture, NativeTransportRequest,
 };
 use jazz::tools::test_support::{AllowAll, ordinary_rows};
 use jazz::tools::{ColumnType, ReadTier, SchemaBuilder, TableSchema, Value};
@@ -62,12 +61,6 @@ impl NativeTransportConnector for GatedConnector {
             });
             Ok(connection)
         })
-    }
-    fn bootstrap_catalogue(
-        &self,
-        request: NativeTransportRequest,
-    ) -> NativeCatalogueBootstrapFuture {
-        jazz_native_transport::NativeWebSocketConnector.bootstrap_catalogue(request)
     }
 }
 struct GatedWire {
@@ -181,7 +174,7 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
                 assert_eq!(ordinary_rows(result), vec![(probe, vec![Value::Text("fresh server row".into())])]);
                 {
                     use std::future::Future;
-                    let mut settlement = Box::pin(uploader.wait_for_transaction(upload, jazz::tools::DurabilityTier::EdgeServer));
+                    let mut settlement = Box::pin(uploader.wait_for_transaction(upload, jazz::tools::DurabilityTier::GlobalServer));
                     std::future::poll_fn(|cx| {
                         assert!(settlement.as_mut().poll(cx).is_pending(), "upload must remain incomplete until bulk credits return");
                         std::task::Poll::Ready(())

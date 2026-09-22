@@ -821,7 +821,7 @@ fn pending_backpressure_admits_later_receipt_in_bounded_channel_queue() {
         ),
         fate: Fate::Accepted,
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
 
     assert_eq!(sender.send(view.clone()), Ok(()));
@@ -2075,7 +2075,7 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
             durability: Some(if repair {
                 DurabilityTier::Global
             } else {
-                DurabilityTier::Edge
+                DurabilityTier::Global
             }),
         })
         .unwrap();

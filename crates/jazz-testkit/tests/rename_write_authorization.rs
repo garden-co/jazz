@@ -597,7 +597,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
     assert!(
         tokio::time::timeout(
             Duration::from_secs(15),
-            reader.wait_for_transaction(denied.unwrap(), jazz::tools::DurabilityTier::EdgeServer),
+            reader.wait_for_transaction(denied.unwrap(), jazz::tools::DurabilityTier::GlobalServer),
         )
         .await
         .expect("denied sibling write should receive a rejection")

@@ -391,10 +391,7 @@ where
                             matches!(tx.fate, Fate::Accepted)
                                 && tx.durability >= DurabilityTier::Global
                         }
-                        DurabilityTier::Edge => {
-                            matches!(tx.fate, Fate::Accepted)
-                                && tx.durability >= DurabilityTier::Edge
-                        }
+
                         DurabilityTier::None | DurabilityTier::Local => {
                             !matches!(tx.fate, Fate::Rejected(_))
                         }
@@ -628,9 +625,7 @@ where
                 DurabilityTier::Global => {
                     matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
                 }
-                DurabilityTier::Edge => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Edge
-                }
+
                 DurabilityTier::None | DurabilityTier::Local => {
                     !matches!(tx.fate, Fate::Rejected(_))
                 }

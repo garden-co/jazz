@@ -1912,7 +1912,7 @@ fn indexed_root_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() 
     };
 
     let event = subscription_terminal_delta_event(
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         true,
         &previous,
         &[left.clone(), right.clone()],
