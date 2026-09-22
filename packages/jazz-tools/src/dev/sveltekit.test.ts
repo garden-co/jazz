@@ -29,9 +29,7 @@ function deployed(hash = "abc123def4567890") {
   };
 }
 
-type CapturedMiddleware = Parameters<
-  NonNullable<ViteDevServer["middlewares"]>["use"]
->[0];
+type CapturedMiddleware = Parameters<NonNullable<ViteDevServer["middlewares"]>["use"]>[0];
 
 function invokeMiddleware(handler: CapturedMiddleware, url: string) {
   return new Promise<{ statusCode: number; body: string }>((resolve) => {
@@ -263,6 +261,70 @@ describe("jazzSvelteKit", () => {
     ]);
 
     expect(stop).toHaveBeenCalledOnce();
+  });
+  it("keeps a new server reference installed when configure races closeBundle disposal", async () => {
+    let resolveFirstStop!: () => void;
+    const firstStopPending = new Promise<void>((resolve) => {
+      resolveFirstStop = resolve;
+    });
+    const firstStop = vi.fn().mockReturnValue(firstStopPending);
+    const secondStop = vi.fn().mockResolvedValue(undefined);
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer");
+    startSpy
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000244",
+        port: 19980,
+        url: "http://127.0.0.1:19980",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: firstStop,
+      })
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000245",
+        port: 19979,
+        url: "http://127.0.0.1:19979",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: secondStop,
+      });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-race"));
+    let latestOnPush: ((hash: string) => void | Promise<void>) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      latestOnPush = opts.onPush;
+      return { close: vi.fn() };
+    });
+
+    const root = await tempRoots.create("jazz-sveltekit-race-test-");
+    const plugin = jazzSvelteKit({ server: { adminSecret: "race-admin" } });
+    const configureServer = plugin.configureServer as (s: ViteDevServer) => Promise<void>;
+    const firstServer = makeViteServer("serve", root);
+    await configureServer(firstServer);
+
+    const closePromise = (plugin.closeBundle as () => Promise<void>)();
+    expect(firstStop).toHaveBeenCalledOnce();
+
+    const newWsSend = vi.fn();
+    const newServer = {
+      ...makeViteServer("serve", root),
+      ws: { send: newWsSend },
+    };
+    const configurePromise = configureServer(newServer);
+    await Promise.resolve();
+    expect(startSpy).toHaveBeenCalledOnce();
+
+    resolveFirstStop();
+    await closePromise;
+    await configurePromise;
+    expect(startSpy).toHaveBeenCalledTimes(2);
+
+    newWsSend.mockClear();
+    expect(latestOnPush).toBeDefined();
+    await latestOnPush!("b237aaceface");
+    expect(newWsSend).toHaveBeenCalledWith({ type: "full-reload" });
+
+    await (plugin.closeBundle as () => Promise<void>)();
   });
 
   it("reports and rethrows disposal failures from closeBundle", async () => {
