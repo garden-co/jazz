@@ -60,6 +60,15 @@ describe("startLocalJazzServer via JazzServer", () => {
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
   }, 30_000);
+  it("binds and advertises an explicit concrete host", async () => {
+    handle = await startLocalJazzServer({
+      host: "127.0.0.2",
+      inMemory: true,
+    });
+
+    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.2:[1-9]\d*$/);
+    expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
+  }, 30_000);
 
   it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
     const blocker = createServer();
