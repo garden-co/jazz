@@ -40,19 +40,17 @@ impl QueryProgramTemplateCache {
         explain: ExplainPlan,
         describe: impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
     ) -> QueryCompileResult {
-        // Inline programs still embed literals. Their values stay in identity;
-        // prepared programs may omit values only if unbound lowering succeeds.
-        let mut template_compilation = compilation.clone();
-        if template_compilation
-            .request
-            .input
-            .binding
-            .source_shape
-            .is_some()
-        {
-            template_compilation.request.input.binding.values.clear();
-            template_compilation.request.input.binding.id = BindingId(uuid::Uuid::nil());
+        // Private inline programs still bake literals into their shape. Until
+        // scalar slots exist, preparing a fresh template for each such shape
+        // adds work without enabling cross-binding reuse. Keep their ordinary
+        // compiler path, rather than charging all receivers for this boundary.
+        if compilation.request.input.binding.source_shape.is_none() {
+            return lower_resolved_query_program(compilation, sources, explain);
         }
+        // Prepared programs may omit values only if unbound lowering succeeds.
+        let mut template_compilation = compilation.clone();
+        template_compilation.request.input.binding.values.clear();
+        template_compilation.request.input.binding.id = BindingId(uuid::Uuid::nil());
         let mut template_sources = sources.clone();
         let mut inputs = Vec::new();
         let mut source_parameters = BTreeMap::new();
