@@ -5,7 +5,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 import { createNativeCrypto } from "./native.js";
 
-it.each(["private-signature", "device-envelope"])(
+it.each(["private-signature", "device-envelope", "delivery-verification"])(
   "rejects a faulty recovery %s before publishing it and permits retry",
   async (fault) => {
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -65,6 +65,17 @@ it.each(["private-signature", "device-envelope"])(
                   }
                   return adapters.keyEnvelope.seal(key, context, value);
                 },
+                async wrap(key, context, value) {
+                  if (
+                    corrupt &&
+                    fault === "delivery-verification" &&
+                    new TextDecoder().decode(context).includes("delivery-verification")
+                  ) {
+                    injected++;
+                    return new Uint8Array([1]);
+                  }
+                  return adapters.keyEnvelope.wrap(key, context, value);
+                },
               },
             },
           },
@@ -89,7 +100,7 @@ it.each(["private-signature", "device-envelope"])(
       corrupt = false;
       await second.e2ee.recovery.use(material).wait();
       expect(await second.e2ee.devices.list()).toContainEqual(
-        expect.objectContaining({ id: pending.id, state: "active" }),
+        expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
       );
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
