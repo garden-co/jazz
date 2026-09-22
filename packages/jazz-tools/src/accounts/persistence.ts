@@ -67,7 +67,7 @@ export async function prepareAccountManager(options: {
 }) {
   const stored = decode(await options.store.read());
   let writes = Promise.resolve();
-  let adopting = false;
+  let adoptingSecret: string | undefined;
   const save = () => {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
@@ -99,9 +99,17 @@ export async function prepareAccountManager(options: {
       generateSecret: options.generateSecret,
       isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
       retainSecret(secret) {
+        if (adoptingSecret === secret) {
+          // Suppress only the one retention callback caused by adoption. Any
+          // re-entrant explicit selection must retain and persist normally.
+          adoptingSecret = undefined;
+          let index = stored.roots.indexOf(secret);
+          if (index < 0) index = stored.roots.push(secret) - 1;
+          stored.selected = index;
+          return;
+        }
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
-        if (adopting) return;
         stored.selected = index;
         return save();
       },
@@ -110,7 +118,7 @@ export async function prepareAccountManager(options: {
   automaticInitializers.set(manager, async () => {
     let changed = false;
     const unsubscribe = manager.subscribe(() => {
-      if (!adopting) changed = true;
+      changed = true;
     });
     try {
       // Generate outside the transform because transactional hosts may retry it.
@@ -137,17 +145,24 @@ export async function prepareAccountManager(options: {
       if (changed) {
         const current = manager.getLoggedIn();
         if (current) return current;
+        stored.selected = null;
+        await save();
         throw new Error("Automatic local-first startup was superseded");
       }
       if (winner === undefined)
         throw new Error("Automatic local-first selection was not committed");
-      // Adoption only hydrates the manager; it must not enqueue a selection write.
-      adopting = true;
+      // Adoption only hydrates the manager; suppress its one retention callback.
+      adoptingSecret = winner;
       try {
-        return manager.restoreLocalFirst(winner);
+        manager.restoreLocalFirst(winner);
       } finally {
-        adopting = false;
+        if (adoptingSecret === winner) adoptingSecret = undefined;
       }
+      const current = manager.getLoggedIn();
+      if (current) return current;
+      stored.selected = null;
+      await save();
+      throw new Error("Automatic local-first startup was superseded");
     } finally {
       unsubscribe();
     }
