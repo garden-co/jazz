@@ -4,6 +4,7 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { accountToken, exportLocalFirstSecret } from "./enrollment.js";
+import type { AccountHandle } from "./state.js";
 
 const registry = "https://core.example/apps/test/accounts";
 // Controlled crypto boundary: these tests prove storage ordering and recovery;
@@ -220,6 +221,74 @@ it("does not reselect an automatic root after an interleaved selection", async (
   const explicit = manager.createLocalFirst();
   finish();
   const adopted = await pending;
+  expect(adopted).toBe(explicit);
+  await vi.waitFor(() => expect(JSON.parse(value!).selected).toBe(1));
+  expect(JSON.parse(value!).roots).toEqual([automaticSecret, explicitSecret]);
+});
+it("durably clears logout racing automatic local-first adoption", async () => {
+  const automaticSecret = formatAuthSecret(new Uint8Array(32).fill(5));
+  let value: string | null = null;
+  let updates = 0;
+  let finish!: () => void;
+  const durable = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      updates++;
+      value = transform(value);
+      if (updates === 1) await durable;
+    },
+  };
+  const manager = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => automaticSecret,
+  });
+  const pending = ensureAutomaticLocalFirst(manager);
+  await vi.waitFor(() => expect(updates).toBe(1));
+  manager.logout();
+  finish();
+  await expect(pending).rejects.toThrow("superseded");
+  await vi.waitFor(() => expect(JSON.parse(value!).selected).toBeNull());
+  expect(JSON.parse(value!).roots).toEqual([automaticSecret]);
+});
+
+it("returns and persists a re-entrant explicit selection during automatic adoption", async () => {
+  const automaticSecret = formatAuthSecret(new Uint8Array(32).fill(6));
+  const explicitSecret = formatAuthSecret(new Uint8Array(32).fill(7));
+  let generated = 0;
+  let value: string | null = null;
+  let explicit: AccountHandle | undefined;
+  let reentered = false;
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      value = transform(value);
+    },
+  };
+  const manager = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => (generated++ === 0 ? automaticSecret : explicitSecret),
+  });
+  manager.subscribe(() => {
+    if (!reentered && manager.getLoggedIn()) {
+      reentered = true;
+      explicit = manager.createLocalFirst();
+    }
+  });
+  const adopted = await ensureAutomaticLocalFirst(manager);
+  expect(explicit).toBeDefined();
   expect(adopted).toBe(explicit);
   await vi.waitFor(() => expect(JSON.parse(value!).selected).toBe(1));
   expect(JSON.parse(value!).roots).toEqual([automaticSecret, explicitSecret]);
