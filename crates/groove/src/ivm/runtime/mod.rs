@@ -174,6 +174,8 @@ pub struct IvmRuntime {
     /// sources. Cases are runtime input metadata rather than graph identity.
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
+    /// Pure typed fragments, independent of source identity and live state.
+    projection_plans: RefCell<typed_projection::ProjectionPlans>,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
@@ -266,6 +268,7 @@ impl IvmRuntime {
             variant_descriptors,
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
+            projection_plans: RefCell::default(),
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
@@ -410,6 +413,7 @@ mod graph_lifecycle;
 mod runtime_tick;
 mod schema;
 mod subscriptions;
+mod typed_projection;
 pub use subscriptions::*;
 mod operator_updates;
 use operator_updates::*;

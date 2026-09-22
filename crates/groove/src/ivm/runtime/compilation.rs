@@ -981,16 +981,8 @@ impl IvmRuntime {
                 let mut input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let mut expressions = fields
-                    .iter()
-                    .map(|field| {
-                        project_field_expr(&input_output, field).map(|expression| ProjectionExpr {
-                            expression,
-                            output_name: Some(field.output_name.clone()),
-                            output_identity: field.output_identity.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let plan = self.projection_plan(input_output, fields)?;
+                let mut expressions = plan.expressions()?.to_vec();
                 // Compose only total field selections. Dropping an unselected
                 // enum conversion or constant expression could change whether
                 // a row is omitted or an error is raised. Never cross those,
