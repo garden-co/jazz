@@ -160,6 +160,29 @@ records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
 reopen before resident state changes. The former naked serde JSON has no
 compatibility decoder in this experimental storage epoch.
 
+A schema publication contains a nonempty set of predecessors, each with its
+incoming lens and source-relative new/dropped table declarations. Sources must
+be distinct, already admitted before activation, and different from the target.
+All preserved target coordinates must agree on their permanent identities. A
+target may inherit a column from any predecessor; only identities preserved by
+an incoming lens may be reused from catalogue history. Activation and snapshots
+install the schema, every incoming lens, and its identity manifest together.
+
+The existing `jazz.catalogue.lineage.v1` staged/pending envelopes remain unchanged;
+their length-prefixed publication body has its own version byte. A one-predecessor
+body retains **exactly** its v1 bytes and `jazz-schema-lineage-publication-v1`
+content ID. A multiple-predecessor body is `v2:u8 | id:uuid[16] |
+schema_len:u32-le | schema | predecessor_count:u32-le | predecessors |
+physical_identity_manifest`. Each predecessor is `lens_len:u32-le | lens |
+new_table_count:u32-le | new_table_strings | dropped_table_count:u32-le |
+dropped_table_strings`, using existing length-prefixed UTF-8 strings and lens
+encoding. Predecessors are sorted by source UUID bytes, declarations by name;
+duplicates are rejected. V2 requires at least two predecessors. Its content ID
+uses the `jazz-schema-lineage-publication-v2` domain with the same canonical
+schema, predecessor count, ordered predecessor bodies, and manifest primitives
+as v1. `catalogue-predecessors.hex` pins both publication versions. Old readers
+reject the unknown nested version; new readers recover v1 without changing IDs.
+
 The protocol `MigrationLens` is intentionally distinct from the server schema
 editor's `LensTransform`. A protocol lens describes a published source/target
 table lineage and includes copy, transform, reverse-default, and

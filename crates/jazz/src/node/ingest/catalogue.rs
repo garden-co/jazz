@@ -457,7 +457,11 @@ where
             ));
         }
         let schema = &publication.schema;
-        let lens = &publication.lens;
+        let acknowledged_lens = publication
+            .predecessors
+            .first()
+            .filter(|_| publication.predecessors.len() == 1)
+            .map(|p| p.lens.id);
         if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
             if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
                 return Err(Error::InvalidCatalogueUpdate(
@@ -468,7 +472,7 @@ where
                 SyncMessage::CatalogueAck(CatalogueAck {
                     revision: None,
                     schema: Some(schema.id),
-                    lens: Some(lens.id),
+                    lens: acknowledged_lens,
                     applied: true,
                 }),
             ]));
@@ -486,35 +490,19 @@ where
                 ));
             }
         } else {
-            if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
-                Self::validate_migration_lens_between(lens, source, schema)?;
-                let identity_history = self.physical_identity_history_for_candidate(
-                    publication.schema.id,
-                    Some(publication.id),
-                );
-                let source_identities = &self
-                    .catalogue
-                    .physical_mappings
-                    .get(&lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities;
-                source_identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &schema.schema,
-                        lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)?;
-                Self::validate_lineage_table_partition(
-                    &source.schema,
-                    &schema.schema,
-                    lens,
-                    &publication.new_tables,
-                    &publication.dropped_tables,
+            if publication.predecessors.iter().all(|p| {
+                self.catalogue
+                    .catalogue_schemas
+                    .contains_key(&p.lens.source)
+            }) {
+                Self::validate_publication_sources(
+                    &publication,
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
+                    self.physical_identity_history_for_candidate(
+                        publication.schema.id,
+                        Some(publication.id),
+                    ),
                 )?;
             }
             if self
@@ -577,49 +565,23 @@ where
                 break;
             };
             let publication = &pending.publication;
-            let Some(source) = self
-                .catalogue
-                .catalogue_schemas
-                .get(&publication.lens.source)
-                .cloned()
-            else {
+            if publication.predecessors.iter().any(|p| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&p.lens.source)
+            }) {
                 break;
-            };
-            let validation = Self::validate_migration_lens_between(
-                &publication.lens,
-                &source,
-                &publication.schema,
-            )
-            .and_then(|()| {
-                Self::validate_lineage_table_partition(
-                    &source.schema,
-                    &publication.schema.schema,
-                    &publication.lens,
-                    &publication.new_tables,
-                    &publication.dropped_tables,
-                )
-            })
-            .and_then(|()| {
-                let identity_history = self.physical_identity_history_for_candidate(
+            }
+            let validation = Self::validate_publication_sources(
+                publication,
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.physical_mappings,
+                self.physical_identity_history_for_candidate(
                     publication.schema.id,
                     Some(publication.id),
-                );
-                self.catalogue
-                    .physical_mappings
-                    .get(&publication.lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &publication.schema.schema,
-                        &publication.lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)
-            })
+                ),
+            )
             // A parked sibling was admitted against the catalogue prefix that
             // existed when it arrived. Reconcile it again only when its
             // sequence becomes active: an earlier sibling may have widened a
@@ -660,11 +622,8 @@ where
                     &mut provisional_next_table_id,
                     &mut provisional_next_column_id,
                 )?;
-                let mapping = self.reconcile_physical_mapping_for_lens_payload(
-                    &publication.lens,
-                    &publication.schema,
-                    &fresh,
-                )?;
+                let mapping =
+                    Self::reconcile_publication_mapping(&self.catalogue, &publication, &fresh)?;
                 let mut next_physical_table_id = self.catalogue.next_physical_table_id;
                 let mut next_physical_column_id = self.catalogue.next_physical_column_id;
                 for table in mapping.tables.values() {
@@ -804,7 +763,12 @@ where
                 outcome.value.push(SyncMessage::CatalogueAck(CatalogueAck {
                     revision: Some(next),
                     schema: Some(staged.publication.schema.id),
-                    lens: Some(staged.publication.lens.id),
+                    lens: staged
+                        .publication
+                        .predecessors
+                        .first()
+                        .filter(|_| staged.publication.predecessors.len() == 1)
+                        .map(|p| p.lens.id),
                     applied: true,
                 }));
                 outcome.extend(self.drain_parked_commit_units().await?);
@@ -820,9 +784,11 @@ where
             staged.publication.schema.id,
             staged.publication.schema.clone(),
         );
-        self.catalogue
-            .catalogue_lenses
-            .insert(staged.publication.lens.id, staged.publication.lens.clone());
+        for predecessor in &staged.publication.predecessors {
+            self.catalogue
+                .catalogue_lenses
+                .insert(predecessor.lens.id, predecessor.lens.clone());
+        }
         self.catalogue
             .schema_version_aliases
             .insert(staged.publication.schema.id, staged.alias);
@@ -847,9 +813,9 @@ where
         self.catalogue
             .catalogue_schemas
             .remove(&staged.publication.schema.id);
-        self.catalogue
-            .catalogue_lenses
-            .remove(&staged.publication.lens.id);
+        for predecessor in &staged.publication.predecessors {
+            self.catalogue.catalogue_lenses.remove(&predecessor.lens.id);
+        }
         self.catalogue
             .schema_version_aliases
             .remove(&staged.publication.schema.id);
@@ -988,29 +954,34 @@ where
         publication: &SchemaLineagePublication,
     ) -> Result<(), Error> {
         let declaration_count = publication
-            .lens
-            .table_lenses
-            .len()
-            .saturating_add(publication.new_tables.len())
-            .saturating_add(publication.dropped_tables.len());
-        let operation_count = publication
-            .lens
-            .table_lenses
+            .predecessors
             .iter()
-            .map(|table| table.ops.len())
-            .sum::<usize>();
-        let names_in_bounds = publication
-            .new_tables
-            .iter()
-            .chain(&publication.dropped_tables)
-            .chain(
-                publication
-                    .lens
+            .map(|p| {
+                p.lens
                     .table_lenses
-                    .iter()
-                    .flat_map(|table| [&table.source_table, &table.target_table]),
-            )
-            .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES);
+                    .len()
+                    .saturating_add(p.new_tables.len())
+                    .saturating_add(p.dropped_tables.len())
+            })
+            .fold(publication.predecessors.len(), usize::saturating_add);
+        let operation_count = publication
+            .predecessors
+            .iter()
+            .flat_map(|p| &p.lens.table_lenses)
+            .map(|table| table.ops.len())
+            .fold(0usize, usize::saturating_add);
+        let names_in_bounds = publication.predecessors.iter().all(|p| {
+            p.new_tables
+                .iter()
+                .chain(&p.dropped_tables)
+                .chain(
+                    p.lens
+                        .table_lenses
+                        .iter()
+                        .flat_map(|table| [&table.source_table, &table.target_table]),
+                )
+                .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES)
+        });
         if declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
             || operation_count > MAX_SCHEMA_LINEAGE_OPS
             || !names_in_bounds
@@ -1040,15 +1011,29 @@ where
                 "schema id does not match schema payload",
             ));
         }
-        if publication.lens.id != publication.lens.content_id() {
+        if publication.predecessors.is_empty() {
             return Err(Error::InvalidCatalogueUpdate(
-                "lens id does not match lens payload",
+                "schema requires a predecessor",
             ));
         }
-        if publication.lens.target != publication.schema.id {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lineage lens target does not match schema",
-            ));
+        let mut sources = BTreeSet::new();
+        for predecessor in &publication.predecessors {
+            let lens = &predecessor.lens;
+            if !sources.insert(lens.source) || lens.source == publication.schema.id {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "duplicate or self schema predecessor",
+                ));
+            }
+            if lens.id != lens.content_id() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lens id does not match lens payload",
+                ));
+            }
+            if lens.target != publication.schema.id {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lineage lens target does not match schema",
+                ));
+            }
         }
         Ok(())
     }

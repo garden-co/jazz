@@ -734,7 +734,12 @@ where
             let Some(staged) = staged_lineages.get(&next).cloned() else {
                 break;
             };
-            if !schemas.contains_key(&staged.publication.lens.source) {
+            if staged
+                .publication
+                .predecessors
+                .iter()
+                .any(|p| !schemas.contains_key(&p.lens.source))
+            {
                 break;
             }
             let mut batch = database.open_batch();
@@ -761,7 +766,9 @@ where
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
             );
-            lenses.insert(staged.publication.lens.id, staged.publication.lens.clone());
+            for predecessor in &staged.publication.predecessors {
+                lenses.insert(predecessor.lens.id, predecessor.lens.clone());
+            }
             schema_version_aliases.insert(staged.publication.schema.id, staged.alias);
             physical_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
             active_lineages_by_target.insert(staged.publication.schema.id, staged.clone());
@@ -2423,27 +2430,27 @@ where
                 "staged schema lineage violates trusted publication invariants",
             )
         })?;
-        let source = catalogue_schemas
-            .get(&staged.publication.lens.source)
-            .ok_or(Error::InvalidStoredValue(
-                "staged schema lineage source is missing",
-            ))?;
-        Self::validate_migration_lens_between(
-            &staged.publication.lens,
-            source,
-            &staged.publication.schema,
-        )
-        .map_err(|_| Error::InvalidStoredValue("staged schema lineage lens is invalid"))?;
-        Self::validate_lineage_table_partition(
-            &source.schema,
-            &staged.publication.schema.schema,
-            &staged.publication.lens,
-            &staged.publication.new_tables,
-            &staged.publication.dropped_tables,
-        )
-        .map_err(|_| {
-            Error::InvalidStoredValue("staged schema lineage table partition is invalid")
-        })?;
+        for predecessor in &staged.publication.predecessors {
+            let source = catalogue_schemas.get(&predecessor.lens.source).ok_or(
+                Error::InvalidStoredValue("staged schema lineage source is missing"),
+            )?;
+            Self::validate_migration_lens_between(
+                &predecessor.lens,
+                source,
+                &staged.publication.schema,
+            )
+            .map_err(|_| Error::InvalidStoredValue("staged schema lineage lens is invalid"))?;
+            Self::validate_lineage_table_partition(
+                &source.schema,
+                &staged.publication.schema.schema,
+                &predecessor.lens,
+                &predecessor.new_tables,
+                &predecessor.dropped_tables,
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("staged schema lineage table partition is invalid")
+            })?;
+        }
         Ok(())
     }
 
@@ -2491,6 +2498,23 @@ where
                 ));
             }
         }
+        let sequences = active
+            .values()
+            .chain(staged.values())
+            .map(|lineage| (lineage.publication.schema.id, lineage.catalogue_seq))
+            .collect::<BTreeMap<_, _>>();
+        for lineage in active.values().chain(staged.values()) {
+            for predecessor in &lineage.publication.predecessors {
+                if sequences
+                    .get(&predecessor.lens.source)
+                    .is_some_and(|sequence| *sequence >= lineage.catalogue_seq)
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "schema predecessor must precede its target",
+                    ));
+                }
+            }
+        }
         let roots = schemas
             .keys()
             .filter(|schema| !published.contains_key(schema))
@@ -2522,26 +2546,38 @@ where
             for lineage in active.values().chain(staged.values()) {
                 parents.insert(
                     lineage.publication.schema.id,
-                    lineage.publication.lens.source,
+                    lineage
+                        .publication
+                        .predecessors
+                        .iter()
+                        .map(|p| p.lens.source)
+                        .collect::<Vec<_>>(),
                 );
             }
             for lineage in pending.values() {
                 parents.insert(
                     lineage.publication.schema.id,
-                    lineage.publication.lens.source,
+                    lineage
+                        .publication
+                        .predecessors
+                        .iter()
+                        .map(|p| p.lens.source)
+                        .collect::<Vec<_>>(),
                 );
             }
             let is_descendant = |schema: SchemaVersionId| {
-                let mut cursor = schema;
+                let mut remaining = vec![schema];
                 let mut visited = BTreeSet::new();
-                while visited.insert(cursor) {
-                    let Some(parent) = parents.get(&cursor).copied() else {
-                        return false;
-                    };
-                    if parent == candidate {
-                        return true;
+                while let Some(cursor) = remaining.pop() {
+                    if !visited.insert(cursor) {
+                        continue;
                     }
-                    cursor = parent;
+                    if let Some(sources) = parents.get(&cursor) {
+                        if sources.contains(&candidate) {
+                            return true;
+                        }
+                        remaining.extend(sources.iter().copied());
+                    }
                 }
                 false
             };
@@ -2581,64 +2617,46 @@ where
                     "durable mapping identities disagree with authority publication",
                 ));
             }
-            let source = schemas
-                .get(&publication.lens.source)
-                .ok_or(Error::InvalidStoredValue(
-                    "durable identity publication source schema is missing",
-                ))?;
-            let source_mapping =
-                mappings
-                    .get(&publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "durable identity publication source mapping is missing",
-                    ))?;
-            source_mapping
-                .identities
-                .validate_evolution_to_with_history(
-                    &source.schema,
-                    &publication.physical_identities,
-                    &publication.schema.schema,
-                    &publication.lens,
-                    history_for(publication.schema.id, publication.id),
-                )
-                .map_err(|_| {
-                    Error::InvalidStoredValue("durable identity publication evolution is invalid")
-                })?;
+            Self::validate_publication_sources(
+                publication,
+                schemas,
+                mappings,
+                history_for(publication.schema.id, publication.id),
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("durable identity publication evolution is invalid")
+            })?;
         }
         for lineage in pending.values() {
             // A pending lineage may be durably parked ahead of the publication
             // that introduces its source.  There is nothing authoritative to
             // compare yet, but its self-contained target manifest, exact
             // content id, and structural bounds are authoritative already.
-            // Validate those before retaining it for ordered replay. Once a source is
-            // known, however, both its manifest and every evolution rule stay
-            // fail-closed (the durable tamper receipt depends on that).
+            // Validate those before retaining it for ordered replay. Once all
+            // predecessors are available, validate their combined inheritance
+            // before this pending record can activate.
             Self::validate_schema_lineage_publication(&lineage.publication).map_err(|_| {
                 Error::InvalidStoredValue(
                     "pending schema lineage violates trusted publication invariants",
                 )
             })?;
-            let Some(source) = schemas.get(&lineage.publication.lens.source) else {
+            if lineage
+                .publication
+                .predecessors
+                .iter()
+                .any(|p| !schemas.contains_key(&p.lens.source))
+            {
                 continue;
-            };
-            let source_mapping =
-                mappings
-                    .get(&lineage.publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "pending identity publication source mapping is missing",
-                    ))?;
-            source_mapping
-                .identities
-                .validate_evolution_to_with_history(
-                    &source.schema,
-                    &lineage.publication.physical_identities,
-                    &lineage.publication.schema.schema,
-                    &lineage.publication.lens,
-                    history_for(lineage.publication.schema.id, lineage.publication.id),
-                )
-                .map_err(|_| {
-                    Error::InvalidStoredValue("pending identity publication evolution is invalid")
-                })?;
+            }
+            Self::validate_publication_sources(
+                &lineage.publication,
+                schemas,
+                mappings,
+                history_for(lineage.publication.schema.id, lineage.publication.id),
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("pending identity publication evolution is invalid")
+            })?;
         }
         Ok(())
     }

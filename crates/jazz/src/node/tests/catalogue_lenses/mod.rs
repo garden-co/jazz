@@ -10,3 +10,5 @@ include!("lens_projection.rs");
 include!("enum_projection.rs");
 include!("projected_reads.rs");
 include!("wire_identity.rs");
+
+include!("predecessors.rs");

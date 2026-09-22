@@ -365,6 +365,13 @@ mod tests {
             Ok(())
         }
 
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
         fn flush(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
@@ -389,6 +396,13 @@ mod tests {
         fn upsert_catalogue_entry(
             &mut self,
             _entry: &crate::server::catalogue_entry::CatalogueEntry,
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }

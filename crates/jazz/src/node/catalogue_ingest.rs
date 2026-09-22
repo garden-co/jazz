@@ -650,38 +650,15 @@ where
                     "trusted catalogue snapshot lineage sequence is not contiguous",
                 ));
             }
-            let source = planned
-                .catalogue_schemas
-                .get(&publication.lens.source)
-                .ok_or(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot lineage source is missing",
-                ))?;
-            Self::validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
-            planned
-                .physical_mappings
-                .get(&publication.lens.source)
-                .ok_or(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot source identities missing",
-                ))?
-                .identities
-                .validate_evolution_to_with_history(
-                    &source.schema,
-                    &publication.physical_identities,
-                    &publication.schema.schema,
-                    &publication.lens,
-                    planned
-                        .physical_mappings
-                        .values()
-                        .map(|mapping| mapping.identities.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(Error::InvalidCatalogueUpdate)?;
-            Self::validate_lineage_table_partition(
-                &source.schema,
-                &publication.schema.schema,
-                &publication.lens,
-                &publication.new_tables,
-                &publication.dropped_tables,
+            Self::validate_publication_sources(
+                &publication,
+                &planned.catalogue_schemas,
+                &planned.physical_mappings,
+                planned
+                    .physical_mappings
+                    .values()
+                    .map(|mapping| mapping.identities.clone())
+                    .collect(),
             )?;
             let fresh = allocate_provisional_physical_mapping(
                 &publication.schema.schema,
@@ -689,12 +666,7 @@ where
                 &mut planned.next_physical_table_id,
                 &mut planned.next_physical_column_id,
             )?;
-            let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
-                &planned,
-                &publication.lens,
-                &publication.schema,
-                &fresh,
-            )?;
+            let mapping = Self::reconcile_publication_mapping(&planned, &publication, &fresh)?;
             let staged = StagedSchemaLineage {
                 catalogue_seq,
                 publication: publication.clone(),
@@ -704,9 +676,11 @@ where
             planned
                 .catalogue_schemas
                 .insert(publication.schema.id, publication.schema.clone());
-            planned
-                .catalogue_lenses
-                .insert(publication.lens.id, publication.lens.clone());
+            for predecessor in &publication.predecessors {
+                planned
+                    .catalogue_lenses
+                    .insert(predecessor.lens.id, predecessor.lens.clone());
+            }
             planned
                 .schema_version_aliases
                 .insert(publication.schema.id, staged.alias);
@@ -769,48 +743,54 @@ where
             planned.schema_version_aliases.insert(anchor, local_alias);
             planned.physical_mappings.insert(anchor, local_mapping);
 
-            let mut cursor = anchor;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                let Some(lineage) = planned.active_lineages_by_target.get(&cursor).cloned() else {
-                    break;
-                };
-                let source_schema = planned
-                    .catalogue_schemas
-                    .get(&lineage.publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot source schema missing during local mapping reconciliation",
-                    ))?;
-                let target_schema = planned
-                    .catalogue_schemas
-                    .get(&lineage.publication.lens.target)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot target schema missing during local mapping reconciliation",
-                    ))?;
-                let provisional_source = planned
-                    .physical_mappings
-                    .get(&lineage.publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot source mapping missing during local mapping reconciliation",
-                    ))?;
-                let target_mapping =
-                    planned
+            let mut ancestors = BTreeSet::from([anchor]);
+            let mut reverse_lineages = planned
+                .active_lineages_by_target
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            reverse_lineages.sort_by_key(|lineage| std::cmp::Reverse(lineage.catalogue_seq));
+            for lineage in reverse_lineages {
+                if !ancestors.contains(&lineage.publication.schema.id) {
+                    continue;
+                }
+                for predecessor in &lineage.publication.predecessors {
+                    let source_schema = planned
+                        .catalogue_schemas
+                        .get(&predecessor.lens.source)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot source schema missing during local mapping reconciliation",
+                        ))?;
+                    let target_schema = planned
+                        .catalogue_schemas
+                        .get(&predecessor.lens.target)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot target schema missing during local mapping reconciliation",
+                        ))?;
+                    let provisional_source = planned
                         .physical_mappings
-                        .get(&cursor)
+                        .get(&predecessor.lens.source)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot source mapping missing during local mapping reconciliation",
+                        ))?;
+                    let target_mapping = planned
+                        .physical_mappings
+                        .get(&lineage.publication.schema.id)
                         .ok_or(Error::InvalidStoredValue(
                             "snapshot target mapping missing during local mapping reconciliation",
                         ))?;
-                let source_mapping = Self::reconcile_source_physical_mapping_for_lens_payload(
-                    &lineage.publication.lens,
-                    source_schema,
-                    target_schema,
-                    provisional_source,
-                    target_mapping,
-                )?;
-                planned
-                    .physical_mappings
-                    .insert(lineage.publication.lens.source, source_mapping);
-                cursor = lineage.publication.lens.source;
+                    let source_mapping = Self::reconcile_source_physical_mapping_for_lens_payload(
+                        &predecessor.lens,
+                        source_schema,
+                        target_schema,
+                        provisional_source,
+                        target_mapping,
+                    )?;
+                    planned
+                        .physical_mappings
+                        .insert(predecessor.lens.source, source_mapping);
+                    ancestors.insert(predecessor.lens.source);
+                }
             }
 
             let mut ordered_lineages = planned
@@ -827,10 +807,9 @@ where
                         "snapshot target mapping missing during forward reconciliation",
                     ))?
                     .clone();
-                let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
+                let mapping = Self::reconcile_publication_mapping(
                     &planned,
-                    &lineage.publication.lens,
-                    &lineage.publication.schema,
+                    &lineage.publication,
                     &provisional_target,
                 )?;
                 planned
