@@ -1,5 +1,5 @@
 //! Public behavior of batch-local preparation across reads, writes and owners.
-use groove::db::{Database, DatabaseBatch, EnsureExactOutcome, PrimaryKeyValue};
+use groove::db::{Database, DatabaseBatch, EnsureExactOutcome, GraphBuilder, PrimaryKeyValue};
 use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -102,6 +102,9 @@ async fn preparation_cannot_cross_database_schema_owners() {
     db.primary_key_get_raw_in_batch(&batch, "rows", &[Value::U64(1)])
         .await
         .unwrap();
+    // Check commit directly, before an overlay read has an opportunity to
+    // discard the foreign preparation.
+    assert!(other.apply_batch(batch.clone()).await.is_err());
     assert!(
         other
             .primary_key_get_raw_in_batch(&batch, "rows", &[Value::U64(1)])
@@ -116,6 +119,38 @@ async fn preparation_cannot_cross_database_schema_owners() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[futures_test::test]
+async fn prepared_update_uses_commit_time_predecessor_for_subscription_deltas() {
+    let mut db = database(ColumnType::String).await;
+    let mut seed = db.open_batch();
+    seed.insert("rows", vec![Value::U64(1), Value::String("old".into())]);
+    persist(&mut db, seed).await;
+    let subscription = db
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .await
+        .unwrap();
+    db.next_subscription(&subscription).await.unwrap();
+    let mut later = db.open_batch();
+    later.update("rows", vec![Value::U64(1), Value::String("last".into())]);
+    db.primary_key_get_raw_in_batch(&later, "rows", &[Value::U64(1)])
+        .await
+        .unwrap();
+    let mut intervening = db.open_batch();
+    intervening.update("rows", vec![Value::U64(1), Value::String("middle".into())]);
+    persist(&mut db, intervening).await;
+    db.next_subscription(&subscription).await.unwrap();
+    persist(&mut db, later).await;
+    let delta = db
+        .next_subscription(&subscription)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(delta.len(), 2);
+    assert!(delta.contains(&(vec![Value::U64(1), Value::String("middle".into())], -1)));
+    assert!(delta.contains(&(vec![Value::U64(1), Value::String("last".into())], 1)));
 }
 
 #[futures_test::test]
