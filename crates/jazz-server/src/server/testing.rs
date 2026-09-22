@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value as JsonValue, json};
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::middleware::AuthConfig;
@@ -220,6 +220,7 @@ pub struct JazzServer {
     data_dir: ServerDataDir,
     admin_secret: String,
     backend_secret: String,
+    host: IpAddr,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
@@ -302,8 +303,16 @@ impl JazzServer {
             .await
             .map_err(|error| error.to_string())?;
 
-        let mut server =
-            Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await?;
+        let mut server = Self::from_built(
+            built,
+            port,
+            None,
+            app_id,
+            data_dir,
+            admin_secret,
+            backend_secret,
+        )
+        .await?;
         server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
         Ok(server)
@@ -317,18 +326,26 @@ impl JazzServer {
     pub async fn from_built(
         built: BuiltServer,
         port: Option<u16>,
+        host: Option<String>,
         app_id: AppId,
         data_dir: ServerDataDir,
         admin_secret: String,
         backend_secret: String,
     ) -> Result<Self, String> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
+        let host = host
+            .unwrap_or_else(|| "127.0.0.1".to_owned())
+            .parse::<IpAddr>()
+            .map_err(|error| format!("invalid server host: {error}"))?;
+        if host.is_unspecified() {
+            return Err("invalid server host: wildcard addresses are not supported".to_owned());
+        }
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(host, port.unwrap_or(0)))
             .await
             .map_err(|error| format!("bind server listener: {error}"))?;
-        let port = listener
+        let local_addr = listener
             .local_addr()
-            .map_err(|error| format!("read server listener local address: {error}"))?
-            .port();
+            .map_err(|error| format!("read server listener local address: {error}"))?;
+        let port = local_addr.port();
 
         let (serve_shutdown_tx, serve_shutdown_rx) = oneshot::channel();
         let shutdown_state = built.state.clone();
@@ -355,6 +372,7 @@ impl JazzServer {
             app_id,
             data_dir,
             admin_secret,
+            host,
             backend_secret,
             client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
@@ -377,7 +395,11 @@ impl JazzServer {
     }
 
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        let host = match self.host {
+            IpAddr::V4(host) => host.to_string(),
+            IpAddr::V6(host) => format!("[{host}]"),
+        };
+        format!("http://{host}:{}", self.port)
     }
 
     pub fn admin_secret(&self) -> &str {
@@ -749,6 +771,7 @@ mod tests {
             .expect("enter active request");
         let server = JazzServer::from_built(
             built,
+            None,
             None,
             app_id,
             ServerDataDir::in_memory(),

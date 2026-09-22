@@ -69,6 +69,14 @@ describe("startLocalJazzServer via JazzServer", () => {
     expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.2:[1-9]\d*$/);
     expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
   }, 30_000);
+  it.each(["0.0.0.0", "::", "127.0.0.1:1234", "http://127.0.0.1"])(
+    "rejects non-concrete server host %s",
+    async (host) => {
+      await expect(startLocalJazzServer({ host, inMemory: true })).rejects.toThrow(
+        "Invalid Jazz server host",
+      );
+    },
+  );
 
   it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
     const blocker = createServer();

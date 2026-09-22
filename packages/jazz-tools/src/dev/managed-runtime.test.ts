@@ -116,18 +116,20 @@ describe("ManagedDevRuntime", () => {
     const appId = "00000000-0000-0000-0000-000000000124";
     let envAtServerStartup = "";
 
-    vi.spyOn(devServer, "startLocalJazzServer").mockImplementation(async () => {
-      envAtServerStartup = await readFile(join(schemaDir, ".env"), "utf8");
-      return {
-        appId,
-        port: 19884,
-        url: "http://127.0.0.1:19884",
-        dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
-        adminSecret: "bootstrap-admin",
-        backendSecret: "bootstrap-backend",
-        stop: vi.fn().mockResolvedValue(undefined),
-      };
-    });
+    const startLocalJazzServer = vi
+      .spyOn(devServer, "startLocalJazzServer")
+      .mockImplementation(async () => {
+        envAtServerStartup = await readFile(join(schemaDir, ".env"), "utf8");
+        return {
+          appId,
+          port: 19884,
+          url: "http://127.0.0.1:19884",
+          dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
+          adminSecret: "bootstrap-admin",
+          backendSecret: "bootstrap-backend",
+          stop: vi.fn().mockResolvedValue(undefined),
+        };
+      });
     vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
@@ -136,10 +138,13 @@ describe("ManagedDevRuntime", () => {
       await runtime.initialize({
         appId,
         schemaDir,
-        server: { port: 19884, adminSecret: "bootstrap-admin" },
+        server: { port: 19884, host: "127.0.0.2", adminSecret: "bootstrap-admin" },
       });
 
       expect(envAtServerStartup).toContain(`VITE_JAZZ_APP_ID=${appId}`);
+      expect(startLocalJazzServer).toHaveBeenCalledWith(
+        expect.objectContaining({ host: "127.0.0.2" }),
+      );
     } finally {
       await runtime.dispose();
     }

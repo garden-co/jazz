@@ -24,6 +24,8 @@ export function resolveJazzWasmEntry(): string | null {
 
 export interface JazzServerOptions {
   port?: number;
+  /** Concrete IP address used for both listener binding and the advertised URL. */
+  host?: string;
   adminSecret?: string;
   appId?: string;
   allowLocalFirstAuth?: boolean;
