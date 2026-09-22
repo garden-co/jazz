@@ -814,7 +814,7 @@ async fn test_server_resync() {
         let results = client.query(query.clone(), None).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
-        // Use an EdgeServer query as the causal barrier before shutdown.
+        // Use a GlobalServer query as the causal barrier before shutdown.
         // This waits until the server has settled the todo, instead of
         // guessing with a fixed sleep that can flake under CI load.
         let server_results = tokio::time::timeout(
@@ -822,7 +822,7 @@ async fn test_server_resync() {
             client.query(query, Some(DurabilityTier::GlobalServer)),
         )
         .await
-        .expect("Writer query with EdgeServer tier should resolve within 10s")
+        .expect("Writer query with GlobalServer tier should resolve within 10s")
         .expect("Writer query should succeed");
         assert_eq!(
             server_results.len(),
@@ -837,7 +837,7 @@ async fn test_server_resync() {
     std::fs::remove_dir_all(&data_path).unwrap();
     std::fs::create_dir_all(&data_path).unwrap();
 
-    // 4. New client should resync from server via one-shot query with EdgeServer tier.
+    // 4. New client should resync from server via one-shot query with GlobalServer tier.
     // No admin_secret — this client's local catalogue sync will be rejected by the
     // server (CatalogueWriteDenied / SessionRequired), which is fine: the server
     // already has the schema from Client 1. The JWT provides a session so the
@@ -859,7 +859,7 @@ async fn test_server_resync() {
         };
         let client = connect_native(context).await.unwrap();
 
-        // One-shot query with EdgeServer settled tier — waits for the server's
+        // One-shot query with GlobalServer settled tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.
         let query = Query::from("todos");
         let results = tokio::time::timeout(
@@ -867,7 +867,7 @@ async fn test_server_resync() {
             client.query(query, Some(DurabilityTier::GlobalServer)),
         )
         .await
-        .expect("Query with EdgeServer tier should resolve within 10s")
+        .expect("Query with GlobalServer tier should resolve within 10s")
         .expect("Query should succeed");
 
         assert_eq!(results.len(), 1, "Todo should resync from server");

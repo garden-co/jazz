@@ -281,7 +281,7 @@ pub enum CurrentRowOutcome {
     Unknown,
 }
 
-/// Core evaluation evidence. The authenticated serving Edge may proxy this after
+/// Core evaluation evidence. The authenticated local relay may forward this after
 /// validating its selected upstream nonce/epoch; this is not a signature chain.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CurrentRowsReceipt {
@@ -3005,7 +3005,7 @@ pub struct RegisterShapeOptions {
     /// LocalOnly is a caller-local setting and never crosses a node boundary.
     #[serde(default = "default_propagate_upstream")]
     pub propagate_upstream: bool,
-    /// Internal ownership of the binding whose ViewUpdates an Edge relay may
+    /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
     /// coverage handle.
@@ -3026,7 +3026,7 @@ impl Default for RegisterShapeOptions {
 
 /// Internal discriminator for otherwise-identical binding views.
 ///
-/// It participates in [`RegisterShapeOptions::read_view_key`], so an Edge
+/// It participates in [`RegisterShapeOptions::read_view_key`], so a local
 /// relay authority receipt cannot be confused with an ordinary Global read.
 #[derive(
     Clone,
