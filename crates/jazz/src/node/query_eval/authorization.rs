@@ -8,6 +8,35 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+pub(super) struct NormalizedReadPolicyInput {
+    pub(super) shape: ValidatedQuery,
+    pub(super) binding: Binding,
+    pub(super) input_shape: NormalizedRowSetShape,
+    pub(super) claim_params: BTreeMap<String, ProgramClaimParam>,
+}
+
+pub(super) fn read_policy_authorization_context(
+    policy: PolicyContext,
+    table_name: &str,
+) -> PolicyContext {
+    match policy {
+        PolicyContext::Identity {
+            mode,
+            permission_subject,
+            claims,
+            attribution,
+        } => PolicyContext::AuthorizationSubplan {
+            protected_source: root_source_id(table_name),
+            role: PolicyDecisionRole::Read,
+            mode,
+            permission_subject,
+            claims,
+            attribution,
+        },
+        other => other,
+    }
+}
+
 /// Test-only rendezvous at the cancellation-sensitive proof-stack boundary.
 #[cfg(test)]
 struct PolicyProofCompilationPause;
@@ -863,6 +892,8 @@ where
         // binding. Carry that descriptor alongside the source before joining
         // the proof so a later storage delta has every route field the proof
         // advertises.
+        // Nonordered claims remain predicate inputs in the full descriptor,
+        // not join routes. Recursive seeds carry those payloads explicitly.
         let binding_routes = policy_request
             .input
             .binding
@@ -891,9 +922,26 @@ where
                         .input
                         .binding
                         .param_types
-                        .keys()
-                        .chain(policy_request.input.binding.claim_params.keys())
-                        .cloned()
+                        .iter()
+                        .filter(|(_, ty)| groove::records::collect_by_ordered_scalar(ty))
+                        .map(|(name, _)| {
+                            if claim_path_from_param_field(name).is_some() {
+                                name.clone()
+                            } else {
+                                route_param_field(name)
+                            }
+                        })
+                        .chain(
+                            policy_request
+                                .input
+                                .binding
+                                .claim_params
+                                .iter()
+                                .filter(|(_, claim)| {
+                                    groove::records::collect_by_ordered_scalar(&claim.ty)
+                                })
+                                .map(|(name, _)| name.clone()),
+                        )
                         .collect::<BTreeSet<_>>(),
                 )
             });
@@ -917,28 +965,28 @@ where
             authorization_keys.clone(),
             authorization_keys,
         );
-        let (base, binding_route_fields) =
-            match binding_routes {
-                Some((binding, route_fields)) => (
-                    GraphBuilder::join(
-                        base,
-                        binding,
-                        std::iter::empty::<String>(),
-                        std::iter::empty::<String>(),
-                    )
-                    .project_fields(
-                        output_fields
-                            .iter()
-                            .cloned()
-                            .chain(route_fields.iter().map(|field| {
-                                ProjectField::renamed(right_field(field), field.clone())
-                            }))
-                            .collect::<Vec<_>>(),
-                    ),
-                    route_fields,
+        let (base, binding_route_fields) = match binding_routes {
+            Some((binding, route_fields)) => (
+                GraphBuilder::join(
+                    base,
+                    binding,
+                    std::iter::empty::<String>(),
+                    std::iter::empty::<String>(),
+                )
+                .project_fields(
+                    output_fields
+                        .iter()
+                        .cloned()
+                        .chain(route_fields.iter().map(|field| {
+                            let param = route_param_from_field(field).unwrap_or(field);
+                            ProjectField::renamed(right_field(param), field.clone())
+                        }))
+                        .collect::<Vec<_>>(),
                 ),
-                None => (base, BTreeSet::new()),
-            };
+                route_fields,
+            ),
+            None => (base, BTreeSet::new()),
+        };
         let mut join_keys = vec!["row_uuid".to_owned()];
         join_keys.extend(authorized.route_fields.iter().cloned());
         if authorized.route_fields.is_empty() {
@@ -1030,45 +1078,22 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        // System authority bypasses the table policy.  Use the unfiltered
-        // table query rather than merely dropping prepared claim descriptors:
-        // retaining policy claim operands in the shape would still require an
-        // identity context when the historical graph is lowered.
-        let query = if identity == AuthorSubject::SYSTEM {
-            JazzQuery::from(table.name.as_str())
-        } else {
-            authorization_query_from_read_policy(table)
-        };
-        if !query.includes.is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "historical policy source filters do not support include policies",
-            ));
-        }
-        let policy_shape = query.validate(policy_schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
+        let policy = read_policy_authorization_context(
+            self.query_program_policy_context(identity),
+            table_name,
+        );
+        let NormalizedReadPolicyInput {
+            shape: policy_shape,
+            binding,
+            mut input_shape,
+            claim_params,
+        } = self.normalized_read_policy_input(
             policy_schema,
+            table,
+            &policy,
             param_binding_mode,
-        )?;
-        if !policy_shape.params().is_empty() {
-            return Err(Error::QueryCapability(
-                "historical policy source filters with runtime parameters must lower through query-engine binding sources"
-                    .to_owned(),
-            ));
-        }
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params;
-        claim_params.extend(binding_claim_params_for_shape(
-            &input_shape,
-            policy_shape.params(),
-        ));
-        collect_reachable_seed_claim_params(
-            policy_schema,
-            policy_shape.query(),
-            &mut claim_params,
+            binding_claim_params,
+            false,
         )?;
         let binding_source_shape = binding_source_shape.clone().or_else(|| {
             authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
@@ -1076,22 +1101,6 @@ where
         if let Some(source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -1190,34 +1199,86 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(table_name),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
+        let policy = read_policy_authorization_context(
+            self.query_program_policy_context(identity),
+            table_name,
+        );
+        let NormalizedReadPolicyInput {
+            shape: policy_shape,
+            binding,
+            mut input_shape,
+            claim_params,
+        } = self.normalized_read_policy_input(
+            policy_schema,
+            table,
+            &policy,
+            param_binding_mode,
+            binding_claim_params,
+            include_deleted_root,
+        )?;
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        }
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape_and_policy(
+                &policy_shape,
+                &binding,
+                binding_source_shape,
+                binding_user_params,
+                claim_params,
+                &policy,
+            )?,
+            shape: input_shape,
         };
-        // System authority bypasses the table policy.  Its authorization
-        // subplan must therefore describe all rows, not the policy's claim
-        // predicates: those operands are invalid without an identity context
-        // even if the prepared binding descriptor itself has no claim slots.
-        let mut query = if identity == AuthorSubject::SYSTEM {
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: current_query_read_set(
+                &input.shape,
+                policy_schema_version,
+                policy_schema_version,
+                tier,
+                None,
+                None,
+                false,
+            ),
+            policy,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AuthorizedRows,
+                policy_shape.query(),
+            ),
+        };
+        self.query
+            .read_policy_authorization_request_cache
+            .insert(cache_key, request.clone());
+        Ok(request)
+    }
+
+    /// Normalize the actual policy dependency before materializing its claim
+    /// values or publishing a binding-source identity. Outer prepared requests
+    /// use the same construction to discover the complete shared descriptor.
+    pub(super) fn normalized_read_policy_input(
+        &self,
+        policy_schema: &RuntimeSchema,
+        table: &TableSchema,
+        policy: &PolicyContext,
+        param_binding_mode: ParamBindingMode,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
+        include_deleted_root: bool,
+    ) -> Result<NormalizedReadPolicyInput, Error> {
+        // System authority bypasses the policy operands as well as their
+        // prepared claim descriptors.
+        let mut query = if matches!(policy, PolicyContext::System) {
             JazzQuery::from(table.name.as_str())
         } else {
             authorization_query_from_read_policy(table)
         };
         let mut policy_binding_values = BTreeMap::new();
         if matches!(param_binding_mode, ParamBindingMode::RetainAllParams)
-            && let PolicyContext::AuthorizationSubplan { claims, .. } = &policy
+            && let PolicyContext::AuthorizationSubplan { claims, .. } = policy
         {
             bind_scope_claim_operands(&mut query, claims, &mut policy_binding_values);
         }
@@ -1232,7 +1293,7 @@ where
             &mut policy_binding_values,
             &binding_claim_params,
         )?;
-        let policy_shape = query.validate(policy_schema)?;
+        let policy_shape = query.validate_runtime(policy_schema)?;
         coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
         let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
         let policy_shape = bind_query_params_with_mode(
@@ -1273,45 +1334,32 @@ where
                 claim.ty = ty.clone();
             }
         }
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        if !matches!(policy, PolicyContext::System)
+            && !input_shape.reachable_contributions.is_empty()
+            && claim_params
+                .iter()
+                .any(|(name, claim)| policy_shape.params().get(name) != Some(&claim.ty))
+        {
+            input_shape = if include_deleted_root {
+                self.normalized_include_deleted_row_set_shape_with_claim_params(
+                    &policy_shape,
+                    &binding,
+                    &claim_params,
+                )?
+            } else {
+                self.normalized_row_set_shape_with_claim_params(
+                    &policy_shape,
+                    &binding,
+                    &claim_params,
+                )?
+            };
         }
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy(
-                &policy_shape,
-                &binding,
-                binding_source_shape,
-                binding_user_params,
-                claim_params,
-                &policy,
-            )?,
-            shape: input_shape,
-        };
-        let request = QueryProgramRequest {
-            authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: current_query_read_set(
-                &input.shape,
-                policy_schema_version,
-                policy_schema_version,
-                tier,
-                None,
-                None,
-                false,
-            ),
-            policy,
-            input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AuthorizedRows,
-                policy_shape.query(),
-            ),
-        };
-        self.query
-            .read_policy_authorization_request_cache
-            .insert(cache_key, request.clone());
-        Ok(request)
+        Ok(NormalizedReadPolicyInput {
+            shape: policy_shape,
+            binding,
+            input_shape,
+            claim_params,
+        })
     }
 
     pub(super) fn maintained_view_content_current_with_version(

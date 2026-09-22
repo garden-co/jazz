@@ -581,6 +581,15 @@ fn lower_relation_input_cached(
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
+            if linear.steps.is_empty()
+                && let LinearRoot::Value {
+                    shape,
+                    columns,
+                    mode,
+                } = &linear.root
+            {
+                return lower_value_source(shape, columns, mode, request);
+            }
             let source_id = linear.root.source().ok_or_else(|| {
                 UnsupportedReason::Operator("linear join input must have a source".to_owned())
             })?;
@@ -1288,32 +1297,44 @@ fn lower_linear_plan_steps_cached(
     cache_plan: Option<&LinearCurrentRoot>,
     retain_final_project_input_fields: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
-    let mut graph = match &plan.root {
-        LinearRoot::Source { .. } => graph,
+    let (mut graph, mut fields, mut nullable_fields, mut nullable_field_depths) = match &plan.root {
+        LinearRoot::Source { .. } => {
+            let depths = source_nullable_field_depths(root_source);
+            (
+                graph,
+                source_fields(root_source).collect::<BTreeSet<_>>(),
+                depths.keys().cloned().collect::<BTreeSet<_>>(),
+                depths,
+            )
+        }
         LinearRoot::Value {
             shape,
             columns,
             mode,
-        } => lower_value_source(shape, columns, mode, request)?,
+        } => {
+            let value = lower_value_source(shape, columns, mode, request)?;
+            (
+                value.graph,
+                value.fields,
+                value.nullable_fields,
+                value.nullable_field_depths,
+            )
+        }
         LinearRoot::Frontier { frontier, columns } => {
-            GraphBuilder::frontier_source(frontier.0.clone(), value_source_descriptor(columns))
+            let value = lowered_value_relation(
+                GraphBuilder::frontier_source(frontier.0.clone(), value_source_descriptor(columns)),
+                columns
+                    .iter()
+                    .map(|column| (column.name.clone(), column.ty.clone()))
+                    .collect(),
+            );
+            (
+                value.graph,
+                value.fields,
+                value.nullable_fields,
+                value.nullable_field_depths,
+            )
         }
-    };
-    let mut fields: BTreeSet<String> = match &plan.root {
-        LinearRoot::Source { .. } => source_fields(root_source).collect(),
-        LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
-            columns.iter().map(|column| column.name.clone()).collect()
-        }
-    };
-    let mut nullable_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
-        source_nullable_fields(root_source)
-    } else {
-        BTreeSet::new()
-    };
-    let mut nullable_field_depths = if matches!(plan.root, LinearRoot::Source { .. }) {
-        source_nullable_field_depths(root_source)
-    } else {
-        BTreeMap::new()
     };
     let mut pending_order: Option<Vec<OrderKey>> = None;
     let mut last_join_right: Option<(
@@ -1455,7 +1476,47 @@ fn lower_linear_plan_steps_cached(
                         .difference(&available_route_fields)
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    if !missing_route_fields.is_empty() {
+                    let mut missing_binding_fields = missing_route_fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.clone(),
+                                route_param_from_field(field).unwrap_or(field).to_owned(),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    if request.input.binding.source_shape.is_some()
+                        && matches!(on, PredicateExpr::True)
+                        && let RelationInputPlan::Linear(right) = right.as_ref()
+                        && right.steps.is_empty()
+                        && let LinearRoot::Value {
+                            columns,
+                            mode: ValueSourceMode::Binding,
+                            ..
+                        } = &right.root
+                    {
+                        // Nonordered claims are constant within this prepared
+                        // source's admitted claim scope. Carry their payload,
+                        // but correlate bindings only on ordered scalar routes.
+                        for column in columns {
+                            if fields.contains(&column.name)
+                                && right_route_fields.contains(&column.name)
+                                && let Some(depth) =
+                                    lowered_right.nullable_field_depths.get(&column.name)
+                            {
+                                nullable_fields.insert(column.name.clone());
+                                nullable_field_depths.insert(column.name.clone(), *depth);
+                            }
+                            if let NormalizedValueRef::Param(param) = &column.value
+                                && request.input.binding.claim_params.contains_key(param)
+                                && !claim_route_is_ordered_scalar(&column.ty)
+                                && !fields.contains(&column.name)
+                            {
+                                missing_binding_fields.insert(column.name.clone(), param.clone());
+                            }
+                        }
+                    }
+                    if !missing_binding_fields.is_empty() {
                         if let Some(binding_source_shape) = &request.input.binding.source_shape {
                             let binding = GraphBuilder::binding_source(
                                 binding_source_shape.clone(),
@@ -1477,10 +1538,11 @@ fn lower_linear_plan_steps_cached(
                                     ProjectField::renamed(left_field(field), field.clone())
                                 })
                                 .collect::<Vec<_>>();
-                            projection.extend(missing_route_fields.iter().map(|field| {
-                                let binding_field = route_param_from_field(field).unwrap_or(field);
-                                ProjectField::renamed(right_field(binding_field), field.clone())
-                            }));
+                            projection.extend(missing_binding_fields.iter().map(
+                                |(field, binding_field)| {
+                                    ProjectField::renamed(right_field(binding_field), field.clone())
+                                },
+                            ));
                             graph = policy_join_if_needed(
                                 graph,
                                 binding,
@@ -1502,7 +1564,13 @@ fn lower_linear_plan_steps_cached(
                             );
                             graph = graph.project_fields(projection);
                         }
-                        fields.extend(missing_route_fields.iter().cloned());
+                        fields.extend(missing_binding_fields.keys().cloned());
+                        for field in missing_binding_fields.keys() {
+                            if let Some(depth) = lowered_right.nullable_field_depths.get(field) {
+                                nullable_fields.insert(field.clone());
+                                nullable_field_depths.insert(field.clone(), *depth);
+                            }
+                        }
                         available_route_fields.extend(missing_route_fields);
                     }
 
@@ -2085,14 +2153,39 @@ fn binding_source_descriptor_with_user_params(
     ))
 }
 
+fn lowered_value_relation(
+    graph: GraphBuilder,
+    field_types: BTreeMap<String, ColumnType>,
+) -> LoweredRelationInput {
+    let nullable_field_depths = field_types
+        .iter()
+        .filter_map(|(name, ty)| {
+            let depth = value_type_nullable_depth(ty);
+            (depth > 0).then(|| (name.clone(), depth))
+        })
+        .collect::<BTreeMap<_, _>>();
+    LoweredRelationInput {
+        graph,
+        root_source: None,
+        fields: field_types.into_keys().collect(),
+        nullable_fields: nullable_field_depths.keys().cloned().collect(),
+        nullable_field_depths,
+        union_occurrence_carrier: None,
+    }
+}
+
 fn lower_value_source(
     shape: &str,
     columns: &[ValueSourceColumn],
     mode: &ValueSourceMode,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let descriptor = value_source_descriptor(columns);
-    match mode {
+    let mut field_types = columns
+        .iter()
+        .map(|column| (column.name.clone(), column.ty.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let graph = match mode {
         ValueSourceMode::Binding => {
             let domain = parameter_domain_for_request(request)?;
             let params = binding_descriptor_params(request)?;
@@ -2138,11 +2231,13 @@ fn lower_value_source(
                     .iter()
                     .map(|column| lower_value_source_column(column, request))
                     .collect::<Result<Vec<_>, _>>()?;
-                return GraphBuilder::values(descriptor, [row]).map_err(|err| {
-                    UnsupportedReason::Operator(format!(
-                        "binding value source could not encode constant row: {err}"
-                    ))
-                });
+                return GraphBuilder::values(descriptor, [row])
+                    .map(|graph| lowered_value_relation(graph, field_types))
+                    .map_err(|err| {
+                        UnsupportedReason::Operator(format!(
+                            "binding value source could not encode constant row: {err}"
+                        ))
+                    });
             }
             let input_descriptor = RecordDescriptor::new(
                 params
@@ -2168,12 +2263,17 @@ fn lower_value_source(
                 .collect::<BTreeSet<_>>();
             let retained_routes = domain
                 .user_params
-                .keys()
-                .filter(|param| source_user_params.contains(*param))
-                .filter_map(|param| {
+                .iter()
+                .filter(|(param, _)| source_user_params.contains(*param))
+                .filter_map(|(param, ty)| {
                     let route_field = route_param_field(param);
-                    (!projected.contains(&route_field))
-                        .then(|| ProjectField::renamed(param.clone(), route_field))
+                    (!projected.contains(&route_field)).then(|| {
+                        (
+                            ProjectField::renamed(param.clone(), route_field.clone()),
+                            route_field,
+                            ty.clone(),
+                        )
+                    })
                 })
                 // A nested policy graph can consume an enclosing claim only
                 // in a sibling/ancestor branch. The shared binding descriptor
@@ -2182,10 +2282,16 @@ fn lower_value_source(
                 .chain(
                     domain
                         .claim_params
-                        .keys()
-                        .filter(|param| !projected.contains(*param))
-                        .map(ProjectField::named),
+                        .iter()
+                        .filter(|(param, _)| !projected.contains(*param))
+                        .map(|(param, claim)| {
+                            (ProjectField::named(param), param.clone(), claim.ty.clone())
+                        }),
                 )
+                .map(|(field, name, ty)| {
+                    field_types.insert(name, ty);
+                    field
+                })
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
@@ -2227,7 +2333,8 @@ fn lower_value_source(
                 UnsupportedReason::Operator(format!("inline value source could not encode: {err}"))
             })
         }
-    }
+    }?;
+    Ok(lowered_value_relation(graph, field_types))
 }
 
 #[cfg(test)]
@@ -2241,7 +2348,7 @@ pub(crate) fn binding_value_source_projection_fields_for_test(
         &ValueSourceMode::Binding,
         request,
     )?;
-    graph_declared_output_fields(&graph).ok_or_else(|| {
+    graph_declared_output_fields(&graph.graph).ok_or_else(|| {
         UnsupportedReason::Runtime(
             "binding value-source projection must have a named descriptor".to_owned(),
         )
@@ -2757,7 +2864,7 @@ fn lower_projection_source(
                 Some(_) => left_field(param),
                 None => param.clone(),
             },
-            nullable_depth: 0,
+            nullable_depth: field_nullable_depths.get(param).copied().unwrap_or(0),
         });
     }
     if let Some((field, _)) = accumulated_join_field(value, accumulated_join_fields) {
@@ -2941,15 +3048,33 @@ fn lower_equality_param_filter_joins(
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
         );
-        projection.push(ProjectField::renamed(
-            right_field(route_carrier.as_deref().unwrap_or(&join.param)),
-            route_field.clone(),
-        ));
+        if !retained_route_fields.contains(&route_field) {
+            projection.push(ProjectField::renamed(
+                right_field(route_carrier.as_deref().unwrap_or(&join.param)),
+                route_field.clone(),
+            ));
+        }
+        // A completed policy source already identifies its binding. An
+        // equality witness from another live binding must not widen that route.
+        let mut left_keys = vec![join.field.clone()];
+        let mut right_keys = vec![join.param.clone()];
+        for field in &retained_route_fields {
+            let param = route_param_from_field(field).unwrap_or(field);
+            if !binding_fields.iter().any(|name| name == param) {
+                continue;
+            }
+            left_keys.push(field.clone());
+            right_keys.push(if param == join.param {
+                route_carrier.as_deref().unwrap_or(param).to_owned()
+            } else {
+                param.to_owned()
+            });
+        }
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
             binding = binding.unwrap_nullable(join.param.clone());
         }
-        graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
+        graph = policy_join_if_needed(graph, binding, left_keys, right_keys, request)
             .project_fields(projection);
         retained_route_fields.insert(route_field);
     }

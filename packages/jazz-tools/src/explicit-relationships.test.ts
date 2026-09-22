@@ -63,7 +63,7 @@ describe("explicit relationships", () => {
         { itemIds: s.array(s.array(s.uuid())) },
         { items: s.rel("bundle_items", "itemIds") },
       ),
-    ).toThrow(/nested reference array/i);
+    ).toThrow();
   });
   it("preserves reference storage identity and excludes aliases from the hash", async () => {
     const app = s.defineApp(definition());

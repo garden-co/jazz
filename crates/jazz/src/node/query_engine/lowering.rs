@@ -630,7 +630,11 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                 for column in columns {
                     if let NormalizedValueRef::Param(param) = &column.value {
                         domain.user_params.insert(param.clone(), column.ty.clone());
-                        domain.routing_params.insert(route_param_field(param));
+                        if claim_path_from_param_field(param).is_none()
+                            || claim_route_is_ordered_scalar(&column.ty)
+                        {
+                            domain.routing_params.insert(param_route_field(param));
+                        }
                     } else if let NormalizedValueRef::Claim(path) = &column.value {
                         let param = claim_param_field(path);
                         domain.claim_params.insert(

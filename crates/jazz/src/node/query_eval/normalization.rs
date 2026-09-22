@@ -1812,8 +1812,8 @@ fn normalize_reachable_seed(
     if let Some(seed) = &reachable.seed {
         let seed_source = reachable_seed_source_id(seed, reachable_id);
         let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
-        let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
-        for column in &edge_route_columns {
+        let route_columns = reachable_route_columns(reachable, param_types)?;
+        for column in &route_columns {
             if !columns.iter().any(|existing| existing.name == column.name) {
                 columns.push(column.clone());
             }
@@ -1870,6 +1870,30 @@ fn normalize_reachable_seed(
             );
             seed_current = seed_filter_node;
         }
+        if !route_columns.is_empty() {
+            // Route columns belong to the live prepared tuple, not the claim
+            // values of the request that happened to compile this graph.
+            let binding_node = RowSetNodeId(format!("{reachable_id}:seed_binding"));
+            nodes.insert(
+                binding_node.clone(),
+                RowSetExpr::ValueSource {
+                    shape: binding_source_shape.to_owned(),
+                    columns: route_columns.clone(),
+                    mode: ValueSourceMode::Binding,
+                },
+            );
+            let join_node = RowSetNodeId(format!("{reachable_id}:seed_binding_join"));
+            nodes.insert(
+                join_node.clone(),
+                RowSetExpr::Join {
+                    left: seed_current,
+                    right: binding_node,
+                    mode: NormalizedJoinMode::Semi,
+                    on: NormalizedPredicateExpr::True,
+                },
+            );
+            seed_current = join_node;
+        }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
         let seed_team_value =
             source_column_value(&seed_source, &seed.team_column, JoinTarget::Column);
@@ -1892,10 +1916,17 @@ fn normalize_reachable_seed(
                 value: NormalizedValueRef::Param(claim_field.clone()),
             });
         }
-        seed_columns.extend(edge_route_columns.into_iter().map(|column| RowProjection {
-            output: typed_output_field(&column.name, column.ty),
-            value: column.value,
-        }));
+        for column in route_columns {
+            if !seed_columns
+                .iter()
+                .any(|existing| existing.output.name == column.name)
+            {
+                seed_columns.push(RowProjection {
+                    output: typed_output_field(&column.name, column.ty),
+                    value: NormalizedValueRef::Param(column.name),
+                });
+            }
+        }
         nodes.insert(
             seed_project_node.clone(),
             RowSetExpr::Project {
@@ -1907,40 +1938,73 @@ fn normalize_reachable_seed(
     }
 
     let mut columns = reachable_frontier_columns(&reachable.from, param_types)?;
-    for column in reachable_edge_route_columns(reachable, param_types)? {
+    for column in reachable_route_columns(reachable, param_types)? {
         if !columns.iter().any(|existing| existing.name == column.name) {
             columns.push(column);
         }
     }
+    let mode = if columns.iter().any(|column| {
+        matches!(
+            &column.value,
+            NormalizedValueRef::Param(_) | NormalizedValueRef::Claim(_)
+        )
+    }) {
+        ValueSourceMode::Binding
+    } else {
+        reachable_seed_value_source_mode(&reachable.from)?
+    };
     let seed_node = RowSetNodeId(format!("{reachable_id}:seed"));
     nodes.insert(
         seed_node.clone(),
         RowSetExpr::ValueSource {
             shape: binding_source_shape.to_owned(),
             columns: columns.clone(),
-            mode: reachable_seed_value_source_mode(&reachable.from)?,
+            mode,
         },
     );
     Ok((seed_node, columns))
 }
 
-fn reachable_edge_route_columns(
+fn reachable_route_columns(
     reachable: &crate::query::ReachableVia,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<Vec<ValueSourceColumn>, Error> {
-    predicate_params(&reachable.edge_filters)
+    let mut params = predicate_params(&reachable.edge_filters);
+    if let Some(seed) = &reachable.seed {
+        params.extend(predicate_params(&seed.filters));
+    }
+    let mut columns = params
         .into_iter()
         .map(|param| {
             let ty = param_types.get(&param).cloned().ok_or_else(|| {
-                Error::QueryLowering(format!("unknown reachable edge parameter {param}"))
+                Error::QueryLowering(format!("unknown reachable parameter {param}"))
             })?;
             Ok(ValueSourceColumn {
-                name: route_param_field(&param),
+                name: if claim_path_from_param_field(&param).is_some() {
+                    param.clone()
+                } else {
+                    route_param_field(&param)
+                },
                 value: NormalizedValueRef::Param(param),
                 ty,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, Error>>()?;
+    // The same columns define the seed, frontier, recursive step and dedupe
+    // tuple. Preserve exact typed aliases rather than reconstructing a claim
+    // name from its path, which would conflate differently typed slots.
+    for (name, ty) in param_types {
+        if claim_path_from_param_field(name).is_some()
+            && !columns.iter().any(|column| column.name == *name)
+        {
+            columns.push(ValueSourceColumn {
+                name: name.clone(),
+                value: NormalizedValueRef::Param(name.clone()),
+                ty: ty.clone(),
+            });
+        }
+    }
+    Ok(columns)
 }
 
 fn reachable_seed_frontier_columns(
@@ -2787,38 +2851,118 @@ where
 {
     pub(super) fn collect_policy_dependency_claim_params(
         &self,
-        schema: &RuntimeSchema,
+        read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
         input: &NormalizedRowSetShape,
         params: &mut BTreeMap<String, ProgramClaimParam>,
     ) -> Result<(), Error> {
-        let claims = match policy {
-            PolicyContext::Identity { claims, .. }
-            | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
-            PolicyContext::System => return Ok(()),
+        // Only ordinary identity-authorized sources request read-policy
+        // dependencies. AuthorizationSubplan auxiliaries are System reads;
+        // their policies must not contribute unrelated claims to this domain.
+        if matches!(policy, PolicyContext::System) {
+            params.clear();
+        }
+        if !matches!(policy, PolicyContext::Identity { .. }) {
+            return Ok(());
+        }
+        let schema = if read_view.policy_schema == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if read_view.policy_schema == self.catalogue.local_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&read_view.policy_schema)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy schema version is unknown",
+                ))?
+                .schema
         };
-        for table_name in normalized_source_tables(input) {
+        let sources = input
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                RowSetExpr::Source { source, visibility } => Some((source, *visibility)),
+                _ => None,
+            })
+            .chain(
+                input
+                    .auxiliary_sources
+                    .iter()
+                    .map(|source| (source, RowVisibility::Visible)),
+            );
+        let mut dependencies = BTreeSet::new();
+        for (source, visibility) in sources {
+            // Match the source modes that actually construct policy dependency
+            // requests. Historical and include-deleted proofs inline parameters;
+            // ordinary prepared proofs retain them.
+            let (retain_params, include_deleted_root) = match read_view.sources.get(source) {
+                Some(SourceExpr::HistoryCut {
+                    data: DataSource::Current,
+                    ..
+                }) => (false, false),
+                Some(SourceExpr::SnapshotRef {
+                    data: DataSource::Current,
+                    ..
+                }) => (true, false),
+                Some(
+                    SourceExpr::VisibleCurrent { .. }
+                    | SourceExpr::BranchView { .. }
+                    | SourceExpr::SettledBindingView { .. }
+                    | SourceExpr::WithOverlays { .. },
+                ) => {
+                    let include_deleted = visibility == RowVisibility::IncludeDeleted;
+                    (!include_deleted, include_deleted)
+                }
+                _ => continue,
+            };
+            dependencies.insert((source.table.as_str(), retain_params, include_deleted_root));
+        }
+        for (table_name, retain_params, include_deleted_root) in dependencies {
             let table = schema
                 .tables
                 .iter()
                 .find(|table| table.name == table_name)
-                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-            let mut query = authorization_query_from_read_policy(table);
-            let mut values = BTreeMap::new();
-            bind_scope_claim_operands(&mut query, claims, &mut values);
-            for (name, claim) in disambiguate_policy_claim_params(&mut query, schema, &mut values)?
-            {
-                // The root policy may rediscover the same claim slot while
-                // walking its source tables. Keep the already-lowered slot in
-                // that case; a typed alias is only needed when the same claim
-                // path is required at a genuinely different schema type.
-                if params
-                    .values()
-                    .any(|existing| existing.path == claim.path && existing.ty == claim.ty)
-                {
-                    continue;
-                }
-                params.insert(name, claim);
+                .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+            let dependency_policy =
+                authorization::read_policy_authorization_context(policy.clone(), table_name);
+            let dependency = self
+                .normalized_read_policy_input(
+                    schema,
+                    table,
+                    &dependency_policy,
+                    if retain_params {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    },
+                    params.clone(),
+                    include_deleted_root,
+                )
+                .and_then(|dependency| {
+                    self.program_binding_for_shape_and_policy(
+                        &dependency.shape,
+                        &dependency.binding,
+                        None,
+                        BTreeMap::new(),
+                        dependency.claim_params,
+                        &dependency_policy,
+                    )
+                });
+            // Normalization expands inherited operation policies and reachable
+            // seeds in the same pass as the real dependency request. Its
+            // policy-local parameters already reuse equivalent outer slots.
+            // No recursive table-policy walk or fixed point is needed: sources
+            // introduced inside this dependency are read under System authority.
+            match dependency {
+                Ok(binding) => *params = binding.claim_params,
+                // The actual source resolver turns an unsupported or unbound
+                // policy proof into an empty authorization graph. It contributes
+                // no binding source; in particular, missing policy claims must
+                // not become required ordinary outer-query claims.
+                Err(Error::QueryCapability(error)) if !error.contains("PolicyProofCycle") => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(())
@@ -2828,6 +2972,38 @@ where
         &self,
         shape: &ValidatedQuery,
         _binding: &Binding,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        self.normalized_row_set_shape_with_param_types(shape, _binding, shape.params())
+    }
+
+    /// Complete the normalization-only parameter types without changing the
+    /// validated query or its user binding. Recursive seeds use these exact
+    /// slots to carry the shared prepared domain through every frontier.
+    pub(super) fn normalized_row_set_shape_with_claim_params(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        claim_params: &BTreeMap<String, ProgramClaimParam>,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        let mut param_types = shape.params().clone();
+        for (name, claim) in claim_params {
+            if let Some(existing) = param_types.get(name)
+                && existing != &claim.ty
+            {
+                return Err(Error::QueryLowering(format!(
+                    "claim binding slot '{name}' conflicts with its validated parameter type"
+                )));
+            }
+            param_types.insert(name.clone(), claim.ty.clone());
+        }
+        self.normalized_row_set_shape_with_param_types(shape, binding, &param_types)
+    }
+
+    fn normalized_row_set_shape_with_param_types(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        param_types: &BTreeMap<String, ColumnType>,
     ) -> Result<NormalizedRowSetShape, Error> {
         let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
             &self.catalogue.active_schema.compiled
@@ -2843,7 +3019,13 @@ where
         };
         let query = shape.query();
         if let Some(relation) = &query.relation {
-            return self.normalized_relation_union_row_set_shape(shape, relation, _binding, schema);
+            return self.normalized_relation_union_row_set_shape(
+                shape,
+                relation,
+                binding,
+                schema,
+                param_types,
+            );
         }
         let root_source = root_source_id(&query.table);
         let (mut auxiliary_sources, closure_paths) =
@@ -2897,7 +3079,7 @@ where
                         reachable: &query.reachable,
                     },
                     &binding_source_shape,
-                    shape.params(),
+                    param_types,
                     false,
                     true,
                     &inheritance_path,
@@ -2944,7 +3126,7 @@ where
                         reachable: &branch.reachable,
                     },
                     &binding_source_shape,
-                    shape.params(),
+                    param_types,
                     false,
                     false,
                     &inheritance_path,
@@ -3008,7 +3190,7 @@ where
                     reachable: &query.reachable,
                 },
                 &binding_source_shape,
-                shape.params(),
+                param_types,
                 true,
                 true,
                 &inheritance_path,
@@ -3295,7 +3477,7 @@ where
             reachable_contributions,
             nodes,
         };
-        let claim_params = binding_claim_params_for_shape(&normalized, shape.params());
+        let claim_params = binding_claim_params_for_shape(&normalized, param_types);
         let binding_source_shape =
             query_binding_source_shape_for_parts(shape.params(), &claim_params);
         retarget_binding_value_sources(&mut normalized, &binding_source_shape);
@@ -3312,6 +3494,7 @@ where
         relation: &RelationQuery,
         binding: &Binding,
         schema: &RuntimeSchema,
+        param_types: &BTreeMap<String, ColumnType>,
     ) -> Result<NormalizedRowSetShape, Error> {
         let Some(parts) = crate::query::relation_union_parts(&relation.rel) else {
             return Err(Error::QueryCapability(
@@ -3337,7 +3520,8 @@ where
             }
             let arm_shape =
                 arm_query.validate_with_schema_version(schema, shape.schema_version())?;
-            let mut normalized = self.normalized_row_set_shape(&arm_shape, binding)?;
+            let mut normalized =
+                self.normalized_row_set_shape_with_param_types(&arm_shape, binding, param_types)?;
             let prefix = format!("relation_union:{}", arm.label);
             prefix_normalized_relation_arm(
                 &mut normalized,
@@ -3436,6 +3620,23 @@ where
         binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
         let mut normalized = self.normalized_row_set_shape(shape, binding)?;
+        Self::include_deleted_root(&mut normalized, shape);
+        Ok(normalized)
+    }
+
+    pub(super) fn normalized_include_deleted_row_set_shape_with_claim_params(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        claim_params: &BTreeMap<String, ProgramClaimParam>,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        let mut normalized =
+            self.normalized_row_set_shape_with_claim_params(shape, binding, claim_params)?;
+        Self::include_deleted_root(&mut normalized, shape);
+        Ok(normalized)
+    }
+
+    fn include_deleted_root(normalized: &mut NormalizedRowSetShape, shape: &ValidatedQuery) {
         let root_source = root_source_id(&shape.query().table);
         for node in normalized.nodes.values_mut() {
             if let RowSetExpr::Source { source, visibility } = node
@@ -3444,6 +3645,5 @@ where
                 *visibility = RowVisibility::IncludeDeleted;
             }
         }
-        Ok(normalized)
     }
 }
