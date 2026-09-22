@@ -105,7 +105,7 @@ jobs:
           key: rn-device-ios-macos-15-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
-        run: cargo test -p jazz-native-relay --example rn_edge_session_harness --no-fail-fast
+        run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Build and stage the relay XCFramework
@@ -190,7 +190,7 @@ jobs:
           key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
-        run: cargo test -p jazz-native-relay --example rn_edge_session_harness --no-fail-fast
+        run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Bootstrap pinned lane-local Android toolchain
