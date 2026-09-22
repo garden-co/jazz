@@ -991,6 +991,7 @@ function resolveOutputColumnTransforms<T>(
 }
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
+  resolveClient: (schema: WasmSchema) => JazzClient;
   openTransactionId: OpenTransactionId;
   session?: Session;
   readSession?: Session;
@@ -1257,6 +1258,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const { writeSession: session, readSession, attribution } = this.context ?? {};
     dbTxHandleBindings.set(this, {
       ownerClient,
+      resolveClient: this.resolveClient,
       openTransactionId: ownerClient.beginTransaction(this.kind, session, attribution),
       session,
       readSession,
@@ -1737,6 +1739,7 @@ function preparedTransactionScope(
   const scope: E2eeTransactionScope = {
     kind: "exclusive",
     upsert(table, id, data, options) {
+      binding.resolveClient(table._schema);
       const transformed = transformInputColumns(table, data);
       const values = toWriteRecordForOperation("Upsert", transformed, table._schema, table._table);
       io.upsertInternal(
@@ -1749,12 +1752,16 @@ function preparedTransactionScope(
         openTransactionId,
       );
     },
-    all: (query, options) => readTransactionRows(query, options, false, binding, io),
+    all(query, options) {
+      binding.resolveClient(query._schema);
+      return readTransactionRows(query, options, false, binding, io);
+    },
     async one(query, options) {
       const rows = await scope.all(limitQueryToOne(query), options);
       return rows[0] ?? null;
     },
     insert(table, data, options) {
+      binding.resolveClient(table._schema);
       const transformed = transformInputColumns(table, data);
       const values = toWriteRecordForOperation("Insert", transformed, table._schema, table._table);
       const row = io.insertInternal(
@@ -1768,6 +1775,7 @@ function preparedTransactionScope(
       return transformOutputRow(table, transformRow(row, table._schema, table._table));
     },
     async allSettledForE2ee(query) {
+      binding.resolveClient(query._schema);
       const { rows, settlements } = await readTransactionRows(
         query,
         { tier: "global" },
