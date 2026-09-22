@@ -514,6 +514,7 @@ pub struct DeterministicDriver {
     queue: BinaryHeap<ScheduledEvent>,
     inboxes: BTreeMap<NodeName, VecDeque<DeliveredMessage>>,
     paused_links: BTreeMap<(NodeName, NodeName), PausedLink>,
+    effective_deadlines: BTreeMap<(NodeName, NodeName), u64>,
     transport_codec: SimulatorTransportCodec,
     metrics: Metrics,
 }
@@ -529,6 +530,7 @@ impl DeterministicDriver {
             queue: BinaryHeap::new(),
             inboxes: BTreeMap::new(),
             paused_links: BTreeMap::new(),
+            effective_deadlines: BTreeMap::new(),
             transport_codec: SimulatorTransportCodec::default(),
             metrics: Metrics::default(),
         }
@@ -642,7 +644,11 @@ impl DeterministicDriver {
     }
 
     fn schedule_delivered_with_profile(&mut self, profile: PeerProfile, message: DeliveredMessage) {
-        let deliver_at_ms = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let nominal_deadline = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let link = (message.from.clone(), message.to.clone());
+        let previous_deadline = self.effective_deadlines.entry(link).or_default();
+        let deliver_at_ms = nominal_deadline.max(*previous_deadline);
+        *previous_deadline = deliver_at_ms;
         let event = ScheduledEvent {
             deliver_at_ms,
             event_id: self.next_event_id,
