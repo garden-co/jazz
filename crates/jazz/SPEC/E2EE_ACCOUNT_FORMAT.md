@@ -324,15 +324,15 @@ keys must never protect real data.
 ## Recovery root signing transcript, version 1
 
 The recovery root binds independent signing and recipient public keys to an
-account. It is not an exported device key. This section specifies the transcript;
-the managed schema also declares its immutable public record. Root publication
-through `recovery.create()` and an initial account-private key delivery are
-implemented. Public recipient discovery validates candidate roots against
-historical device authority. Recovery use can enrol a fresh device and reopen
-that device without another device online. Account rotation also delivers the
-next epoch to accepted recovery roots; the registering-device revocation test
-covers recovery without another device online after two rotations, including
-one initiated by a recovered device.
+account. It is not an exported device key. This layer defines the transcript,
+declares the immutable public record and validates candidate roots against
+historical device authority.
+
+Recovery authoring is deferred to a separate layer. This layer exposes neither
+`recovery.create()` nor `recovery.use(material)`, and its managed permissions
+deny recovery-root insertion. It does not implement recovery key delivery,
+offline enrolment or rotation delivery to recovery roots. The format fixtures
+below do not qualify those lifecycle behaviours.
 
 The signed bytes concatenate three fields, each prefixed by its u32be byte
 length, in this order:
@@ -369,11 +369,12 @@ they are not valid cryptographic keys or evidence of lifecycle qualification.
 
 ### Recovery-backed device approval, version 1
 
-`recovery.use(material)` returns a synchronous handle. Its `wait()` validates
-the material against an accepted recovery root, authenticates a current account
-epoch delivery and enrols the local device through the existing challenge,
-proof, private approval and device-delivery records. An already revoked device
-ID cannot be revived; recovery requires a fresh device identity.
+A future recovery-authoring layer must validate recovery material against an
+accepted root and authenticate a current account epoch delivery before enrolling
+the local device through the challenge, proof, private approval and
+device-delivery records. An already revoked device ID cannot be revived;
+recovery requires a fresh device identity. No recovery-authoring handle is
+implemented by this layer.
 
 The public approval table adds optional `recoveryRootId` and `recoverySignature`
 columns. With a recovery root, `signerId` must equal `deviceId`. Both the new
