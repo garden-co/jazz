@@ -1,4 +1,5 @@
 import { settleAccountSelection } from "../accounts/selection-durability.js";
+import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
@@ -68,7 +69,8 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
 }): Promise<JazzSession<Client>> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
-  if (!selected && options.initial === "local-first") selected = accounts.createLocalFirst();
+  if (!selected && options.initial === "local-first")
+    selected = await ensureAutomaticLocalFirst(accounts);
   if (typeof options.initial === "object") selected = await accounts.becomeBackend(options.initial);
   await settleAccountSelection(accounts);
   let client = selected ? await openClient(selected) : undefined;

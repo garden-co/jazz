@@ -1,6 +1,12 @@
 import { setAccountSelectionBarrier } from "./selection-durability.js";
-import { createAccountManagerWithRuntime, type BackendAccountHost } from "./enrollment.js";
+import {
+  createAccountManagerWithRuntime,
+  type BackendAccountHost,
+  type JWTAuth,
+} from "./enrollment.js";
+import type { AccountHandle, AccountManager } from "./state.js";
 import { localFirstFactory } from "./local-first.js";
+import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 
 /** Platform storage: use browser storage or an OS-protected store on native hosts. */
@@ -38,6 +44,17 @@ function decode(value: string | null): StoredAccounts {
   return { format: parsed.format, roots: [...parsed.roots], selected: parsed.selected };
 }
 
+const automaticInitializers = new WeakMap<AccountManager<JWTAuth>, () => Promise<AccountHandle>>();
+
+/** @internal Select and adopt one durable root for automatic first startup. */
+export async function ensureAutomaticLocalFirst(
+  accounts: AccountManager<JWTAuth>,
+): Promise<AccountHandle> {
+  const selected = accounts.getLoggedIn();
+  if (selected) return selected;
+  return automaticInitializers.get(accounts)?.() ?? accounts.createLocalFirst();
+}
+
 /** @internal Hosts load native crypto first; all selection semantics stay shared. */
 export async function prepareAccountManager(options: {
   appId: string;
@@ -50,6 +67,7 @@ export async function prepareAccountManager(options: {
 }) {
   const stored = decode(await options.store.read());
   let writes = Promise.resolve();
+  let adopting = false;
   const save = () => {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
@@ -83,10 +101,56 @@ export async function prepareAccountManager(options: {
       retainSecret(secret) {
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
+        if (adopting) return;
         stored.selected = index;
         return save();
       },
     }),
+  });
+  automaticInitializers.set(manager, async () => {
+    let changed = false;
+    const unsubscribe = manager.subscribe(() => {
+      if (!adopting) changed = true;
+    });
+    try {
+      // Generate outside the transform because transactional hosts may retry it.
+      const candidate = options.generateSecret?.() ?? generateAuthSecret();
+      parseAuthSecret(candidate);
+      let winner: string | undefined;
+      writes = writes
+        .catch(() => {})
+        .then(() =>
+          options.store.update((current) => {
+            const latest = decode(current);
+            const selected = latest.selected === null ? undefined : latest.roots[latest.selected];
+            if (selected === undefined) {
+              const index = latest.roots.indexOf(candidate);
+              latest.selected = index >= 0 ? index : latest.roots.push(candidate) - 1;
+              winner = candidate;
+            } else {
+              winner = selected;
+            }
+            return JSON.stringify(latest);
+          }),
+        );
+      await writes;
+      if (changed) {
+        const current = manager.getLoggedIn();
+        if (current) return current;
+        throw new Error("Automatic local-first startup was superseded");
+      }
+      if (winner === undefined)
+        throw new Error("Automatic local-first selection was not committed");
+      // Adoption only hydrates the manager; it must not enqueue a selection write.
+      adopting = true;
+      try {
+        return manager.restoreLocalFirst(winner);
+      } finally {
+        adopting = false;
+      }
+    } finally {
+      unsubscribe();
+    }
   });
   let selection = manager.getLoggedIn();
   manager.subscribe(() => {

@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { prepareAccountManager } from "./persistence.js";
+import { ensureAutomaticLocalFirst, prepareAccountManager } from "./persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
@@ -186,4 +186,41 @@ it("converges automatic sessions on one durable root before opening clients", as
     exportLocalFirstSecret(b.getSnapshot().account!),
   );
   expect(JSON.parse(value!)).toMatchObject({ selected: 0, roots: [firstSecret] });
+});
+
+it("does not reselect an automatic root after an interleaved selection", async () => {
+  const automaticSecret = formatAuthSecret(new Uint8Array(32).fill(3));
+  const explicitSecret = formatAuthSecret(new Uint8Array(32).fill(4));
+  let generated = 0;
+  let value: string | null = null;
+  let updates = 0;
+  let finish!: () => void;
+  const durable = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      updates++;
+      value = transform(value);
+      if (updates === 1) await durable;
+    },
+  };
+  const manager = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => (generated++ === 0 ? automaticSecret : explicitSecret),
+  });
+  const pending = ensureAutomaticLocalFirst(manager);
+  await vi.waitFor(() => expect(updates).toBe(1));
+  const explicit = manager.createLocalFirst();
+  finish();
+  const adopted = await pending;
+  expect(adopted).toBe(explicit);
+  await vi.waitFor(() => expect(JSON.parse(value!).selected).toBe(1));
+  expect(JSON.parse(value!).roots).toEqual([automaticSecret, explicitSecret]);
 });
