@@ -4,7 +4,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
+import { deviceRequestSchema, deviceRequestPermissions } from "./index.js";
 
 it.each([false, true])(
   "composes managed records with application policies (devices first: %s)",
