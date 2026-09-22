@@ -16,6 +16,7 @@ fn trace_template(event: &str) {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct QueryProgramTemplateCache {
     entries: VecDeque<TemplateEntry>,
+    physical: groove::ivm::TypedGraphTemplateCache,
     #[cfg(any(test, feature = "testing"))]
     pub(crate) hits: usize,
 }
@@ -31,6 +32,41 @@ struct TemplateEntry {
 impl QueryProgramTemplateCache {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.physical.clear();
+    }
+
+    fn typed_program(
+        &mut self,
+        mut program: QueryProgram,
+        describe: &impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
+    ) -> QueryProgram {
+        let mut graphs = program
+            .lowered
+            .terminals
+            .iter()
+            .map(|terminal| terminal.graph.clone())
+            .collect::<Vec<_>>();
+        graphs.extend(program.lowered.internal_app_rows_graph.iter().cloned());
+        if let Ok(typed) = self.physical.compile_with_sources(&graphs, |graph| {
+            describe(graph.clone())
+                .map(|input| input.descriptor())
+                .map_err(|_| groove::ivm::IvmRuntimeError::UnsupportedOperator)
+        }) {
+            let mut typed = typed.into_iter();
+            for terminal in &mut program.lowered.terminals {
+                terminal.graph = typed.next().expect("typed terminal");
+            }
+            if program.lowered.internal_app_rows_graph.is_some() {
+                program.lowered.internal_app_rows_graph = typed.next();
+            }
+            trace_template("typed_bound");
+            #[cfg(any(test, feature = "testing"))]
+            if std::env::var_os("JAZZ_QUERY_TEMPLATE_TRACE").is_some() {
+                let (compiled, reused) = self.physical.counters();
+                eprintln!("JAZZ_QUERY_TEMPLATE_TRACE physical compiled={compiled} reused={reused}");
+            }
+        }
+        program
     }
 
     pub(crate) fn lower(
@@ -40,12 +76,13 @@ impl QueryProgramTemplateCache {
         explain: ExplainPlan,
         describe: impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
     ) -> QueryCompileResult {
-        // Private inline programs still bake literals into their shape. Until
-        // scalar slots exist, preparing a fresh template for each such shape
-        // adds work without enabling cross-binding reuse. Keep their ordinary
-        // compiler path, rather than charging all receivers for this boundary.
-        if compilation.request.input.binding.source_shape.is_none() {
-            return lower_resolved_query_program(compilation, sources, explain);
+        // Jazz admission and coercion retain the exact logical request. Physical
+        // families may share across literals because their Filter predicates
+        // and source graphs are explicit per-instance installation arguments.
+        let prepared = compilation.request.input.binding.source_shape.is_some();
+        if !prepared {
+            let program = lower_resolved_query_program(compilation, sources, explain)?;
+            return Ok(self.typed_program(program, &describe));
         }
         // Prepared programs may omit values only if unbound lowering succeeds.
         let mut template_compilation = compilation.clone();
@@ -118,26 +155,7 @@ impl QueryProgramTemplateCache {
                 &source_parameters,
             )
             .ok()
-            .map(|mut program| {
-                let mut graphs = program
-                    .lowered
-                    .terminals
-                    .iter()
-                    .map(|terminal| terminal.graph.clone())
-                    .collect::<Vec<_>>();
-                graphs.extend(program.lowered.internal_app_rows_graph.iter().cloned());
-                if let Ok(typed) = groove::ivm::compile_template_graphs(&graphs) {
-                    let mut typed = typed.into_iter();
-                    for terminal in &mut program.lowered.terminals {
-                        terminal.graph = typed.next().expect("typed terminal");
-                    }
-                    if program.lowered.internal_app_rows_graph.is_some() {
-                        program.lowered.internal_app_rows_graph = typed.next();
-                    }
-                    trace_template("typed_compiled");
-                }
-                Arc::new(program)
-            });
+            .map(Arc::new);
             if self.entries.len() == 64 {
                 self.entries.pop_front();
             }
@@ -181,6 +199,6 @@ impl QueryProgramTemplateCache {
         let capabilities = program.explain.capabilities.clone();
         program.explain = explain_with_request(&program.request, explain);
         program.explain.capabilities.extend(capabilities);
-        Ok(program)
+        Ok(self.typed_program(program, &describe))
     }
 }

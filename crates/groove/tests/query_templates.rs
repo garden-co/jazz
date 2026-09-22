@@ -294,3 +294,99 @@ async fn typed_templates_reject_forged_contracts_and_preserve_ordered_sources() 
     );
     assert_eq!(expected, vec![(vec![Value::U64(11)], 1)]);
 }
+
+#[futures_test::test]
+async fn typed_family_reuses_operators_without_capturing_predicates_or_rows() {
+    let mut db = database().await;
+    let mut cache = groove::ivm::TypedGraphTemplateCache::default();
+    let shape = |second| {
+        template()
+            .filter(groove::ivm::PredicateExpr::eq("id", Value::U64(11)))
+            .filter(groove::ivm::PredicateExpr::eq("id", Value::U64(second)))
+    };
+    let first = cache.compile(&[shape(11)]).unwrap().remove(0);
+    let second = cache.compile(&[shape(22)]).unwrap().remove(0);
+    // This public compiler-artifact assertion proves that the exact-result
+    // checks below exercise reuse, not two independent compilations.
+    match (&first, &second) {
+        (
+            GraphBuilder::TypedTemplate { program: a, .. },
+            GraphBuilder::TypedTemplate { program: b, .. },
+        ) => assert!(std::sync::Arc::ptr_eq(a, b)),
+        _ => panic!("expected typed family reuse"),
+    }
+    for (graph, expected) in [
+        (first.clone(), vec![(vec![Value::U64(11)], 1)]),
+        (second, Vec::new()),
+    ] {
+        let rows = GraphBuilder::values(descriptor(), [vec![Value::U64(11)], vec![Value::U64(22)]])
+            .unwrap();
+        let bound = bind_template_graphs(&[graph], &[db.describe_template_input(rows).unwrap()])
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            db.query_graph(bound).await.unwrap().to_values().unwrap(),
+            expected
+        );
+    }
+    // The same typed program can run in a fresh runtime with changed data.
+    let mut fresh = database().await;
+    let rows = GraphBuilder::values(descriptor(), [vec![Value::U64(22)]]).unwrap();
+    let graph = bind_template_graphs(&[first], &[fresh.describe_template_input(rows).unwrap()])
+        .unwrap()
+        .remove(0);
+    assert!(
+        fresh
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[futures_test::test]
+async fn typed_family_preserves_source_projection_context_and_bound_contracts() {
+    use groove::ivm::{ProjectField, TypedGraphTemplateCache};
+    use std::sync::Arc;
+    let mut db = database().await;
+    let mut cache = TypedGraphTemplateCache::default();
+    let raw = RecordDescriptor::new([("left", ColumnType::U64), ("right", ColumnType::U64)]);
+    for (field, left, right, expected) in [
+        ("left", 11, 22, 11),
+        ("right", 11, 22, 22),
+        ("left", 33, 44, 33),
+    ] {
+        let source = GraphBuilder::values(raw, [vec![Value::U64(left), Value::U64(right)]])
+            .unwrap()
+            .project_fields([ProjectField::renamed(field, "id")]);
+        let graph = GraphBuilder::TemplateInput {
+            slot: 7,
+            output: descriptor(),
+            input: Some(Arc::new(source)),
+        }
+        .project(["id"]);
+        let typed = cache.compile(&[graph.clone()]).unwrap().remove(0);
+        assert_eq!(
+            db.query_graph(typed).await.unwrap().to_values().unwrap(),
+            vec![(vec![Value::U64(expected)], 1)]
+        );
+        assert_eq!(
+            db.query_graph(graph).await.unwrap().to_values().unwrap(),
+            vec![(vec![Value::U64(expected)], 1)]
+        );
+    }
+    let forged = GraphBuilder::TemplateInput {
+        slot: 7,
+        output: descriptor(),
+        input: Some(Arc::new(
+            GraphBuilder::values(raw, [vec![Value::U64(11), Value::U64(22)]]).unwrap(),
+        )),
+    }
+    .project(["id"]);
+    assert!(matches!(
+        cache.compile(&[forged]),
+        Err(IvmRuntimeError::GraphOutputMismatch)
+    ));
+}

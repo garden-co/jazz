@@ -80,8 +80,23 @@ fn shared_witness_execution_requires_complete_graph_and_schema_equality() {
         )
         .unwrap();
     let (replacement, version) = program.lowered.shared_witness_sinks.iter().next().unwrap();
+    let mut declarative = program.lowered.terminals.clone();
+    for terminal in &mut declarative {
+        if let GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+        } = &terminal.graph
+        {
+            terminal.graph = program.bind_declarative(inputs, predicates).unwrap();
+        }
+    }
+    assert_eq!(
+        shared_witness_sinks_for_test(&declarative),
+        program.lowered.shared_witness_sinks
+    );
     for mutation in 0..5 {
-        let mut terminals = program.lowered.terminals.clone();
+        let mut terminals = declarative.clone();
         let target = terminals
             .iter_mut()
             .find(|terminal| &terminal.sink == replacement)
@@ -137,11 +152,11 @@ fn shared_witness_execution_requires_complete_graph_and_schema_equality() {
             "mutation {mutation}"
         );
     }
-    let mut missing_version = program.lowered.terminals.clone();
+    let mut missing_version = declarative.clone();
     missing_version.retain(|terminal| &terminal.sink != version);
     assert!(!shared_witness_sinks_for_test(&missing_version).contains_key(replacement));
 
-    let mut repeated_role = program.lowered.terminals.clone();
+    let mut repeated_role = declarative;
     let mut duplicate = repeated_role
         .iter()
         .find(|terminal| &terminal.sink == replacement)
@@ -385,9 +400,11 @@ fn subscribe_query_binding_as_system_with_opts(
 
 fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
     match graph {
-        GraphBuilder::TypedTemplate { program, inputs } => {
-            graph_contains_point_scan(&program.bind_declarative(inputs).unwrap())
-        }
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+        } => graph_contains_point_scan(&program.bind_declarative(inputs, predicates).unwrap()),
         GraphBuilder::TemplateInput { input, .. } => input
             .as_ref()
             .is_some_and(|input| graph_contains_point_scan(input)),

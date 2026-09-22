@@ -310,7 +310,11 @@ impl IvmRuntime {
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
-            GraphBuilder::TypedTemplate { program, inputs } => {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+            } => {
                 let compiled = inputs
                     .iter()
                     .map(|input| {
@@ -320,7 +324,7 @@ impl IvmRuntime {
                             .ok_or(IvmRuntimeError::UnsupportedOperator)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                self.install_typed_template(program, &compiled, inputs)
+                self.install_typed_template(program, &compiled, inputs, predicates)
             }
             GraphBuilder::TemplateInput { input, output, .. } => {
                 let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;

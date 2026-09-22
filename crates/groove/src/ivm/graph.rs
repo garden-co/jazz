@@ -154,6 +154,7 @@ pub enum GraphBuilder {
     TypedTemplate {
         program: Arc<super::template::TypedGraphTemplate>,
         inputs: Vec<Arc<GraphBuilder>>,
+        predicates: Vec<PredicateExpr>,
     },
     /// A typed, compilation-only input of an immutable query template. Binding
     /// supplies a descriptor-checked graph, not rows or authority. Compilation

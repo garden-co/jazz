@@ -11,8 +11,8 @@ mod activation;
 mod execution_layout;
 mod template;
 pub use template::{
-    TemplateBindingError, TemplateGraphInput, TypedGraphTemplate, bind_template_graphs,
-    compile_template_graphs,
+    TemplateBindingError, TemplateGraphInput, TypedGraphTemplate, TypedGraphTemplateCache,
+    bind_template_graphs, compile_template_graphs,
 };
 pub mod graph;
 pub mod op_types;

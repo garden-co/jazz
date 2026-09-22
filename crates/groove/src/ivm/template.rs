@@ -19,6 +19,27 @@ pub struct TypedGraphTemplate {
     pub(crate) ordering: Option<TemplateNodeRef>,
     pub(crate) terminal: bool,
     pub(crate) fallback: GraphBuilder,
+    pub(crate) predicate_markers: Vec<super::PredicateExpr>,
+}
+
+/// Bounded whole-graph compiler cache. Keys contain source contracts and
+/// operator structure, not actual sources, rows or predicate argument values.
+#[derive(Clone, Debug, Default)]
+pub struct TypedGraphTemplateCache {
+    pub(crate) entries: std::collections::VecDeque<(u64, GraphBuilder, Arc<TypedGraphTemplate>)>,
+    pub(crate) compilations: u64,
+    pub(crate) reuses: u64,
+}
+
+impl TypedGraphTemplateCache {
+    /// Cumulative compiler work, retained across entry invalidation.
+    pub fn counters(&self) -> (u64, u64) {
+        (self.compilations, self.reuses)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl PartialEq for TypedGraphTemplate {
@@ -37,7 +58,26 @@ impl TypedGraphTemplate {
     pub fn bind_declarative(
         &self,
         inputs: &[Arc<GraphBuilder>],
+        predicates: &[super::PredicateExpr],
     ) -> Result<GraphBuilder, TemplateBindingError> {
+        if predicates.len() != self.predicate_markers.len() {
+            return Err(TemplateBindingError::PredicateArity);
+        }
+        let mut rewritten = HashMap::<usize, Arc<GraphBuilder>>::new();
+        for node in self.fallback.postorder() {
+            let mut bound =
+                node.map_inputs(|child| rewritten[&(Arc::as_ptr(child) as usize)].clone());
+            if let GraphBuilder::Filter { predicate, .. } = &mut bound
+                && let Some(slot) = self
+                    .predicate_markers
+                    .iter()
+                    .position(|marker| marker == predicate)
+            {
+                *predicate = predicates[slot].clone();
+            }
+            rewritten.insert(node as *const GraphBuilder as usize, Arc::new(bound));
+        }
+        let fallback = rewritten[&(&self.fallback as *const GraphBuilder as usize)].clone();
         let inputs = inputs
             .iter()
             .zip(&self.inputs)
@@ -45,7 +85,10 @@ impl TypedGraphTemplate {
                 TemplateGraphInput::with_output_contract((**graph).clone(), *output)
             })
             .collect::<Vec<_>>();
-        Ok(bind_template_graphs(std::slice::from_ref(&self.fallback), &inputs)?.remove(0))
+        Ok(
+            bind_template_graphs_inner(std::slice::from_ref(fallback.as_ref()), &inputs, true)?
+                .remove(0),
+        )
     }
 }
 impl std::hash::Hash for TypedGraphTemplate {
@@ -64,6 +107,7 @@ pub(crate) enum TemplateNodeRef {
 pub(crate) struct TemplateNode {
     pub(crate) descriptor: super::NodeDescriptor,
     pub(crate) inputs: Vec<TemplateNodeRef>,
+    pub(crate) predicate: Option<usize>,
 }
 
 /// Compile source-slot graphs once into typed operator definitions. The
@@ -72,7 +116,7 @@ pub(crate) struct TemplateNode {
 pub fn compile_template_graphs(
     graphs: &[GraphBuilder],
 ) -> Result<Vec<GraphBuilder>, super::IvmRuntimeError> {
-    super::runtime::IvmRuntime::compile_template_graphs(graphs)
+    TypedGraphTemplateCache::default().compile(graphs)
 }
 
 /// A graph with an explicit output contract. This does not prove that
@@ -106,6 +150,8 @@ impl TemplateGraphInput {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TemplateBindingError {
+    #[error("template predicate argument count does not match")]
+    PredicateArity,
     #[error("template input {0} is missing")]
     MissingInput(u32),
     #[error("template input {0} has a different record descriptor")]
@@ -121,6 +167,17 @@ pub fn bind_template_graphs(
     graphs: &[GraphBuilder],
     inputs: &[TemplateGraphInput],
 ) -> Result<Vec<GraphBuilder>, TemplateBindingError> {
+    bind_template_graphs_inner(graphs, inputs, false)
+}
+
+// Compiler-owned normalized families may contain bound contract wrappers
+// above local slots. Never recurse into a supplied replacement, whose slots
+// belong to its original owner.
+pub(crate) fn bind_template_graphs_inner(
+    graphs: &[GraphBuilder],
+    inputs: &[TemplateGraphInput],
+    descend_bound: bool,
+) -> Result<Vec<GraphBuilder>, TemplateBindingError> {
     let mut rewritten = HashMap::<*const GraphBuilder, Arc<GraphBuilder>>::new();
     for root in graphs {
         let mut pending = vec![(root, false)];
@@ -135,25 +192,27 @@ pub fn bind_template_graphs(
                 input: bound,
             } = node
             {
-                if bound.is_some() {
+                if bound.is_some() && !descend_bound {
                     rewritten.insert(key, Arc::new(node.clone()));
                     continue;
                 }
-                let input = inputs
-                    .get(*slot as usize)
-                    .ok_or(TemplateBindingError::MissingInput(*slot))?;
-                if input.output != *output {
-                    return Err(TemplateBindingError::DescriptorMismatch(*slot));
+                if bound.is_none() {
+                    let input = inputs
+                        .get(*slot as usize)
+                        .ok_or(TemplateBindingError::MissingInput(*slot))?;
+                    if input.output != *output {
+                        return Err(TemplateBindingError::DescriptorMismatch(*slot));
+                    }
+                    rewritten.insert(
+                        key,
+                        Arc::new(GraphBuilder::TemplateInput {
+                            slot: *slot,
+                            output: *output,
+                            input: Some(input.graph.clone()),
+                        }),
+                    );
+                    continue;
                 }
-                rewritten.insert(
-                    key,
-                    Arc::new(GraphBuilder::TemplateInput {
-                        slot: *slot,
-                        output: *output,
-                        input: Some(input.graph.clone()),
-                    }),
-                );
-                continue;
             }
             if !expanded {
                 pending.push((node, true));

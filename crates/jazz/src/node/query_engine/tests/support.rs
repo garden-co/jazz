@@ -47,9 +47,14 @@ pub(super) fn collect_binding_source_fingerprint(
     sources: &mut BTreeSet<(String, u64)>,
 ) {
     match graph {
-        GraphBuilder::TypedTemplate { program, inputs } => {
-            collect_binding_source_fingerprint(&program.bind_declarative(inputs).unwrap(), sources)
-        }
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+        } => collect_binding_source_fingerprint(
+            &program.bind_declarative(inputs, predicates).unwrap(),
+            sources,
+        ),
         GraphBuilder::TemplateInput { input, .. } => {
             if let Some(input) = input {
                 collect_binding_source_fingerprint(input, sources);
@@ -116,9 +121,14 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         return true;
     }
     match graph {
-        GraphBuilder::TypedTemplate { program, inputs } => {
-            graph_any(&program.bind_declarative(inputs).unwrap(), predicate)
-        }
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+        } => graph_any(
+            &program.bind_declarative(inputs, predicates).unwrap(),
+            predicate,
+        ),
         GraphBuilder::TemplateInput { input, .. } => input
             .as_ref()
             .is_some_and(|input| graph_any(input, predicate)),

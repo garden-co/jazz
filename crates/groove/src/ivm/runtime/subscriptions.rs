@@ -764,7 +764,7 @@ impl Hash for AutoDirectFamilyKey {
 /// Bounded structural fingerprint for auto-direct family lookup. Hash-map
 /// collisions are resolved by [`graph_builders_equal`], so this hash never
 /// carries semantic identity by itself.
-fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
+pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
     let mut hashes = HashMap::<*const GraphBuilder, u64>::default();
     macro_rules! child {
         ($child:expr) => {
@@ -781,8 +781,13 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
         let mut hasher = DefaultHasher::new();
         std::mem::discriminant(node).hash(&mut hasher);
         match node {
-            GraphBuilder::TypedTemplate { program, inputs } => {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+            } => {
                 program.hash(&mut hasher);
+                predicates.hash(&mut hasher);
                 for input in inputs {
                     child!(input).hash(&mut hasher);
                 }
@@ -980,7 +985,7 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
 }
 
 /// Exact, nonrecursive equality check paired with the bounded family hash.
-fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
+pub(super) fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
         match (left, right) {
@@ -988,12 +993,14 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 GraphBuilder::TypedTemplate {
                     program: a,
                     inputs: b,
+                    predicates: c,
                 },
                 GraphBuilder::TypedTemplate {
                     program: x,
                     inputs: y,
+                    predicates: z,
                 },
-            ) if a == x && b.len() == y.len() => {
+            ) if a == x && b.len() == y.len() && c == z => {
                 pending.extend(b.iter().zip(y).map(|(b, y)| (b.as_ref(), y.as_ref())))
             }
             (
@@ -4046,7 +4053,14 @@ impl IvmRuntime {
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
-            GraphBuilder::TypedTemplate { program, inputs } => {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+            } => {
+                if predicates.len() != program.predicate_markers.len() {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
                 if inputs.len() != program.inputs.len() {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
