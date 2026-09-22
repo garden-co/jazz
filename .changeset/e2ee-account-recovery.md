@@ -6,6 +6,9 @@ Add independently generated account recovery creation/import, root registration 
 recovery-backed device approval, rotation delivery, local-first secret protection,
 and read-only recovery status. Recovery does not restore revoked membership, reuse
 a device private key, or report registration alone as proof of recoverability.
+Validate the final recovery delivery verifier before publication, and sanitise
+material-import parser and private-key adapter failures without retaining their
+diagnostic text or causes.
 
 Correctness WASM builds retain development safety checks with basic optimization.
 Bound worker and browser-package concurrency so multi-client lifecycle tests keep

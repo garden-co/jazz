@@ -38,7 +38,9 @@ it("validates recovery material against the account scope and both cryptographic
       restored.recipient.privateKey.fill(0);
       restored.signing.privateKey.fill(0);
     }
-    await expect(decode(material, "other-account")).rejects.toThrow(/scope|account/i);
+    await expect(decode(material, "other-account")).rejects.toMatchObject({
+      code: "recovery-material-unusable",
+    });
     for (const patch of [
       { format: "jazz-e2ee-recovery-v2" },
       { rootId: "not-an-id" },

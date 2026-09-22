@@ -26,7 +26,6 @@ import {
   recoveryDeliveryContext,
   encodeRecoveryMaterial,
   decodeRecoveryMaterial,
-  decodeRecoveryMaterialForInspection,
 } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { readPublicMembershipHistory, replayAccountMembership } from "./public-membership.js";
@@ -984,12 +983,7 @@ export class DeviceApproval {
   /** Read-only: validates the same account recovery path as useRecovery. */
   async inspectRecovery(value: string) {
     this.assertOpen();
-    const material = await decodeRecoveryMaterialForInspection(
-      value,
-      this.application,
-      this.keys,
-      this.signer,
-    );
+    const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
     let secret: Uint8Array | undefined;
     try {
       const snapshot = await this.currentSnapshot();
