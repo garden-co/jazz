@@ -4,9 +4,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { benchmarkMetadata, getBenchmarkMetadata, throughput } from "./index.ts";
 
 const root = new URL("../../../", import.meta.url);
-test("catalogue documents all 71 known current and retired wallclock cases", () => {
-  assert.equal(benchmarkMetadata.length, 71);
-  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, 71);
+test("catalogue documents all 72 known current and retired wallclock cases", () => {
+  assert.equal(benchmarkMetadata.length, 72);
+  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, 72);
   for (const m of benchmarkMetadata) {
     for (const key of ["name", "title", "description", "fixture", "storage", "source"] as const)
       assert.ok(m[key].length > 0, `${m.name}: ${key}`);
@@ -55,6 +55,7 @@ test("denominators distinguish transaction count, batch rows, queries and load c
   assert.equal(getBenchmarkMetadata("sequential_insert_1350_rocksdb")?.work.count, 1350);
   assert.equal(getBenchmarkMetadata("batch_update_1350_rocksdb")?.work.unit, "rows updated/s");
   assert.equal(getBenchmarkMetadata("first_sync_27518_rocksdb")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
   assert.match(
     getBenchmarkMetadata("first_sync_27518_rocksdb")!.description,
     /Member, not anonymous/,

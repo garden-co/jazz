@@ -1,5 +1,5 @@
-//! Deterministic permissioned-resource example: native Core → Edge → Client.
-//! Workload revision 1 preserves the historical shallow-history fixture.
+//! Deterministic permissioned-resource example: Core → device-local relay → Client.
+//! Workload revision 2 retains the shallow-history fixture with Core-only authority.
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 pub use alloc_metrics::CountingAllocator as SelectedAllocator;
 #[cfg(feature = "bench-alloc-sites")]
@@ -1428,6 +1428,12 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let seed_start = Instant::now();
     let plan = build_seed_plan(config);
     let cache_key = seed_cache_key(schema, config);
+    // Correctness tests run concurrently: never share a mutable seed cache.
+    #[cfg(test)]
+    let isolated_cache = tempfile::tempdir().unwrap();
+    #[cfg(test)]
+    let cache_dir = isolated_cache.path().join(&cache_key);
+    #[cfg(not(test))]
     let cache_dir = seed_cache_root().join(&cache_key);
     let fresh_seed = std::env::var_os("JAZZ_CUSTOMER_FRESH_SEED").is_some();
     let cache_hit = !fresh_seed && cache_dir.join(SEED_CACHE_READY).is_file();
@@ -1897,7 +1903,7 @@ fn run_cold(
     let relay = open_db_node(
         node(2),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::new(tempfile::tempdir().unwrap())),
     );
     let client = open_client_db(
@@ -1920,7 +1926,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1938,7 +1944,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1987,8 +1993,8 @@ fn run_connect_and_subscribe(
         eprintln!("SQL sync capture enabled: discard this run's timing");
         fs::create_dir_all(&root).unwrap();
         for (name, metrics) in [
-            ("core-edge", &relay_core.right_to_left),
-            ("edge-client", &client_relay.right_to_left),
+            ("core-relay", &relay_core.right_to_left),
+            ("relay-client", &client_relay.right_to_left),
         ] {
             let path = Path::new(&root).join(format!("{name}.jsonl"));
             *metrics.capture.borrow_mut() = Some(SyncCapture {
@@ -2004,9 +2010,14 @@ fn run_connect_and_subscribe(
         }
     }
     let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
-    let _core_sub = seeded
-        .core
-        .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
+    // Both hops belong to the same device reader. Core authorizes the scope;
+    // the local persistence relay forwards only its authorized input versions.
+    let _core_sub = seeded.core.accept_scope_isolated_relay_subscriber_for_test(
+        relay_core.right_transport,
+        config.client_author(seeded),
+        BTreeMap::new(),
+        1,
+    );
     let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
     let _relay_sub = relay
         .db
@@ -2560,7 +2571,7 @@ fn open_db_node(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "edge");
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "relay");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2571,6 +2582,7 @@ fn open_db_node(
         id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node_uuid)))),
     }))
     .unwrap();
+    db.set_relay_authority_session_owner_for_test();
     DbNode { _dir: dir, db }
 }
 
@@ -2852,9 +2864,14 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert("workload_revision".to_owned(), json!(2));
+    fields.insert(
+        "topology".to_owned(),
+        json!("core-device-local-relay-client"),
+    );
     fields.insert("storage_mode".to_owned(), json!(storage_mode()));
     fields.insert(
-        "node_tick_wall_us_core_edge_client".to_owned(),
+        "node_tick_wall_us_core_relay_client".to_owned(),
         json!(summary.tick_wall_us),
     );
     fields.insert(
@@ -3474,5 +3491,34 @@ mod tests {
         let result = fixture.first_sync();
         result.verify();
         assert!(result.rows() > 0);
+    }
+
+    #[test]
+    fn device_local_relay_preserves_exact_scope_after_reopen() {
+        let mut fixture = Fixture::new(0.01);
+        fixture.config.diagnostics = true;
+        let mut result = run_warm(
+            &fixture.schema,
+            &fixture.seeded,
+            &fixture.expected,
+            &fixture.config,
+        );
+        result.expected_rows_by_table = Some(Rc::clone(&fixture.expected_rows_by_table));
+        result.verify();
+    }
+
+    #[test]
+    fn device_local_relay_does_not_grant_unrelated_reader_member_access() {
+        let mut fixture = Fixture::new(0.01);
+        let member_rows = fixture.expected.values().sum::<usize>();
+        fixture.config.identity = BenchIdentity::Spy;
+        fixture.expected = expected_visible_counts(&fixture.seeded, BenchIdentity::Spy);
+        let mut expected = expected_visible_rows(&fixture.seeded, BenchIdentity::Spy);
+        let tables = subscription_tables();
+        expected.retain(|table, _| tables.contains(table));
+        fixture.expected_rows_by_table = Rc::new(expected);
+        let result = fixture.first_sync();
+        result.verify();
+        assert!(result.rows() < member_rows);
     }
 }
