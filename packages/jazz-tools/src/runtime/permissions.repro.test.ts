@@ -9,6 +9,9 @@ import type { RowRefValue } from "../permissions/index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
+import { createDb } from "./default-create-db.js";
+import { localAccountConfig } from "./testing/account-fixtures.js";
+import type { Db } from "./db.js";
 
 const reproApp = s.defineApp({
   teams: s.table(
@@ -869,3 +872,67 @@ describe("runtime permission repros for recursive gather and qualified predicate
     }
   });
 });
+
+it("keeps prepared claim domains complete across private and public policy reads", async () => {
+  const app = s.defineApp({
+    requests: s.table({ publicKey: s.bytes() }, {}),
+    published_keys: s.table(
+      { deviceId: s.uuid(), publicKey: s.bytes() },
+      { device: s.rel("requests", "deviceId") },
+    ),
+  });
+  const permissions = definePermissions(app, ({ policy, session, allOf }) => {
+    policy.requests.allowRead.where({ "$createdBy.account": session.user.account });
+    policy.requests.allowInsert.where({ "$createdBy.account": session.user.account });
+    policy.published_keys.allowRead.where(
+      session.where({ authMode: { in: ["local-first", "external"] } }),
+    );
+    policy.published_keys.allowInsert.where((record) =>
+      allOf([
+        { "$createdBy.account": session.user.account },
+        policy.requests.exists.where({
+          id: record.deviceId,
+          publicKey: record.publicKey,
+          "$createdBy.account": session.user.account,
+        }),
+      ]),
+    );
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Db[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const owner = await createDb(await localAccountConfig(server.appId, server.url));
+    clients.push(owner);
+    const deviceId = randomUUID();
+    expect(await owner.one(app.requests.where({ id: deviceId }), { tier: "edge" })).toBeNull();
+    const request = await owner
+      .insert(app.requests, { publicKey: Uint8Array.of(1, 2, 3) }, { id: deviceId })
+      .wait({ tier: "global" });
+    expect(await owner.one(app.published_keys.where({ deviceId }), { tier: "edge" })).toBeNull();
+    const published = await owner
+      .insert(app.published_keys, {
+        deviceId,
+        publicKey: request.publicKey,
+      })
+      .wait({ tier: "global" });
+    const observer = await createDb(await localAccountConfig(server.appId, server.url));
+    clients.push(observer);
+    expect(await observer.all(app.requests, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(app.published_keys, { tier: "edge" })).toEqual([
+      expect.objectContaining({ id: published.id, deviceId, publicKey: request.publicKey }),
+    ]);
+    expect(await owner.all(app.requests, { tier: "edge" })).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+  } finally {
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await server.stop();
+  }
+}, 30_000);
