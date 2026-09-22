@@ -211,7 +211,10 @@ pub(crate) async fn prepare_and_lower_query_program(
                         ),
                     })
                 })?;
-            resolved_source.authorized_deletion_preimage = Some(preimage.graph);
+            resolved_source.authorized_deletion_preimage = Some(AuthorizedDeletionPreimage {
+                graph: preimage.graph,
+                routing_fields: preimage.routing_fields,
+            });
         }
         // A receiver-local maintained subscription may replace an
         // authority-approved source closure through runtime-owned input

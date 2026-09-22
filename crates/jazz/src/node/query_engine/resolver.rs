@@ -151,7 +151,16 @@ pub(crate) struct ResolvedSource {
     /// Current authorized deleted-row preimage for this same source
     /// occurrence. The deletion terminal semijoins its raw register witness
     /// against this graph, so a tombstone is never authorization by itself.
-    pub(crate) authorized_deletion_preimage: Option<GraphBuilder>,
+    pub(crate) authorized_deletion_preimage: Option<AuthorizedDeletionPreimage>,
+}
+
+/// The authorization proof for a deletion is route-scoped, not only row-scoped.
+/// Keep the route contract with its graph so reusable programs cannot borrow
+/// another binding's proof after projecting down to the deletion version key.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthorizedDeletionPreimage {
+    pub(crate) graph: GraphBuilder,
+    pub(crate) routing_fields: BTreeSet<String>,
 }
 
 /// Concrete content-version source selected by node-side source resolution.

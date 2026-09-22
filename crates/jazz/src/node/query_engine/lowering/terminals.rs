@@ -1077,6 +1077,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         "version_deletion",
                         request,
+                        parameter_domain,
                         &source_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -1140,6 +1141,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         "replacement_deletion",
                         request,
+                        parameter_domain,
                         &source_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -2343,6 +2345,7 @@ fn lowered_aggregate_terminals(
                         resolved_source,
                         "version_deletion",
                         request,
+                        parameter_domain,
                         &root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -2397,6 +2400,7 @@ fn lowered_aggregate_terminals(
                         resolved_source,
                         "replacement_deletion",
                         request,
+                        parameter_domain,
                         &root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -3023,16 +3027,31 @@ fn fact_terminal_graph(
 /// Emit a source-completeness receipt for the currently bound program scope.
 ///
 /// A coverage receipt must exist even when the admitted residual relation is
-/// empty. For routed programs, attach the already-admitted binding literals so
-/// it carries exactly the same compiler-owned policy-route fields as the
-/// CoveredInput terminals. The multisink terminal filters those hidden fields
-/// before the receipt is frozen into a protocol fact.
+/// empty. Prepared programs read routes from their binding input, not from the
+/// values present while the graph was compiled. Otherwise reusing an immutable
+/// program for a second binding would silently retain the first binding's
+/// coverage route. Concrete, non-prepared programs retain their literal route.
+/// The multisink terminal removes hidden fields before freezing protocol facts.
 fn program_source_coverage_graph(
     request: &QueryProgramRequest,
     parameter_domain: &ParameterDomain,
     complete: bool,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
+    if !routing_param_fields.is_empty()
+        && let Some(shape) = &request.input.binding.source_shape
+    {
+        let (binding, routes) = binding_route_projection(
+            shape,
+            &request.input.binding.extra_user_params,
+            parameter_domain,
+            routing_param_fields,
+        )
+        .map_err(single_gap_report)?;
+        return Ok(binding.project_fields(
+            std::iter::once(ProjectField::literal("complete", Value::Bool(complete))).chain(routes),
+        ));
+    }
     if routing_param_fields.is_empty() {
         let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
         return GraphBuilder::values(descriptor, [vec![Value::Bool(complete)]]).map_err(|error| {
@@ -3059,6 +3078,249 @@ fn program_source_coverage_graph(
             .map_err(single_gap_report)?,
     );
     Ok(graph.project_fields(fields))
+}
+
+/// A binding-dependent terminal consumes an explicit typed input. Values and
+/// claims are inserted by the owner of that input; compilation only resolves
+/// names against its descriptor. This is not permission to share a receiver's
+/// input or a session's binding source with another owner.
+fn binding_route_projection(
+    shape: &str,
+    extra_user_params: &BTreeMap<String, ColumnType>,
+    domain: &ParameterDomain,
+    routes: &BTreeSet<String>,
+) -> Result<(GraphBuilder, Vec<ProjectField>), UnsupportedReason> {
+    let mut params = extra_user_params.clone();
+    params.extend(domain.user_params.clone());
+    let descriptor = RecordDescriptor::new(
+        params.into_iter().chain(
+            domain
+                .claim_params
+                .iter()
+                .map(|(name, claim)| (name.clone(), claim.ty.clone())),
+        ),
+    );
+    let fields = routes
+        .iter()
+        .map(|route| {
+            let source = if domain.claim_params.contains_key(route) {
+                route.as_str()
+            } else {
+                route_param_from_field(route).ok_or_else(|| {
+                    UnsupportedReason::Runtime(format!(
+                        "binding route '{route}' has no parameter slot"
+                    ))
+                })?
+            };
+            let index = descriptor.field_index(source).ok_or_else(|| {
+                UnsupportedReason::Runtime(format!(
+                    "binding route '{route}' is absent from its input descriptor"
+                ))
+            })?;
+            Ok(ProjectField::renamed_resolved(index, route.clone()))
+        })
+        .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+    Ok((GraphBuilder::binding_source(shape, descriptor), fields))
+}
+
+#[cfg(test)]
+mod binding_route_tests {
+    use super::*;
+    use crate::legacy_test_future::ResultFutureExt as _;
+    use groove::storage::MemoryStorage;
+    use groove::{db::Database, ivm::RoutedMultisinkTerminal, schema::DatabaseSchema};
+
+    #[test]
+    fn compiled_routes_bind_independently_and_survive_sibling_retirement() {
+        // Internal compiler-boundary test: the public Jazz installer still
+        // recompiles per concrete request. Rebind this exact immutable graph
+        // through Groove's public API to detect captured values before enabling
+        // cross-binding Jazz template reuse. No query/permission JSON fixtures.
+        let route = route_param_field("tenant");
+        let domain = ParameterDomain {
+            user_params: BTreeMap::from([("tenant".to_owned(), ColumnType::String)]),
+            ..ParameterDomain::default()
+        };
+        let (input, routes) = binding_route_projection(
+            "coverage_routes",
+            &BTreeMap::new(),
+            &domain,
+            &BTreeSet::from([route.clone()]),
+        )
+        .unwrap();
+        let graph = input.project_fields(
+            std::iter::once(ProjectField::literal("complete", Value::Bool(true))).chain(routes),
+        );
+        let mut database =
+            Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap()).unwrap();
+        let prepared = database
+            .prepare(
+                [RoutedMultisinkTerminal::new(
+                    "coverage",
+                    graph,
+                    [route.clone()],
+                    ["complete".to_owned(), route],
+                )],
+                "coverage_routes",
+                RecordDescriptor::new([("tenant", ColumnType::String)]),
+            )
+            .unwrap();
+        let first = database
+            .bind_shape(prepared.id(), &[Value::String("first".to_owned())])
+            .unwrap();
+        let second = database
+            .bind_shape(prepared.id(), &[Value::String("second".to_owned())])
+            .unwrap();
+        for (subscription, name) in [(&first, "first"), (&second, "second")] {
+            let deltas = subscription.try_recv().unwrap();
+            let rows = deltas.get("coverage").unwrap();
+            assert_eq!(
+                rows.iter()
+                    .map(|(record, weight)| (record.to_values().unwrap(), weight))
+                    .collect::<Vec<_>>(),
+                vec![(vec![Value::Bool(true), Value::String(name.to_owned())], 1)],
+            );
+        }
+        database.unsubscribe(first.id());
+        let third = database
+            .bind_shape(prepared.id(), &[Value::String("third".to_owned())])
+            .unwrap();
+        let deltas = third.try_recv().unwrap();
+        assert_eq!(
+            deltas
+                .get("coverage")
+                .unwrap()
+                .iter()
+                .map(|(record, weight)| (record.to_values().unwrap(), weight))
+                .collect::<Vec<_>>(),
+            vec![(
+                vec![Value::Bool(true), Value::String("third".to_owned())],
+                1
+            )],
+        );
+        assert!(
+            second.try_recv().is_err(),
+            "retiring a sibling does not change this route"
+        );
+    }
+
+    #[test]
+    fn deletion_routes_require_the_exact_authorized_version_and_dedupe_proofs() {
+        // Internal boundary: exercise the reusable witness graph directly,
+        // without recompiling it separately for each authorized route.
+        let route = route_param_field("tenant");
+        let keys = ["row_uuid", "tx_time", "tx_node_id"];
+        let witness = GraphBuilder::values(
+            RecordDescriptor::new(keys.map(|name| (name, ColumnType::U64))),
+            [
+                vec![Value::U64(1), Value::U64(20), Value::U64(7)],
+                vec![Value::U64(2), Value::U64(30), Value::U64(7)],
+            ],
+        )
+        .unwrap();
+        let proof = |row, time, tenant: &str| {
+            vec![
+                Value::U64(row),
+                Value::U64(time),
+                Value::U64(7),
+                Value::String(tenant.to_owned()),
+            ]
+        };
+        let authorized = GraphBuilder::values(
+            RecordDescriptor::new(
+                keys.map(|name| (name.to_owned(), ColumnType::U64))
+                    .into_iter()
+                    .chain([(route.clone(), ColumnType::String)]),
+            ),
+            [
+                proof(1, 20, "first"),
+                proof(1, 20, "first"),  // two policy derivations, one witness
+                proof(1, 19, "second"), // stale version is not authority
+                proof(2, 30, "second"),
+                proof(3, 40, "third"), // no corresponding register
+            ],
+        )
+        .unwrap();
+        let graph = routed_deletion_authorization_graph(
+            witness,
+            &keys.map(str::to_owned),
+            "row_uuid",
+            authorized,
+            &BTreeSet::from([route]),
+        );
+        let mut database =
+            Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap()).unwrap();
+        let mut rows = database.query_graph(graph).unwrap().to_values().unwrap();
+        rows.sort_by_key(|(values, _)| match values[0] {
+            Value::U64(row) => row,
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            rows,
+            vec![(proof(1, 20, "first"), 1), (proof(2, 30, "second"), 1)]
+        );
+    }
+
+    #[test]
+    fn binding_routes_preserve_nullable_and_claim_slots_in_descriptor_order() {
+        // The typed compiler contract (including null with no inferable
+        // payload type) must survive rebinding, independently of a query's
+        // data rows. Test the generated graph through the public runtime API.
+        let nullable = ColumnType::Nullable(Box::new(ColumnType::String));
+        let user_route = route_param_field("optional");
+        let claim_path = ClaimPath(vec!["claims".to_owned(), "sub".to_owned()]);
+        let claim_route = claim_param_field(&claim_path);
+        let domain = ParameterDomain {
+            user_params: BTreeMap::from([("optional".to_owned(), nullable.clone())]),
+            claim_params: BTreeMap::from([(
+                claim_route.clone(),
+                ClaimParameter {
+                    path: claim_path,
+                    ty: ColumnType::String,
+                },
+            )]),
+            ..ParameterDomain::default()
+        };
+        let routes = BTreeSet::from([user_route.clone(), claim_route.clone()]);
+        let (input, fields) =
+            binding_route_projection("nullable_claim_routes", &BTreeMap::new(), &domain, &routes)
+                .unwrap();
+        let indices = routes
+            .iter()
+            .map(|route| if route == &user_route { 0 } else { 1 })
+            .collect::<Vec<_>>();
+        let mut database =
+            Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap()).unwrap();
+        let shape = database
+            .prepare(
+                [RoutedMultisinkTerminal::new(
+                    "routes",
+                    input.project_fields(fields),
+                    routes.iter().cloned(),
+                    [user_route, claim_route.clone()],
+                )
+                .with_route_value_indices(indices)],
+                "nullable_claim_routes",
+                RecordDescriptor::new([
+                    ("optional".to_owned(), nullable),
+                    (claim_route, ColumnType::String),
+                ]),
+            )
+            .unwrap();
+        for value in [
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::String("north".to_owned())))),
+        ] {
+            let expected = vec![value, Value::String("session-subject".to_owned())];
+            let subscription = database.bind_shape(shape.id(), &expected).unwrap();
+            let deltas = subscription.try_recv().unwrap();
+            assert_eq!(
+                deltas.get("routes").unwrap().to_values().unwrap(),
+                vec![(expected, 1)]
+            );
+            database.unsubscribe(subscription.id());
+        }
+    }
 }
 
 pub(super) fn route_literal_project_field(
@@ -3311,6 +3573,7 @@ fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
     event_kind: &str,
     request: &QueryProgramRequest,
+    parameter_domain: &ParameterDomain,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(register) = &source.deletion_register else {
@@ -3335,14 +3598,70 @@ fn deletion_witness_graph_for_current_register(
     // the receiver may learn is deleted. Match the register's exact winner,
     // not merely a row id: a later deletion of the same row must never borrow
     // authorization from an earlier one.
-    let authorized_deleted_winner = authorized_preimage
-        .clone()
-        .filter(GroovePredicateExpr::from_field_literal(
-            PredicateKind::Eq,
-            "__jazz_deleted",
-            LiteralValue::Bool(true),
-        ))
-        .project(["row_uuid", "tx_time", "tx_node_id"]);
+    let authorized_deleted_winner =
+        authorized_preimage
+            .graph
+            .clone()
+            .filter(GroovePredicateExpr::from_field_literal(
+                PredicateKind::Eq,
+                "__jazz_deleted",
+                LiteralValue::Bool(true),
+            ));
+    if !routing_param_fields.is_empty()
+        && let Some(shape) = &request.input.binding.source_shape
+    {
+        let witness_fields = deletion_witness_fields_for_tagged_rows(source, event_kind)?;
+        let witness_names = witness_fields
+            .iter()
+            .map(|field| field.output_name.clone())
+            .collect::<Vec<_>>();
+        let present_routes = authorized_preimage
+            .routing_fields
+            .intersection(routing_param_fields)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let witness = routed_deletion_authorization_graph(
+            register.graph.clone().project_fields(witness_fields),
+            &witness_names,
+            &source.row_shape.row_uuid_field,
+            authorized_deleted_winner,
+            &present_routes,
+        );
+        let missing_routes = routing_param_fields
+            .difference(&present_routes)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if missing_routes.is_empty() {
+            return Ok(witness);
+        }
+        let (binding, routes) = binding_route_projection(
+            shape,
+            &request.input.binding.extra_user_params,
+            parameter_domain,
+            routing_param_fields,
+        )
+        .map_err(single_gap_report)?;
+        let mut fields = witness_names
+            .iter()
+            .chain(present_routes.iter())
+            .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+            .collect::<Vec<_>>();
+        fields.extend(
+            missing_routes
+                .iter()
+                .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+        );
+        return Ok(policy_join_if_needed(
+            witness,
+            binding.project_fields(routes),
+            present_routes.iter().cloned(),
+            present_routes.iter().cloned(),
+            request,
+        )
+        .project_fields(fields));
+    }
+    let authorized_deleted_winner =
+        authorized_deleted_winner.project(["row_uuid", "tx_time", "tx_node_id"]);
     let authorized_register = GraphBuilder::semi_join(
         register.graph.clone(),
         authorized_deleted_winner,
@@ -3358,6 +3677,52 @@ fn deletion_witness_graph_for_current_register(
             .map_err(single_gap_report)?,
     );
     Ok(authorized_register.project_fields(fields))
+}
+
+/// Transfer only routes that proved this exact deletion winner. Dedupe the
+/// proof side before joining: several policy derivations must not multiply a
+/// register witness, and a proof for an older deletion is never sufficient.
+fn routed_deletion_authorization_graph(
+    witness: GraphBuilder,
+    witness_fields: &[String],
+    row_uuid_field: &str,
+    authorized: GraphBuilder,
+    routes: &BTreeSet<String>,
+) -> GraphBuilder {
+    let keys = ["row_uuid", "tx_time", "tx_node_id"];
+    if routes.is_empty() {
+        return GraphBuilder::semi_join(
+            witness,
+            authorized.project(keys),
+            [row_uuid_field, "tx_time", "tx_node_id"],
+            keys,
+        );
+    }
+    let proof_fields = keys
+        .iter()
+        .map(|field| (*field).to_owned())
+        .chain(routes.iter().cloned())
+        .collect::<Vec<_>>();
+    let proof = GraphBuilder::arg_max_by(
+        authorized.project(proof_fields.clone()),
+        proof_fields,
+        std::iter::empty::<String>(),
+    );
+    let fields = witness_fields
+        .iter()
+        .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+        .chain(
+            routes
+                .iter()
+                .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+        );
+    GraphBuilder::join(
+        witness,
+        proof,
+        [row_uuid_field, "tx_time", "tx_node_id"],
+        keys,
+    )
+    .project_fields(fields)
 }
 
 fn content_version_witness_graph(

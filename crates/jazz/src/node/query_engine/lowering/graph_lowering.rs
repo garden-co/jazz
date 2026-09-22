@@ -2080,7 +2080,7 @@ fn omits_public_occurrence_carriers(request: &QueryProgramRequest) -> bool {
             .is_some_and(|output| !output.public_terminal)
 }
 
-fn policy_join_if_needed(
+pub(super) fn policy_join_if_needed(
     left: GraphBuilder,
     right: GraphBuilder,
     left_on: impl IntoIterator<Item = impl Into<String>>,
