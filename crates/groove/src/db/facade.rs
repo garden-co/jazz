@@ -393,6 +393,7 @@ impl Database {
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             immutable_batch_owner: Rc::new(()),
+            batch_preparation_owner: Rc::new(()),
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),

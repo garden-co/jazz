@@ -52,8 +52,18 @@ pub struct DatabaseBatch {
     pub(super) exact_keys: BTreeMap<(String, Vec<u8>), Vec<u8>>,
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
+    // A prepared prefix belongs to one database/schema generation. It is not
+    // a proof about persisted rows; delta computation still observes current
+    // storage and earlier writes at commit time.
+    pub(super) prepared: RefCell<PreparedBatchWrites>,
     pub(super) notification_timing: NotificationTiming,
     pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct PreparedBatchWrites {
+    pub(super) owner: Option<Rc<()>>,
+    pub(super) writes: Vec<PendingTableWrite>,
 }
 
 impl PartialEq for DatabaseBatch {
@@ -128,6 +138,13 @@ impl DatabaseBatch {
         match comparison {
             crate::storage::ValueComparison::Absent => {
                 self.push_operation(operation);
+                // The conflict check already prepared this immutable insert.
+                // Keep the exact same preparation for overlay reads and commit.
+                self.txn_operations
+                    .borrow_mut()
+                    .stage(database.owned_storage_operation_for_pending(&pending)?);
+                self.prepared.borrow_mut().writes.push(pending);
+                self.txn_indexed_operations.set(self.operations.len());
                 Ok(EnsureExactOutcome::Inserted)
             }
             crate::storage::ValueComparison::Identical => Ok(EnsureExactOutcome::AlreadyIdentical),

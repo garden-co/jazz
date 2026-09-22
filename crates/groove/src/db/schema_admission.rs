@@ -196,6 +196,7 @@ impl Database {
     /// [`Self::runtime_registry_checkpoint`].
     #[doc(hidden)]
     pub fn restore_runtime_registry(&mut self, checkpoint: RuntimeRegistryCheckpoint) {
+        self.batch_preparation_owner = Rc::new(());
         self.ivm_runtime = checkpoint.ivm_runtime;
         *self.stored_record_descriptors.borrow_mut() = checkpoint.stored_record_descriptors;
     }
@@ -210,6 +211,7 @@ impl Database {
     /// The backing storage layout must already be able to route the table's
     /// logical family (for example through a shared class family).
     pub fn register_table(&mut self, table: TableSchema) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         if self.ivm_runtime.table(&table.name).is_some() {
             return Err(Error::TableAlreadyExists(table.name));
@@ -248,6 +250,7 @@ impl Database {
         columns: impl IntoIterator<Item = crate::schema::ColumnSchema>,
         variant: TableVariant,
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let mut updated = self.table(table)?.clone();
         if !updated.has_variants() {
@@ -303,6 +306,7 @@ impl Database {
         table: &str,
         columns: &[crate::schema::ColumnSchema],
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let existing = self.table(table)?;
         for desired in columns {
@@ -338,6 +342,7 @@ impl Database {
         table: &str,
         index: IndexSchema,
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let existing = self.table(table)?.clone();
         if let Some(registered) = existing
