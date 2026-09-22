@@ -5,17 +5,6 @@ import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import type { DeviceKeyPair, DeviceSigner, KeyEnvelope } from "./types.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 
-/** Inspection reports failure without retaining parser or private-key adapter error text. */
-export async function decodeRecoveryMaterialForInspection(
-  ...args: Parameters<typeof decodeRecoveryMaterial>
-) {
-  try {
-    return await decodeRecoveryMaterial(...args);
-  } catch {
-    throw new E2eeRecoveryError("recovery-material-unusable");
-  }
-}
-
 /** Owned private buffers: the recovery operation must clear them in finally. */
 export async function decodeRecoveryMaterial(
   value: string,
@@ -23,11 +12,13 @@ export async function decodeRecoveryMaterial(
   keys: KeyEnvelope,
   signer: DeviceSigner,
 ): Promise<{ rootId: string; recipient: DeviceKeyPair; signing: DeviceKeyPair }> {
-  if (typeof value !== "string" || value.length > 2_000_000)
-    throw new Error("Invalid E2EE recovery material size");
-  const parsed = JSON.parse(value) as Record<string, unknown> | null;
+  let privateFields: Record<string, unknown> | null | undefined;
   let material: { rootId: string; recipient: DeviceKeyPair; signing: DeviceKeyPair } | undefined;
   try {
+    if (typeof value !== "string" || value.length > 2_000_000)
+      throw new Error("Invalid E2EE recovery material size");
+    const parsed = JSON.parse(value) as Record<string, unknown> | null;
+    privateFields = parsed;
     const fields = [
       "format",
       "scope",
@@ -108,13 +99,13 @@ export async function decodeRecoveryMaterial(
       challenge.fill(0);
     }
     return material;
-  } catch (error) {
+  } catch {
     material?.recipient.privateKey.fill(0);
     material?.signing.privateKey.fill(0);
-    throw error;
+    throw new E2eeRecoveryError("recovery-material-unusable");
   } finally {
-    if (Array.isArray(parsed?.privateKey)) parsed.privateKey.fill(0);
-    if (Array.isArray(parsed?.signingPrivateKey)) parsed.signingPrivateKey.fill(0);
+    if (Array.isArray(privateFields?.privateKey)) privateFields.privateKey.fill(0);
+    if (Array.isArray(privateFields?.signingPrivateKey)) privateFields.signingPrivateKey.fill(0);
   }
 }
 
