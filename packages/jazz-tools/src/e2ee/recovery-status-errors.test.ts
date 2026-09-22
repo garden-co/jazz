@@ -5,7 +5,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp as app, deviceRequestPermissions } from "./device-requests.js";
 import { createNativeCrypto } from "./native.js";
-import { E2eeRecoveryError } from "./index.js";
+import { deviceRequestSchema, E2eeRecoveryError } from "./index.js";
 
 it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
   "reports recovery %s without exposing adapter errors or enrolling a device",
@@ -58,13 +58,18 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
       await owner.shutdown();
       if (fault !== "protector-unusable") {
         // Missing means unavailable to this client, including policy-filtered records.
-        const reads = definePermissions(app, ({ policy }) => {
-          if (fault === "delivery-missing") policy.__e2ee_recovery_deliveries.allowRead.never();
-          else policy.__e2ee_recovery_protectors.allowRead.never();
+        const denied =
+          fault === "delivery-missing"
+            ? "__e2ee_recovery_deliveries"
+            : "__e2ee_recovery_protectors";
+        const permissions = definePermissions(app, ({ policy }) => {
+          for (const name of Object.keys(
+            deviceRequestSchema,
+          ) as (keyof typeof deviceRequestSchema)[]) {
+            if (name === denied) policy[name].allowRead.never();
+            else policy[name].allowRead.always();
+          }
         });
-        const permissions = { ...deviceRequestPermissions };
-        for (const [table, read] of Object.entries(reads))
-          permissions[table] = { ...permissions[table], select: read.select };
         await deploy({ ...deployment, permissions });
       }
       const observer = await open(true);
