@@ -24,8 +24,10 @@ export function TodoList() {
 
   // #region reading-loading-state-react
   const allTodos = useAll(app.todos);
-  // `allTodos.data` is `undefined` while loading the first result (and `allTodos.isLoading` is `true`).
-  // `allTodos.data` is `[]` when loaded but empty
+  // `allTodos.data` may contain a local preview while `allTodos.isLoading` is `true`.
+  // It is `undefined` only when no result is available yet.
+  // Once the requested first result is ready, `allTodos.isLoading` is `false`.
+  // A loaded empty query returns `[]`.
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react
