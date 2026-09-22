@@ -61,7 +61,10 @@ test("manual starter filters reject unknown dispatch values before preparation",
   assert.match(validation, /\*\)[\s\S]*?exit 1/);
 
   const accepted = validation.match(/^\s+""\|([^)\n]+)\)$/m)?.[1]?.split("|");
-  assert.deepEqual(accepted, listedStarters(starters));
+  const canonical = starters.match(/export const KNOWN_STARTERS = \[([\s\S]*?)\] as const;/)?.[1];
+  assert.ok(canonical, "could not find the canonical starter catalogue");
+  const expected = [...canonical.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(accepted, expected);
   assert.ok(
     prepare.indexOf("- name: Validate workflow_dispatch starter") <
       prepare.indexOf("pnpm install --frozen-lockfile"),
