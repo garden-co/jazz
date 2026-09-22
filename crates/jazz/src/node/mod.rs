@@ -682,6 +682,10 @@ struct SchemaCatalogue {
     catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
     /// Resolved logical-to-physical identity mapping for every known schema.
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    /// Successfully registered raw-current projection metadata. Derived from
+    /// the catalogue and live registry, never persisted or shared across nodes.
+    physical_current_winner_projections:
+        BTreeMap<SchemaVersionId, BTreeMap<String, (String, Vec<String>)>>,
     /// Durable, not-yet-visible schema bundles awaiting ordered activation.
     staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
     /// Ordered bundle payloads waiting for an earlier sequence or active source.

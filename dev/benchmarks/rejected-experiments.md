@@ -49,6 +49,16 @@ original-parent receipts in [#2913](https://github.com/garden-co/jazz/issues/291
   longer appeared in the new sampled cold graph, but this was not an endpoint
   win. Do not infer savings from disappearance of an optimized stack frame.
 
+The source-contract fragment traversal trial on #3254 was also excluded
+(`6395773f93`, branch `codex/source-contract-fragment-trial`). Revalidating
+compact source certificates allowed skipping internal compiler traversal, but
+native 600-row/60-list fanout ABBA medians were 1.113124s control versus
+1.113457s trial (+0.03%, six samples per arm). The predicted 2–6% endpoint
+gain did not materialize. The simpler exact-fragment reuse remains; this
+rejection concerns the additional certificate machinery. Source, binaries and
+receipts are preserved in the [#2913](https://github.com/garden-co/jazz/issues/2913)
+log. Do not infer a win from fewer compiled nodes alone.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.

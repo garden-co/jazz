@@ -431,6 +431,7 @@ where
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.catalogue.physical_write_plan_cache.clear();
+        self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
@@ -560,6 +561,7 @@ where
                     catalogue_schemas: BTreeMap::from([(genesis_id, genesis.clone())]),
                     catalogue_lenses: BTreeMap::new(),
                     physical_mappings: BTreeMap::from([(genesis_id, mapping)]),
+                    physical_current_winner_projections: BTreeMap::new(),
                     staged_lineages: BTreeMap::new(),
                     pending_lineages: BTreeMap::new(),
                     active_lineages_by_target: BTreeMap::new(),

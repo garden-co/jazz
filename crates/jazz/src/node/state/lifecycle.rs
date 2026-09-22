@@ -734,6 +734,7 @@ where
                 catalogue_schemas: schemas,
                 catalogue_lenses: lenses,
                 physical_mappings,
+                physical_current_winner_projections: BTreeMap::new(),
                 staged_lineages,
                 pending_lineages,
                 active_lineages_by_target,
