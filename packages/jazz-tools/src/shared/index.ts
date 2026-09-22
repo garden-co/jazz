@@ -18,3 +18,4 @@ export { RowChangeKind, applySubscriptionDelta } from "../runtime/subscription-m
 export type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
 export type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
 export type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+export type { QuerySettlementLevel } from "../drivers/types.js";

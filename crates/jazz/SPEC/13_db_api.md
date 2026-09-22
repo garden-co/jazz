@@ -18,6 +18,12 @@ Invariant digest:
 - `INV-API-4`: When `ReadOpts.local_updates == LocalUpdates::Immediate`, the effective read tier MUST be at least `DurabilityTier::Local`; when it is `Deferred`, the effective read tier MUST be exactly `ReadOpts.tier`.
 - `INV-API-5`: `ReadOpts::default()` MUST be `{ tier: DurabilityTier::Local, local_updates: LocalUpdates::Immediate, propagation: Propagation::Full }`.
 - `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes and MUST publish their truthful node-local opening, including an empty opening, even when `Propagation::Full` concurrently requests upstream coverage; propagation does not raise the requested observation tier. Global subscriptions apply the same query semantics over the Core-confirmed frontier and MUST withhold an empty opening until it is authority-backed. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
+- `INV-API-36`: A progressive client subscription MAY publish a materialized
+  local preview before its requested read tier is ready, but MUST mark that
+  event `requested_ready == false`; a strict settled subscription MUST NOT
+  publish an unready preview. A `requested_ready == true` event MUST include
+  materialized data, and each binding MUST preserve the highest observed
+  settlement level monotonically for the logical subscription lifetime.
 - `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
   events and MUST NOT queue facade-side full-result diffs as the normal live
   subscription mechanism.
@@ -250,6 +256,15 @@ as its normal live-subscription mechanism. Subscription delivery is a thin event
 bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
+
+Progressive client bindings may expose an available materialized preview before
+the requested read tier is ready. The event metadata is explicit: `requestedReady`
+means that the requested first-result gate has been satisfied, while
+`attainedSettlement` reports the settlement level represented by that event.
+Framework caches retain the highest observed settlement level as
+`highestSettledAt`; this is historical monotonic metadata, not a claim that every
+currently displayed row has reached that level. Strict remote/settled
+subscriptions remain gated and do not publish an unready preview.
 
 #### Binding read choices
 

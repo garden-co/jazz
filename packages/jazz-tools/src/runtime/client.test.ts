@@ -194,7 +194,13 @@ describe("JazzClient subscription ownership", () => {
     const failure = new Error("executeSubscription failed after callback");
     runtime.createSubscription.mockReturnValue(41);
     runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
-      onUpdate({ added: [], updated: [], removed: [] });
+      onUpdate({
+        added: [],
+        updated: [],
+        removed: [],
+        requestedReady: true,
+        attainedSettlement: "local",
+      });
       throw failure;
     });
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
@@ -275,7 +281,13 @@ describe("JazzClient subscription ownership", () => {
     });
 
     emit(failure);
-    emit({ added: [], updated: [], removed: [] });
+    emit({
+      added: [],
+      updated: [],
+      removed: [],
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
 
     expect(runtime.unsubscribe).toHaveBeenCalledOnce();
     expect(runtime.unsubscribe).toHaveBeenCalledWith(46);
@@ -319,8 +331,20 @@ describe("JazzClient subscription ownership", () => {
 
     const failure = new Error("affected subscription failed");
     callbacks.get(51)!(failure);
-    callbacks.get(51)!({ added: [], updated: [], removed: [] });
-    callbacks.get(52)!({ added: [], updated: [], removed: [] });
+    callbacks.get(51)!({
+      added: [],
+      updated: [],
+      removed: [],
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
+    callbacks.get(52)!({
+      added: [],
+      updated: [],
+      removed: [],
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
 
     expect(affectedError).toHaveBeenCalledTimes(1);
     expect(affectedError).toHaveBeenCalledWith(failure);
@@ -343,7 +367,13 @@ describe("JazzClient subscription ownership", () => {
 
     client.subscribe('{"table":"todos"}', onUpdate);
     emit(failure);
-    emit({ added: [], updated: [], removed: [] });
+    emit({
+      added: [],
+      updated: [],
+      removed: [],
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
     emit(new Error("duplicate failure"));
 
     expect(consoleError).toHaveBeenCalledOnce();
@@ -370,8 +400,22 @@ describe("JazzClient subscription ownership", () => {
     });
 
     client.subscribe('{"table":"todos"}', { onUpdate, onError });
-    expect(() => emit({ added: [], updated: [], removed: [] })).not.toThrow();
-    emit({ added: [], updated: [], removed: [] });
+    expect(() =>
+      emit({
+        added: [],
+        updated: [],
+        removed: [],
+        requestedReady: true,
+        attainedSettlement: "local",
+      }),
+    ).not.toThrow();
+    emit({
+      added: [],
+      updated: [],
+      removed: [],
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
 
     expect(onUpdate).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledOnce();

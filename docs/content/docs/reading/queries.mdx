@@ -61,7 +61,7 @@ See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of 
 
 ## Read durability
 
-Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+Queries and subscriptions return results as soon as they are available locally by default. A subscription may therefore publish a materialized local preview before its requested tier is ready; `isLoading` remains `true` until the requested first result is ready. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
 
 <DurabilityTiersTable />
 
@@ -137,18 +137,20 @@ magic columns.
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
 
-| Framework  | API                            | Notes                                                 |
-| ---------- | ------------------------------ | ----------------------------------------------------- |
-| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                  |
-| Vue        | `useAll(query)`                | Returns `{ data, isLoading, error }` refs             |
-| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.isLoading` / `.error` |
-| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                  |
+| Framework  | API                            | Notes                                                                       |
+| ---------- | ------------------------------ | --------------------------------------------------------------------------- |
+| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error, highestSettledAt }`                      |
+| Vue        | `useAll(query)`                | Returns `{ data, isLoading, error, highestSettledAt }` refs                 |
+| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.isLoading` / `.error` / `.highestSettledAt` |
+| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error, highestSettledAt }`                      |
 
 ### The loading state
 
-`useAll`'s `data` field (or Vue's `data` ref and Svelte's `QuerySubscription.current`) are
-`undefined` until the first result arrives from the requested tier. After that, the value is an
-array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+`useAll`'s `data` field (or Vue's `data` ref and Svelte's `QuerySubscription.current`) may contain a local preview while `isLoading` is `true`. Once the requested first result is ready, `isLoading` becomes `false`; the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+
+`highestSettledAt` records the highest settlement level observed during the current
+subscription lifetime: `"unconfirmed"`, `"local"`, or `"remote"`. It is a historical
+milestone, not a promise that every currently displayed row has reached that level.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -173,10 +175,10 @@ array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the req
   </Tab>
 </Tabs>
 
-<Callout type="info">
-  You're unlikely to see `data: undefined` in practice unless you're awaiting a more [durable
-  tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
-  data exists yet.
+You're unlikely to see `data: undefined` in practice unless you're awaiting a more [durable
+tier](#read-durability). A local preview can still be available while a stronger tier is
+loading; local storage reads are effectively instant and resolve to `[]` if no data exists yet.
+
 </Callout>
 
 ### Fine-grained updates

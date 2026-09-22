@@ -15,6 +15,7 @@ where
         opts: ReadOpts,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
+        delivery: SubscriptionDelivery,
     ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_read(&opts).await?;
         let prepared = self
@@ -22,7 +23,8 @@ where
             .await?;
         match authorization {
             SerializedSubscriptionAuthorization::ClientLocal => {
-                self.subscribe(&prepared, opts).await
+                self.subscribe_with_delivery(&prepared, opts, delivery)
+                    .await
             }
             SerializedSubscriptionAuthorization::TrustedServing(author) => {
                 self.subscribe_for_identity(&prepared, opts, author).await
@@ -84,12 +86,23 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
+        self.subscribe_with_delivery(prepared, opts, SubscriptionDelivery::Settled)
+            .await
+    }
+
+    async fn subscribe_with_delivery(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        delivery: SubscriptionDelivery,
+    ) -> Result<SubscriptionStream, Error> {
         self.open_subscription(
             prepared,
             opts,
             self.identity.author,
             QueryAuthorizationMode::ClientLocal,
             true,
+            delivery,
         )
         .await
     }
@@ -107,6 +120,7 @@ where
             author,
             QueryAuthorizationMode::TrustedServing,
             false,
+            SubscriptionDelivery::Settled,
         )
         .await
     }
@@ -126,8 +140,15 @@ where
         } else {
             QueryAuthorizationMode::TrustedServing
         };
-        self.open_subscription(prepared, opts, author, mode, false)
-            .await
+        self.open_subscription(
+            prepared,
+            opts,
+            author,
+            mode,
+            false,
+            SubscriptionDelivery::Settled,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query.
@@ -945,6 +966,7 @@ where
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         allow_pending_overlay: bool,
+        delivery: SubscriptionDelivery,
     ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_read(&opts).await?;
         ensure_supported_subscription_read_opts(&opts)?;
@@ -1170,6 +1192,7 @@ where
             sender,
             publication: Rc::new(RefCell::new(SubscriptionPublication::default())),
             requested_tier: read_tier,
+            delivery,
         };
         let mut root_occurrence_ids = snapshot_index
             .roots
@@ -1201,8 +1224,9 @@ where
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         // Even a warm, empty foreground graph is provisional until its owner
         // has answered. Refresh initializes the published graph from those inputs.
-        let pending_initial_local_snapshot =
-            pending_initial_owner_result || !subscription.initial_snapshot_received();
+        let pending_initial_local_snapshot = (delivery == SubscriptionDelivery::Settled
+            && pending_initial_owner_result)
+            || !subscription.initial_snapshot_received();
         let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
@@ -1241,11 +1265,14 @@ where
             settled,
             pending_initial_local_snapshot,
             pending_initial_owner_result,
+            delivery,
             sender,
         }));
         {
             let node = self.node.node.lock().await;
             let state = state.borrow();
+            let (requested_ready, attained_settlement) =
+                subscription_event_metadata(read_tier, settled, !pending_initial_local_snapshot);
             let event = SubscriptionEvent::Delta {
                 reset: true,
                 publishable: !suppress_provisional_opening && !pending_initial_local_snapshot,
@@ -1254,6 +1281,8 @@ where
                 removed: Vec::new(),
                 terminal_operations: Vec::new(),
                 settled,
+                requested_ready,
+                attained_settlement,
                 tier: read_tier,
             };
             let materialized = state.sender.materialized(&node, &prepared.shape, &event)?;
@@ -1330,8 +1359,15 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author, authorization_mode, true)
-            .await
+        self.open_subscription(
+            &prepared,
+            opts,
+            author,
+            authorization_mode,
+            true,
+            SubscriptionDelivery::Settled,
+        )
+        .await
     }
 
     async fn open_subscription_upstream_coverage(

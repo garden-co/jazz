@@ -7,6 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
  */
 
 import type {
+  QuerySettlementLevel,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
   Value,
@@ -33,22 +34,27 @@ type DecodedRowDelta =
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
   | { kind: RowChangeKind["Updated"]; id: string; index: number; row?: WasmRow | null };
 
+export type SubscriptionDeltaMetadata = {
+  requestedReady: boolean;
+  attainedSettlement: QuerySettlementLevel;
+};
+
 export type SubscriptionDelta<T> =
-  | {
+  | ({
       /** Complete result after applying this delta, when available. */
       all?: T[];
       /** Ordered list of changes for this delta. */
       delta: RowDelta<T>[];
       reset?: false;
-    }
-  | {
+    } & SubscriptionDeltaMetadata)
+  | ({
       /** Complete replacement result after applying this reset delta. */
       all: T[];
       /** Ordered list of changes for this delta. */
       delta: RowDelta<T>[];
       /** True when this delta replaces all previously observed state. */
       reset: true;
-    };
+    } & SubscriptionDeltaMetadata);
 
 type SubscriptionManagerSnapshot<T> = {
   currentResults: Map<string, T>;
@@ -259,18 +265,27 @@ export class SubscriptionManager<T extends { id: string }> {
     }
   }
 
-  /**
-   * Process a row delta and return typed object delta.
-   *
-   * @param delta Structured root delta from the runtime adapter
-   * @param transform Function to convert WasmRow to typed object T
-   * @returns Typed delta with full state and changes
-   */
+  /** Process a row delta and return the typed object delta. */
   handleDelta(
     delta: RuntimeSubscriptionDelta,
     transform: (row: WasmRow) => T,
   ): SubscriptionDelta<T> {
     const reset = delta.reset === true;
+    const metadata: SubscriptionDeltaMetadata = {
+      requestedReady: delta.requestedReady,
+      attainedSettlement: delta.attainedSettlement,
+    };
+    const terminalOperations = delta.terminalOperations ?? [];
+    if (
+      !reset &&
+      delta.added.length === 0 &&
+      delta.updated.length === 0 &&
+      delta.removed.length === 0 &&
+      terminalOperations.length === 0
+    ) {
+      return { delta: [], ...metadata };
+    }
+
     const snapshot = this.snapshot();
     try {
       if (reset) {
@@ -306,9 +321,6 @@ export class SubscriptionManager<T extends { id: string }> {
           index: change.index,
         })),
       ];
-      // Root removals are applied before terminal operations. Keep their
-      // full public occurrence identities so a later descendant teardown in
-      // this frame can be recognized as subsumed by its root removal.
       const removedRoots = new Set<string>();
       for (const [index, change] of decoded
         .filter((change) => change.kind === RowChangeKind.Removed)
@@ -324,34 +336,33 @@ export class SubscriptionManager<T extends { id: string }> {
         if (change.kind === RowChangeKind.Removed) {
           for (const rootId of removedRoots) this.terminalRows.delete(rootId);
         } else if (change.row) {
-          // Retained roots are immutable. The first descendant edit in a
-          // later frame makes a private writable copy of the whole root.
           this.terminalRows.set(change.id, change.row);
         }
       }
-      const wireResult = this.handleDecodedDelta(decoded, transform, reset);
-      // Complete roots already include this frame's descendant edits. Replaying
-      // those edits would remove children twice or apply moves to the new order.
-      // Earlier deferred edits still replay when their root hydration arrives.
+      const wireResult = this.handleDecodedDelta(decoded, transform, reset, metadata);
       const completeRoots = new Set(
         decoded
           .filter((change) => change.kind !== RowChangeKind.Removed)
           .map((change) => change.id),
       );
-      const terminalOperations = this.readyTerminalOperations(
-        (delta.terminalOperations ?? []).filter(
+      const readyTerminalOperations = this.readyTerminalOperations(
+        terminalOperations.filter(
           (operation) =>
             operation.path.length === 0 ||
             !completeRoots.has(this.terminalAddress(operation.root_key)),
         ),
         removedRoots,
       );
-      if (terminalOperations.length > 0) {
-        const terminalResult = this.handleTerminalOperations(terminalOperations, transform);
+      if (readyTerminalOperations.length > 0) {
+        const terminalResult = this.handleTerminalOperations(
+          readyTerminalOperations,
+          transform,
+          metadata,
+        );
         const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
         return reset
-          ? { delta: combined, all: this.all(), reset: true }
-          : { delta: combined, all: this.all() };
+          ? { delta: combined, all: this.all(), reset: true, ...metadata }
+          : { delta: combined, all: this.all(), ...metadata };
       }
       return wireResult;
     } catch (error) {
@@ -414,6 +425,7 @@ export class SubscriptionManager<T extends { id: string }> {
   private handleTerminalOperations(
     operations: RuntimeTerminalOperation[],
     transform: (row: WasmRow) => T,
+    metadata: SubscriptionDeltaMetadata,
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
@@ -481,7 +493,7 @@ export class SubscriptionManager<T extends { id: string }> {
           : { kind: RowChangeKind.Updated, id, index, item },
       ];
     });
-    return { delta, all: this.all() } as SubscriptionDelta<T>;
+    return { delta, all: this.all(), ...metadata };
   }
 
   private writableTerminalRoot(rootId: string, writableRoots: Set<string>): WasmRow {
@@ -519,6 +531,8 @@ export class SubscriptionManager<T extends { id: string }> {
         index,
         item,
       })),
+      false,
+      { requestedReady: true, attainedSettlement: "unconfirmed" },
     );
   }
 
@@ -526,6 +540,10 @@ export class SubscriptionManager<T extends { id: string }> {
     delta: DecodedRowDelta[],
     transform: (row: WasmRow) => T,
     reset = false,
+    metadata: SubscriptionDeltaMetadata = {
+      requestedReady: true,
+      attainedSettlement: "local",
+    },
   ): SubscriptionDelta<T> {
     return this.handleTypedDelta(
       delta.map((change) => {
@@ -553,20 +571,28 @@ export class SubscriptionManager<T extends { id: string }> {
         }
       }),
       reset,
+      metadata,
     );
   }
 
-  private handleTypedDelta(delta: RowDelta<T>[], reset = false): SubscriptionDelta<T> {
+  private handleTypedDelta(
+    delta: RowDelta<T>[],
+    reset = false,
+    metadata: SubscriptionDeltaMetadata = {
+      requestedReady: true,
+      attainedSettlement: "local",
+    },
+  ): SubscriptionDelta<T> {
     delta.sort((a, b) => a.index - b.index);
     delta = normalizeRowDelta(delta);
 
     if (reset) {
-      return this.replaceWithResetDelta(delta);
+      return this.replaceWithResetDelta(delta, metadata);
     }
 
     if (shouldApplyDeltaInBulk(delta)) {
       this.applyBulkTypedDelta(delta);
-      return { delta, all: this.all() } as SubscriptionDelta<T>;
+      return { delta, all: this.all(), ...metadata };
     }
 
     for (const change of delta) {
@@ -596,10 +622,14 @@ export class SubscriptionManager<T extends { id: string }> {
     return {
       delta,
       all: this.all(),
-    } as SubscriptionDelta<T>;
+      ...metadata,
+    };
   }
 
-  private replaceWithResetDelta(delta: RowDelta<T>[]): SubscriptionDelta<T> {
+  private replaceWithResetDelta(
+    delta: RowDelta<T>[],
+    metadata: SubscriptionDeltaMetadata,
+  ): SubscriptionDelta<T> {
     this.currentResults = new Map();
     const placements: Array<{ id: string; index: number; item: T }> = [];
     for (const change of delta) {
@@ -622,7 +652,7 @@ export class SubscriptionManager<T extends { id: string }> {
     const all = this.orderedIds
       .map((id) => this.currentResults.get(id))
       .filter((item): item is T => item !== undefined);
-    return { delta, reset: true as const, all };
+    return { delta, reset: true as const, all, ...metadata };
   }
 
   private applyBulkTypedDelta(delta: RowDelta<T>[]): void {

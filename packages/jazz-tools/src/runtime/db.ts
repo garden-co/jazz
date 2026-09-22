@@ -208,6 +208,7 @@ type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   localUpdates?: InternalQueryExecutionOptions["localUpdates"];
   propagation?: InternalQueryExecutionOptions["propagation"];
   visibility?: InternalQueryExecutionOptions["visibility"];
+  subscriptionDelivery?: InternalQueryExecutionOptions["subscriptionDelivery"];
 };
 /**
  * Callbacks for a public live query subscription.
@@ -2625,6 +2626,9 @@ export class Db {
       typeof callbacks === "function" ? { onUpdate: callbacks, onError: undefined } : callbacks;
     const deltaCallbacks: DbDeltaSubscriptionCallbacks<T> = {
       onDelta: (update) => {
+        if (update.all === undefined && !update.reset && update.delta.length === 0) {
+          return;
+        }
         if (update.all === undefined) {
           throw new Error("Jazz subscription update is missing its materialized result.");
         }
@@ -2639,13 +2643,11 @@ export class Db {
    * Subscribe to a query and receive updates when results change.
    *
    * The callback receives a SubscriptionDelta with:
-   * - `all`: Complete current result set. Freshly allocated on every delta —
-   *   the rows are new object references each time, so diffing `all` by identity
-   *   sees every row as changed. Reactive-framework consumers should reconcile
-   *   with `applyDelta`/`reconcileArray` from `reconcile-array.js` to preserve
-   *   identity for unchanged rows.
+   * - `all`: Complete current result set when materialized. A progressive
+   *   opening may omit it while only settlement metadata changes.
    * - `delta`: Ordered list of row-level changes (see `RowDelta`)
-   *
+   * - `requestedReady`: Whether the requested first-result gate is satisfied.
+   * - `attainedSettlement`: Settlement level represented by this event.
    * @param query QueryBuilder instance
    * @param callbacks Called with deltas and, in object form, terminal subscription errors
    * @param options Optional read durability options
@@ -2718,10 +2720,21 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(
+      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
+      queryOptions,
+    ).tier;
+    const progressiveDelivery =
+      options?.tier === ReadTier.LocalFirst ||
+      options?.tier === "local" ||
+      options?.tier === "local-only" ||
+      (options?.tier === undefined && effectiveTier === "local");
+    queryOptions.subscriptionDelivery = progressiveDelivery ? "progressive" : "settled";
     const remoteIfPossibleOffline =
       options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
     if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
+    let hasDeliveredRequestedReady = false;
     type NativeSubscription = {
       id: number | null;
       installing: boolean;
@@ -2810,6 +2823,9 @@ export class Db {
         bufferedDeltas.push(delta);
         return;
       }
+      if (delta.requestedReady) {
+        hasDeliveredRequestedReady = true;
+      }
       try {
         onDelta(delta);
       } catch (error) {
@@ -2826,6 +2842,9 @@ export class Db {
       subscription: NativeSubscription,
       subscriptionOptions = queryOptions,
     ) => {
+      const effectiveSubscriptionOptions = hasDeliveredRequestedReady
+        ? { ...subscriptionOptions, subscriptionDelivery: "settled" as const }
+        : subscriptionOptions;
       if (
         unsubscribed ||
         activeSubscription !== subscription ||
@@ -2862,7 +2881,7 @@ export class Db {
               terminalizeSubscription(subscription, error);
             },
           },
-          subscriptionOptions,
+          effectiveSubscriptionOptions,
           context?.readSession ?? context?.session ?? session,
         );
       } catch (error) {
@@ -2944,6 +2963,7 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     if (
+      !progressiveDelivery &&
       this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
     ) {
       // The worker can only classify the initial authority-tier snapshot as
@@ -2982,6 +3002,8 @@ export class Db {
           tier: offline ? ("local" as const) : ReadTier.RemoteIfPossible,
         };
         if (offline) {
+          startNativeSubscription(replacement, replacementOptions);
+        } else if (progressiveDelivery && !hasDeliveredRequestedReady) {
           startNativeSubscription(replacement, replacementOptions);
         } else {
           void this.ensureReady("global", readyAbort.signal)

@@ -5,7 +5,7 @@ import type {
   NativeForegroundRuntime,
   NativeForegroundRuntimeFactory,
 } from "jazz-rn";
-import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V2 } from "jazz-rn/native-relay-abi";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import {
   nativeSubscriptionDeltaHasFieldBytes,
@@ -51,13 +51,13 @@ export function proveForegroundByteAbi(
   ) => void,
 ): NativeForegroundRuntime {
   markFailure?.("foreground-abi-version-failed");
-  if (factory.abiVersion !== NATIVE_RELAY_ABI_V1)
+  if (factory.abiVersion !== NATIVE_RELAY_ABI_V2)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
   markFailure?.("foreground-open-failed");
   const foreground = factory.openAttached(capability);
   markFailure?.("foreground-probe-failed");
   const probe = codec.decode(foreground.execute(codec.encode("probe")));
-  if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_V1)
+  if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_V2)
     throw new Error("installed foreground returned an unexpected Probe response");
   markFailure?.("foreground-tick-failed");
   const tick = codec.decode(foreground.execute(codec.encode("tick")));
@@ -108,7 +108,7 @@ export function proveForegroundJsReentry(
     }
     if (!reentered) throw new Error("foreground response did not exercise JS reentry");
     const probe = codec.decode(response);
-    if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_V1)
+    if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_V2)
       throw new Error("installed foreground returned an unexpected Probe response");
   } finally {
     foreground.close();

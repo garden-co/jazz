@@ -1,11 +1,13 @@
 import type { Accessor } from "solid-js";
 import { limitQueryToOne, type QueryBuilder, type QueryOptions } from "../runtime/db.js";
+import type { QuerySettlementLevel } from "../shared/index.js";
 import { useAll } from "./use-all.js";
 
 export type UseOneResult<T extends { id: string }> = {
   readonly data: T | null | undefined;
   readonly isLoading: boolean;
   readonly error: Error | null;
+  readonly highestSettledAt: QuerySettlementLevel;
 };
 
 export function useOne<T extends { id: string }>(
@@ -28,6 +30,9 @@ export function useOne<T extends { id: string }>(
     },
     get error() {
       return result.error;
+    },
+    get highestSettledAt() {
+      return result.highestSettledAt;
     },
   };
 }

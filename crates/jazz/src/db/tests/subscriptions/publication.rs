@@ -35,6 +35,7 @@ fn sender(tier: DurabilityTier) -> (SubscriptionSender, UnboundedReceiver<Subscr
             sender,
             publication: Rc::new(RefCell::new(SubscriptionPublication::default())),
             requested_tier: tier,
+            delivery: SubscriptionDelivery::Settled,
         },
         receiver,
     )

@@ -244,6 +244,8 @@ export interface SubscriptionDeltaEvent {
   delta: Uint8Array
   terminalOperations: Array<SubscriptionTerminalOperation>
   settled: boolean
+  requestedReady: boolean
+  attainedSettlement: 'unconfirmed' | 'local' | 'remote'
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
 

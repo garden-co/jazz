@@ -1,15 +1,16 @@
 import { batch, createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { applyDelta } from "../reconcile-array.js";
+import type { QuerySettlementLevel } from "../shared/index.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
-import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 export type UseAllResult<T extends { id: string }> = {
   data: T[] | undefined;
   isLoading: boolean;
   error: Error | null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 export function useAll<T extends { id: string }>(
@@ -24,6 +25,7 @@ export function useAll<T extends { id: string }>(
     data: undefined,
     isLoading: false,
     error: null,
+    highestSettledAt: "unconfirmed",
   });
 
   createEffect(() => {
@@ -33,6 +35,7 @@ export function useAll<T extends { id: string }>(
         data: undefined,
         isLoading: false,
         error: null,
+        highestSettledAt: "unconfirmed",
       });
       return;
     }
@@ -45,6 +48,7 @@ export function useAll<T extends { id: string }>(
         data: entry.state.data,
         isLoading: entry.state.status === "pending",
         error: entry.state.error ? normalizeError(entry.state.error) : null,
+        highestSettledAt: entry.state.highestSettledAt,
       });
 
       const unsubscribe = entry.subscribe({
@@ -53,37 +57,45 @@ export function useAll<T extends { id: string }>(
             data: undefined,
             isLoading: false,
             error: normalizeError(error),
+            highestSettledAt: entry.state.highestSettledAt,
           }),
         onReset: () =>
           batch(() => {
             setState("data", undefined);
             setState("isLoading", true);
             setState("error", null);
+            setState("highestSettledAt", "unconfirmed");
           }),
         onfulfilled: (nextData) =>
           setState({
             data: nextData,
             isLoading: false,
             error: null,
+            highestSettledAt: entry.state.highestSettledAt,
           }),
         onDelta: (delta: SubscriptionDelta<T>) =>
           batch(() => {
-            if (state.data) {
-              setState(
-                "data",
-                produce((current) => {
-                  if (!current) return;
-                  applyDelta(current, delta);
-                }),
-              );
-            } else if (delta.reset) {
-              setState("data", reconcile(delta.all));
-            } else {
-              const current: T[] = [];
-              applyDelta(current, delta);
-              setState("data", reconcile(current));
+            setState("highestSettledAt", entry.state.highestSettledAt);
+            const metadataOnly =
+              !delta.reset && delta.all === undefined && delta.delta.length === 0;
+            if (!metadataOnly) {
+              if (state.data) {
+                setState(
+                  "data",
+                  produce((current) => {
+                    if (!current) return;
+                    applyDelta(current, delta);
+                  }),
+                );
+              } else if (delta.reset) {
+                setState("data", reconcile(delta.all));
+              } else {
+                const current: T[] = [];
+                applyDelta(current, delta);
+                setState("data", reconcile(current));
+              }
             }
-            setState("isLoading", false);
+            setState("isLoading", entry.state.status === "pending");
             setState("error", null);
           }),
       });
@@ -94,6 +106,7 @@ export function useAll<T extends { id: string }>(
         data: undefined,
         isLoading: false,
         error: normalizeError(error),
+        highestSettledAt: "unconfirmed",
       });
     }
   });

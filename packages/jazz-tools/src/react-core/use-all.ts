@@ -1,5 +1,10 @@
 import { type Usable, use, useCallback, useMemo, useRef, useSyncExternalStore } from "react";
-import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
+import type {
+  QueryBuilder,
+  QueryOptions,
+  QuerySettlementLevel,
+  UseAllState,
+} from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
@@ -8,32 +13,36 @@ type UseAllOptions = {
 };
 
 export type UseAllResult<T extends { id: string }> =
-  | UseAllLoadingResult
+  | UseAllLoadingResult<T>
   | UseAllFulfilledResult<T>
   | UseAllErrorResult;
 
-type UseAllLoadingResult = {
-  data: undefined;
+type UseAllLoadingResult<T extends { id: string }> = {
+  data: T[] | undefined;
   isLoading: true;
   error: null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 type UseAllFulfilledResult<T extends { id: string }> = {
   data: T[];
   isLoading: false;
   error: null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 type UseAllErrorResult = {
   data: undefined;
   isLoading: false;
   error: Error;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 type UseAllNoQueryResult = {
   data: undefined;
   isLoading: false;
   error: null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -94,24 +103,30 @@ function useAllBase<T extends { id: string }>(
 
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const status = state?.status;
-  const data = state?.status === "fulfilled" ? state.data : undefined;
+  const data = state?.status === "rejected" ? undefined : state?.data;
   const stateError = state?.status === "rejected" ? state.error : null;
+  const highestSettledAt = state?.highestSettledAt ?? "unconfirmed";
 
   const result = useMemo<UseAllResult<T> | UseAllNoQueryResult>(() => {
     if (key === null) {
-      return { data: undefined, isLoading: false, error: null };
+      return { data: undefined, isLoading: false, error: null, highestSettledAt: "unconfirmed" };
     }
 
     if (status === "fulfilled") {
-      return { data: data!, isLoading: false, error: null };
+      return { data: data!, isLoading: false, error: null, highestSettledAt };
     }
 
     if (status === "rejected") {
-      return { data: undefined, isLoading: false, error: toError(stateError) };
+      return {
+        data: undefined,
+        isLoading: false,
+        error: toError(stateError),
+        highestSettledAt,
+      };
     }
 
-    return { data: undefined, isLoading: true, error: null };
-  }, [data, key, stateError, status]);
+    return { data, isLoading: true, error: null, highestSettledAt };
+  }, [data, highestSettledAt, key, stateError, status]);
 
   if (suspense) {
     if (!query || key === null) {
@@ -150,11 +165,13 @@ function useAllBase<T extends { id: string }>(
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns `{ data, isLoading, error }`
- * - `data` is `undefined` until the query resolves or if the query fails.
- * - `isLoading` is `true` before the first result is available.
+ * @returns `{ data, isLoading, error, highestSettledAt }`
+ * - `data` may contain a materialized local preview while `isLoading` is `true`.
+ * - `isLoading` is `true` until the requested first result is available.
  * - `error` is `null` unless there was a problem setting up the subscription
  *   and no results could be loaded.
+ * - `highestSettledAt` is the highest settlement level observed during the
+ *   subscription lifetime.
  *
  * Use {@link useAllSuspense} when you want loading and errors to flow through
  * Suspense and an error boundary instead.

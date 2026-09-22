@@ -97,6 +97,9 @@ export interface RuntimeSubscriptionRemovedRow {
   index: number;
 }
 
+/** Settlement lattice reported by a progressive subscription event. */
+export type QuerySettlementLevel = "unconfirmed" | "local" | "remote";
+
 /** Structured root changes published by a runtime adapter to the TS facade. */
 export interface RuntimeSubscriptionDelta {
   reset?: boolean;
@@ -104,6 +107,8 @@ export interface RuntimeSubscriptionDelta {
   removed: RuntimeSubscriptionRemovedRow[];
   updated: RuntimeSubscriptionUpdatedRow[];
   terminalOperations?: RuntimeTerminalOperation[];
+  requestedReady: boolean;
+  attainedSettlement: QuerySettlementLevel;
 }
 
 export type ColumnType =

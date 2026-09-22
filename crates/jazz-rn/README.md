@@ -57,8 +57,8 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
-The wrapper accepts ABI V1, which uses opaque host-generated admission
-capabilities and trusted revocation. ABI V1 defines the shared foreground
+The wrapper accepts ABI V2, which uses opaque host-generated admission
+capabilities and trusted revocation. ABI V2 defines the shared foreground
 `NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
 plus pending-operation poll/cancel commands for chunk-backed reads. It is a
 byte-oriented native-host contract, not a new React Native row/query API:

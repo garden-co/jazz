@@ -3849,6 +3849,7 @@ where
             authorization_mode,
             terminal_rows,
             upstream_subscription_handles,
+            delivery,
         ) = {
             let state = state.borrow();
             (
@@ -3864,6 +3865,7 @@ where
                 state.authorization_mode,
                 state.terminal_rows,
                 state.upstream_subscription_handles.clone(),
+                state.delivery,
             )
         };
         let awaiting_initial_owner_result = state.borrow().pending_initial_owner_result;
@@ -3878,9 +3880,12 @@ where
                                 && !owner.opening_pending_for_authority_result(&key)
                         })
                 });
-            if !ready {
+            if delivery == SubscriptionDelivery::Settled && !ready {
                 retained.push(Rc::downgrade(&state));
                 continue;
+            }
+            if delivery == SubscriptionDelivery::Progressive && ready {
+                state.borrow_mut().pending_initial_owner_result = false;
             }
         }
         let request_claims = state
@@ -3892,7 +3897,7 @@ where
         // A foreground's provisional graph may already have consumed an empty
         // first batch. Initialize it again after the owner's complete answer so
         // the ordinary cold-graph gate covers evaluation of all recovered inputs.
-        if awaiting_initial_owner_result
+        if (awaiting_initial_owner_result && delivery == SubscriptionDelivery::Settled)
             || state.borrow().groove_runtime_token != groove_runtime_token
         {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -4751,6 +4756,8 @@ where
                                 removed,
                                 terminal_operations: _,
                                 settled: event_settled,
+                                requested_ready,
+                                attained_settlement,
                                 ..
                             } = &mut event
                             {
@@ -4760,6 +4767,10 @@ where
                                     || !updated.is_empty()
                                     || !removed.is_empty();
                                 *event_settled = settled;
+                                let (event_requested_ready, event_attained_settlement) =
+                                    subscription_event_metadata(snapshot_tier, settled, true);
+                                *requested_ready = event_requested_ready;
+                                *attained_settlement = event_attained_settlement;
                             }
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));

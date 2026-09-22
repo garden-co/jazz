@@ -458,8 +458,8 @@ JS-owned memory before Rust frees its response allocation.
 
 The command bytes are pinned by
 `foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec`,
-`foreground_extension_v1_byte_contract`,
-`foreground_continuation_v1_byte_contract`, and
+`foreground_extension_v2_byte_contract`,
+`foreground_continuation_v2_byte_contract`, and
 `relation_read_uses_the_canonical_query_byte_contract`. Both ordinary and
 relational reads carry one canonical `Query`; relational syntax is nested in
 `Query.relation` and is normalized while core prepares the read.
@@ -475,22 +475,24 @@ operation retires its result handle; the already admitted operation continues
 through bounded foreground cleanup. Finish and abort use first-closing-wins;
 canceling a result does not roll back a finish. Canceling a push leaves its
 partial upload available for an explicit abort. Foreground close retires all
-pending operations and uploads. Subscription event ordinal 3 is reserved for
-StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
-terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
-terminal operations use `binding_codec::terminal_operations_to_json`.
+pending operations and uploads. Native relay ABI V2 subscription event ordinal 3 is
+reserved for `StructuredDelta`: reset bool, settled bool, tier string,
+requested-ready bool, attained-settlement discriminant, delta byte vector, and
+terminal_operations_json string. Event ordinals 0–2 remain stable; their V2
+payloads carry the same metadata fields before the delta payload. Terminal
+operations use `binding_codec::terminal_operations_to_json`.
 
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
 configured, explicitly_offline, connected. All fields use postcard 1's existing
-canonical V1 envelope: unsigned varints, UTF-8 strings/byte vectors prefixed by
+canonical V2 envelope: unsigned varints, UTF-8 strings/byte vectors prefixed by
 varint byte length, options with a 0/1 presence byte, and raw fixed arrays.
 Options strings reuse the established native binding JSON option vocabulary;
 validation belongs to the shared native option parser, never the host bridge.
 A supported discriminant does not grant capabilities or change admission identity.
 The byte-level Rust contract is pinned by
-`foreground_extension_v1_byte_contract`; additive handler availability must be
-verified by the corresponding real C ABI acceptance tests.
+`foreground_structured_delta_v2_byte_contract`; additive handler availability must
+be verified by the corresponding real C ABI acceptance tests.
 
 `All` attaches ordinary core coverage with the supplied read options before
 evaluating. An optional
@@ -499,14 +501,15 @@ write overlay through the existing transaction read APIs; it cannot select a
 sibling foreground's transaction or replace its opening identity/claims.
 The pending future awaits owner admission and coverage without blocking the
 owner thread. Completion or cancellation queues a bounded coverage cleanup;
-ordinary owner turns acquire the node asynchronously before releasing its pins.
+ordinary owner turns acquire the node asynchronously before releasing their pins.
 The read admission budget includes retained reads and queued cleanups, and
 foreground retirement cancels those local obligations after cancelling retained
 ticks and reads. Relation snapshots use
 `binding_codec::encode_relation_snapshot`. Subscription event 3,
 `StructuredDelta`, appends the existing terminal-operation JSON codec to the
-ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
-event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
+ordinary reset/settled/tier/metadata/row-delta fields. Event 0 uses the same V2
+metadata layout. The byte contract is pinned by
+`foreground_structured_delta_v2_byte_contract`.
 
 `All` and `Subscribe` each accept one bounded canonical Postcard `Query`.
 Preparation, including relation lowering, happens behind those core operations;
@@ -544,7 +547,7 @@ Objects contain sorted, unique UTF-8 keys; `F64` carries raw IEEE-754 bits, so
 negative zero is preserved. A receiver requires an exact canonical Postcard
 payload with no trailing bytes or overlong alternative spelling.
 
-**V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
+**V2 vertical slice.** Native relay ABI V2 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `All`, `Subscribe`, `DrainSubscription`,
 `Unsubscribe`. Query inputs are exactly canonical postcard `Query` bytes; read
@@ -585,7 +588,7 @@ cleanup; the next bounded `Tick` performs its finalization, because awaiting
 that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
-ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
+ABI V2 also includes a deliberately narrow write family: `BeginTransaction` with
 the ordinary `mergeable` or `exclusive` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
@@ -655,7 +658,7 @@ foreground owns delivery and cancellation even though the request uses the
 scope's shared upstream. Offline/timeouts resolve Unknown; synchronous local
 advice remains Unknown.
 
-The V1 subset otherwise deliberately supports only `ReadOpts::default()`
+The V2 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation
 terminal operations and any not-yet-shared mutation
 contract rather than silently receiving a distinct RN meaning. The admitted
@@ -665,7 +668,7 @@ query or encoded-cell bytes. `tick`/`close` convenience JSI methods may remain
 internal compatibility shorthands only while they invoke the same foreground
 lifecycle; `jazz-tools` must move to `execute` as each family is implemented.
 
-**Wake registration.** ABI V1 includes the private JSI `setTickScheduler(callback)`
+**Wake registration.** ABI V2 includes the private JSI `setTickScheduler(callback)`
 companion on each foreground handle. The callback receives `"immediate"`,
 `"deferred"`, or `"after:<milliseconds>"`; it schedules the adapter's normal
 JS-side tick and does not synchronously call the native handle. Rust records

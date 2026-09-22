@@ -23,7 +23,8 @@ use jazz::db::{
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
     PermissionAdvice, Propagation, ReadOpts, RowCells, SeededRowIdSource, SerializedReadResult,
     SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
-    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
+    SubscriptionDelivery, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -1025,9 +1026,10 @@ impl WasmDbInner {
         opts: ReadOpts,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
+        delivery: SubscriptionDelivery,
     ) -> Result<jazz::db::SubscriptionStream, Error> {
         with_wasm_db!(self, |db| db
-            .subscribe_serialized_query(&query, opts, request_scope, authorization)
+            .subscribe_serialized_query(&query, opts, request_scope, authorization, delivery)
             .await)
     }
 
@@ -1897,6 +1899,7 @@ impl WasmDb {
         author: Option<Vec<u8>>,
         claims: JsValue,
     ) -> Result<JsValue, JsValue> {
+        let delivery = subscription_delivery_from_js(&opts)?;
         let opts = read_opts_from_js(opts)?;
         let has_explicit_author = author.is_some();
         let author = self.read_author(author)?;
@@ -1916,7 +1919,7 @@ impl WasmDb {
                     None => SerializedSubscriptionAuthorization::ClientLocal,
                 };
                 let stream = db
-                    .subscribe_serialized_query(query, opts, admission, authorization)
+                    .subscribe_serialized_query(query, opts, admission, authorization, delivery)
                     .await
                     .map_err(to_js_error)?;
                 subscription_stream_to_js(db, stream)
@@ -3229,6 +3232,18 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     }
     Ok(opts)
 }
+fn subscription_delivery_from_js(value: &JsValue) -> Result<SubscriptionDelivery, JsValue> {
+    let Some(delivery) = optional_string_prop(value, "subscription_delivery")? else {
+        return Ok(SubscriptionDelivery::Settled);
+    };
+    match delivery.as_str() {
+        "settled" | "Settled" => Ok(SubscriptionDelivery::Settled),
+        "progressive" | "Progressive" => Ok(SubscriptionDelivery::Progressive),
+        other => Err(JsValue::from_str(&format!(
+            "unknown subscription_delivery {other}"
+        ))),
+    }
+}
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
     match tier {
@@ -3494,6 +3509,8 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             removed,
             terminal_operations,
             settled,
+            requested_ready,
+            attained_settlement,
             tier,
             ..
         } => {
@@ -3525,6 +3542,16 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
+            set_prop(
+                &object,
+                "requestedReady",
+                JsValue::from_bool(requested_ready),
+            )?;
+            set_prop(
+                &object,
+                "attainedSettlement",
+                JsValue::from_str(&format!("{attained_settlement:?}").to_ascii_lowercase()),
+            )?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
         }
         SubscriptionEvent::Closed => {

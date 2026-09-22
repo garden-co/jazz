@@ -11,7 +11,12 @@ import { JazzClientProvider } from "./provider.js";
 import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 
 type Todo = { id: string; title: string };
-type NoQueryResult = { data: undefined; isLoading: false; error: null };
+type NoQueryResult = {
+  data: undefined;
+  isLoading: false;
+  error: null;
+  highestSettledAt: "unconfirmed";
+};
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
   return {
@@ -23,7 +28,7 @@ function makeQuery(table = "todos"): QueryBuilder<Todo> {
 }
 
 function delta(all: Todo[]): SubscriptionDelta<Todo> {
-  return { all, delta: [] };
+  return { all, delta: [], requestedReady: true, attainedSettlement: "local" };
 }
 
 function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
@@ -98,7 +103,12 @@ describe("react-core/useAll", () => {
     );
 
     expect(container.textContent).toBe("idle");
-    expect(result).toEqual({ data: undefined, isLoading: false, error: null });
+    expect(result).toEqual({
+      data: undefined,
+      isLoading: false,
+      error: null,
+      highestSettledAt: "unconfirmed",
+    });
     expect(subscribeCalls).toHaveLength(0);
   });
 

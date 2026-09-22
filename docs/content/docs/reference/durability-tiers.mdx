@@ -30,8 +30,9 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 
 ## Read tiers
 
-Read choices control which data a query uses and when its **first result** is delivered.
-They are intentionally separate from write durability.
+Read choices control which data a query uses and when its **requested first result** is delivered.
+They are intentionally separate from write durability. A subscription may publish an available local
+preview before that first-result gate is satisfied; strict remote reads remain gated.
 
 New applications should use the product read choices `"local-first"`,
 `"remote"`, and `"remote-if-possible"`:
@@ -59,6 +60,10 @@ These options apply to:
 - `new QuerySubscription(query, options?)` (Svelte)
 - `useAll(query, options?)` (Vue)
 - `useAll(() => ({ query, options }))` (Solid)
+
+Non-Suspense framework results expose `highestSettledAt`, which is the highest
+settlement level observed during that subscription lifetime. It is monotonic
+metadata, not a claim that every currently displayed row is at that level.
 
 The React Native/Expo alpha uses these same read and write durability tiers
 after opening its account-handle client with `createJazzClient`. Its native

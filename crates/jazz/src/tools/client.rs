@@ -2223,8 +2223,10 @@ impl ClientDbInner {
                             terminal_operations,
                             settled,
                             tier,
+                            requested_ready,
+                            attained_settlement,
                         } => eprintln!(
-                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_event reset={reset} publishable={publishable} added={} updated={} removed={} terminal_ops={} settled={settled} tier={tier:?}",
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_event reset={reset} publishable={publishable} added={} updated={} removed={} terminal_ops={} settled={settled} tier={tier:?} requested_ready={requested_ready} attained_settlement={attained_settlement:?}",
                             added.len(), updated.len(), removed.len(), terminal_operations.len(),
                         ),
                         CoreSubscriptionEvent::Rejected { reason } => eprintln!(
