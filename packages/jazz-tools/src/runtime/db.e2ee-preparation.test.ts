@@ -69,7 +69,7 @@ it.each(["all", "one", "settled", "insert", "upsert"] as const)(
       }),
     ).rejects.toThrow();
     await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
-    tx.rollback();
+    await tx.rollback();
     expect(await db.all(app.markers, { tier: "global" })).toEqual([]);
     expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
   },

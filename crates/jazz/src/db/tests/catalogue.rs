@@ -643,6 +643,71 @@ pub(super) fn assert_authority_rejects_staged_write(
     assert_eq!(error.code, ErrorCode::WriteRejected);
 }
 
+/// This internal seam covers authored-but-unaccepted schema-ID lookup, which
+/// the high-level identity binding does not expose. Real-server rename coverage
+/// lives in `scope-identity-native.test.ts`.
+#[test]
+fn catalogue_table_identity_requires_accepted_schema_publication() {
+    let base = owner_write_schema();
+    let evolved = SchemaVersion::new(evolved_owner_write_schema());
+    let db = open_db(0x5d, AuthorSubject::SYSTEM, &base);
+    let base_identity = db
+        .catalogue_table_identity(base.version_id(), "todos")
+        .unwrap()
+        .unwrap();
+    assert!(!base_identity.0.is_nil());
+    assert_eq!(
+        db.catalogue_table_identity(evolved.id, "todos").unwrap(),
+        None
+    );
+
+    let lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .expect("valid migration lens");
+    let publication = db
+        .author_schema_lineage_publication(
+            evolved.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        publication.physical_identities.tables["todos"].id,
+        base_identity
+    );
+    assert_eq!(
+        db.catalogue_table_identity(base.version_id(), "todos")
+            .unwrap(),
+        Some(base_identity)
+    );
+    assert_eq!(
+        db.catalogue_table_identity(evolved.id, "todos").unwrap(),
+        None
+    );
+
+    db.publish_schema_with_lens(1, publication).unwrap();
+    assert_eq!(
+        db.catalogue_table_identity(evolved.id, "todos").unwrap(),
+        Some(base_identity)
+    );
+    assert_eq!(
+        db.catalogue_table_identity(base.version_id(), "todos")
+            .unwrap(),
+        Some(base_identity)
+    );
+}
+
 #[test]
 fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     let base = owner_write_schema();

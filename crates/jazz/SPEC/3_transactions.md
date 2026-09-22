@@ -384,6 +384,10 @@ requires coverage and acceptance. An explicit global wait never falls back to
 local durability when no authority is configured; omitted wait options retain
 the existing offline behavior.
 
+Prepared exclusive scopes perform the same schema admission as ordinary
+transactions before writes or read decoding. While a commit drains, operations
+continue through the scope's bound preparation I/O rather than ordinary owner I/O.
+
 `observeE2eeHistory` is weaker: it hydrates local inputs, freezes a fresh
 read-only exclusive snapshot, excludes its pending local prefix and unsettled
 dots, and rolls the observation back. The returned accepted observations do
@@ -417,9 +421,10 @@ this contract.
 Regressions cover authority ordering and snapshot conflicts
 (`settlement-snapshot.test.ts`), Node and browser parity
 (`settlement-native.test.ts`, `e2ee-settlement.server.test.ts`), accepted identity
-across a rename (`e2ee_scope_identity.rs`), fresh clients and denied row access
-(`e2ee-scope-identity.server.test.ts`), and the binding byte corpus
-(`wasm-settled-rows.test.ts`). These are extracted regressions; this extraction
+across a real-server rename (`scope-identity-native.test.ts`), authored-but-unaccepted
+schema-ID lookup (`catalogue.rs::catalogue_table_identity_requires_accepted_schema_publication`),
+fresh clients and denied row access (`e2ee-scope-identity.server.test.ts`), and
+the binding byte corpus (`wasm-settled-rows.test.ts`). These are extracted regressions; this extraction
 itself has not run native generation, focused tests or the canonical gate.
 Release-level qualification and limitations remain tracked in
 [#3125](https://github.com/garden-co/jazz/issues/3125); prior source receipts do
