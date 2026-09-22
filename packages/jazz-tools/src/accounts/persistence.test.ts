@@ -1,5 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { prepareAccountManager } from "./persistence.js";
+import { createJazzSessionOwner } from "../session/state.js";
+import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { accountToken, exportLocalFirstSecret } from "./enrollment.js";
 
@@ -8,6 +10,10 @@ const registry = "https://core.example/apps/test/accounts";
 // native signature/subject derivation is covered by the Rust identity corpus.
 const mintToken = () =>
   `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`;
+const mintRootToken = (secret: string) =>
+  `e30.${btoa(
+    JSON.stringify({ iss: "urn:jazz:local-first", sub: secret.slice("jazz-auth-v1:".length) }),
+  )}.sig`;
 
 it("restores local selection and retains its root after logout", async () => {
   let value: string | null = null;
@@ -124,4 +130,60 @@ it("restores a retained local root without exposing it in account state", async 
   const recovered = manager.restoreLocalFirst(replacement);
   await accountToken(recovered, registry);
   expect(exportLocalFirstSecret(recovered)).toBe(replacement);
+});
+
+it("converges automatic sessions on one durable root before opening clients", async () => {
+  const firstSecret = formatAuthSecret(new Uint8Array(32).fill(1));
+  const secondSecret = formatAuthSecret(new Uint8Array(32).fill(2));
+  let value: string | null = null;
+  let updates = 0;
+  let finish!: () => void;
+  const durable = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      updates++;
+      value = transform(value);
+      await durable;
+    },
+  };
+  const first = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => firstSecret,
+  });
+  const second = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => secondSecret,
+  });
+  const opened: string[] = [];
+  const start = (accounts: typeof first) =>
+    createJazzSessionOwner({
+      accounts,
+      initial: "local-first",
+      async openClient(account) {
+        opened.push(exportLocalFirstSecret(account));
+        return { async shutdown() {} };
+      },
+    });
+  const firstSession = start(first);
+  const secondSession = start(second);
+  await vi.waitFor(() => expect(updates).toBe(2));
+  expect(opened).toEqual([]);
+  finish();
+  const [a, b] = await Promise.all([firstSession, secondSession]);
+  expect(a.getSnapshot().account?.identity).toEqual(b.getSnapshot().account?.identity);
+  expect(exportLocalFirstSecret(a.getSnapshot().account!)).toBe(
+    exportLocalFirstSecret(b.getSnapshot().account!),
+  );
+  expect(JSON.parse(value!)).toMatchObject({ selected: 0, roots: [firstSecret] });
 });
