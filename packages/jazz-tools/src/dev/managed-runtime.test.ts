@@ -168,6 +168,9 @@ describe("ManagedDevRuntime", () => {
         {},
       ),
     });
+    const expectedPublishedSchema = {
+      todos: { columns: expectedApp.wasmSchema.todos.columns },
+    };
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({
       close: vi.fn(),
     });
@@ -209,7 +212,7 @@ describe("ManagedDevRuntime", () => {
           adminSecret,
           schemaHash,
         }),
-      ).resolves.toMatchObject({ schema: expectedApp.wasmSchema });
+      ).resolves.toMatchObject({ schema: expectedPublishedSchema });
 
       await firstRuntime.resetForTests();
 
@@ -233,7 +236,7 @@ describe("ManagedDevRuntime", () => {
           adminSecret,
           schemaHash,
         }),
-      ).resolves.toMatchObject({ schema: expectedApp.wasmSchema });
+      ).resolves.toMatchObject({ schema: expectedPublishedSchema });
     } finally {
       await firstRuntime.resetForTests();
       await secondRuntime.resetForTests();
