@@ -7,6 +7,8 @@ import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { ensureEnvAppId, ManagedDevRuntime } from "./managed-runtime.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "../runtime/schema-fetch.js";
+import { schema as s } from "../index.js";
 import { chmod, lstat, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { unlock, waitForLockSync } from "fs-native-extensions";
@@ -149,6 +151,94 @@ describe("ManagedDevRuntime", () => {
       await runtime.dispose();
     }
   });
+  it("publishes through the native server and reopens its persistent catalogue", async () => {
+    const projectRoot = await tempRoots.create("jazz-managed-native-persistence-");
+    await writeFile(join(projectRoot, "schema.ts"), todoSchema());
+    await writeFile(join(projectRoot, "permissions.ts"), "export default {};\n");
+
+    const appId = "00000000-0000-0000-0000-000000000244";
+    const adminSecret = "managed-native-admin-secret";
+    const dataDir = join(projectRoot, "persistent-server-data");
+    const expectedApp = s.defineApp({
+      todos: s.table(
+        {
+          title: s.string(),
+          done: s.boolean(),
+        },
+        {},
+      ),
+    });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({
+      close: vi.fn(),
+    });
+    const firstRuntime = makeRuntime();
+    const secondRuntime = makeRuntime();
+
+    try {
+      const first = await firstRuntime.initialize({
+        appId,
+        schemaDir: projectRoot,
+        server: {
+          host: "127.0.0.2",
+          dataDir,
+          adminSecret,
+        },
+      });
+
+      expect(first.adminSecret).toBe(adminSecret);
+      expect(first.serverUrl).toMatch(/^http:\/\/127\.0\.0\.2:[1-9]\d*$/);
+      expect((await fetch(`${first.serverUrl}/health`)).ok).toBe(true);
+
+      const firstCatalogue = await fetchSchemaHashes(first.serverUrl, {
+        appId: first.appId,
+        adminSecret,
+      });
+      expect(firstCatalogue.hashes).toHaveLength(1);
+      const schemaHash = firstCatalogue.hashes[0];
+      if (!schemaHash) throw new Error("Native server did not publish a schema hash");
+
+      await expect(
+        fetchSchemaHashes(first.serverUrl, {
+          appId: first.appId,
+          adminSecret: "wrong-admin-secret",
+        }),
+      ).rejects.toThrow("Schema hashes fetch failed: 401 Unauthorized");
+      await expect(
+        fetchStoredWasmSchema(first.serverUrl, {
+          appId: first.appId,
+          adminSecret,
+          schemaHash,
+        }),
+      ).resolves.toMatchObject({ schema: expectedApp.wasmSchema });
+
+      await firstRuntime.resetForTests();
+
+      const second = await secondRuntime.initialize({
+        appId,
+        schemaDir: projectRoot,
+        server: {
+          host: "127.0.0.2",
+          dataDir,
+          adminSecret,
+        },
+      });
+      const reopenedCatalogue = await fetchSchemaHashes(second.serverUrl, {
+        appId: second.appId,
+        adminSecret,
+      });
+      expect(reopenedCatalogue.hashes).toContain(schemaHash);
+      await expect(
+        fetchStoredWasmSchema(second.serverUrl, {
+          appId: second.appId,
+          adminSecret,
+          schemaHash,
+        }),
+      ).resolves.toMatchObject({ schema: expectedApp.wasmSchema });
+    } finally {
+      await firstRuntime.resetForTests();
+      await secondRuntime.resetForTests();
+    }
+  }, 30_000);
 
   it("restores the backend secret after stop failure and permits retry", async () => {
     const firstSchemaDir = await tempRoots.create("jazz-managed-stop-failure-first-");
