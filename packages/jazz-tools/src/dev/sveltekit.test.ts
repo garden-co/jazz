@@ -29,15 +29,58 @@ function deployed(hash = "abc123def4567890") {
   };
 }
 
+type CapturedMiddleware = Parameters<
+  NonNullable<ViteDevServer["middlewares"]>["use"]
+>[0];
+
+function invokeMiddleware(handler: CapturedMiddleware, url: string) {
+  return new Promise<{ statusCode: number; body: string }>((resolve) => {
+    let statusCode = 200;
+    handler(
+      { url },
+      {
+        setHeader() {},
+        get statusCode() {
+          return statusCode;
+        },
+        set statusCode(value: number) {
+          statusCode = value;
+        },
+        end(body?: string | Buffer) {
+          resolve({ statusCode, body: body?.toString() ?? "" });
+        },
+      },
+      () => resolve({ statusCode, body: "" }),
+    );
+  });
+}
+
 function makeViteServer(
   command: "serve" | "build",
   root = "/tmp/jazz-sveltekit-test",
-): ViteDevServer & { restart: ReturnType<typeof vi.fn> } {
+): ViteDevServer & {
+  restart: ReturnType<typeof vi.fn>;
+  closeHandlers: (() => void | Promise<void>)[];
+  middlewareHandlers: CapturedMiddleware[];
+} {
+  const closeHandlers: (() => void | Promise<void>)[] = [];
+  const middlewareHandlers: CapturedMiddleware[] = [];
   return {
     config: { root, command, env: {} },
-    httpServer: { once() {} },
+    httpServer: {
+      once(event, handler) {
+        if (event === "close") closeHandlers.push(handler);
+      },
+    },
+    middlewares: {
+      use(handler) {
+        middlewareHandlers.push(handler);
+      },
+    },
     ws: { send() {} },
     restart: vi.fn(() => Promise.resolve()),
+    closeHandlers,
+    middlewareHandlers,
   };
 }
 
@@ -93,6 +136,7 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit();
     // Without a serve ConfigEnv the hook returns the merged config synchronously
     // (the async runtime path only runs for `command: "serve"`).
+
     const runConfig = (c: Record<string, unknown>) =>
       plugin.config(c) as { ssr: { external: true | string[] } };
 
@@ -102,6 +146,38 @@ describe("jazzSvelteKit", () => {
 
     const externaliseAll = runConfig({ ssr: { external: true } });
     expect(externaliseAll.ssr.external).toBe(true);
+  });
+  it("serves the embedded inspector route and disposes the runtime on dev-server close", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000237",
+      port: 19987,
+      url: "http://127.0.0.1:19987",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzSvelteKit({
+      server: { port: 19987, adminSecret: "bug237-admin" },
+    });
+    const viteServer = makeViteServer("serve");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.config.env!.VITE_JAZZ_INSPECTOR).toBe("1");
+    expect(viteServer.middlewareHandlers).toHaveLength(1);
+    const response = await invokeMiddleware(
+      viteServer.middlewareHandlers[0]!,
+      "/__jazz/embedded/embedded.html",
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("<!doctype html>");
+
+    for (const close of viteServer.closeHandlers) await close();
+    expect(stop).toHaveBeenCalledOnce();
   });
 
   it("starts a local server in dev and injects PUBLIC_JAZZ_* env vars", async () => {
