@@ -87,3 +87,87 @@ it("keeps accepted device membership visible when rotated key delivery fails aut
     await server.stop();
   }
 }, 60_000);
+
+it("rejects device listing with the original signer error during successor history authentication", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Db[] = [];
+  const signerError = new Error("Successor history signer unavailable");
+  let failHistoryVerification = false;
+  let successorHistoryUnwrapped = false;
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    const account = await localAccountConfig(server.appId, server.url);
+    const adapters = await createNativeCrypto();
+    const decoder = new TextDecoder();
+    const open = async (faultyVerifier = false) => {
+      let saved: string | null = null;
+      const db = await createDb({
+        ...account,
+        e2ee: {
+          store: {
+            async read() {
+              return saved;
+            },
+            async update(transform) {
+              saved = transform(saved);
+            },
+          },
+          crypto: {
+            ...adapters,
+            keyEnvelope: {
+              ...adapters.keyEnvelope,
+              async unwrap(key, context, envelope) {
+                const secret = await adapters.keyEnvelope.unwrap(key, context, envelope);
+                if (faultyVerifier && failHistoryVerification) {
+                  const decoded = decoder.decode(context);
+                  if (
+                    decoded.includes("jazz.e2ee.account-successor.v1") &&
+                    decoded.includes("history")
+                  ) {
+                    successorHistoryUnwrapped = true;
+                  }
+                }
+                return secret;
+              },
+            },
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async verify(publicKey, record, signature) {
+                if (faultyVerifier && failHistoryVerification && successorHistoryUnwrapped)
+                  throw signerError;
+                return adapters.deviceSigner.verify(publicKey, record, signature);
+              },
+            },
+          },
+        },
+      });
+      clients.push(db);
+      return db;
+    };
+    const first = await open(true);
+    const [creator] = await first.e2ee.devices.list();
+    const second = await open();
+    const removed = (await second.e2ee.devices.list()).find((device) => device.id !== creator!.id)!;
+    await first.e2ee.devices.approve(removed.id).wait();
+    await first.e2ee.devices.revoke(removed.id).wait();
+
+    failHistoryVerification = true;
+    await expect(first.e2ee.devices.list()).rejects.toBe(signerError);
+    expect(successorHistoryUnwrapped).toBe(true);
+
+    failHistoryVerification = false;
+    successorHistoryUnwrapped = false;
+    expect(await first.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: creator!.id, state: "active", keyReadiness: "verified" }),
+    );
+  } finally {
+    await Promise.all(clients.map((db) => db.shutdown()));
+    await server.stop();
+  }
+}, 60_000);
