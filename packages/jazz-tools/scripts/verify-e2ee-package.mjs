@@ -26,7 +26,12 @@ try {
   ]);
   await symlink(resolve(root, "../../crates/jazz-napi"), resolve(modules, "jazz-napi"), "dir");
   const manifest = JSON.parse(await readFile(resolve(consumer, "package.json"), "utf8"));
-  for (const dependency of ["@standard-schema/spec", "jazz-wasm", "json-schema-to-ts"]) {
+  for (const dependency of [
+    "@standard-schema/spec",
+    "jazz-wasm",
+    "json-schema-to-ts",
+    "@noble/hashes",
+  ]) {
     assert.ok(manifest.dependencies?.[dependency], `${dependency} must be declared`);
     const destination = resolve(modules, dependency);
     await mkdir(dirname(destination), { recursive: true });
@@ -39,6 +44,18 @@ try {
     `
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
     import type { DeviceInfo } from "jazz-tools";
+    import { schema as s } from "jazz-tools";
+    import { deviceRequestSchema, deviceRequestPermissions } from "jazz-tools/e2ee";
+    export const app = s.defineApp({
+      ...deviceRequestSchema,
+      notes: s.table({ body: s.string() }, {}),
+    });
+    export const permissions = {
+      ...deviceRequestPermissions,
+      ...s.definePermissions(app, ({ policy, session }) => {
+        policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
+      }),
+    };
     export function deviceState(device: DeviceInfo): "pending" | "active" | "revoked" {
       return device.state;
     }
@@ -90,7 +107,14 @@ try {
       "-e",
       `
     import { strict as assert } from "node:assert";
-    import { encodeCryptoContext } from "jazz-tools/e2ee";
+    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions } from "jazz-tools/e2ee";
+    import { schema as s } from "jazz-tools";
+    const app = s.defineApp({
+      ...deviceRequestSchema,
+      notes: s.table({ body: s.string() }, {}),
+    });
+    assert.ok(app.__e2ee_device_requests);
+    assert.ok(deviceRequestPermissions.__e2ee_device_requests);
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import {
