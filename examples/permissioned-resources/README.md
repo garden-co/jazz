@@ -5,4 +5,4 @@ permissions. It deliberately has no application UI. All data and identifiers are
 synthetic; the workload preserves the shape of the anonymized performance fixture.
 
 The [benchmark package](benchmarks/README.md) owns the schema, deterministic seed,
-Core → Edge → Client driver, profiling tools and reference-engine experiments.
+Core → device-local persistence relay → Client driver, profiling tools and reference-engine experiments.

@@ -2493,6 +2493,20 @@ where
         )
     }
 
+    /// Test-only counterpart of the authenticated scope-isolated relay handshake.
+    /// As with the `Db` helper, callers supply the already authenticated session.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_scope_isolated_relay_subscriber_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_scope_isolated_relay_subscriber(transport, identity, claims, admission_epoch)
+    }
+
     /// Admit the one immutable session selected during a scope-isolated relay
     /// handshake. This is crate-private so a host must not turn application
     /// claims or raw frames into a relay capability.

@@ -120,7 +120,8 @@ pub struct FanoutReceipt {
     pub compilations_core_relay_foreground: [usize; 3],
 }
 
-/// A fresh core -> scope-isolated relay -> non-durable foreground topology.
+/// A fresh Core -> device-local persistence relay -> non-durable foreground topology.
+/// Core owns authorization; the scope-isolated relay is not a server Edge.
 /// Two teams have equally sized tables; Alice can read only team zero. The
 /// overview intentionally has no tenant predicate, so policy is load-bearing.
 pub struct FanoutFixture {
