@@ -171,3 +171,136 @@ it("rejects device listing with the original signer error during successor histo
     await server.stop();
   }
 }, 60_000);
+
+it("reports signer failure when a shared device reconciles an accepted proof", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Db[] = [];
+  const signerError = new Error("Accepted proof signer unavailable");
+  let releaseResponses!: () => void;
+  const responsesReady = new Promise<void>((resolve) => {
+    releaseResponses = resolve;
+  });
+  let reachedVerifier!: () => void;
+  const verifierFailed = new Promise<void>((resolve) => {
+    reachedVerifier = resolve;
+  });
+  let responses = 0;
+  let rejectProofVerification = true;
+  const returnedSecrets: Uint8Array[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    const account = await localAccountConfig(server.appId, server.url);
+    const adapters = await createNativeCrypto();
+    const store = () => {
+      let saved: string | null = null;
+      return {
+        async read() {
+          return saved;
+        },
+        async update(transform: (current: string | null) => string) {
+          saved = transform(saved);
+        },
+      };
+    };
+    const open = async (localStore = store(), responder = false) => {
+      let reconcilingProof = false;
+      const db = await createDb({
+        ...account,
+        e2ee: {
+          store: localStore,
+          crypto: {
+            ...adapters,
+            keyEnvelope: {
+              ...adapters.keyEnvelope,
+              async open(device, context, envelope) {
+                const secret = await adapters.keyEnvelope.open(device, context, envelope);
+                if (
+                  responder &&
+                  new TextDecoder().decode(context).includes("jazz.e2ee.device-approval.v1")
+                )
+                  returnedSecrets.push(secret);
+                return secret;
+              },
+              async unwrap(key, context, envelope) {
+                const secret = await adapters.keyEnvelope.unwrap(key, context, envelope);
+                const decoded = new TextDecoder().decode(context);
+                if (
+                  responder &&
+                  decoded.includes("jazz.e2ee.device-approval.v1") &&
+                  decoded.includes("proof")
+                )
+                  reconcilingProof = true;
+                return secret;
+              },
+              async wrap(key, context, plaintext) {
+                if (responder && new TextDecoder().decode(context).includes("proof")) {
+                  if (++responses === 2) releaseResponses();
+                  await responsesReady;
+                }
+                return adapters.keyEnvelope.wrap(key, context, plaintext);
+              },
+            },
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async verify(publicKey, context, signature) {
+                if (
+                  responder &&
+                  rejectProofVerification &&
+                  reconcilingProof &&
+                  new TextDecoder().decode(context).includes("proof-signature")
+                ) {
+                  reconcilingProof = false;
+                  reachedVerifier();
+                  throw signerError;
+                }
+                return adapters.deviceSigner.verify(publicKey, context, signature);
+              },
+            },
+          },
+        },
+      });
+      clients.push(db);
+      return db;
+    };
+    const creator = await open();
+    await creator.e2ee.devices.list();
+    const sharedStore = store();
+    const second = await open(sharedStore, true);
+    const pending = (await second.e2ee.devices.list()).find(
+      (device) => device.state === "pending",
+    )!;
+    const shared = await open(sharedStore, true);
+    await shared.e2ee.devices.list();
+    await creator.e2ee.devices.approve(pending.id).wait();
+    await verifierFailed;
+    const reported: unknown[] = [];
+    await expect
+      .poll(async () => {
+        const results = await Promise.allSettled([
+          second.e2ee.devices.list(),
+          shared.e2ee.devices.list(),
+        ]);
+        for (const result of results)
+          if (result.status === "rejected") reported.push(result.reason);
+        return reported;
+      })
+      .toContain(signerError);
+    expect(responses).toBe(2);
+    expect(returnedSecrets.every((secret) => secret.every((byte) => byte === 0))).toBe(true);
+    rejectProofVerification = false;
+    for (const client of [second, shared])
+      expect(await client.e2ee.devices.list()).toContainEqual(
+        expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
+      );
+  } finally {
+    releaseResponses();
+    await Promise.all(clients.map((db) => db.shutdown()));
+    await server.stop();
+  }
+}, 60_000);

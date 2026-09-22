@@ -39,6 +39,14 @@ type Challenge = {
   envelope: Uint8Array;
 };
 
+class UnavailableDelivery extends Error {}
+
+// KeyEnvelope has no separate authentication-rejection result. Preserve its
+// existing readiness behaviour without classifying signer or lifecycle errors.
+function unavailableDelivery(cause: unknown): never {
+  throw new UnavailableDelivery("Unable to authenticate E2EE key delivery", { cause });
+}
+
 const positions = (entries: RowSettlement[]) =>
   new Map(entries.map((entry) => [entry.rowId, BigInt(entry.position)]));
 const comparePosition = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
@@ -231,10 +239,10 @@ export class DeviceApproval {
 
   private async marker(key: Uint8Array, context: Uint8Array, envelope: Uint8Array): Promise<void> {
     this.assertOpen();
-    const value = await this.keys.unwrap(key, context, envelope);
+    const value = await this.keys.unwrap(key, context, envelope).catch(unavailableDelivery);
     try {
       if (value.length !== 32 || value.some((byte) => byte !== 0))
-        throw new Error("Invalid E2EE device approval proof");
+        throw new UnavailableDelivery("Invalid E2EE device approval proof");
     } finally {
       value.fill(0);
     }
@@ -388,7 +396,7 @@ export class DeviceApproval {
   }
 
   private async confirmEpoch(snapshot: EpochSnapshot, secret: Uint8Array): Promise<void> {
-    if (secret.length !== 32) throw new Error("Invalid E2EE epoch key");
+    if (secret.length !== 32) throw new UnavailableDelivery("Invalid E2EE epoch key");
     if (snapshot.successor)
       await this.marker(
         secret,
@@ -402,23 +410,25 @@ export class DeviceApproval {
         this.accountId,
         snapshot.identity,
         secret,
-      );
+      ).catch(unavailableDelivery);
   }
 
   private async authenticateHistory(snapshot: EpochSnapshot, secret: Uint8Array): Promise<void> {
     if (!snapshot.successor || !snapshot.previous) return;
-    const previousSecret = await this.keys.unwrap(
-      secret,
-      successorContext(this.application, snapshot.successor, "history"),
-      snapshot.successor.history,
-    );
+    const previousSecret = await this.keys
+      .unwrap(
+        secret,
+        successorContext(this.application, snapshot.successor, "history"),
+        snapshot.successor.history,
+      )
+      .catch(unavailableDelivery);
     try {
       await this.confirmEpoch(snapshot.previous, previousSecret);
       const prior = this.revisionView(snapshot.previous, snapshot.successor);
       const accepted = await this.eligibleApprovals(prior, previousSecret);
       const revision = decodeEpochIds(snapshot.successor.revision);
       if (revision.length !== accepted.size || revision.some((id) => !accepted.has(id)))
-        throw new Error("Unauthenticated E2EE successor ancestry");
+        throw new UnavailableDelivery("Unauthenticated E2EE successor ancestry");
       await this.authenticateHistory(snapshot.previous, previousSecret);
     } finally {
       previousSecret.fill(0);
@@ -536,8 +546,9 @@ export class DeviceApproval {
               this.deliveryContext(challenge, delivery.envelope),
               delivery.verification,
             );
-        } catch {
+        } catch (error) {
           this.assertOpen();
+          if (!(error instanceof UnavailableDelivery)) throw error;
           continue;
         }
       }
@@ -562,12 +573,12 @@ export class DeviceApproval {
     ) => {
       let secret: Uint8Array | undefined;
       try {
-        secret = await this.keys.open(device, context, envelope);
+        secret = await this.keys.open(device, context, envelope).catch(unavailableDelivery);
         await this.confirmEpoch(snapshot, secret);
         await this.authenticateHistory(snapshot, secret);
         if (challenge) {
           if (!verification || !deliveryVerification)
-            throw new Error("Missing E2EE delivery authentication");
+            throw new UnavailableDelivery("Missing E2EE delivery authentication");
           await this.marker(secret, this.context(challenge, "approval"), verification);
           await this.marker(
             secret,
@@ -575,7 +586,7 @@ export class DeviceApproval {
             deliveryVerification,
           );
           if (!(await this.eligibleApprovals(snapshot, secret, true)).has(challenge.id))
-            throw new Error("Unauthenticated E2EE approval ancestry");
+            throw new UnavailableDelivery("Unauthenticated E2EE approval ancestry");
         }
         this.assertOpen();
         return secret;
@@ -586,8 +597,13 @@ export class DeviceApproval {
     };
     try {
       if (snapshot.successor && snapshot.baseMembers.has(this.deviceId)) {
-        const envelope = decodeEpochDeliveries(snapshot.successor.deliveries).get(this.deviceId);
-        if (!envelope) throw new Error("Missing E2EE successor delivery");
+        let envelope: Uint8Array | undefined;
+        try {
+          envelope = decodeEpochDeliveries(snapshot.successor.deliveries).get(this.deviceId);
+        } catch (error) {
+          unavailableDelivery(error);
+        }
+        if (!envelope) throw new UnavailableDelivery("Missing E2EE successor delivery");
         return await open(
           successorContext(this.application, snapshot.successor, "delivery", this.deviceId),
           envelope,
@@ -616,15 +632,17 @@ export class DeviceApproval {
             grant.verification,
             delivery.verification,
           );
-        } catch {
+        } catch (error) {
           this.assertOpen();
+          if (!(error instanceof UnavailableDelivery)) throw error;
         } // An unauthenticated candidate cannot hide a later valid delivery.
       }
       return undefined;
-    } catch {
-      // Accepted membership is independent of a usable delivery. Authority and
-      // device-store reads occur before this boundary and still reject listing.
+    } catch (error) {
+      // Accepted membership is independent of a usable delivery, not of the
+      // ability to verify authority. Operational signer failures still reject.
       this.assertOpen();
+      if (!(error instanceof UnavailableDelivery)) throw error;
       return undefined;
     } finally {
       device.privateKey.fill(0);
@@ -731,17 +749,19 @@ export class DeviceApproval {
         // Another context for this same device may already have supplied the proof.
         try {
           await this.marker(secret, this.context(challenge, "proof"), accepted.proof);
-          if (
-            !(await this.signer.verify(
-              device.signing.publicKey,
-              this.proofContext(challenge, accepted.proof),
-              accepted.signature,
-            ))
-          )
-            throw new Error("Invalid E2EE device signature");
-        } catch {
+        } catch (error) {
+          this.assertOpen();
+          if (!(error instanceof UnavailableDelivery)) throw error;
           return;
-        } // A forged proof is rejected by the approver, not by device listing.
+        }
+        if (
+          !(await this.signer.verify(
+            device.signing.publicKey,
+            this.proofContext(challenge, accepted.proof),
+            accepted.signature,
+          ))
+        )
+          return; // A forged proof is rejected by the approver, not by device listing.
       }
     } finally {
       secret?.fill(0);
