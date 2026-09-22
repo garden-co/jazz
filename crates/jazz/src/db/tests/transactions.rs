@@ -3116,6 +3116,109 @@ fn identity_bound_mergeable_transaction_rejects_cross_identity_reads() {
 }
 
 #[test]
+fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let existing = row(0xa1);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("original", false),
+        crate::db::InsertOptions {
+            row_id: Some(existing),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let duplicate = db.exclusive_tx().unwrap();
+    let error = duplicate
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(existing),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        db.one(&prepared).unwrap().unwrap().cell(table, "title"),
+        Some(Value::String("original".to_owned()))
+    );
+
+    db.delete("todos", existing, Default::default()).unwrap();
+    let hidden = db.exclusive_tx().unwrap();
+    let error = hidden
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(existing),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(db.read(&prepared).unwrap().is_empty());
+}
+
+#[test]
+fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let repeated = row(0xa2);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("first", false),
+        crate::db::InsertOptions {
+            row_id: Some(repeated),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = tx
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(repeated),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    tx.commit().unwrap();
+    assert_eq!(
+        db.one(&prepared)
+            .unwrap()
+            .unwrap()
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("first".to_owned()))
+    );
+
+    let pending_delete = row(0xa3);
+    let tx = db.exclusive_tx().unwrap();
+    tx.delete("todos", pending_delete, Default::default())
+        .unwrap();
+    let error = tx
+        .insert(
+            "todos",
+            doctest_support::todo_cells("hidden", false),
+            crate::db::InsertOptions {
+                row_id: Some(pending_delete),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    tx.commit().unwrap();
+    assert!(db.read(&prepared).unwrap().is_empty());
+}
+
+#[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -3133,7 +3236,11 @@ fn exclusive_tx_rejects_conflicting_concurrent_update() {
     );
 
     first
-        .insert_with_id("todos", row, cells("first", false, owner))
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
+        )
         .unwrap();
     first.commit().unwrap();
     second
@@ -3159,10 +3266,8 @@ fn exclusive_tx_rejects_conflicting_concurrent_update() {
 
 #[test]
 fn exclusive_tx_blind_writes_are_first_committer_wins() {
-    // Two concurrent exclusive transactions overwrite the same existing row
-    // WITHOUT reading it. With no read sets, only per-write first-committer-wins
-    // (INV-TX-20) can catch the conflict — this is the exact case the earlier
-    // broken validator let through (it short-circuited to "ok" on empty reads).
+    // Generic node writes remain blind CAS operations; public INSERT has its
+    // own existence contract at the Jazz transaction staging seam.
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -3175,10 +3280,18 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
     let first = core.exclusive_tx().unwrap();
     let second = core.exclusive_tx().unwrap();
     first
-        .insert_with_id("todos", row, cells("first", false, owner))
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
+        )
         .unwrap();
     second
-        .insert_with_id("todos", row, cells("second", false, owner))
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+        )
         .unwrap();
 
     first.commit().unwrap();
