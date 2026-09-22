@@ -113,6 +113,7 @@ export async function startLocalJazzServer(
       appId,
       port,
       host,
+      dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
       jwtIssuer: options.jwtIssuer,

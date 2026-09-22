@@ -604,6 +604,7 @@ export class ManagedDevRuntime {
             appId,
             port: serverConfig.port ?? 0,
             host: serverConfig.host,
+            adminSecret,
             backendSecret: options.backendSecret,
             allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,
             dataDir,
