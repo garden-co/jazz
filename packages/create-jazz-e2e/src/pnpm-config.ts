@@ -20,8 +20,12 @@ const UPSTREAM_PINS: Record<string, string> = {
  */
 export function renderScaffoldedPnpmConfig(tarballs: Record<string, string>): string {
   const overrideLines = [
-    ...Object.entries(tarballs).map(([pkg, tgz]) => `  "${pkg}": "file:${tgz}"`),
-    ...Object.entries(UPSTREAM_PINS).map(([pkg, v]) => `  "${pkg}": "${v}"`),
+    ...Object.entries(tarballs).map(
+      ([pkg, tgz]) => `  ${JSON.stringify(pkg)}: ${JSON.stringify(`file:${tgz}`)}`,
+    ),
+    ...Object.entries(UPSTREAM_PINS).map(
+      ([pkg, version]) => `  ${JSON.stringify(pkg)}: ${JSON.stringify(version)}`,
+    ),
   ].join("\n");
   return `overrides:\n${overrideLines}\n`;
 }
