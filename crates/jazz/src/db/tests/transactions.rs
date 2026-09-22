@@ -3215,7 +3215,7 @@ fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
     tx.commit().unwrap();
-    assert!(db.read(&prepared).unwrap().is_empty());
+    assert_eq!(db.read(&prepared).unwrap().len(), 1);
 }
 
 #[test]

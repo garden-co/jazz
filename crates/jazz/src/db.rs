@@ -46,7 +46,7 @@ use crate::node::{
     CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    RowProvenance, TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;

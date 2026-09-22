@@ -366,6 +366,14 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
+For an exclusive transaction, a root `insert` with an explicit id is
+insert-only: its target MUST be absent in the transaction's frozen snapshot
+and in its own staged overlay. An existing content row, a committed or
+pending deletion, or any earlier staged mutation at that id MUST reject with
+`ErrorCode::WriteRejected` before creating or replacing pending content. A
+truly absent insert remains subject to exclusive first-committer-wins
+validation, so concurrent inserts still allow exactly one commit to win.
+
 An upsert's `WriteTarget` is the complete read view used to choose between
 update and insert. For a head-over-base branch view, a head-local row is patched
 with its local content winner as parent. A row inherited only from the base is

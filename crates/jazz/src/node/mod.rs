@@ -336,7 +336,7 @@ mod row_availability;
 mod source_resolution;
 pub(crate) mod supporting_frontier;
 mod views;
-pub(crate) use open_tx::TransactionBranchRowState;
+pub(crate) use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]

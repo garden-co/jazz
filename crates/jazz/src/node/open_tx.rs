@@ -239,6 +239,34 @@ where
         Ok(result)
     }
 
+    /// Classify an explicit exclusive insert against its frozen snapshot and
+    /// the transaction's own staged writes. A hidden row or any staged
+    /// mutation occupies the target even when ordinary reads would show it as
+    /// absent.
+    pub(crate) async fn tx_insert_target_state_in_schema(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<TransactionInsertTargetState, Error> {
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let snapshot_row = self
+            .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+            .await?;
+        if snapshot_row.content_cells.is_some() || snapshot_row.deleted {
+            return Ok(TransactionInsertTargetState::Occupied);
+        }
+        let staged = self.open_tx(tx_id)?.writes.iter().any(|write| {
+            write.table == table && write.row_uuid == row_uuid
+        });
+        Ok(if staged {
+            TransactionInsertTargetState::Occupied
+        } else {
+            TransactionInsertTargetState::Absent
+        })
+    }
+
     /// Read all current rows inside an exclusive transaction.
     pub async fn tx_current_rows(
         &mut self,
@@ -1787,6 +1815,12 @@ pub(crate) enum TransactionBranchRowState {
     PendingDeletion,
     /// Neither committed nor staged content exists in the exact branch.
     Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionInsertTargetState {
+    Absent,
+    Occupied,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

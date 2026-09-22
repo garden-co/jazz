@@ -1291,19 +1291,28 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.lock_for_transaction_operation(tx_id)
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        if node
+            .tx_insert_target_state_in_schema(tx_id, self.schema_version_id, table, row)
             .await?
-            .tx_write_in_schema_at_ms(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Some(now_ms),
-            )
-            .await
-            .map_err(Into::into)
+            != TransactionInsertTargetState::Absent
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("row already exists: {row:?}"),
+            ));
+        }
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(super) async fn stage_exclusive_update(
