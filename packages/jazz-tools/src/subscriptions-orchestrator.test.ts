@@ -497,6 +497,39 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-P01 exposes an unready delta while keeping the cache pending", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const rows = [makeTodo("preview")];
+      const preview: SubscriptionDelta<Todo> & {
+        requestedReady: boolean;
+        attainedSettlement: string;
+      } = {
+        ...makeDelta(rows),
+        requestedReady: false,
+        attainedSettlement: "unconfirmed",
+      };
+
+      harness.emit(0, preview);
+
+      expect(entry.status).toBe("pending");
+      expect(entry.state.data).toBe(rows);
+      expect(entry.promise.status).toBe("pending");
+
+      harness.emit(0, { ...preview, requestedReady: true, attainedSettlement: "local" });
+
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: rows,
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U10 first delta transitions entry from pending to fulfilled", async () => {
     const harness = createUnitHarness();
     try {
