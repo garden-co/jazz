@@ -5,6 +5,21 @@ fn main() {
     divan::main();
 }
 
+/// Permissioned direct-session ingress, not a trusted SYSTEM fixture seed.
+#[divan::bench(args = [(500, 50), (2_000, 50)], sample_count = 5, sample_size = 1)]
+fn permissioned_direct_upload_memory(
+    bencher: divan::Bencher<'_, '_>,
+    (rows, batch): (usize, usize),
+) {
+    use jazz_example_benchmark_w1::direct_upload::UploadFixture;
+    bencher
+        .with_inputs(|| UploadFixture::new(rows, batch))
+        .bench_local_values(|mut fixture| {
+            let receipt = fixture.upload();
+            (fixture, receipt)
+        });
+}
+
 /// Independent dashboard bindings through core -> relay -> foreground.
 #[divan::bench(args = [(600, 0), (600, 10), (600, 60), (6000, 60)], sample_count = 3)]
 fn subscription_fanout_memory(bencher: divan::Bencher<'_, '_>, (rows, lists): (usize, usize)) {

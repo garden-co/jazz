@@ -1,5 +1,6 @@
 //! W1 compatibility fixture derived from the realistic project-board workload.
 
+pub mod direct_upload;
 pub mod subscription_fanout;
 
 use std::cell::RefCell;
