@@ -11,7 +11,7 @@ impl IvmRuntime {
         comparison: ValueComparison,
     ) -> NodeId {
         self.logical_nodes_requested += 1;
-        let node = self.graph.dedup_node(
+        let node = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::Arrange(ArrangeOp { fields, comparison }),
                 [input],
@@ -53,7 +53,7 @@ impl IvmRuntime {
             })
             .collect();
         let mapping = selected.iter().map(|index| (0, *index)).collect();
-        let node = self.graph.dedup_node(
+        let node = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::MapProject(MapProjectOp {
                     expressions,
@@ -235,7 +235,7 @@ impl IvmRuntime {
                 *field = FieldRef::Resolved(output_positions[&(side, physical)]);
             }
         }
-        let node = self.graph.dedup_node(
+        let node = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::Join(JoinOp {
                     left_descriptor,
@@ -286,7 +286,28 @@ impl IvmRuntime {
         if let Some(compiled) = compiled_memo.get(&key) {
             return Ok(compiled.clone());
         }
+        let recipe_key = compilation_recipes::RecipeKey::for_builder(graph, compiled_memo);
+        if let Some(recipe) = recipe_key
+            .as_ref()
+            .and_then(|key| self.compilation_recipes.lookup(key))
+        {
+            // Inputs have already been compiled in postorder. Their exact
+            // identities include any graph-context-dependent rewrite inputs.
+            // Recreate released nodes without restoring any evaluation state.
+            for descriptor in &recipe.nodes {
+                let node = self
+                    .graph
+                    .dedup_node(descriptor.clone(), NodeDurability::Ephemeral);
+                self.initialize_node_runtime(node);
+            }
+            self.logical_nodes_requested += recipe.logical_nodes;
+            compiled_memo.insert(key, recipe.compiled.clone());
+            return Ok(recipe.compiled.clone());
+        }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
+        debug_assert!(self.compilation_capture.is_none());
+        self.compilation_capture = recipe_key.as_ref().map(|_| Vec::new());
+        let logical_nodes_before = self.logical_nodes_requested;
         let compiled = match graph {
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
@@ -319,7 +340,17 @@ impl IvmRuntime {
             | GraphBuilder::AntiJoin { .. } => {
                 self.add_dedup_join_graph(graph, inferred_output, output_memo, compiled_memo)
             }
-        }?;
+        };
+        let captured = self.compilation_capture.take();
+        let compiled = compiled?;
+        if let (Some(key), Some(nodes)) = (recipe_key, captured) {
+            self.compilation_recipes.insert(
+                key,
+                nodes,
+                compiled.clone(),
+                self.logical_nodes_requested - logical_nodes_before,
+            );
+        }
         compiled_memo.insert(key, compiled.clone());
         Ok(compiled)
     }
@@ -339,7 +370,7 @@ impl IvmRuntime {
                 variant_projection,
             } => {
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::TableSource(TableSourceOp {
                             table: table.clone(),
@@ -364,7 +395,7 @@ impl IvmRuntime {
                 if !inferred_output.registry_compatible_with(output) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::InlineRecords(InlineRecordsOp {
                             records: records.clone(),
@@ -397,7 +428,7 @@ impl IvmRuntime {
                         id.diagnostic_name(),
                     ));
                 }
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         // A mutable input uses the same runtime delta and
                         // hydration machinery as a prepared binding source;
@@ -441,7 +472,7 @@ impl IvmRuntime {
                     row_projection.clone(),
                 )?;
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(OpType::IndexSource(source), [], output),
                     NodeDurability::Ephemeral,
                 );
@@ -453,7 +484,7 @@ impl IvmRuntime {
                 })
             }
             GraphBuilder::FrontierSource { binding, output } => {
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::FrontierSource(FrontierSourceOp {
                             binding: binding.clone(),
@@ -471,7 +502,7 @@ impl IvmRuntime {
                 })
             }
             GraphBuilder::BindingSource { shape, output } => {
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::BindingSource(BindingSourceOp {
                             key: BindingSourceKey::prepared(shape.clone()),
@@ -522,7 +553,7 @@ impl IvmRuntime {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::Recursive(RecursiveOp {
                             frontier: frontier.clone(),
@@ -584,7 +615,7 @@ impl IvmRuntime {
                     .descriptor
                     .output
                     .records();
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::RecursiveStepWitness(crate::ivm::RecursiveStepWitnessOp),
                         [compiled_recursive.node],
@@ -680,7 +711,7 @@ impl IvmRuntime {
                     group_field_names.clone(),
                     ValueComparison::Exact,
                 );
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::ArgMaxBy(ArgMaxByOp {
                             group_fields: group_field_names,
@@ -761,7 +792,7 @@ impl IvmRuntime {
                     group_field_names.clone(),
                     ValueComparison::Exact,
                 );
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::ArgMinBy(ArgMinByOp {
                             group_fields: group_field_names,
@@ -854,7 +885,7 @@ impl IvmRuntime {
                     group_field_names.clone(),
                     ValueComparison::Exact,
                 );
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::TopBy(TopByOp {
                             group_fields: group_field_names,
@@ -929,7 +960,7 @@ impl IvmRuntime {
                     plan_expr_names(&group_key),
                     ValueComparison::Exact,
                 );
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::Aggregate(AggregateOp {
                             group_key,
@@ -957,7 +988,7 @@ impl IvmRuntime {
                     self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
                 let input_node = compiled_input.node;
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::Filter(FilterOp {
                             predicate: predicate.clone(),
@@ -1032,7 +1063,7 @@ impl IvmRuntime {
                         _ => None,
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::MapProject(MapProjectOp {
                             expressions,
@@ -1063,7 +1094,7 @@ impl IvmRuntime {
                 let compiled_input =
                     self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
                 let field_idx = resolve_field_ref(&compiled_input.output, field)?;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::StreamingChecksum(StreamingChecksumOp {
                             field: field_ref_name(&compiled_input.output, field)?,
@@ -1091,7 +1122,7 @@ impl IvmRuntime {
                 let input_output = compiled_input.output;
                 let field_idx = resolve_field_ref(&input_output, field)?;
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::UnwrapNullable(UnwrapNullableOp {
                             field: field_ref_name(&input_output, field)?,
@@ -1120,7 +1151,7 @@ impl IvmRuntime {
                 let input_output = compiled_input.output;
                 let array_field_idx = resolve_field_ref(&input_output, array_field)?;
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::Unnest(UnnestOp {
                             array_field: field_ref_name(&input_output, array_field)?,
@@ -1152,7 +1183,7 @@ impl IvmRuntime {
                 };
                 let tag = schema.tag(case)?;
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(
                         OpType::VariantProject(VariantProjectOp {
                             field: field_ref_name(&input_output, field)?,
@@ -1191,7 +1222,7 @@ impl IvmRuntime {
                     input_nodes.push(input_node);
                 }
                 let output = inferred_output;
-                let node = self.graph.dedup_node(
+                let node = self.dedup_compilation_node(
                     NodeDescriptor::new(OpType::Union, input_nodes, output),
                     NodeDurability::Ephemeral,
                 );
@@ -1262,9 +1293,7 @@ impl IvmRuntime {
                     [left_arrangement, right_arrangement],
                     output,
                 );
-                let node = self
-                    .graph
-                    .dedup_node(node_descriptor, NodeDurability::Ephemeral);
+                let node = self.dedup_compilation_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode {
                     output,
@@ -1323,9 +1352,7 @@ impl IvmRuntime {
                     [left_arrangement, right_arrangement],
                     output,
                 );
-                let node = self
-                    .graph
-                    .dedup_node(node_descriptor, NodeDurability::Ephemeral);
+                let node = self.dedup_compilation_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode {
                     output,
@@ -1381,9 +1408,7 @@ impl IvmRuntime {
                     [left_arrangement, right_arrangement],
                     output,
                 );
-                let node = self
-                    .graph
-                    .dedup_node(node_descriptor, NodeDurability::Ephemeral);
+                let node = self.dedup_compilation_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode {
                     output,
@@ -1453,7 +1478,7 @@ impl IvmRuntime {
                 group_fields.clone(),
                 ValueComparison::Exact,
             );
-            let node = self.graph.dedup_node(
+            let node = self.dedup_compilation_node(
                 NodeDescriptor::new(
                     OpType::CollectBy(Box::new(CollectByOp {
                         mode: collect.mode,
@@ -1607,7 +1632,7 @@ impl IvmRuntime {
             group_fields.clone(),
             ValueComparison::Exact,
         );
-        let node = self.graph.dedup_node(
+        let node = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::CollectBy(Box::new(CollectByOp {
                     mode: collect.mode,
@@ -1661,7 +1686,7 @@ impl IvmRuntime {
         } else {
             (table.record_schema(), None)
         };
-        let input = self.graph.dedup_node(
+        let input = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::TableSource(TableSourceOp {
                     table: table.name.clone(),
@@ -1685,7 +1710,7 @@ impl IvmRuntime {
             column_family: "indices".to_owned(),
             key_prefix: durable_index_key_prefix(&table.name, &index.name),
         };
-        let persist = self.graph.dedup_node(
+        let persist = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::Persist(PersistOp {
                     name: index.name.clone(),
@@ -1807,7 +1832,7 @@ impl IvmRuntime {
             .iter()
             .all(|primary_key_column| index.columns.contains(&primary_key_column.column));
 
-        let node = self.graph.dedup_node(
+        let node = self.dedup_compilation_node(
             NodeDescriptor::new(
                 OpType::IndexBy(IndexByOp {
                     key_expressions: index

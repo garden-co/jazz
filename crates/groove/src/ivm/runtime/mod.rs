@@ -47,6 +47,7 @@ use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, S
 use thiserror::Error;
 
 mod aggregate;
+mod compilation_recipes;
 mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
@@ -176,6 +177,8 @@ pub struct IvmRuntime {
     graph: IvmGraph,
     /// Pure typed fragments, independent of source identity and live state.
     projection_plans: RefCell<typed_projection::ProjectionPlans>,
+    compilation_recipes: compilation_recipes::CompilationRecipes,
+    compilation_capture: Option<Vec<NodeDescriptor>>,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
@@ -269,6 +272,8 @@ impl IvmRuntime {
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             projection_plans: RefCell::default(),
+            compilation_recipes: Default::default(),
+            compilation_capture: None,
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),

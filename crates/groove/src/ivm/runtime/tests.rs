@@ -7,6 +7,66 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 #[futures_test::test]
+async fn installation_recipes_rebuild_after_gc_without_restoring_rows_or_bindings() {
+    let schema = albums_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = schema.table("albums").unwrap().record_schema();
+    let store = RecordStore::new(&storage, "albums", &descriptor);
+    let graph = |id, marker| {
+        let selected =
+            GraphBuilder::table("albums").filter(PredicateExpr::eq("id", Value::U64(id)));
+        GraphBuilder::join(selected, GraphBuilder::table("albums"), ["id"], ["id"]).project_fields(
+            [
+                ProjectField::renamed("left.title", "title"),
+                ProjectField::literal("marker", Value::U64(marker)),
+            ],
+        )
+    };
+    for (id, title, marker) in [
+        (1, "first", 7),
+        (1, "updated", 7),
+        (2, "other", 9),
+        (1, "again", 7),
+    ] {
+        let record = descriptor
+            .create(&[Value::U64(id), Value::String(title.into())])
+            .unwrap();
+        let encoded = crate::records::encode_variant_record(0, &record);
+        store
+            .write_many(vec![store.set(b"only", &encoded)])
+            .await
+            .unwrap();
+        let result = runtime
+            .query_snapshot(graph(id, marker), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.to_values().unwrap(),
+            vec![(vec![Value::String(title.into()), Value::U64(marker)], 1)]
+        );
+        // These internal checks are needed to prove this is recipe reuse after
+        // actual graph retirement, not a retained execution returning stale data.
+        assert!(runtime.retained_node_ids().is_empty());
+        assert!(runtime.graph.nodes().is_empty());
+        let absent = runtime
+            .query_snapshot(graph(id + 1, marker), &storage)
+            .await
+            .unwrap();
+        assert!(absent.to_values().unwrap().is_empty());
+    }
+    assert!(runtime.compilation_recipes.hits > 0);
+    // Eviction must change work only. Recompile the same query and read the
+    // last stored row, rather than accidentally keeping result state alive.
+    runtime.compilation_recipes = Default::default();
+    let result = runtime.query_snapshot(graph(1, 7), &storage).await.unwrap();
+    assert_eq!(
+        result.to_values().unwrap(),
+        vec![(vec![Value::String("again".into()), Value::U64(7)], 1)]
+    );
+}
+
+#[futures_test::test]
 async fn typed_projection_reuse_keeps_sources_literals_and_descriptor_order_isolated() {
     let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
