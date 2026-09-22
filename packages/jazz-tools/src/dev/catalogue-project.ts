@@ -30,7 +30,7 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
-import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
+import { hasRootSchema, loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import {
@@ -56,6 +56,13 @@ import {
   schemaTransitionRequiresRowTransform,
   shortSchemaHash,
 } from "./catalogue.js";
+
+import {
+  combineMigrationGraphs,
+  fetchMigrationGraph,
+  type LocalMigrationGraph,
+  type MigrationGraph,
+} from "./migration-graph.js";
 
 export { shortSchemaHash };
 
@@ -1547,6 +1554,71 @@ function migrationHashesFromFileName(fileName: string): { from: string; to: stri
     );
   }
   return { from: match[1]!, to: match[2]! };
+}
+
+export interface MigrationGraphOptions extends Omit<CatalogueProjectOptions, "onEvent"> {
+  migrationsDir?: string;
+}
+
+/** Load and compare local and server history without publishing any artifacts. */
+export async function getMigrationGraph(options: MigrationGraphOptions): Promise<MigrationGraph> {
+  const server = await fetchMigrationGraph(options);
+  const local = await loadLocalMigrationGraph(
+    options.schemaDir,
+    resolvedMigrationsDir(options.schemaDir, options.migrationsDir),
+    server.schemas,
+  );
+  return combineMigrationGraphs(server, local);
+}
+
+/** Read local history without creating snapshots, migrations, or their directories. */
+async function loadLocalMigrationGraph(
+  schemaDir: string,
+  migrationsDir: string,
+  serverSchemaHashes: readonly string[],
+): Promise<LocalMigrationGraph> {
+  const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
+  const current = (await hasRootSchema(schemaDir)) ? await loadCurrentSchema(schemaDir) : null;
+  const schemas = [
+    ...new Set([...snapshots.map(({ hash }) => hash), ...(current ? [current.hash] : [])]),
+  ];
+  const knownHashes = [...new Set([...serverSchemaHashes, ...schemas])];
+  const migrations: LocalMigrationGraph["migrations"] = [];
+  if (await pathExists(migrationsDir)) {
+    await assertNoSymlinkComponents(migrationsDir);
+    for (const fileName of (await readdir(migrationsDir))
+      .filter((name) => name.endsWith(".ts"))
+      .sort()) {
+      const migration = await loadDefinedMigration(join(migrationsDir, fileName));
+      if (!migration.fromHash || !migration.toHash) {
+        throw new Error(
+          `Migration ${fileName} must embed fromHash and toHash metadata; regenerate it to include it in the graph.`,
+        );
+      }
+      const resolveHash = (hash: string, label: string) => {
+        try {
+          return resolveKnownSchemaHash(hash, label, knownHashes);
+        } catch (error) {
+          throw new Error(
+            `Cannot resolve ${label} in ${fileName} against local snapshots, schema.ts, or server schemas: ${(error as Error).message}`,
+          );
+        }
+      };
+      const fromHash = resolveHash(migration.fromHash, "fromHash");
+      const toHash = resolveHash(migration.toHash, "toHash");
+      const named = migrationHashesFromFileName(fileName);
+      if (
+        resolveHash(named.from, "filename fromHash") !== fromHash ||
+        resolveHash(named.to, "filename toHash") !== toHash
+      ) {
+        throw new Error(
+          `Migration filename ${fileName} does not match its embedded schema hashes.`,
+        );
+      }
+      migrations.push({ fromHash, toHash });
+    }
+  }
+  return { schemas, migrations, currentSchemaHash: current?.hash ?? null };
 }
 
 async function resolveProjectDeployMigrationChain(

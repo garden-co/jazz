@@ -38,7 +38,7 @@ interface DeployResponse {
 ```
 
 - Return structured validation errors with stable codes and relevant hashes/paths. Use `422` for invalid graph/schema/lens/permissions and `400` for malformed requests. A successful `200` means the authority durably committed and activated the complete deployment, not that all replicas have caught up.
-- The graph endpoint also powers `jazz-tools migrations graph <appId>`, displaying directed edges, abbreviated hashes, and the active schema. Read the remote graph; do not mutate or silently combine it with local history for this command.
+- The graph endpoint also powers `jazz-tools migrations graph <appId>`, displaying directed edges, abbreviated hashes, and the active schema. Combine the remote graph with local snapshots, schema.ts, and migrations; mark schemas and edges that exist only locally or only on the server. Do not publish or save snapshots.
 
 2. **Validate the whole graph before publication.**
 

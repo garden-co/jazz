@@ -8,11 +8,13 @@ import { basename, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
   createMigration as createCatalogueMigration,
+  getMigrationGraph,
   deploy as deployCatalogue,
   compileSchema as compileCatalogueSchema,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
+import { renderMigrationGraph } from "./dev/migration-graph.js";
 import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {
@@ -453,6 +455,7 @@ function printHelp(): void {
   console.log("  schema compile        Print the compiled schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  migrations create     Generate a migration stub between two schema versions");
+  console.log("  migrations graph      Visualize the full migration graph");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -461,7 +464,7 @@ function printHelp(): void {
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
   console.log("\nMigration options:");
   console.log(
-    "  <appId>               Required for remote migration creation and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+    "  <appId>               Required for migrations graph, remote migration creation, and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
   );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log(
@@ -545,10 +548,40 @@ if (isMainModule()) {
         toHash: getFlagValue(commandArgs, "--toHash"),
         name: getFlagValue(commandArgs, "--name"),
       });
+    } else if (subcommand === "graph") {
+      task = (async () => {
+        const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
+        for (let i = 0; i < commandArgs.length; i += 2) {
+          if (
+            !["--server-url", "--admin-secret", "--schema-dir", "--migrations-dir"].includes(
+              commandArgs[i]!,
+            )
+          ) {
+            throw new Error(`Unknown migrations graph argument: ${commandArgs[i]}.`);
+          }
+          if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
+            throw new Error(`Missing value for ${commandArgs[i]}.`);
+          }
+        }
+        const localOptions = resolveMigrationOptions(commandArgs);
+        const options = requireMigrationServerOptions({ ...localOptions, appId });
+        const graph = await getMigrationGraph({
+          ...options,
+          schemaDir: localOptions.schemaDir ?? process.cwd(),
+          migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
+            ? localOptions.migrationsDir
+            : undefined,
+        });
+        const color =
+          Boolean(process.stdout.isTTY) &&
+          process.env.NO_COLOR === undefined &&
+          process.env.TERM !== "dumb";
+        console.log(renderMigrationGraph(graph, color));
+      })();
     } else {
       task = Promise.reject(
         new Error(
-          "Use `jazz-tools migrations create` to prepare migrations and `jazz-tools deploy <appId>` to publish them.",
+          "Use `jazz-tools migrations create` to prepare migrations, `jazz-tools migrations graph <appId>` to inspect the migration graph, and `jazz-tools deploy <appId>` to publish them.",
         ),
       );
     }

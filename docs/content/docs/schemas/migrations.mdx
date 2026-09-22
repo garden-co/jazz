@@ -137,6 +137,17 @@ pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHa
 server and saves a snapshot in `migrations/snapshots/`. Remote lookup requires the app ID, server URL, and admin secret;
 provide the server URL and secret through `--server-url` and `--admin-secret` or their environment variables.
 
+## Visualizing the migration graph
+
+Run `jazz-tools migrations graph` to see the schemas and migrations:
+
+```sh
+pnpm dlx jazz-tools@alpha migrations graph <appId> --server-url <url> --admin-secret <secret>
+```
+
+The graph includes all schemas and migrations present in the server and locally. If any schema
+exist only in the server or locally, it's indicated in the graph.
+
 ## Compiling the schema
 
 `pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It

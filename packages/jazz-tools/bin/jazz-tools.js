@@ -134,6 +134,7 @@ function printWrapperHelp() {
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
+  console.log("  migrations graph      Visualize the full migration graph");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  help                  Print this message");
