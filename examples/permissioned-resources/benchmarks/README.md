@@ -16,6 +16,11 @@ The new `first_sync_local_relay_27518_rocksdb` identity starts a fresh baseline.
 Do not interpret differences from the retired `first_sync_27518_rocksdb` server-edge
 workload as a like-for-like optimization. Its metadata remains for historical runs.
 
+The local profile's warm phase closes and reopens the persistence relay. Its row
+cache survives, but known state never survives a node restart. Reopen checks
+therefore require no known-state declaration and exact resulting row membership;
+they are not same-process reconnect measurements.
+
 Core seeding is outside the wall-time measurement. Receiver opening, connection,
 query preparation, subscription and settling until every expected row is present
 are inside. Exact per-table row-ID verification, post-read diagnostic scans and runtime teardown are outside. The
