@@ -68,6 +68,71 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   // is populated. Initial-push callbacks during `config` see `null` and no-op,
   // which is correct — there's no browser to reload yet.
   let viteServerRef: ViteDevServer | null = null;
+  let disposalPromise: Promise<void> | null = null;
+  let publicEnvBaseline: {
+    appId: string | undefined;
+    serverUrl: string | undefined;
+    telemetryCollectorUrl: string | undefined;
+  } | null = null;
+  let injectedPublicEnv: {
+    appId: string | undefined;
+    serverUrl: string | undefined;
+    telemetryCollectorUrl: string | undefined;
+  } | null = null;
+
+  function capturePublicEnvBaseline() {
+    publicEnvBaseline = {
+      appId: process.env.PUBLIC_JAZZ_APP_ID,
+      serverUrl: process.env.PUBLIC_JAZZ_SERVER_URL,
+      telemetryCollectorUrl: process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+    };
+  }
+
+  function restoreInjectedPublicEnv() {
+    if (!injectedPublicEnv) return;
+
+    const envEntries = [
+      ["PUBLIC_JAZZ_APP_ID", injectedPublicEnv.appId, publicEnvBaseline?.appId],
+      ["PUBLIC_JAZZ_SERVER_URL", injectedPublicEnv.serverUrl, publicEnvBaseline?.serverUrl],
+      [
+        "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
+        injectedPublicEnv.telemetryCollectorUrl,
+        publicEnvBaseline?.telemetryCollectorUrl,
+      ],
+    ] as const;
+
+    for (const [key, injectedValue, baselineValue] of envEntries) {
+      if (injectedValue === undefined || process.env[key] !== injectedValue) continue;
+      if (baselineValue === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = baselineValue;
+      }
+    }
+  }
+
+  async function disposePluginRuntime(): Promise<void> {
+    if (disposalPromise) return disposalPromise;
+
+    const pending = (async () => {
+      try {
+        if (managed) await runtime.dispose();
+      } catch (error) {
+        console.error(`${LOG_PREFIX} runtime disposal failed:`, error);
+        throw error;
+      } finally {
+        restoreInjectedPublicEnv();
+        managed = null;
+        viteServerRef = null;
+        publicEnvBaseline = null;
+        injectedPublicEnv = null;
+        disposalPromise = null;
+      }
+    })();
+    disposalPromise = pending;
+    return pending;
+  }
+
   let managed: ManagedRuntime | null = null;
 
   function buildMergedConfig(config: ViteUserConfigLike) {
@@ -133,9 +198,17 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     envDir: string | false,
     mode: string,
   ): Promise<ManagedRuntime> {
+    const activeDisposal = disposalPromise;
+    if (activeDisposal) await activeDisposal;
     if (managed) return managed;
     await loadEnvFileIntoProcessEnv(envDir, mode);
+    capturePublicEnvBaseline();
     managed = await runtime.initialize(buildInitOptions(serverConfig, root));
+    injectedPublicEnv = {
+      appId: managed.appId,
+      serverUrl: managed.serverUrl,
+      telemetryCollectorUrl: managed.telemetryCollectorUrl,
+    };
     return managed;
   }
 
@@ -197,11 +270,8 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
           resolvedRuntime.telemetryCollectorUrl;
       }
       if (options.inspector !== false) wireInspectorOverlay(viteServer);
-
-      viteServer.httpServer?.once("close", async () => {
-        await runtime.dispose();
-      });
     },
+    closeBundle: disposePluginRuntime,
   };
 }
 
