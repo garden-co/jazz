@@ -1,0 +1,68 @@
+import { betterAuth } from "better-auth";
+import { nextCookies } from "better-auth/next-js";
+import { admin, bearer, jwt } from "better-auth/plugins";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { authJazzClient } from "./auth-jazz-client";
+import { app } from "../../schema";
+
+const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
+const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
+
+async function createBetterAuth(issuer: string = APP_ORIGIN) {
+  const auth = betterAuth({
+    baseURL: issuer,
+    database: jazzAdapter({
+      db: async () => (await authJazzClient()).db,
+      schema: app.wasmSchema,
+    }),
+    secret: BETTER_AUTH_SECRET,
+    trustedOrigins: [APP_ORIGIN],
+    emailAndPassword: {
+      enabled: true,
+      autoSignIn: true,
+      minPasswordLength: 1,
+      requireEmailVerification: false,
+    },
+    plugins: [
+      admin({
+        adminRoles: ["admin"],
+        defaultRole: "member",
+      }),
+      bearer(),
+      jwt({
+        jwks: {
+          keyPairConfig: { alg: "ES256" },
+        },
+        jwt: {
+          expirationTime: "1h",
+          issuer,
+          definePayload: ({
+            user,
+          }: {
+            user: { id: string; name: string; role?: string | string[] };
+          }) => ({
+            role: Array.isArray(user.role) ? user.role[0] : (user.role ?? ""),
+            username: user.name,
+          }),
+          getSubject: ({ user }: { user: { id: string } }) => user.id,
+        },
+      }),
+      nextCookies(),
+    ],
+  });
+
+  await auth.api
+    .createUser({
+      body: {
+        email: "admin@example.com",
+        name: "admin",
+        password: "admin",
+        role: "admin",
+      },
+    })
+    .catch(() => {});
+
+  return auth;
+}
+
+export const auth = createBetterAuth();

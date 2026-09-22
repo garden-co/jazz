@@ -1,0 +1,730 @@
+//! materialization query-evaluation tests.
+
+use super::*;
+
+#[test]
+fn authoritative_replacement_provenance_is_member_specific_in_a_mixed_batch() {
+    let member = |row_byte, time| {
+        ResultMemberEntry::row((
+            groove::Intern::from("documents".to_owned()),
+            RowUuid::from_bytes([row_byte; 16]),
+            TxId::new(
+                crate::time::TxTime::from(time),
+                NodeUuid::from_bytes([0x91; 16]),
+            ),
+        ))
+    };
+    let stale_authority_member = member(0x11, 1);
+    let authority_reentry = member(0x11, 2);
+    let stable_ordinary_member = member(0x22, 3);
+    let ordinary_content_update = member(0x22, 4);
+    let provenance = BTreeSet::from([authority_reentry.clone()]);
+    let mut result_set = BTreeSet::from([
+        stale_authority_member.clone(),
+        stable_ordinary_member.clone(),
+    ]);
+    let mut payloads = BTreeMap::new();
+
+    for added in [&authority_reentry, &ordinary_content_update] {
+        replace_stale_authoritative_occurrence_member(
+            &mut result_set,
+            &mut payloads,
+            &provenance,
+            added,
+            "documents",
+            false,
+        )
+        .expect("reduce mixed authoritative and ordinary additions");
+        result_set.insert(added.clone());
+    }
+
+    assert!(!result_set.contains(&stale_authority_member));
+    assert!(result_set.contains(&authority_reentry));
+    assert!(result_set.contains(&stable_ordinary_member));
+    assert!(result_set.contains(&ordinary_content_update));
+}
+
+#[test]
+fn required_cell_guard_resolves_a_later_projected_column_by_name() {
+    let table = TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("first", ColumnType::String),
+            ColumnSchema::new("second", ColumnType::String),
+            ColumnSchema::new("third", ColumnType::String),
+        ],
+    );
+    let row_id = RowUuid(uuid::Uuid::from_u128(1));
+    let complete = current_row_from_cells(
+        &table,
+        row_id,
+        &BTreeMap::from([
+            ("first".to_owned(), Value::String("one".to_owned())),
+            ("second".to_owned(), Value::String("two".to_owned())),
+            ("third".to_owned(), Value::String("three".to_owned())),
+        ]),
+    )
+    .expect("build complete row")
+    .project(&table, &["third".to_owned()])
+    .expect("project later column");
+    assert!(current_row_has_required_subscription_cells(
+        &complete,
+        &table,
+        Some(&["third".to_owned()]),
+    ));
+
+    let missing = current_row_from_cells(
+        &table,
+        row_id,
+        &BTreeMap::from([
+            ("first".to_owned(), Value::String("one".to_owned())),
+            ("second".to_owned(), Value::String("two".to_owned())),
+        ]),
+    )
+    .expect("build row missing projected required cell")
+    .project(&table, &["third".to_owned()])
+    .expect("project missing later column");
+    assert!(!current_row_has_required_subscription_cells(
+        &missing,
+        &table,
+        Some(&["third".to_owned()]),
+    ));
+}
+
+#[test]
+fn unordered_array_windows_materialize_per_parent_row_id_order() {
+    let windows =
+        NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
+            "comments", "comments", "todo_id", "id",
+        )
+        .offset(1)
+        .limit(2)]);
+    assert_eq!(
+        windows
+            .get("comments")
+            .map(|window| (window.offset, window.limit)),
+        Some((1, Some(2)))
+    );
+}
+
+#[test]
+fn authoritative_reset_version_uses_non_base_partition_descriptor() {
+    let (_dir, mut node, evolved_table, todo, tx_id) = evolved_todos_version();
+    let table = node.table("todos").unwrap().clone();
+    let alias = *node
+        .node_aliases
+        .get(&tx_id.node)
+        .expect("local node alias");
+    let version = node
+        .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+        .unwrap()
+        .expect("non-base partition version");
+    assert_eq!(version.tx_time(), tx_id.time);
+    assert_eq!(version.tx_node_alias(), alias);
+    let row = node
+        .projected_current_row_from_materialized_version_in_read_schema(
+            node.catalogue.local_schema_version_id,
+            &version,
+        )
+        .unwrap()
+        .expect("stored evolved version projects into the active schema");
+    assert_eq!(
+        row.cell(&table, "title"),
+        Some(Value::String("partition-title".to_owned()))
+    );
+    assert_eq!(
+        version.cell(&evolved_table, "body").unwrap(),
+        Some(Value::String("partition-body".to_owned()))
+    );
+}
+
+#[test]
+fn relation_edge_target_uses_non_base_partition_descriptor() {
+    let (_dir, mut node, evolved_table, todo, tx_id) = evolved_todos_version();
+    let table = node.table("todos").unwrap().clone();
+    let alias = *node
+        .node_aliases
+        .get(&tx_id.node)
+        .expect("local node alias");
+    let row = node
+        .materialize_relation_edge_target_row(
+            &ReadViewSpec::default(),
+            node.catalogue.local_schema_version_id,
+            "todos",
+            todo,
+            tx_id.time,
+            alias,
+        )
+        .unwrap();
+    assert_eq!(
+        row.cell(&table, "title"),
+        Some(Value::String("partition-title".to_owned()))
+    );
+    let version = node
+        .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+        .unwrap()
+        .expect("non-base partition version");
+    assert_eq!(version.tx_time(), tx_id.time);
+    assert_eq!(version.tx_node_alias(), alias);
+    assert_eq!(
+        version.cell(&evolved_table, "body").unwrap(),
+        Some(Value::String("partition-body".to_owned()))
+    );
+}
+
+#[test]
+fn relation_edge_target_projects_old_witness_into_read_schema() {
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), base.clone());
+    let todo = row(0xe5);
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", todo, 0xe6).cells(BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("written-by-alice".to_owned()),
+            )])),
+        )
+        .expect("commit v1 todo");
+
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    );
+    let evolved_table = evolved_schema.tables[0].clone();
+    let evolved = SchemaVersion::new(evolved_schema);
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("from-lens-default".to_owned()),
+                        }],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
+    })
+    .expect("publish v2 lens");
+
+    let alias = *node
+        .node_aliases
+        .get(&tx_id.node)
+        .expect("local node alias");
+    let row = node
+        .materialize_relation_edge_target_row(
+            &ReadViewSpec::default(),
+            evolved.id,
+            "todos",
+            todo,
+            tx_id.time,
+            alias,
+        )
+        .expect("render projected relation target");
+    assert_eq!(
+        row.cell(&evolved_table, "title"),
+        Some(Value::String("written-by-alice".to_owned()))
+    );
+    assert_eq!(
+        row.cell(&evolved_table, "body"),
+        Some(Value::String("from-lens-default".to_owned()))
+    );
+}
+
+#[test]
+fn authoritative_reset_relation_target_projects_old_renamed_witness() {
+    let base = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe7; 16]), base.clone());
+    let user = row(0xe8);
+    let tx_id =
+        node.commit_mergeable_settled(MergeableCommit::new("users", user, 0xe9).cells(
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ))
+        .expect("commit v1 user");
+
+    let evolved_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("people")
+                .column("name", PublicColumnType::Text)
+                .column("label", PublicColumnType::Text),
+        ),
+    );
+    let people = evolved_schema.tables[0].clone();
+    let evolved = SchemaVersion::new(evolved_schema);
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "label".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
+    })
+    .expect("publish people lens");
+
+    let target_version = RowVersionRefEntry {
+        tx: tx_id,
+        schema_version: None,
+        layer: ResultRowLayer::Content,
+        batch: None,
+        branch_or_prefix: None,
+        row_digest: None,
+    };
+    let version = node
+        .resolve_relation_edge_version("users", user, &target_version)
+        .expect("resolve canonical relation witness");
+    let row = node
+        // The wire fact names the canonical authored table.  Project the
+        // immutable witness into the v2 read table; this is ordinary lens
+        // materialization, not an authority-reset rendering path.
+        .projected_current_row_from_materialized_version_in_read_schema(evolved.id, &version)
+        .expect("render relation target")
+        .expect("stored target witness projects into v2");
+    assert_eq!(row.table(), "people");
+    assert_eq!(
+        row.cell(&people, "name"),
+        Some(Value::String("alice".to_owned()))
+    );
+    assert_eq!(
+        row.cell(&people, "label"),
+        Some(Value::String("migrated".to_owned()))
+    );
+
+    let canonical_edge = RelationEdgeEntry {
+        path: "author".to_owned(),
+        // The root is already expressed in Bob's result schema; only the
+        // related witness needs the lineage translation here.
+        source_table: groove::Intern::new("people".to_owned()),
+        source_row: user,
+        target_table: groove::Intern::new("users".to_owned()),
+        target_row: user,
+        kind: None,
+        source_version: None,
+        target_version: Some(target_version),
+        depth: None,
+        edge_id: None,
+        branch: None,
+        role: None,
+        order: None,
+        hole_state: None,
+    };
+    let read_edge = node
+        .project_relation_edge_through_read_schema(&canonical_edge, evolved.id)
+        .expect("project canonical edge identity for reset index");
+    assert_eq!(canonical_edge.target_table.as_str(), "users");
+    assert_eq!(read_edge.target_table, "people");
+    assert_eq!(read_edge.target_row, user);
+}
+
+#[test]
+fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
+    let v1 = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf0; 16]), v1.clone());
+    let user = row(0xf1);
+    let tx_id =
+        node.commit_mergeable_settled(MergeableCommit::new("users", user, 0xf2).cells(
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ))
+        .expect("commit v1 user");
+
+    let v2 = SchemaVersion::new(public_query_eval_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text),
+    )));
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
+    })
+    .expect("publish v2 rename");
+
+    let v3_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("members")
+                .column("display_name", PublicColumnType::Text)
+                .column("origin", PublicColumnType::Text),
+        ),
+    );
+    let members = v3_schema.tables[0].clone();
+    let v3 = SchemaVersion::new(v3_schema);
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 2,
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v3.clone(),
+                MigrationLens::new(
+                    v2.id,
+                    v3.id,
+                    vec![TableLens {
+                        source_table: "people".to_owned(),
+                        target_table: "members".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "people".to_owned(),
+                                to: "members".to_owned(),
+                            },
+                            LensOp::RenameColumn {
+                                from: "name".to_owned(),
+                                to: "display_name".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "origin".to_owned(),
+                                default: Value::String("v1".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
+    })
+    .expect("publish v3 rename");
+
+    let target_version = RowVersionRefEntry {
+        tx: tx_id,
+        schema_version: Some(v1.version_id()),
+        layer: ResultRowLayer::Content,
+        batch: None,
+        branch_or_prefix: None,
+        row_digest: None,
+    };
+    let edge = RelationEdgeEntry {
+        path: "author".to_owned(),
+        source_table: groove::Intern::new("members".to_owned()),
+        source_row: user,
+        target_table: groove::Intern::new("users".to_owned()),
+        target_row: user,
+        kind: None,
+        source_version: None,
+        target_version: Some(target_version.clone()),
+        depth: None,
+        edge_id: None,
+        branch: None,
+        role: None,
+        order: None,
+        hole_state: None,
+    };
+    let projected_edge = node
+        .project_relation_edge_through_read_schema(&edge, v3.id)
+        .expect("project canonical edge through both lenses");
+    assert_eq!(projected_edge.target_table, "members");
+
+    let version = node
+        .resolve_relation_edge_version("users", user, &target_version)
+        .expect("resolve canonical relation witness");
+    let row = node
+        .projected_current_row_from_materialized_version_in_read_schema(v3.id, &version)
+        .expect("render canonical relation witness through v3")
+        .expect("stored target witness projects into v3");
+    assert_eq!(row.table(), "members");
+    assert_eq!(
+        row.cell(&members, "display_name"),
+        Some(Value::String("alice".to_owned()))
+    );
+    assert_eq!(
+        row.cell(&members, "origin"),
+        Some(Value::String("v1".to_owned()))
+    );
+}
+
+/// A historical row translated through a table rename retains its v1 creation
+/// provenance and later deletion-register restoration provenance.
+#[test]
+fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_provenance() {
+    let v1 = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("posts")
+                    .column("author_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text),
+            ),
+    );
+    let v2 = SchemaVersion::new(public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("posts")
+                    .column("author_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text),
+            ),
+    ));
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
+    let author = row(0xf7);
+    let created_by = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let restored_by = AuthorSubject::for_test_bytes([0xe2; 16]);
+    let post = row(0xf8);
+    let mismatched_author_row = row(0xf9);
+    let mismatched_author_id = row(0xfa);
+    let mismatched_post = row(0xfb);
+    let author_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("users", author, 1)
+                .made_by(created_by)
+                .cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("alice".to_owned()),
+                )])),
+        )
+        .expect("commit v1 author");
+    node.apply_fate_update(
+        author_tx,
+        Fate::Accepted,
+        Some(GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("settle v1 author");
+    let post_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("posts", post, 2).cells(BTreeMap::from([
+                ("author_id".to_owned(), Value::Uuid(author.0)),
+                ("title".to_owned(), Value::String("hello".to_owned())),
+            ])),
+        )
+        .expect("commit v1 post");
+    node.apply_fate_update(
+        post_tx,
+        Fate::Accepted,
+        Some(GlobalTime(2)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("settle v1 post");
+    let mismatched_author_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("unmatched".to_owned()),
+            )])),
+        )
+        .expect("commit v1 author with distinct row identity");
+    node.apply_fate_update(
+        mismatched_author_tx,
+        Fate::Accepted,
+        Some(GlobalTime(3)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("settle mismatched v1 author");
+    let mismatched_post_tx = node
+        .commit_mergeable_settled(MergeableCommit::new("posts", mismatched_post, 4).cells(
+            BTreeMap::from([
+                ("author_id".to_owned(), Value::Uuid(mismatched_author_id.0)),
+                (
+                    "title".to_owned(),
+                    Value::String("must not join".to_owned()),
+                ),
+            ]),
+        ))
+        .expect("commit v1 post whose foreign key is not the author row identity");
+    node.apply_fate_update(
+        mismatched_post_tx,
+        Fate::Accepted,
+        Some(GlobalTime(4)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("settle mismatched v1 post");
+    let publication = node
+        .author_schema_lineage_publication(
+            v2.clone(),
+            MigrationLens::new(
+                v1.version_id(),
+                v2.id,
+                vec![
+                    TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    },
+                    TableLens {
+                        source_table: "posts".to_owned(),
+                        target_table: "posts".to_owned(),
+                        ops: Vec::new(),
+                    },
+                ],
+            )
+            .expect("valid migration lens"),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication.clone()),
+    })
+    .expect("publish users to people lens");
+    node.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: v2.id,
+    })
+    .expect("activate v2 read schema");
+
+    for table in ["people", "posts"] {
+        let shape = Query::from(table)
+            .validate(&v2.schema)
+            .expect("validate source");
+        let binding = shape.bind(BTreeMap::new()).expect("bind source");
+        assert_eq!(
+            node.query_rows_at(&shape, &binding, GlobalTime(4))
+                .expect("read projected source")
+                .len(),
+            2,
+            "{table} must independently project its v1 row"
+        );
+    }
+    let query = Query::from("posts").flat_join("people", "posts.author_id", "people._id");
+    let shape = query.validate(&v2.schema).expect("validate v2 flat join");
+    let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
+    let rows = node
+        .query_rows_at(&shape, &binding, GlobalTime(4))
+        .expect("evaluate v2 flat join");
+    assert_eq!(
+        rows.len(),
+        1,
+        "flat joins must use the explicit source row identity alias, not an arbitrary stored id cell"
+    );
+
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    let update = peer
+        .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
+        .expect("rehydrate maintained v2 flat join");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = update
+    else {
+        panic!("flat join rehydrate must emit a view update");
+    };
+    assert!(!peer_payload_inventory.opening_pending);
+    assert!(
+        program_fact_adds.added_rows().iter().any(|fact| matches!(
+            fact,
+            input
+                if input.row == author
+        )),
+        "the renamed join contributor must cross as a compiler-owned covered input: {program_fact_adds:?}"
+    );
+
+    // The content winner remains the v1 creation witness after a later
+    // deletion-register restore. Historical v2 projection must retain both
+    // fields instead of rebuilding a provenance-free current row.
+    let deleted = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("people", author, 5)
+                .made_by(restored_by)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        )
+        .expect("delete renamed v1 row");
+    node.apply_fate_update(
+        deleted,
+        Fate::Accepted,
+        Some(GlobalTime(5)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept delete");
+    let restored = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("people", author, 6)
+                .made_by(restored_by)
+                .deletion(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("restore renamed v1 row");
+    node.apply_fate_update(
+        restored,
+        Fate::Accepted,
+        Some(GlobalTime(6)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept restore");
+    let historical = node
+        .projected_historical_current_rows("people", v2.id, GlobalTime(6))
+        .expect("project renamed historical row")
+        .into_iter()
+        .find(|row| row.row_uuid() == author)
+        .expect("restored renamed row remains visible");
+    assert_eq!(
+        historical.provenance().expect("decode provenance"),
+        Some(RowProvenance {
+            created_by,
+            created_at: 1,
+            updated_by: restored_by,
+            updated_at: 6,
+        })
+    );
+}

@@ -1,0 +1,16 @@
+[package]
+name = "jazz-example-epic-drop-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz = { workspace = true, features = ["testing"] }
+groove = { workspace = true, features = ["test"] }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "file_operations"
+harness = false

@@ -1,0 +1,19 @@
+{
+  "test-count": 4,
+  "rust-suites": {
+    "unit": {
+      "binary-id": "pkg::unit",
+      "testcases": {
+        "alpha": { "kind": "test", "ignored": false, "filter-match": { "status": "matches" } },
+        "beta": { "kind": "test", "ignored": false, "filter-match": { "status": "mismatch" } }
+      }
+    },
+    "integration": {
+      "binary-id": "pkg::integration",
+      "testcases": {
+        "gamma": { "kind": "test", "ignored": false, "filter-match": { "status": "matches" } },
+        "delta": { "kind": "test", "ignored": true, "filter-match": { "status": "matches" } }
+      }
+    }
+  }
+}

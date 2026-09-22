@@ -1,0 +1,79 @@
+"use client";
+
+import Image from "next/image";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { TodoWidget } from "@/components/todo-widget";
+import { AuthBackup } from "@/components/auth-backup";
+import { authClient } from "@/lib/auth-client";
+import { useJazzAuth } from "jazz-tools/react";
+import { useProviderError } from "@/components/jazz-provider";
+
+function HeaderActions() {
+  const router = useRouter();
+  const lifecycle = useJazzAuth();
+  const reportError = useProviderError();
+  const { data: authSession } = authClient.useSession();
+
+  if (authSession?.session) {
+    async function handleSignOut() {
+      reportError(undefined);
+      try {
+        await lifecycle.sessionActions.logout();
+        const result = await authClient.signOut();
+        if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+        await lifecycle.sessionActions.createLocalFirst();
+        router.push("/");
+      } catch (cause) {
+        reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      }
+    }
+
+    return (
+      <div className="auth-nav">
+        <p>Hello, {authSession.user.name}</p>
+        <button type="button" className="btn-secondary" onClick={handleSignOut}>
+          Sign out
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="auth-nav">
+      <p>
+        <Link href="/signup" className="link">
+          Sign up
+        </Link>
+        {" or "}
+        <Link href="/signin" className="link">
+          Sign in
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+export default function Page() {
+  const { data: authSession } = authClient.useSession();
+  const authenticated = Boolean(authSession?.session);
+
+  return (
+    <main className="dashboard">
+      <header>
+        <Image
+          src="/jazz.svg"
+          alt="Jazz"
+          className="wordmark"
+          width={80}
+          height={24}
+          style={{ width: "100%", height: "auto" }}
+          loading="eager"
+        />
+        <HeaderActions />
+      </header>
+      <TodoWidget />
+      {!authenticated && <AuthBackup />}
+    </main>
+  );
+}

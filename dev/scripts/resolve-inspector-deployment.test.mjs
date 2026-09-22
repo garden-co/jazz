@@ -1,0 +1,332 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { resolveInspectorDeployment } from "./resolve-inspector-deployment.mjs";
+
+const requiredEnv = {
+  VERCEL_ORG_ID: "team_alice",
+  VERCEL_PROJECT_ID: "project_inspector",
+  VERCEL_TOKEN: "vercel_token",
+  GITHUB_SHA: "sha-current",
+};
+
+function makeOutputFile() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-inspector-deployment-"));
+  return path.join(tempRoot, "github-output");
+}
+
+function jsonResponse(body, init = {}) {
+  return {
+    ok: init.ok ?? true,
+    status: init.status ?? 200,
+    async json() {
+      return body;
+    },
+    async text() {
+      return JSON.stringify(body);
+    },
+  };
+}
+
+test("resolveInspectorDeployment writes GitHub output for the latest staged deployment from release", async () => {
+  const outputFile = makeOutputFile();
+  const requests = [];
+  const logs = [];
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), authorization: init.headers.Authorization });
+      return jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector-git-main-alice.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
+            readyState: "READY",
+            target: "production",
+            readySubstate: "STAGED",
+          },
+        ],
+      });
+    },
+    log: (message) => logs.push(message),
+    sleep: async () => {
+      throw new Error("resolver should not wait after finding a staged deployment");
+    },
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector-git-main-alice.vercel.app",
+    alreadyPromoted: false,
+  });
+  assert.equal(
+    fs.readFileSync(outputFile, "utf8"),
+    [
+      "deployment_url=https://jazz-inspector-git-main-alice.vercel.app",
+      "already_promoted=false",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].authorization, "Bearer vercel_token");
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.origin + requestUrl.pathname, "https://api.vercel.com/v7/deployments");
+  assert.equal(requestUrl.searchParams.get("projectId"), "project_inspector");
+  assert.equal(requestUrl.searchParams.get("target"), "production");
+  assert.equal(requestUrl.searchParams.get("state"), "READY");
+  assert.equal(requestUrl.searchParams.get("branch"), "release");
+  assert.equal(requestUrl.searchParams.get("sha"), "sha-current");
+  assert.equal(requestUrl.searchParams.get("teamId"), "team_alice");
+  assert.deepEqual(logs, [
+    "Resolved inspector deployment: jazz-inspector-git-main-alice.vercel.app state=READY target=production substate=STAGED",
+  ]);
+});
+
+test("resolveInspectorDeployment marks an already promoted deployment", async () => {
+  const outputFile = makeOutputFile();
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+    fetchImpl: async () =>
+      jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
+            readyState: "READY",
+            target: "production",
+            readySubstate: "PROMOTED",
+          },
+        ],
+      }),
+    log: () => {},
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector.vercel.app",
+    alreadyPromoted: true,
+  });
+  assert.equal(
+    fs.readFileSync(outputFile, "utf8"),
+    ["deployment_url=https://jazz-inspector.vercel.app", "already_promoted=true", ""].join("\n"),
+  );
+});
+
+test("resolveInspectorDeployment uses the latest release deployment before older staged deployments", async () => {
+  const outputFile = makeOutputFile();
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+    fetchImpl: async () =>
+      jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector-latest-main.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
+            readyState: "READY",
+            target: "production",
+            readySubstate: "PROMOTED",
+          },
+          {
+            url: "jazz-inspector-older-main.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
+            readyState: "READY",
+            target: "production",
+            readySubstate: "STAGED",
+          },
+        ],
+      }),
+    log: () => {},
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector-latest-main.vercel.app",
+    alreadyPromoted: true,
+  });
+  assert.equal(
+    fs.readFileSync(outputFile, "utf8"),
+    [
+      "deployment_url=https://jazz-inspector-latest-main.vercel.app",
+      "already_promoted=true",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("resolveInspectorDeployment reports the last matching deployments when none is staged", async () => {
+  const outputFile = makeOutputFile();
+  const sleeps = [];
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async () =>
+        jsonResponse({
+          deployments: [
+            {
+              url: "jazz-inspector-main.vercel.app",
+              meta: { githubCommitSha: "sha-current" },
+              readyState: "READY",
+              target: "production",
+              readySubstate: "QUEUED",
+            },
+          ],
+        }),
+      attempts: 2,
+      delayMs: 5,
+      log: () => {},
+      sleep: async (delayMs) => {
+        sleeps.push(delayMs);
+      },
+    }),
+    /No staged inspector production deployment found on release\.[\s\S]*jazz-inspector-main\.vercel\.app state=READY target=production substate=QUEUED/,
+  );
+  assert.deepEqual(sleeps, [5]);
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("resolveInspectorDeployment uses VERCEL_DEPLOY_BRANCH to query deployments from a custom branch", async () => {
+  const outputFile = makeOutputFile();
+  const requests = [];
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile, VERCEL_DEPLOY_BRANCH: "feature/foo" },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), authorization: init.headers.Authorization });
+      return jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector-git-feature-foo.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
+            readyState: "READY",
+            target: "production",
+            readySubstate: "STAGED",
+          },
+        ],
+      });
+    },
+    log: () => {},
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector-git-feature-foo.vercel.app",
+    alreadyPromoted: false,
+  });
+  assert.equal(requests.length, 1);
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.searchParams.get("branch"), "feature/foo");
+});
+
+test("resolveInspectorDeployment error message mentions the custom branch", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: {
+        ...requiredEnv,
+        GITHUB_OUTPUT: outputFile,
+        VERCEL_DEPLOY_BRANCH: "staging",
+      },
+      fetchImpl: async () =>
+        jsonResponse({
+          deployments: [],
+        }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /No staged inspector production deployment found on staging/,
+  );
+});
+
+test("resolveInspectorDeployment requires all CI environment variables", async () => {
+  const env = { ...requiredEnv };
+  delete env.VERCEL_TOKEN;
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env,
+      fetchImpl: async () => {
+        throw new Error("fetch should not run without credentials");
+      },
+      log: () => {},
+    }),
+    /Missing required environment variable VERCEL_TOKEN/,
+  );
+});
+test("resolveInspectorDeployment ignores an old promoted deployment with a different SHA", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async () =>
+        jsonResponse({
+          deployments: [
+            {
+              url: "jazz-inspector-old.vercel.app",
+              meta: { githubCommitSha: "sha-old" },
+              readyState: "READY",
+              target: "production",
+              readySubstate: "PROMOTED",
+            },
+          ],
+        }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /No staged inspector production deployment found on release/,
+  );
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("resolveInspectorDeployment requires a non-empty source SHA", async () => {
+  const env = { ...requiredEnv, GITHUB_OUTPUT: makeOutputFile() };
+  delete env.GITHUB_SHA;
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env,
+      fetchImpl: async () => {
+        throw new Error("fetch should not run without a source SHA");
+      },
+      log: () => {},
+    }),
+    /Missing required environment variable GITHUB_SHA/,
+  );
+});
+
+test("resolveInspectorDeployment rejects a successful response without deployments", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async () => jsonResponse({ deployments: null }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /malformed response.*deployments must be an array/,
+  );
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("resolveInspectorDeployment aborts a request at its deadline", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async (_url, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+      requestTimeoutMs: 10,
+      attempts: 1,
+      log: () => {},
+    }),
+    /timed out after 10ms/,
+  );
+});

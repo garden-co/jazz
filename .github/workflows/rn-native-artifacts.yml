@@ -1,0 +1,201 @@
+name: React Native relay artifacts
+
+on:
+  pull_request:
+    # A platform label is the explicit opt-in for these expensive platform
+    # builds. `rn-preview-release` requests the same source-compatible
+    # artifacts for package publication, so it must exercise the host link
+    # receipts too.
+    # Include removal so its no-op run joins the same concurrency group and
+    # cancels a previously queued or running artifact build for this PR.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  push:
+    branches: [main, release]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/groove/**"
+      - "crates/idb-tree/**"
+      - "crates/jazz/**"
+      - "crates/jazz-compression/**"
+      - "crates/jazz-native-relay/**"
+      - "crates/jazz-native-transport/**"
+      - "crates/jazz-storage-sqlite/**"
+      - "crates/jazz-rn/**"
+
+permissions:
+  contents: read
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
+
+concurrency:
+  # An unlabeled run has no jobs, but still cancels stale work for this PR.
+  group: rn-native-artifacts-${{ github.event.pull_request.number || github.ref }}
+  # Keep each qualifying main push intact; PR label changes replace stale work.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  android:
+    name: Android relay static libraries
+    # A label is maintainer-controlled but does not make a fork's checked-out
+    # code trusted. Keep artifact builds on same-repository PRs only.
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          (
+            contains(github.event.pull_request.labels.*.name, 'react-native')
+            || contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          )
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+          rust-cache-key: rn-artifacts-android-${{ env.JAZZ_RN_CARGO_NDK_VERSION }}-ndk-27.1.12297006-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-relay/**', 'crates/jazz-native-transport/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
+          rust-cache-bin: "true"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
+      - run: sdkmanager --install "ndk;27.1.12297006"
+      - run: pnpm --filter jazz-rn build:relay:android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.1.12297006
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: ${{ env.JAZZ_RN_CARGO_NDK_VERSION }}
+      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android
+          path: |
+            crates/jazz-rn/android/src/main/jniLibs
+            crates/jazz-rn/android/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
+  ios:
+    name: iOS relay XCFramework
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          (
+            contains(github.event.pull_request.labels.*.name, 'react-native')
+            || contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          )
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+          rust-cache-key: rn-artifacts-ios-macos-15-xcode-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-relay/**', 'crates/jazz-native-transport/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - run: pnpm --filter jazz-rn build:relay:ios
+      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios
+          path: |
+            crates/jazz-rn/JazzNativeRelay.xcframework
+            crates/jazz-rn/ios/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
+  android-link:
+    # This is the JNI/C++ receipt: the generated Android host compiles
+    # `cpp-relay.cpp` and `foreground-runtime.cpp` against the React Native
+    # headers, then links them to the staged Android Rust archive. It cannot
+    # run unless the guarded artifact producer succeeded.
+    name: Android relay linked AAR
+    needs: android
+    if: needs.android.result == 'success'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
+      # The host receipt is a separate runner from the archive producer, so
+      # provision the NDK that CMake uses to compile the JNI bridge here too.
+      - run: sdkmanager --install "ndk;27.1.12297006"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: rn-artifacts-android-link-${{ hashFiles('pnpm-lock.yaml', 'examples/todo-client-localfirst-expo/**', 'crates/jazz-rn/android/**', 'crates/jazz-rn/native/**') }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-android
+          path: crates/jazz-rn
+      - name: Stage downloaded android payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage android
+      - name: Generate the Expo Android host with the staged relay package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:android
+      - name: Link the relay through the application AAR
+        run: ./gradlew :app:assembleDebug --no-daemon
+        working-directory: examples/todo-client-localfirst-expo/android
+
+  ios-link:
+    # This is the Objective-C++ receipt: the generated simulator host compiles
+    # `JazzRelay.mm` and `foreground-runtime.cpp` against the staged
+    # XCFramework, then links the resulting application. It inherits the
+    # producer's same-repository label/trust guard through `needs: ios`.
+    name: iOS relay linked app
+    needs: ios
+    if: needs.ios.result == 'success'
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            examples/todo-client-localfirst-expo/ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: rn-artifacts-ios-link-macos-15-${{ hashFiles('pnpm-lock.yaml', 'examples/todo-client-localfirst-expo/**', 'crates/jazz-rn/ios/**', 'crates/jazz-rn/native/**', 'crates/jazz-rn/JazzRn.podspec') }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-ios
+          path: crates/jazz-rn
+      - name: Stage downloaded ios payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage ios
+      - name: Generate the Expo iOS host with the staged relay package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
+      - name: Install the staged native pod
+        run: pod install
+        working-directory: examples/todo-client-localfirst-expo/ios
+      - name: Link the relay through an iOS simulator app
+        run: |
+          xcodebuild \
+            -workspace todoclientlocalfirstexpo.xcworkspace \
+            -scheme todoclientlocalfirstexpo \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            build
+        working-directory: examples/todo-client-localfirst-expo/ios

@@ -1,0 +1,210 @@
+---
+title: Defining Tables
+description: Define tables and relationships in schema.ts using the TypeScript DSL.
+reviewedAt: "b29b48d1a"
+---
+
+import SchemaSetup from "../../partials/schema-setup.mdx";
+
+## Project layout
+
+A Jazz project has a small set of files at the app root:
+
+```text
+app-root/
+├── schema.ts            # Structural schema — tables and columns
+├── permissions.ts       # Optional row-level policies
+└── migrations/          # Reviewed migration edges
+    └── 20260331-add-description-aaa-bbb.ts
+```
+
+`schema.ts` is the source of truth for your data model. `permissions.ts` contains authorization policies over your tables. The `migrations/` directory holds reviewed migration stubs — see
+[Migrations](/docs/schemas/migrations) for the full workflow.
+
+## Table definitions
+
+Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(columns, relations)` call declares its stored columns and named relations.
+The second argument is required; pass `{}` when the table has no relations.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
+</include>
+
+## Explicit relations
+
+Store row IDs in UUID columns and declare each traversal separately:
+
+```ts
+const schema = {
+  users: s.table(
+    { name: s.string() },
+    {
+      authoredPosts: s.reverse("posts", "author"),
+    },
+  ),
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
+    },
+  ),
+};
+const app = s.defineApp(schema);
+```
+
+`author` is the public relation name, `users` is its target table, and `authorId` is the
+local UUID column. `authoredPosts` names a reverse traversal of the `posts.author` relation;
+the second argument to `s.reverse` is a **forward relation name**, not a column name.
+No suffix convention, generated code, or automatic reverse relation is involved. A UUID
+column without a relation declaration remains an ordinary UUID column.
+
+Use `s.uuid().optional()` for an optional ID and `s.array(s.uuid())` for an array of IDs;
+point `s.rel` at that column in both cases. Optionality and cardinality come from the column.
+A declared relation does not guarantee the target row exists or is readable: a peer may not
+have synced it, it may have been deleted, or permissions may hide it. See
+[Missing references](/docs/reading/includes-and-relations#missing-references).
+
+App construction validates the complete schema, including relations outside a typed slice.
+Targets and local columns must exist, forward columns must have supported UUID shapes, and
+reverse declarations must resolve to a forward relation pointing back to their table.
+Relation names must not collide with stored column names.
+
+### Migrating from inferred relations
+
+Replace each `s.ref("users")` column builder with `s.uuid()`, preserving modifiers such as
+`.optional()` and `s.array(...)`. Add `author: s.rel("users", "authorId")` in the table's
+second argument to preserve an existing `author` include. Add reverse relations explicitly
+on their target tables. You can preserve an old query name with
+`postsViaAuthor: s.reverse("posts", "author")`, or choose an intentional name such as
+`authoredPosts` and update callers. Add `{}` to tables with no relations.
+
+Column names no longer determine relations. Renaming a relation does not rename its stored
+UUID column; forward declarations retain the same underlying column reference metadata.
+
+## Validate locally
+
+<SchemaSetup />
+
+When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
+
+If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
+
+## Exporting the app
+
+`s.defineApp(schema)` converts your schema definition into a typed `app` object. This is what you
+pass to queries, mutations, and subscriptions throughout your application code.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-define-app-ts
+</include>
+
+The `app` object has one typed table handle per table (e.g. `app.todos`, `app.projects`). Table handles are query builders&hairsp;—&hairsp;you chain `.where()`, `.include()`, `.orderBy()` and other methods directly on them.
+
+### Type helpers
+
+Extract precise TypeScript types from any table handle:
+
+| Helper                         | Returns                                                     |
+| ------------------------------ | ----------------------------------------------------------- |
+| `s.RowOf<typeof app.todos>`    | The row type (all columns, `id` included)                   |
+| `s.InsertOf<typeof app.todos>` | The insert shape (no `id`, respects optionals and defaults) |
+| `s.WhereOf<typeof app.todos>`  | The `where(...)` input shape for that table                 |
+
+## Very Large Schemas
+
+For most apps, `s.defineApp(schema)` is the right export: it gives you one typed table handle for
+each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
+planning, and TypeScript inference.
+
+Very large apps can hit a different tradeoff. The runtime schema may need to contain hundreds of
+tables, while a given feature area only works with a much smaller subset. Because typed relations
+and reverse relations are declared in the app schema, asking TypeScript to understand the whole
+graph can make editor and build performance worse than the code you are writing actually needs.
+
+Use `s.defineSliceableApp(schema)` when you want one complete runtime schema but smaller typed app
+surfaces:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  accounts: s.table({ name: s.string() }, {}),
+  workspaces: s.table(
+    { name: s.string(), accountId: s.uuid() },
+    {
+      account: s.rel("accounts", "accountId"),
+      tickets: s.reverse("support_tickets", "workspace"),
+    },
+  ),
+  catalog_items: s.table(
+    { title: s.string(), workspaceId: s.uuid() },
+    {
+      workspace: s.rel("workspaces", "workspaceId"),
+      orders: s.reverse("orders", "catalogItem"),
+    },
+  ),
+  orders: s.table(
+    { number: s.string(), catalogItemId: s.uuid(), buyerId: s.uuid() },
+    {
+      catalogItem: s.rel("catalog_items", "catalogItemId"),
+      buyer: s.rel("users", "buyerId"),
+    },
+  ),
+  shipments: s.table(
+    { trackingCode: s.string(), orderId: s.uuid() },
+    {
+      order: s.rel("orders", "orderId"),
+    },
+  ),
+  users: s.table({ name: s.string() }, {}),
+  support_tickets: s.table(
+    { workspaceId: s.uuid(), requesterId: s.uuid() },
+    {
+      workspace: s.rel("workspaces", "workspaceId"),
+      requester: s.rel("users", "requesterId"),
+    },
+  ),
+};
+
+const sliceableApp = s.defineSliceableApp(schema);
+
+export const commerceApp = sliceableApp.slice(
+  "accounts",
+  "workspaces",
+  "catalog_items",
+  "orders",
+  "shipments",
+);
+export const supportApp = sliceableApp.slice("accounts", "workspaces", "support_tickets");
+```
+
+Each slice returns a normal typed `App` surface for only the selected tables:
+
+```ts
+await db.all(commerceApp.orders.include({ catalogItem: true }));
+await db.all(commerceApp.catalog_items.include({ orders: true }));
+```
+
+Declared relations to tables inside the slice become typed relations and includes. UUID columns referring to tables outside the slice
+remain valid scalar ID columns:
+
+```ts
+type Order = s.RowOf<typeof commerceApp.orders>;
+// Order["catalogItemId"] is string, and commerceApp.orders.include({ catalogItem: true }) is typed.
+// Order["buyerId"] is string, but there is no typed `buyer` include unless `users` is in the slice.
+```
+
+Explicit reverse relations are available only when their source tables are in the current slice. In the example above,
+`commerceApp.catalog_items` has `orders`, while `supportApp.workspaces` has
+`tickets`.
+
+All slices share the complete runtime schema:
+
+```ts
+commerceApp.wasmSchema === sliceableApp.wasmSchema;
+supportApp.wasmSchema === sliceableApp.wasmSchema;
+```
+
+That means schema hashing, migrations, permissions, runtime validation, query planning, inserts,
+updates, and row transforms still see the full schema. The slice only limits the TypeScript app
+graph you ask the compiler to expand.

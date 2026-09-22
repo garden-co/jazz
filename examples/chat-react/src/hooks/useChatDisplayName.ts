@@ -1,0 +1,63 @@
+import { useAll, useSession } from "jazz-tools/react";
+import { app } from "../../schema.js";
+
+/**
+ * Returns the display name for a chat.
+ *
+ * Priority:
+ * 1. Explicit `chatName` if set
+ * 2. Comma-joined names of *other* members (excluding current user)
+ * 3. Chat start date if you're the only member (DD Mon YYYY HH:MM)
+ * 4. "Chat" while loading
+ */
+export function useChatDisplayName(chatId: string, chatName?: string): string {
+  const session = useSession();
+  const userId = session?.user.account ?? null;
+
+  const { data: members = [] } = useAll(app.chatMembers.where({ chatId }));
+  const { data: allProfiles = [] } = useAll(app.profiles);
+  const { data: messages = [] } = useAll(
+    app.messages.select("*", "$createdAt").where({ chatId }).orderBy("$createdAt", "asc").limit(1),
+  );
+
+  if (chatName) return chatName;
+
+  if (members.length === 0) return "Chat";
+
+  const firstMessage = messages[0];
+  const dateSuffix = firstMessage ? ` · ${formatChatDate(firstMessage.$createdAt)}` : "";
+
+  const memberUserIds = new Set(members.map((m) => m.userId));
+  const otherNames = allProfiles
+    .filter((p) => memberUserIds.has(p.userId) && p.userId !== userId)
+    .map((p) => p.name);
+
+  if (otherNames.length > 0) return "Chat with " + otherNames.join(", ") + dateSuffix;
+
+  // Solo chat — just the date
+  return firstMessage ? formatChatDate(firstMessage.$createdAt) : "Chat";
+}
+
+function formatChatDate(date: number | Date): string {
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const resolved = date instanceof Date ? date : new Date(date);
+  const d = resolved.getDate().toString().padStart(2, "0");
+  const mon = months[resolved.getMonth()];
+  const y = resolved.getFullYear();
+  const h = resolved.getHours().toString().padStart(2, "0");
+  const m = resolved.getMinutes().toString().padStart(2, "0");
+  return `${d} ${mon} ${y} ${h}:${m}`;
+}

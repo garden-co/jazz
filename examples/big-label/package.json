@@ -1,0 +1,27 @@
+{
+  "name": "big-label",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 NEXT_PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-000000000301 NEXT_PUBLIC_JAZZ_SERVER_URL=http://127.0.0.1:4200 BACKEND_SECRET=big-label-build-backend-secret BETTER_AUTH_SECRET=2ff8ef66a6ee1a1e551a8f0c7dfa9c8d6fd4cc683a963f04989fdd84cc9cdb53 sh -c 'node ../../packages/jazz-tools/dist/cli.js validate && next build'",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "next": "catalog:default",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

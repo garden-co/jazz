@@ -1,0 +1,8 @@
+{
+  "id": "R4",
+  "name": "update_fanout_to_many_clients",
+  "seed": 20260222,
+  "operation_count": 128,
+  "fanout_clients": [10, 50, 200],
+  "target_project_index": 0
+}

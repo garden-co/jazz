@@ -1,0 +1,2858 @@
+//! Behavior guards for compact record encoding and typed wrapper access.
+//!
+//! These tests own descriptor layout, scalar/nullable/tuple/array encoding,
+//! projection, patching, seeded round-trip oracles, and generated record
+//! wrappers. Database and IVM behavior is covered from [`crate::db::tests`];
+//! this module stays focused on bytes and descriptor semantics.
+
+use super::*;
+
+fn descriptor(value_types: impl IntoIterator<Item = ValueType>) -> RecordDescriptor {
+    RecordDescriptor::new(
+        value_types
+            .into_iter()
+            .enumerate()
+            .map(|(idx, value_type)| (format!("f{idx}"), value_type)),
+    )
+}
+
+#[test]
+fn system_enum_registry_identity_survives_trusted_serde_round_trip() {
+    let schema = ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
+        .unwrap()
+        .with_system_registry(SystemVariantRegistry::deletion_state());
+    let encoded = serde_json::to_string(&schema).unwrap();
+    let restored: ScalarEnumSchema = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(restored.registry_id(), schema.registry_id());
+    assert_ne!(restored.registry_id() & (1 << 63), 0);
+}
+
+#[test]
+fn scalar_enum_constructor_rejects_duplicate_variant_names_case_sensitively() {
+    let distinct = ScalarEnumSchema::new("state", ["Open", "open"]).unwrap();
+    assert_eq!(distinct.discriminant("Open"), Ok(0));
+    assert_eq!(distinct.discriminant("open"), Ok(1));
+    assert_eq!(distinct.variant(0), Ok("Open"));
+    assert_eq!(distinct.variant(1), Ok("open"));
+
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(distinct))]);
+    let encoded = encode_record_descriptor(&descriptor).unwrap();
+    assert_eq!(decode_record_descriptor(&encoded).unwrap(), descriptor);
+    assert_eq!(encode_record_descriptor(&descriptor).unwrap(), encoded);
+
+    let result = ScalarEnumSchema::new("state", ["Open", "open", "Open"]);
+    assert!(
+        result.is_err(),
+        "a scalar enum cannot contain a repeated case-sensitive variant name"
+    );
+}
+
+fn duplicate_scalar_descriptor_bytes(
+    encode: fn(&RecordDescriptor) -> Result<Vec<u8>, Error>,
+) -> Vec<u8> {
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done"]).unwrap();
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(schema))]);
+    let mut encoded = encode(&descriptor).unwrap();
+
+    // Keep the valid descriptor's layout and all framing bytes intact while
+    // making the second equal-length variant spelling an ambiguous duplicate.
+    let duplicate = b"Done";
+    let offset = encoded
+        .windows(duplicate.len())
+        .position(|window| window == duplicate)
+        .expect("fixture must contain the second variant spelling");
+    encoded[offset..offset + duplicate.len()].copy_from_slice(b"Open");
+    encoded
+}
+
+#[test]
+fn scalar_enum_descriptor_decoders_reject_duplicate_variant_names() {
+    for (encoding, decode) in [
+        (
+            "execution",
+            decode_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+        (
+            "persisted",
+            decode_persisted_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+    ] {
+        let encoded = duplicate_scalar_descriptor_bytes(match encoding {
+            "execution" => encode_record_descriptor,
+            "persisted" => encode_persisted_record_descriptor,
+            _ => unreachable!("all fixture encodings are named above"),
+        });
+
+        assert!(
+            decode(&encoded).is_err(),
+            "{encoding} descriptor ingress must reject duplicate scalar enum names"
+        );
+    }
+}
+
+#[test]
+fn scalar_enum_serde_ingress_rejects_duplicate_variant_names() {
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done", "Closed"]).unwrap();
+    let schema_json = serde_json::to_string(&schema)
+        .unwrap()
+        .replacen("\"Closed\"", "\"Open\"", 1);
+    let schema = serde_json::from_str::<ScalarEnumSchema>(&schema_json);
+    assert!(
+        schema.is_err(),
+        "serde scalar enum ingress must reject duplicate variant names"
+    );
+
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done"]).unwrap();
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(schema))]);
+    let descriptor_json = serde_json::to_string(&descriptor)
+        .unwrap()
+        .replacen("\"Done\"", "\"Open\"", 1);
+    let descriptor = serde_json::from_str::<RecordDescriptor>(&descriptor_json);
+    assert!(
+        descriptor.is_err(),
+        "serde descriptor ingress must reject duplicate scalar enum names"
+    );
+}
+
+crate::define_record! {
+    struct TestStaticRow {
+        0 => id: u64,
+        1 => name: String,
+        2 => active: bool,
+    }
+}
+
+crate::define_record! {
+    struct TestTailRow {
+        0 => row_id: Vec<u8>,
+        .. user_cells,
+    }
+}
+
+crate::define_record! {
+    struct TestUuidRow {
+        0 => id: uuid::Uuid,
+        1 => maybe_owner: Option<uuid::Uuid>,
+    }
+}
+
+crate::define_record! {
+    struct TestTupleRow {
+        0 => id: (uuid::Uuid, u64),
+        1 => maybe_id: Option<(uuid::Uuid, u64)>,
+    }
+}
+
+#[test]
+fn descriptor_fields_remain_in_declaration_order() {
+    let schema = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("age", ValueType::U8),
+        ("payload", ValueType::Bytes),
+        ("active", ValueType::Bool),
+    ]);
+
+    let names = schema
+        .fields()
+        .iter()
+        .map(|field| field.name.as_deref().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["name", "age", "payload", "active"]);
+}
+
+#[test]
+fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
+    // A descriptor can cross a durable engine boundary (for example, inside a
+    // Jazz settled result payload). Its encoding must therefore be Groove's
+    // normal record/value algebra, not the incidental serde layout of these
+    // Rust types. Cover every recursive descriptor family here; concrete
+    // persistent-key fixtures live with Jazz's result-member codec.
+    let status = ScalarEnumSchema::new("status", ["draft", "published"]).unwrap();
+    let event = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("none", RecordDescriptor::default()),
+            EnumCase::new("changed", RecordDescriptor::new([("at", ValueType::U64)])),
+        ],
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("u8", ValueType::U8),
+        ("u16", ValueType::U16),
+        ("u32", ValueType::U32),
+        ("u64", ValueType::U64),
+        ("i32", ValueType::I32),
+        ("i64", ValueType::I64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("string", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        ("raw_string", ValueType::raw_string()),
+        ("raw_bytes", ValueType::raw_bytes()),
+        (
+            "stored_bytes",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ),
+        (
+            "stored_string",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ),
+        (
+            "stored_json",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ),
+        ("uuid", ValueType::Uuid),
+        ("tag", ValueType::EnumTag(status)),
+        (
+            "tuple",
+            ValueType::Tuple(vec![ValueType::U32, ValueType::Bool]),
+        ),
+        (
+            "array",
+            ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ),
+        (
+            "record",
+            ValueType::Record(Box::new(RecordDescriptor::new([("child", ValueType::U8)]))),
+        ),
+        ("event", ValueType::Enum(Box::new(event))),
+    ]);
+    let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
+    assert_eq!(
+        blake3::hash(&encoded).to_hex().as_str(),
+        "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
+    );
+    let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+    assert_eq!(
+        encode_persisted_record_descriptor(&decoded).unwrap(),
+        encoded
+    );
+
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(decode_persisted_record_descriptor(&trailing).is_err());
+    let mut corrupt = encoded;
+    corrupt[0] ^= 1;
+    assert!(decode_persisted_record_descriptor(&corrupt).is_err());
+}
+
+#[test]
+fn record_newtype_static_wrapper_round_trips_in_logical_order() {
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("name", ValueType::String),
+        ("active", ValueType::Bool),
+    ]);
+    TestStaticRow::assert_layout(&descriptor);
+
+    let row = TestStaticRow::encode(&descriptor, 7, "Monk".to_owned(), true).unwrap();
+
+    assert_eq!(row.id().unwrap(), 7);
+    assert_eq!(row.name().unwrap(), "Monk");
+    assert!(row.active().unwrap());
+    assert_eq!(row.record().to_values().unwrap()[0], Value::U64(7));
+}
+
+#[test]
+fn record_newtype_tail_wrapper_uses_logical_tail_despite_physical_reordering() {
+    let descriptor = RecordDescriptor::new([
+        ("row_id", ValueType::Bytes),
+        ("user_count", ValueType::Nullable(Box::new(ValueType::U64))),
+        (
+            "user_title",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+    ]);
+    TestTailRow::assert_layout(&descriptor);
+
+    let row = TestTailRow::encode(
+        &descriptor,
+        vec![1, 2, 3],
+        &[
+            Some(Value::U64(42)),
+            Some(Value::String("logical tail".to_owned())),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(row.row_id().unwrap(), vec![1, 2, 3]);
+    assert_eq!(row.cell(0).unwrap(), Some(Value::U64(42)));
+    assert_eq!(
+        row.cell(1).unwrap(),
+        Some(Value::String("logical tail".to_owned()))
+    );
+    assert_eq!(
+        row.cells().collect::<Result<Vec<_>, _>>().unwrap(),
+        vec![
+            Some(Value::U64(42)),
+            Some(Value::String("logical tail".to_owned()))
+        ]
+    );
+}
+
+#[test]
+#[should_panic(expected = "record field index drifted")]
+fn record_newtype_layout_assertion_catches_name_drift() {
+    let descriptor = RecordDescriptor::new([
+        ("name", ValueType::U64),
+        ("id", ValueType::String),
+        ("active", ValueType::Bool),
+    ]);
+
+    TestStaticRow::assert_layout(&descriptor);
+}
+
+#[test]
+fn uuid_fields_round_trip_order_and_nullable() {
+    let low = uuid::Uuid::from_bytes([0; 16]);
+    let high = uuid::Uuid::from_bytes([0xff; 16]);
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::Uuid),
+        (
+            "maybe_owner",
+            ValueType::Nullable(Box::new(ValueType::Uuid)),
+        ),
+    ]);
+    TestUuidRow::assert_layout(&descriptor);
+
+    let row = TestUuidRow::encode(&descriptor, high, Some(low)).unwrap();
+
+    assert_eq!(row.id().unwrap(), high);
+    assert_eq!(row.maybe_owner().unwrap(), Some(low));
+    assert_eq!(row.record().to_values().unwrap()[0], Value::Uuid(high));
+    assert!(low.as_bytes() < high.as_bytes());
+}
+
+#[test]
+fn tuple_fields_round_trip_order_nullable_and_layout() {
+    let low = uuid::Uuid::from_bytes([0; 16]);
+    let high = uuid::Uuid::from_bytes([0xff; 16]);
+    let tuple_type = ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64]);
+    let descriptor = RecordDescriptor::new([
+        ("id", tuple_type.clone()),
+        ("maybe_id", ValueType::Nullable(Box::new(tuple_type))),
+    ]);
+    TestTupleRow::assert_layout(&descriptor);
+
+    let row = TestTupleRow::encode(&descriptor, (high, 9), Some((low, 7))).unwrap();
+
+    assert_eq!(row.id().unwrap(), (high, 9));
+    assert_eq!(row.maybe_id().unwrap(), Some((low, 7)));
+    assert_eq!(
+        row.record().to_values().unwrap()[0],
+        Value::Tuple(vec![Value::Uuid(high), Value::U64(9)])
+    );
+}
+
+#[test]
+fn creates_and_reads_mixed_records() {
+    let schema = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("age", ValueType::U8),
+        ("payload", ValueType::Bytes),
+        ("active", ValueType::Bool),
+    ]);
+    let record = schema
+        .create(&[
+            Value::String("Blue Note".to_owned()),
+            Value::U8(42),
+            Value::Bytes(vec![1, 2, 3]),
+            Value::Bool(true),
+        ])
+        .unwrap();
+
+    assert_eq!(schema.get(&record, "age").unwrap(), Value::U8(42));
+    assert_eq!(schema.get(&record, "active").unwrap(), Value::Bool(true));
+    assert_eq!(
+        schema.get(&record, "name").unwrap(),
+        Value::String("Blue Note".to_owned())
+    );
+    assert_eq!(schema.get_idx(&record, 3).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn record_values_and_arrays_of_records_round_trip() {
+    let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let first = OwnedRecord::new(
+        child
+            .create(&[Value::U64(1), Value::String("Kind of Blue".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let second = OwnedRecord::new(
+        child
+            .create(&[Value::U64(2), Value::String("A Love Supreme".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let descriptor = RecordDescriptor::new([
+        ("featured", ValueType::Record(Box::new(child))),
+        (
+            "albums",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ),
+    ]);
+    let values = vec![
+        Value::Record(first.clone()),
+        Value::Array(vec![Value::Record(first), Value::Record(second)]),
+    ];
+
+    let raw = descriptor.create(&values).unwrap();
+
+    assert_eq!(descriptor.bind(&raw).to_values().unwrap(), values);
+}
+
+#[test]
+fn nested_record_values_round_trip_at_multiple_depths() {
+    let leaf = RecordDescriptor::new([("name", ValueType::String)]);
+    let leaf_record = OwnedRecord::new(
+        leaf.create(&[Value::String("leaf".to_owned())]).unwrap(),
+        leaf,
+    );
+    let middle = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+    let middle_record = OwnedRecord::new(
+        middle.create(&[Value::Record(leaf_record)]).unwrap(),
+        middle,
+    );
+    let root = RecordDescriptor::new([("middle", ValueType::Record(Box::new(middle)))]);
+    let values = vec![Value::Record(middle_record)];
+
+    let raw = root.create(&values).unwrap();
+
+    assert_eq!(root.bind(&raw).to_values().unwrap(), values);
+}
+
+#[test]
+fn record_values_reject_non_canonical_child_bytes() {
+    let child = RecordDescriptor::new([("maybe_id", ValueType::Nullable(Box::new(ValueType::U8)))]);
+    // A fixed-width null reserves one zero payload byte. `OwnedRecord::new`
+    // permits these arbitrary bytes, so validation at the embedding boundary is
+    // what prevents this malformed child from entering byte-based deltas.
+    let non_canonical = OwnedRecord::new(vec![0, 7], child);
+    let parent = RecordDescriptor::new([("child", ValueType::Record(Box::new(child)))]);
+
+    assert_eq!(
+        parent.create(&[Value::Record(non_canonical)]).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn structural_validation_rejects_corrupt_composite_records_before_lazy_access() {
+    let child = RecordDescriptor::new([
+        ("maybe_id", ValueType::Nullable(Box::new(ValueType::U8))),
+        ("active", ValueType::Bool),
+    ]);
+    let child_record = OwnedRecord::new(
+        child
+            .create(&[Value::Nullable(None), Value::Bool(true)])
+            .unwrap(),
+        child,
+    );
+    let descriptor = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("child", ValueType::Record(Box::new(child))),
+        ("aliases", ValueType::Array(Box::new(ValueType::String))),
+    ]);
+    let valid = descriptor
+        .create(&[
+            Value::String("kind of blue".into()),
+            Value::Record(child_record),
+            Value::Array(vec![
+                Value::String("blue in green".into()),
+                Value::String("all blues".into()),
+            ]),
+        ])
+        .unwrap();
+
+    let equivalent = |raw: &[u8]| {
+        // Lazy reads no longer validate descendants. Explicit canonical
+        // validation must retain its recursive rejection behavior.
+        assert_eq!(
+            descriptor.bind(raw).validate().is_ok(),
+            descriptor.bind(raw).validate_canonical().is_ok(),
+            "structural and canonical validation disagreed for {raw:?}"
+        );
+        if descriptor.bind(raw).validate().is_ok() {
+            assert!(descriptor.bind(raw).to_values().is_ok());
+        }
+    };
+
+    equivalent(&valid);
+    for len in 0..valid.len() {
+        equivalent(&valid[..len]);
+    }
+    let mut with_trailing_byte = valid.clone();
+    with_trailing_byte.push(0xff);
+    equivalent(&with_trailing_byte);
+    for index in 0..valid.len() {
+        for replacement in [0, 1, 0x7f, 0x80, 0xff] {
+            let mut mutated = valid.clone();
+            mutated[index] = replacement;
+            equivalent(&mutated);
+        }
+    }
+}
+
+#[test]
+fn pure_fixed_schema_bytes_are_unchanged() {
+    let schema = RecordDescriptor::new([
+        ("a", ValueType::U8),
+        ("b", ValueType::Bool),
+        ("c", ValueType::U64),
+    ]);
+    let record = schema
+        .create(&[Value::U8(3), Value::Bool(true), Value::U64(0x0102)])
+        .unwrap();
+
+    let mut expected = vec![3, 1];
+    expected.extend(0x0102_u64.to_le_bytes());
+    assert_eq!(record, expected);
+    assert_eq!(schema.get_idx(&record, 0).unwrap(), Value::U8(3));
+    assert_eq!(schema.get_idx(&record, 1).unwrap(), Value::Bool(true));
+    assert_eq!(schema.get_idx(&record, 2).unwrap(), Value::U64(0x0102));
+}
+
+#[test]
+fn patch_field_uses_logical_index_for_physically_relocated_field() {
+    let schema = RecordDescriptor::new([
+        ("title", ValueType::String),
+        ("count", ValueType::U64),
+        ("blob", ValueType::Bytes),
+    ]);
+    let record = schema
+        .create(&[
+            Value::String("before".to_owned()),
+            Value::U64(10),
+            Value::Bytes(vec![1, 2, 3]),
+        ])
+        .unwrap();
+
+    let patched = schema
+        .patch_field(&record, 1, &Value::U64(99))
+        .expect("patch logical fixed field");
+
+    assert_eq!(
+        schema.get_idx(&patched, 0).unwrap(),
+        Value::String("before".to_owned())
+    );
+    assert_eq!(schema.get_idx(&patched, 1).unwrap(), Value::U64(99));
+    assert_eq!(
+        schema.get_idx(&patched, 2).unwrap(),
+        Value::Bytes(vec![1, 2, 3])
+    );
+}
+
+#[test]
+fn logical_order_reads_match_full_decode_for_interleaved_seeded_schemas() {
+    let status = ScalarEnumSchema::new("status", ["new", "seen", "done"]).unwrap();
+    let schemas = [
+        RecordDescriptor::new([
+            ("text", ValueType::String),
+            ("id", ValueType::U64),
+            ("maybe", ValueType::Nullable(Box::new(ValueType::String))),
+            ("status", ValueType::EnumTag(status.clone())),
+            ("bytes", ValueType::Bytes),
+        ]),
+        RecordDescriptor::new([
+            ("blob", ValueType::Bytes),
+            ("flag", ValueType::Bool),
+            ("maybe_seq", ValueType::Nullable(Box::new(ValueType::U64))),
+            ("tail", ValueType::String),
+        ]),
+    ];
+
+    let mut rng = 0x1234_abcd_9876_5555_u64;
+    for (schema_idx, schema) in schemas.iter().enumerate() {
+        for step in 0..128 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let values = if schema_idx == 0 {
+                vec![
+                    Value::String(format!("t-{step}-{rng:x}")),
+                    Value::U64(rng),
+                    if rng.is_multiple_of(2) {
+                        Value::Nullable(None)
+                    } else {
+                        Value::Nullable(Some(Box::new(Value::String(format!("m-{rng:x}")))))
+                    },
+                    Value::EnumTag((rng % 3) as u8),
+                    Value::Bytes(rng.to_be_bytes()[..(step % 8)].to_vec()),
+                ]
+            } else {
+                vec![
+                    Value::Bytes(rng.to_le_bytes()[..(step % 8)].to_vec()),
+                    Value::Bool(rng & 1 == 1),
+                    if rng.is_multiple_of(3) {
+                        Value::Nullable(None)
+                    } else {
+                        Value::Nullable(Some(Box::new(Value::U64(rng.rotate_left(9)))))
+                    },
+                    Value::String(format!("tail-{rng:x}")),
+                ]
+            };
+            let record = schema.create(&values).unwrap();
+            assert_eq!(schema.bind(&record).to_values().unwrap(), values);
+            for (idx, expected) in values.iter().enumerate() {
+                assert_eq!(schema.get_idx(&record, idx).unwrap(), expected.clone());
+            }
+        }
+    }
+}
+
+#[test]
+fn encoded_record_accessors_read_only_requested_fields() {
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("flag", ValueType::Bool),
+        ("small", ValueType::U8),
+        ("count", ValueType::U32),
+        ("maybe_seq", ValueType::Nullable(Box::new(ValueType::U64))),
+        ("empty", ValueType::String),
+        ("name", ValueType::String),
+        ("blob", ValueType::Bytes),
+        (
+            "maybe_name",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        (
+            "missing_name",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+    ]);
+    let values = vec![
+        Value::U64(42),
+        Value::Bool(true),
+        Value::U8(7),
+        Value::U32(9),
+        Value::Nullable(Some(Box::new(Value::U64(11)))),
+        Value::String(String::new()),
+        Value::String("Monk".to_owned()),
+        Value::Bytes(vec![1, 2, 3]),
+        Value::Nullable(Some(Box::new(Value::String("Trane".to_owned())))),
+        Value::Nullable(None),
+    ];
+    let record = schema.create(&values).unwrap();
+    let encoded = schema.bind(&record);
+
+    // Invariant: typed accessors compute the requested field span and decode
+    // only that span; they do not materialize a Vec<Value> or allocate strings.
+    assert_eq!(
+        encoded.get_u64(schema.field_index("id").unwrap()).unwrap(),
+        42
+    );
+    assert!(
+        encoded
+            .get_bool(schema.field_index("flag").unwrap())
+            .unwrap()
+    );
+    assert_eq!(
+        encoded
+            .get_u8(schema.field_index("small").unwrap())
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        encoded
+            .get_u32(schema.field_index("count").unwrap())
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        encoded
+            .get_nullable_u64(schema.field_index("maybe_seq").unwrap())
+            .unwrap(),
+        Some(11)
+    );
+    assert_eq!(
+        encoded
+            .get_str(schema.field_index("empty").unwrap())
+            .unwrap(),
+        ""
+    );
+    assert_eq!(
+        encoded
+            .get_str(schema.field_index("name").unwrap())
+            .unwrap(),
+        "Monk"
+    );
+    assert_eq!(
+        encoded
+            .get_bytes(schema.field_index("blob").unwrap())
+            .unwrap(),
+        &[1, 2, 3]
+    );
+    assert_eq!(
+        encoded
+            .get_nullable_string(schema.field_index("maybe_name").unwrap())
+            .unwrap(),
+        Some("Trane")
+    );
+    assert_eq!(
+        encoded
+            .get_nullable_string(schema.field_index("missing_name").unwrap())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn enum_values_decode_as_discriminants_and_store_discriminants() {
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("status", ValueType::EnumTag(status.clone())),
+        (
+            "maybe_status",
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
+        ),
+    ]);
+    let record = schema
+        .create(&[
+            Value::U64(7),
+            Value::String("ready".to_owned()),
+            Value::Nullable(Some(Box::new(Value::String("done".to_owned())))),
+        ])
+        .unwrap();
+    let encoded = schema.bind(&record);
+
+    assert_eq!(schema.get(&record, "status").unwrap(), Value::EnumTag(1));
+    assert_eq!(
+        schema.get(&record, "maybe_status").unwrap(),
+        Value::Nullable(Some(Box::new(Value::EnumTag(2))))
+    );
+    assert_eq!(
+        encoded
+            .get_enum(schema.field_index("status").unwrap())
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        encoded
+            .get_enum_name(schema.field_index("status").unwrap())
+            .unwrap(),
+        "ready"
+    );
+    assert_eq!(
+        encoded
+            .get_nullable_enum(schema.field_index("maybe_status").unwrap())
+            .unwrap(),
+        Some(2)
+    );
+}
+
+#[test]
+fn enum_nullable_layout_stays_fixed_width_and_patchable() {
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        (
+            "maybe_status",
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
+        ),
+        ("body", ValueType::String),
+    ]);
+    let record = schema
+        .create(&[
+            Value::U64(7),
+            Value::Nullable(None),
+            Value::String("payload".to_owned()),
+        ])
+        .unwrap();
+    let maybe_idx = schema.field_index("maybe_status").unwrap();
+    let patched = schema
+        .patch_field(
+            &record,
+            maybe_idx,
+            &Value::Nullable(Some(Box::new(Value::String("done".to_owned())))),
+        )
+        .unwrap();
+
+    assert_eq!(patched.len(), record.len());
+    assert_eq!(
+        schema.bind(&patched).get_nullable_enum(maybe_idx).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        schema.get(&patched, "body").unwrap(),
+        Value::String("payload".to_owned())
+    );
+}
+
+#[test]
+fn encoded_record_accessors_match_full_decode_under_seeded_rows() {
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("kind", ValueType::U8),
+        ("active", ValueType::Bool),
+        ("bytes", ValueType::Bytes),
+        ("text", ValueType::String),
+        (
+            "maybe_text",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        ("maybe_seq", ValueType::Nullable(Box::new(ValueType::U64))),
+    ]);
+    let id_idx = schema.field_index("id").unwrap();
+    let kind_idx = schema.field_index("kind").unwrap();
+    let active_idx = schema.field_index("active").unwrap();
+    let bytes_idx = schema.field_index("bytes").unwrap();
+    let text_idx = schema.field_index("text").unwrap();
+    let maybe_text_idx = schema.field_index("maybe_text").unwrap();
+    let maybe_seq_idx = schema.field_index("maybe_seq").unwrap();
+    let mut rng = 0x5eed_cafe_u64;
+    for _ in 0..256 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let id = rng;
+        let kind = (rng >> 8) as u8;
+        let active = rng & 1 == 1;
+        let bytes = rng.to_le_bytes()[..((rng as usize) % 8)].to_vec();
+        let text = if rng.is_multiple_of(5) {
+            String::new()
+        } else {
+            format!("v-{rng:x}")
+        };
+        let maybe_text = if rng.is_multiple_of(3) {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::String(text.clone()))))
+        };
+        let maybe_seq = if rng.is_multiple_of(4) {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::U64(rng.rotate_left(7)))))
+        };
+        let values = vec![
+            Value::U64(id),
+            Value::U8(kind),
+            Value::Bool(active),
+            Value::Bytes(bytes.clone()),
+            Value::String(text.clone()),
+            maybe_text.clone(),
+            maybe_seq.clone(),
+        ];
+        let record = schema.create(&values).unwrap();
+        let encoded = schema.bind(&record);
+        assert_eq!(schema.get_idx(&record, id_idx).unwrap(), Value::U64(id));
+        assert_eq!(encoded.get_u64(id_idx).unwrap(), id);
+        assert_eq!(schema.get_idx(&record, kind_idx).unwrap(), Value::U8(kind));
+        assert_eq!(encoded.get_u8(kind_idx).unwrap(), kind);
+        assert_eq!(
+            schema.get_idx(&record, active_idx).unwrap(),
+            Value::Bool(active)
+        );
+        assert_eq!(encoded.get_bool(active_idx).unwrap(), active);
+        assert_eq!(
+            schema.get_idx(&record, bytes_idx).unwrap(),
+            Value::Bytes(bytes.clone())
+        );
+        assert_eq!(encoded.get_bytes(bytes_idx).unwrap(), bytes.as_slice());
+        assert_eq!(
+            schema.get_idx(&record, text_idx).unwrap(),
+            Value::String(text.clone())
+        );
+        assert_eq!(encoded.get_str(text_idx).unwrap(), text.as_str());
+        let expected_nullable_text = match &maybe_text {
+            Value::Nullable(Some(value)) => match value.as_ref() {
+                Value::String(value) => Some(value.as_str()),
+                _ => unreachable!(),
+            },
+            Value::Nullable(None) => None,
+            _ => unreachable!(),
+        };
+        assert_eq!(schema.get_idx(&record, maybe_text_idx).unwrap(), maybe_text);
+        assert_eq!(
+            encoded.get_nullable_string(maybe_text_idx).unwrap(),
+            expected_nullable_text
+        );
+        let expected_nullable_seq = match &maybe_seq {
+            Value::Nullable(Some(value)) => match value.as_ref() {
+                Value::U64(value) => Some(*value),
+                _ => unreachable!(),
+            },
+            Value::Nullable(None) => None,
+            _ => unreachable!(),
+        };
+        assert_eq!(schema.get_idx(&record, maybe_seq_idx).unwrap(), maybe_seq);
+        assert_eq!(
+            encoded.get_nullable_u64(maybe_seq_idx).unwrap(),
+            expected_nullable_seq
+        );
+    }
+}
+
+#[test]
+fn encodes_all_scalar_value_types_little_endian() {
+    let descriptor = descriptor([
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::F64,
+        ValueType::Bool,
+    ]);
+
+    let record = descriptor
+        .create(&[
+            Value::U8(0x12),
+            Value::U16(0x3456),
+            Value::U32(0x789a_bcde),
+            Value::U64(0x0123_4567_89ab_cdef),
+            Value::F64(1.5),
+            Value::Bool(true),
+        ])
+        .unwrap();
+
+    let mut expected = Vec::new();
+    expected.push(0x12);
+    expected.extend(0x3456_u16.to_le_bytes());
+    expected.extend(0x789a_bcde_u32.to_le_bytes());
+    expected.extend(0x0123_4567_89ab_cdef_u64.to_le_bytes());
+    expected.extend(1.5_f64.to_le_bytes());
+    expected.push(1);
+
+    assert_eq!(record, expected);
+    assert_eq!(descriptor.get_idx(&record, 4).unwrap(), Value::F64(1.5));
+}
+
+#[test]
+fn f64_accessors_reject_nan_and_record_field_round_trips() {
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("score", ValueType::F64),
+        ("maybe_score", ValueType::Nullable(Box::new(ValueType::F64))),
+    ]);
+    let record = descriptor
+        .create(&[
+            Value::U64(7),
+            1.25_f64.to_value(),
+            Some(-2.5_f64).to_value(),
+        ])
+        .unwrap();
+    let borrowed = descriptor.bind(&record);
+    assert_eq!(borrowed.get_u64(0).unwrap(), 7);
+    assert_eq!(borrowed.get_f64(1).unwrap(), 1.25);
+    assert_eq!(borrowed.get_nullable_f64(2).unwrap(), Some(-2.5));
+    assert_eq!(f64::read(&borrowed, 1).unwrap(), 1.25);
+    assert_eq!(Option::<f64>::read(&borrowed, 2).unwrap(), Some(-2.5));
+    assert_eq!(
+        descriptor.create(&[Value::U64(1), Value::F64(f64::NAN), Value::Nullable(None)]),
+        Err(Error::InvalidF64NaN)
+    );
+    assert_eq!(
+        descriptor.create(&[
+            Value::U64(1),
+            Value::F64(0.0),
+            Value::Nullable(Some(Box::new(Value::F64(f64::NAN)))),
+        ]),
+        Err(Error::InvalidF64NaN)
+    );
+}
+
+#[test]
+fn encodes_nullable_fixed_size_values_with_flag_and_reserved_width() {
+    let descriptor = descriptor([
+        ValueType::Nullable(Box::new(ValueType::U16)),
+        ValueType::Nullable(Box::new(ValueType::Bool)),
+    ]);
+    let record = descriptor
+        .create(&[
+            Value::Nullable(Some(Box::new(Value::U16(0x1234)))),
+            Value::Nullable(None),
+        ])
+        .unwrap();
+
+    assert_eq!(record, [1, 0x34, 0x12, 0, 0]);
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Nullable(Some(Box::new(Value::U16(0x1234))))
+    );
+    assert_eq!(
+        descriptor.get_idx(&record, 1).unwrap(),
+        Value::Nullable(None)
+    );
+}
+
+#[test]
+fn encodes_nullable_variable_size_null_as_only_flag_byte() {
+    let descriptor = descriptor([
+        ValueType::Nullable(Box::new(ValueType::String)),
+        ValueType::Nullable(Box::new(ValueType::Bytes)),
+    ]);
+    let record = descriptor
+        .create(&[
+            Value::Nullable(Some(Box::new(Value::String("yes".to_owned())))),
+            Value::Nullable(None),
+        ])
+        .unwrap();
+
+    let mut expected = Vec::new();
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([1, 2]);
+    expected.extend(b"yes");
+    expected.extend([0]);
+    assert_eq!(record, expected);
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Nullable(Some(Box::new(Value::String("yes".to_owned()))))
+    );
+    assert_eq!(
+        descriptor.get_idx(&record, 1).unwrap(),
+        Value::Nullable(None)
+    );
+}
+
+#[test]
+fn encodes_arrays_of_nullable_fixed_size_values() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::Nullable(Box::new(
+        ValueType::U8,
+    ))))]);
+    let record = descriptor
+        .create(&[Value::Array(vec![
+            Value::Nullable(Some(Box::new(Value::U8(7)))),
+            Value::Nullable(None),
+        ])])
+        .unwrap();
+
+    assert_eq!(record, [1, 7, 0, 0]);
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Array(vec![
+            Value::Nullable(Some(Box::new(Value::U8(7)))),
+            Value::Nullable(None)
+        ])
+    );
+}
+
+#[test]
+fn tuple_encoding_is_concatenated_fixed_member_encoding() {
+    let uuid = uuid::Uuid::from_bytes([
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ]);
+    let descriptor = descriptor([ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64])]);
+    let record = descriptor
+        .create(&[Value::Tuple(vec![
+            Value::Uuid(uuid),
+            Value::U64(0x0102_0304_0506_0708),
+        ])])
+        .unwrap();
+
+    let mut expected = Vec::new();
+    expected.extend_from_slice(uuid.as_bytes());
+    expected.extend_from_slice(&0x0102_0304_0506_0708_u64.to_be_bytes());
+    assert_eq!(record, expected);
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Tuple(vec![Value::Uuid(uuid), Value::U64(0x0102_0304_0506_0708)])
+    );
+}
+
+#[test]
+fn tuple_integer_members_are_big_endian_even_inside_little_endian_records() {
+    let descriptor = descriptor([ValueType::U64, ValueType::Tuple(vec![ValueType::U64])]);
+    let record = descriptor
+        .create(&[
+            Value::U64(0x0102_0304_0506_0708),
+            Value::Tuple(vec![Value::U64(0x0102_0304_0506_0708)]),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        record,
+        [
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // record scalar
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // tuple member
+        ]
+    );
+}
+
+#[test]
+fn nullable_tuple_round_trips() {
+    let uuid = uuid::Uuid::from_bytes([0x22; 16]);
+    let tuple_type = ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64]);
+    let descriptor = descriptor([ValueType::Nullable(Box::new(tuple_type))]);
+    let record = descriptor
+        .create(&[Value::Nullable(Some(Box::new(Value::Tuple(vec![
+            Value::Uuid(uuid),
+            Value::U64(4),
+        ]))))])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Nullable(Some(Box::new(Value::Tuple(vec![
+            Value::Uuid(uuid),
+            Value::U64(4)
+        ]))))
+    );
+}
+
+#[test]
+fn fixed_tuple_arrays_support_indexed_element_reads() {
+    let first = uuid::Uuid::from_bytes([0x01; 16]);
+    let second = uuid::Uuid::from_bytes([0x02; 16]);
+    let tuple_type = ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64]);
+    let descriptor = descriptor([ValueType::Array(Box::new(tuple_type))]);
+    let record = descriptor
+        .create(&[Value::Array(vec![
+            Value::Tuple(vec![Value::Uuid(first), Value::U64(10)]),
+            Value::Tuple(vec![Value::Uuid(second), Value::U64(20)]),
+        ])])
+        .unwrap();
+    let borrowed = descriptor.bind(&record);
+
+    assert_eq!(
+        borrowed.get_array_element(0, 1).unwrap(),
+        Value::Tuple(vec![Value::Uuid(second), Value::U64(20)])
+    );
+    assert_eq!(
+        borrowed.get_array_element(0, 2).unwrap_err(),
+        Error::FieldIndexOutOfBounds { index: 2, len: 2 }
+    );
+}
+
+#[test]
+#[should_panic(expected = "tuple members must be fixed-width")]
+fn descriptor_rejects_variable_width_tuple_members() {
+    let _ = descriptor([ValueType::Tuple(vec![ValueType::Uuid, ValueType::String])]);
+}
+
+#[test]
+fn tuple_round_trip_matches_seeded_oracle() {
+    let descriptor = descriptor([
+        ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64]),
+        ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+            ValueType::Uuid,
+            ValueType::U64,
+        ]))),
+        ValueType::Array(Box::new(ValueType::Tuple(vec![
+            ValueType::Uuid,
+            ValueType::U64,
+        ]))),
+    ]);
+    let mut seed = 0x7b1e_5eed_u64;
+    for _ in 0..128 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let uuid_a = uuid::Uuid::from_bytes(seed.to_be_bytes().repeat(2).try_into().unwrap());
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let uuid_b = uuid::Uuid::from_bytes(seed.to_be_bytes().repeat(2).try_into().unwrap());
+        let nullable = if seed & 1 == 0 {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::Tuple(vec![
+                Value::Uuid(uuid_b),
+                Value::U64(seed),
+            ]))))
+        };
+        let values = vec![
+            Value::Tuple(vec![Value::Uuid(uuid_a), Value::U64(seed.rotate_left(7))]),
+            nullable,
+            Value::Array(vec![
+                Value::Tuple(vec![Value::Uuid(uuid_a), Value::U64(1)]),
+                Value::Tuple(vec![Value::Uuid(uuid_b), Value::U64(2)]),
+            ]),
+        ];
+        let record = descriptor.create(&values).unwrap();
+        assert_eq!(descriptor.bind(&record).to_values().unwrap(), values);
+    }
+}
+
+#[test]
+fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcard() {
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let id = uuid::Uuid::from_bytes([0x31; 16]);
+    let nested_id = uuid::Uuid::from_bytes([0x42; 16]);
+    let descriptor = RecordDescriptor::new([
+        ("u8_min", ValueType::U8),
+        ("u16_max", ValueType::U16),
+        ("u32_max", ValueType::U32),
+        ("u64_zero", ValueType::U64),
+        ("u64_max", ValueType::U64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("string", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        ("uuid", ValueType::Uuid),
+        ("enum", ValueType::EnumTag(status.clone())),
+        (
+            "nullable_none",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        (
+            "nullable_some_tuple",
+            ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::Uuid,
+                ValueType::U64,
+            ]))),
+        ),
+        (
+            "array_nested",
+            ValueType::Array(Box::new(ValueType::Array(Box::new(ValueType::U16)))),
+        ),
+        (
+            "array_tuple",
+            ValueType::Array(Box::new(ValueType::Tuple(vec![
+                ValueType::Uuid,
+                ValueType::U64,
+            ]))),
+        ),
+        (
+            "tuple",
+            ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64, ValueType::Bool]),
+        ),
+    ]);
+    let values = vec![
+        Value::U8(u8::MIN),
+        Value::U16(u16::MAX),
+        Value::U32(u32::MAX),
+        Value::U64(0),
+        Value::U64(u64::MAX),
+        Value::F64(-42.25),
+        Value::Bool(true),
+        Value::String("all value types".to_owned()),
+        Value::Bytes(vec![0, 1, 2, 3, 254, 255]),
+        Value::Uuid(id),
+        Value::EnumTag(2),
+        Value::Nullable(None),
+        Value::Nullable(Some(Box::new(Value::Tuple(vec![
+            Value::Uuid(nested_id),
+            Value::U64(u64::MAX - 1),
+        ])))),
+        Value::Array(vec![
+            Value::Array(vec![Value::U16(1), Value::U16(2)]),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::U16(u16::MAX)]),
+        ]),
+        Value::Array(vec![
+            Value::Tuple(vec![Value::Uuid(id), Value::U64(1)]),
+            Value::Tuple(vec![Value::Uuid(nested_id), Value::U64(u64::MAX)]),
+        ]),
+        Value::Tuple(vec![Value::Uuid(id), Value::U64(9), Value::Bool(false)]),
+    ];
+
+    let raw = descriptor.create(&values).unwrap();
+    assert_eq!(descriptor.bind(&raw).to_values().unwrap(), values);
+
+    let encoded_descriptor = postcard::to_allocvec(&descriptor).unwrap();
+    let decoded_descriptor: RecordDescriptor = postcard::from_bytes(&encoded_descriptor).unwrap();
+    assert_eq!(decoded_descriptor.fields(), descriptor.fields());
+    assert_eq!(decoded_descriptor.bind(&raw).to_values().unwrap(), values);
+
+    let owned = OwnedRecord::new(raw.clone(), descriptor);
+    let encoded_record = postcard::to_allocvec(&owned).unwrap();
+    let decoded_record: OwnedRecord = postcard::from_bytes(&encoded_record).unwrap();
+    assert_eq!(decoded_record.raw(), raw.as_slice());
+    assert_eq!(decoded_record.to_values().unwrap(), values);
+
+    let (projected_descriptor, projected_raw) = RecordDescriptor::project(
+        &[*decoded_record.descriptor()],
+        &[decoded_record.raw()],
+        &[(0, 10), (0, 14), (0, 4), (0, 12)],
+    )
+    .unwrap();
+    assert_eq!(
+        projected_descriptor
+            .bind(&projected_raw)
+            .to_values()
+            .unwrap(),
+        vec![
+            Value::EnumTag(2),
+            Value::Array(vec![
+                Value::Tuple(vec![Value::Uuid(id), Value::U64(1)]),
+                Value::Tuple(vec![Value::Uuid(nested_id), Value::U64(u64::MAX)]),
+            ]),
+            Value::U64(u64::MAX),
+            Value::Nullable(Some(Box::new(Value::Tuple(vec![
+                Value::Uuid(nested_id),
+                Value::U64(u64::MAX - 1),
+            ])))),
+        ]
+    );
+}
+
+#[test]
+fn encodes_record_offsets_relative_to_record_start() {
+    let descriptor = descriptor([ValueType::U8, ValueType::String, ValueType::Bytes]);
+    let record = descriptor
+        .create(&[
+            Value::U8(9),
+            Value::String("abc".to_owned()),
+            Value::Bytes(vec![4, 5]),
+        ])
+        .unwrap();
+
+    let mut expected = vec![9];
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([2]);
+    expected.extend(b"abc");
+    expected.extend([2, 4, 5]);
+
+    assert_eq!(record, expected);
+}
+
+// These deliberately use literals on both sides of the codec boundary. They
+// are storage-format fixtures, not a round-trip oracle: the decoder assertion
+// must keep detecting an encoder change, and the encoder assertion must keep
+// detecting a decoder-only widening.
+fn epoch_1_record_fixture_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("id", ValueType::U16),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::U8))),
+        (
+            "pair",
+            ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+        ),
+        ("aliases", ValueType::Array(Box::new(ValueType::String))),
+    ])
+}
+
+const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
+    0x34, 0x12, // id: little-endian U16
+    0x00, 0x00, // fixed nullable U8: null flag + canonical zero payload
+    0xab, 0xcd, 0x01, // tuple U16 (big-endian) + Bool
+    0x0e, 0x00, 0x00, 0x00, // first variable field ends at record byte 14
+    0x02, b'h', b'i', // String primitive StoredScalar arm tag + payload
+    0x02, 0x00, 0x00, 0x00, // variable array count
+    0x0a, 0x00, 0x00, 0x00, // first array item ends at array-relative byte 10
+    0x02, b'a', 0x02, b'b', b'c',
+];
+
+// Scalar and envelope goldens deliberately keep both sides of the codec
+// boundary literal.  Do not derive these bytes through `create` in the decoder
+// assertion: this is the epoch-1 receipt for record values.
+const EPOCH_1_SCALAR_RECORD_FIXTURE: &[u8] = &[
+    0xaa, // U8
+    0x34, 0x12, // U16 little-endian
+    0x78, 0x56, 0x34, 0x12, // U32 little-endian
+    0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // U64 little-endian
+    0xfe, 0xff, 0xff, 0xff, // I32(-2) little-endian
+    0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // I64(-3) little-endian
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xff, // F64(-infinity)
+    0x01, // Bool(true)
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+    0x0f, // Uuid raw bytes
+    0x00, 0x00, 0x00, // Nullable(U16)::None, including zero reservation
+];
+
+fn epoch_1_scalar_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("u8", ValueType::U8),
+        ("u16", ValueType::U16),
+        ("u32", ValueType::U32),
+        ("u64", ValueType::U64),
+        ("i32", ValueType::I32),
+        ("i64", ValueType::I64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("uuid", ValueType::Uuid),
+        ("none", ValueType::Nullable(Box::new(ValueType::U16))),
+    ])
+}
+
+#[test]
+fn epoch_1_scalar_record_fixture_is_exact_and_rejects_nan_and_noncanonical_null() {
+    let descriptor = epoch_1_scalar_record_descriptor();
+    let values = vec![
+        Value::U8(0xaa),
+        Value::U16(0x1234),
+        Value::U32(0x1234_5678),
+        Value::U64(0x0102_0304_0506_0708),
+        Value::I32(-2),
+        Value::I64(-3),
+        Value::F64(f64::NEG_INFINITY),
+        Value::Bool(true),
+        Value::Uuid(uuid::Uuid::from_bytes([
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        ])),
+        Value::Nullable(None),
+    ];
+    assert_eq!(
+        descriptor.create(&values).unwrap(),
+        EPOCH_1_SCALAR_RECORD_FIXTURE
+    );
+    assert_eq!(
+        descriptor
+            .bind(EPOCH_1_SCALAR_RECORD_FIXTURE)
+            .to_values()
+            .unwrap(),
+        values
+    );
+
+    let mut noncanonical_null = EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec();
+    *noncanonical_null.last_mut().unwrap() = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+
+    let mut nan = EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec();
+    // F64 starts after 1 + 2 + 4 + 8 + 4 + 8 bytes.
+    nan[27..35].copy_from_slice(&f64::NAN.to_le_bytes());
+    assert!(descriptor.bind(&nan).to_values().is_err());
+    assert!(matches!(
+        descriptor.bind(&nan).validate(),
+        Err(Error::InvalidF64NaN)
+    ));
+}
+
+#[test]
+fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_closed() {
+    let case = RecordDescriptor::new([("code", ValueType::U8)]);
+    let enum_schema = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("unused", RecordDescriptor::default()),
+            EnumCase::new("message", case),
+        ],
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("text", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        (
+            "maybe_text",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        ("words", ValueType::Array(Box::new(ValueType::String))),
+        ("event", ValueType::Enum(Box::new(enum_schema))),
+    ]);
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::Bytes(vec![0, 0xff]),
+        Value::Nullable(Some(Box::new(Value::String("ok".to_owned())))),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+        Value::Enum(EnumValue::create(1, case, &[Value::U8(0x7e)]).unwrap()),
+    ];
+    // Four record offsets, then StoredScalar primitive arms (02), array offsets,
+    // and the canonical payload-enum tag 1 as a one-byte u32 varint.
+    let frozen: &[u8] = &[
+        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x02, b'h', b'i', 0x02, 0x00,
+        0xff, 0x01, 0x02, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x02, b'a', 0x02, b'b', b'c',
+        0x01, 0x7e,
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), frozen);
+    assert_eq!(descriptor.bind(frozen).to_values().unwrap(), values);
+
+    let mut noncanonical_tag = frozen.to_vec();
+    let tag = noncanonical_tag.len() - 2;
+    noncanonical_tag.splice(tag..tag + 1, [0x81, 0x00]);
+    assert!(descriptor.bind(&noncanonical_tag).to_values().is_err());
+    assert!(
+        descriptor
+            .bind(&frozen[..frozen.len() - 1])
+            .validate_canonical()
+            .is_err()
+    );
+}
+
+#[test]
+fn epoch_1_payload_enum_tag_128_uses_the_exact_two_byte_envelope() {
+    let payload = RecordDescriptor::new([("code", ValueType::U8)]);
+    let schema = EnumSchema::new(
+        "many_events",
+        (0..=128).map(|tag| {
+            EnumCase::new(
+                format!("case_{tag}"),
+                if tag == 128 {
+                    payload
+                } else {
+                    RecordDescriptor::default()
+                },
+            )
+        }),
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("event", ValueType::Enum(Box::new(schema)))]);
+    let value = Value::Enum(EnumValue::create(128, payload, &[Value::U8(0x7e)]).unwrap());
+    // 128 is the first two-byte payload-enum tag: minimal u32 LEB128 `80 01`.
+    let frozen = [0x80, 0x01, 0x7e];
+    assert_eq!(
+        descriptor.create(std::slice::from_ref(&value)).unwrap(),
+        frozen
+    );
+    assert_eq!(descriptor.bind(&frozen).to_values().unwrap(), vec![value]);
+}
+
+#[test]
+fn epoch_1_record_fixture_encodes_to_frozen_bytes() {
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::U16(0x1234),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U16(0xabcd), Value::Bool(true)]),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+    ];
+    assert_eq!(
+        epoch_1_record_fixture_descriptor().create(&values).unwrap(),
+        EPOCH_1_RECORD_FIXTURE
+    );
+}
+
+#[test]
+fn epoch_1_record_fixture_decodes_hard_coded_bytes_and_rejects_noncanonical_forms() {
+    let descriptor = epoch_1_record_fixture_descriptor();
+    let expected = vec![
+        Value::String("hi".to_owned()),
+        Value::U16(0x1234),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U16(0xabcd), Value::Bool(true)]),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+    ];
+    assert_eq!(
+        descriptor.bind(EPOCH_1_RECORD_FIXTURE).to_values().unwrap(),
+        expected
+    );
+
+    let mut noncanonical_null = EPOCH_1_RECORD_FIXTURE.to_vec();
+    noncanonical_null[3] = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+    assert!(
+        descriptor
+            .bind(&EPOCH_1_RECORD_FIXTURE[..10])
+            .to_values()
+            .is_err()
+    );
+}
+
+#[test]
+fn encodes_fixed_size_arrays_without_count() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::U16))]);
+    let record = descriptor
+        .create(&[Value::Array(vec![
+            Value::U16(10),
+            Value::U16(20),
+            Value::U16(30),
+        ])])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Array(vec![Value::U16(10), Value::U16(20), Value::U16(30)])
+    );
+}
+
+#[test]
+fn encodes_empty_fixed_size_arrays_as_empty_payloads() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::U32))]);
+    let record = descriptor.create(&[Value::Array(Vec::new())]).unwrap();
+
+    assert!(record.is_empty());
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Array(Vec::new())
+    );
+}
+
+#[test]
+fn encodes_variable_size_arrays_with_offsets() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+    let record = descriptor
+        .create(&[Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bop".to_owned()),
+            Value::String("c".to_owned()),
+        ])])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bop".to_owned()),
+            Value::String("c".to_owned())
+        ])
+    );
+}
+
+#[test]
+fn encodes_variable_array_offsets_relative_to_array_start() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+    let record = descriptor
+        .create(&[Value::Array(vec![
+            Value::String("hi".to_owned()),
+            Value::String("j".to_owned()),
+        ])])
+        .unwrap();
+
+    let mut expected = Vec::new();
+    expected.extend(2_u32.to_le_bytes());
+    expected.extend(11_u32.to_le_bytes());
+    expected.extend([2]);
+    expected.extend(b"hi");
+    expected.extend([2]);
+    expected.extend(b"j");
+
+    assert_eq!(record, expected);
+}
+
+#[test]
+fn encodes_empty_variable_size_arrays_with_zero_count() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+    let record = descriptor.create(&[Value::Array(Vec::new())]).unwrap();
+
+    assert_eq!(record, 0_u32.to_le_bytes());
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Array(Vec::new())
+    );
+}
+
+#[test]
+fn encodes_nested_variable_arrays() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::Array(Box::new(
+        ValueType::String,
+    ))))]);
+    let value = Value::Array(vec![
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bb".to_owned()),
+        ]),
+        Value::Array(vec![Value::String("ccc".to_owned())]),
+    ]);
+    let record = descriptor.create(std::slice::from_ref(&value)).unwrap();
+
+    assert_eq!(descriptor.get_idx(&record, 0).unwrap(), value);
+}
+
+#[test]
+fn projects_fields_from_source_records() {
+    let left = RecordDescriptor::new([("id", ValueType::U32), ("name", ValueType::String)]);
+    let right = RecordDescriptor::new([("enabled", ValueType::Bool), ("blob", ValueType::Bytes)]);
+    let left_record = left
+        .create(&[Value::U32(7), Value::String("Kind of Blue".to_owned())])
+        .unwrap();
+    let right_record = right
+        .create(&[Value::Bool(false), Value::Bytes(vec![9, 8])])
+        .unwrap();
+
+    let (projected_descriptor, projected_record) = RecordDescriptor::project(
+        &[left, right],
+        &[left_record.as_ref(), right_record.as_ref()],
+        &[(1, 0), (0, 1)],
+    )
+    .unwrap();
+
+    assert_eq!(
+        projected_descriptor
+            .fields()
+            .iter()
+            .map(|field| field.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["enabled", "name"]
+    );
+    assert_eq!(
+        projected_descriptor.get_idx(&projected_record, 0).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        projected_descriptor.get_idx(&projected_record, 1).unwrap(),
+        Value::String("Kind of Blue".to_owned())
+    );
+}
+
+#[test]
+fn project_preserves_logical_mapping_order() {
+    let source = RecordDescriptor::new([("name", ValueType::String), ("id", ValueType::U32)]);
+    let source_record = source
+        .create(&[Value::String("Monk".to_owned()), Value::U32(5)])
+        .unwrap();
+
+    let (descriptor, record) =
+        RecordDescriptor::project(&[source], &[source_record.as_ref()], &[(0, 1), (0, 0)]).unwrap();
+
+    assert_eq!(
+        descriptor
+            .fields()
+            .iter()
+            .map(|field| field.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["id", "name"]
+    );
+    assert_eq!(descriptor.get_idx(&record, 0).unwrap(), Value::U32(5));
+    assert_eq!(
+        descriptor.get_idx(&record, 1).unwrap(),
+        Value::String("Monk".to_owned())
+    );
+}
+
+#[test]
+fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let source = RecordDescriptor::new([
+        ("payload", ValueType::Bytes),
+        ("id", ValueType::U64),
+        (
+            "maybe_title",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        ("status", ValueType::EnumTag(status.clone())),
+        ("title", ValueType::String),
+        (
+            "maybe_status",
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status.clone()))),
+        ),
+        ("flag", ValueType::Bool),
+    ]);
+    let target = RecordDescriptor::new([
+        ("title", ValueType::String),
+        ("status", ValueType::EnumTag(status.clone())),
+        ("id", ValueType::U64),
+        ("payload", ValueType::Bytes),
+        (
+            "maybe_status",
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
+        ),
+        (
+            "maybe_title",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+    ]);
+    let mapping = [
+        (
+            source.field_index("title").unwrap(),
+            target.field_index("title").unwrap(),
+        ),
+        (
+            source.field_index("status").unwrap(),
+            target.field_index("status").unwrap(),
+        ),
+        (
+            source.field_index("id").unwrap(),
+            target.field_index("id").unwrap(),
+        ),
+        (
+            source.field_index("payload").unwrap(),
+            target.field_index("payload").unwrap(),
+        ),
+        (
+            source.field_index("maybe_status").unwrap(),
+            target.field_index("maybe_status").unwrap(),
+        ),
+        (
+            source.field_index("maybe_title").unwrap(),
+            target.field_index("maybe_title").unwrap(),
+        ),
+    ];
+    let projector = RecordProjector::new(source, target, mapping).unwrap();
+
+    let mut rng = 0x90ab_cdef_1234_5678_u64;
+    for idx in 0..256 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let title = if idx % 17 == 0 {
+            String::new()
+        } else {
+            format!("title-{rng:x}")
+        };
+        let maybe_title = if rng.is_multiple_of(3) {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::String(title.clone()))))
+        };
+        let maybe_status = if rng.is_multiple_of(4) {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::EnumTag((rng % 3) as u8))))
+        };
+        let source_values = vec![
+            Value::Bytes(rng.to_be_bytes()[..(idx % 8)].to_vec()),
+            Value::U64(rng),
+            maybe_title.clone(),
+            Value::EnumTag(((rng >> 8) % 3) as u8),
+            Value::String(title),
+            maybe_status.clone(),
+            Value::Bool(rng & 1 == 1),
+        ];
+        let source_raw = source.create(&source_values).unwrap();
+        let projected = projector.project(source.bind(&source_raw)).unwrap();
+
+        let target_values = (0..target.fields().len())
+            .map(|target_idx| {
+                let source_idx = mapping
+                    .iter()
+                    .find_map(|(source_idx, mapped_target)| {
+                        (*mapped_target == target_idx).then_some(*source_idx)
+                    })
+                    .unwrap();
+                source.get_idx(&source_raw, source_idx)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let expected = target.create(&target_values).unwrap();
+
+        assert_eq!(projected.raw(), expected.as_slice());
+        for field_idx in 0..target.fields().len() {
+            assert_eq!(
+                projected.get_idx(field_idx).unwrap(),
+                target.get_idx(&expected, field_idx).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn record_projector_rejects_incomplete_duplicate_and_type_mismatched_mappings() {
+    let source = RecordDescriptor::new([("id", ValueType::U64), ("name", ValueType::String)]);
+    let target = RecordDescriptor::new([("id", ValueType::U64), ("name", ValueType::String)]);
+
+    assert!(matches!(
+        RecordProjector::new(source, target, [(0, 0)]),
+        Err(Error::ProjectMissingTarget { target_idx: 1 })
+    ));
+    assert!(matches!(
+        RecordProjector::new(source, target, [(0, 0), (0, 0), (1, 1)]),
+        Err(Error::ProjectDuplicateTarget { target_idx: 0 })
+    ));
+    assert!(matches!(
+        RecordProjector::new(source, target, [(1, 0), (0, 1)]),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn rebound_registry_projector_allows_identical_layout_but_not_added_tags() {
+    let source_status = ValueType::EnumTag(
+        ScalarEnumSchema::new("status", ["open"])
+            .unwrap()
+            .with_registry_id(11),
+    );
+    let rebound_status = ValueType::EnumTag(
+        ScalarEnumSchema::new("status", ["open"])
+            .unwrap()
+            .with_registry_id(22),
+    );
+    let source = RecordDescriptor::new([("status", source_status)]);
+    let rebound = RecordDescriptor::new([("status", rebound_status)]);
+    let projector = RecordProjector::new_registry_rebound(source, rebound, [(0, 0)])
+        .expect("same enum encoding may cross a registry rebinding");
+    let raw = source.create(&[Value::EnumTag(0)]).unwrap();
+    assert_eq!(projector.project(source.bind(&raw)).unwrap().raw(), raw);
+
+    let evolved = RecordDescriptor::new([(
+        "status",
+        ValueType::EnumTag(
+            ScalarEnumSchema::new("status", ["open", "closed"])
+                .unwrap()
+                .with_registry_id(33),
+        ),
+    )]);
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(source, evolved, [(0, 0)]),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn rebound_variant_projector_rejects_changed_payload_field_type_or_layout() {
+    let source = || {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new(
+                    "event",
+                    [
+                        EnumCase::new(
+                            "message",
+                            RecordDescriptor::new([("level", ValueType::I32)]),
+                        ),
+                        EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                    ],
+                )
+                .unwrap()
+                .with_registry_id(101),
+            )),
+        )])
+    };
+    let rejects = |target: RecordDescriptor| {
+        assert!(matches!(
+            RecordProjector::new_registry_rebound(source(), target, [(0, 0)]),
+            Err(Error::ProjectTypeMismatch { .. })
+        ));
+    };
+
+    rejects(RecordDescriptor::new([(
+        "event",
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new(
+                        "message",
+                        RecordDescriptor::new([("level", ValueType::I64)]),
+                    ),
+                    EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(202),
+        )),
+    )]));
+    rejects(RecordDescriptor::new([(
+        "event",
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new(
+                        "message",
+                        RecordDescriptor::new([
+                            ("level", ValueType::I32),
+                            ("extra", ValueType::Bool),
+                        ]),
+                    ),
+                    EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(202),
+        )),
+    )]));
+}
+
+#[test]
+fn rebound_variant_projector_rejects_changed_case_name() {
+    let enum_descriptor = |registry_id, message_case_name| {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new(
+                    "event",
+                    [
+                        EnumCase::new(
+                            message_case_name,
+                            RecordDescriptor::new([("value", ValueType::I32)]),
+                        ),
+                        EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+                    ],
+                )
+                .unwrap()
+                .with_registry_id(registry_id),
+            )),
+        )])
+    };
+
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(
+            enum_descriptor(101, "message"),
+            enum_descriptor(202, "renamed_message"),
+            [(0, 0)],
+        ),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn rebound_variant_projector_rejects_reordered_same_layout_cases() {
+    let enum_descriptor = |registry_id, cases: [EnumCase; 2]| {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new("event", cases)
+                    .unwrap()
+                    .with_registry_id(registry_id),
+            )),
+        )])
+    };
+    let source = enum_descriptor(
+        101,
+        [
+            EnumCase::new(
+                "message",
+                RecordDescriptor::new([("value", ValueType::I32)]),
+            ),
+            EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+        ],
+    );
+    let target = enum_descriptor(
+        202,
+        [
+            EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+            EnumCase::new(
+                "message",
+                RecordDescriptor::new([("value", ValueType::I32)]),
+            ),
+        ],
+    );
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(source, target, [(0, 0)]),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn patch_field_overwrites_fixed_width_values_without_shifting_layout() {
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("until", ValueType::U64),
+        (
+            "maybe_global",
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+        ("title", ValueType::String),
+    ]);
+    let record = schema
+        .create(&[
+            Value::U64(1),
+            Value::U64(u64::MAX),
+            Value::Nullable(None),
+            Value::String("before".to_owned()),
+        ])
+        .unwrap();
+
+    let until_idx = schema.field_index("until").unwrap();
+    let patched = schema
+        .patch_field(&record, until_idx, &Value::U64(7))
+        .unwrap();
+    assert_eq!(patched.len(), record.len());
+    assert_eq!(schema.get_idx(&patched, until_idx).unwrap(), Value::U64(7));
+    assert_eq!(
+        schema.get(&patched, "title").unwrap(),
+        Value::String("before".to_owned())
+    );
+
+    let maybe_idx = schema.field_index("maybe_global").unwrap();
+    let patched = schema
+        .patch_field(
+            &patched,
+            maybe_idx,
+            &Value::Nullable(Some(Box::new(Value::U64(9)))),
+        )
+        .unwrap();
+    assert_eq!(patched.len(), record.len());
+    assert_eq!(
+        schema.get_idx(&patched, maybe_idx).unwrap(),
+        Value::Nullable(Some(Box::new(Value::U64(9))))
+    );
+    let patched = schema
+        .patch_field(&patched, maybe_idx, &Value::Nullable(None))
+        .unwrap();
+    assert_eq!(patched.len(), record.len());
+    assert_eq!(
+        schema.get_idx(&patched, maybe_idx).unwrap(),
+        Value::Nullable(None)
+    );
+}
+
+#[test]
+fn patch_field_rebuilds_when_variable_width_layout_changes() {
+    let schema = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("title", ValueType::String),
+        ("body", ValueType::String),
+    ]);
+    let record = schema
+        .create(&[
+            Value::U64(1),
+            Value::String("a".to_owned()),
+            Value::String("body".to_owned()),
+        ])
+        .unwrap();
+    let patched = schema
+        .patch_field(
+            &record,
+            schema.field_index("title").unwrap(),
+            &Value::String("longer title".to_owned()),
+        )
+        .unwrap();
+    assert_eq!(
+        schema.get(&patched, "title").unwrap(),
+        Value::String("longer title".to_owned())
+    );
+    assert_eq!(
+        schema.get(&patched, "body").unwrap(),
+        Value::String("body".to_owned())
+    );
+}
+
+#[test]
+fn empty_descriptor_creates_empty_record() {
+    let descriptor = descriptor([]);
+    let record = descriptor.create(&[]).unwrap();
+
+    assert!(record.is_empty());
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap_err(),
+        Error::FieldIndexOutOfBounds { index: 0, len: 0 }
+    );
+}
+
+#[test]
+fn lookup_reports_unknown_field_name() {
+    let schema = RecordDescriptor::new([("id", ValueType::U8)]);
+    let record = schema.create(&[Value::U8(1)]).unwrap();
+
+    assert_eq!(
+        schema.get(&record, "missing").unwrap_err(),
+        Error::FieldNotFound("missing".to_owned())
+    );
+}
+
+#[test]
+fn create_rejects_wrong_value_count() {
+    let descriptor = descriptor([ValueType::U8, ValueType::U16]);
+
+    assert_eq!(
+        descriptor.create(&[Value::U8(1)]).unwrap_err(),
+        Error::ArityMismatch {
+            expected: 2,
+            actual: 1
+        }
+    );
+}
+
+#[test]
+fn create_rejects_wrong_scalar_type() {
+    let descriptor = descriptor([ValueType::U16]);
+
+    assert_eq!(
+        descriptor.create(&[Value::U8(1)]).unwrap_err(),
+        Error::TypeMismatch {
+            expected: ValueType::U16
+        }
+    );
+}
+
+#[test]
+fn create_rejects_wrong_array_element_type() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::U8))]);
+
+    assert_eq!(
+        descriptor
+            .create(&[Value::Array(vec![Value::U16(1)])])
+            .unwrap_err(),
+        Error::TypeMismatch {
+            expected: ValueType::U8
+        }
+    );
+}
+
+#[test]
+fn lookup_rejects_truncated_fixed_record() {
+    let descriptor = descriptor([ValueType::U32]);
+
+    assert_eq!(
+        descriptor.get_idx(&[1, 2, 3], 0).unwrap_err(),
+        Error::UnexpectedEof
+    );
+}
+
+#[test]
+fn lookup_rejects_trailing_bytes_in_fixed_only_record() {
+    let descriptor = descriptor([ValueType::U8]);
+
+    assert_eq!(
+        descriptor.get_idx(&[1, 2], 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_invalid_boolean_byte() {
+    let descriptor = descriptor([ValueType::Bool]);
+
+    assert_eq!(
+        descriptor.get_idx(&[2], 0).unwrap_err(),
+        Error::InvalidBool(2)
+    );
+}
+
+#[test]
+fn lookup_rejects_invalid_nullable_flag() {
+    let descriptor = descriptor([ValueType::Nullable(Box::new(ValueType::U8))]);
+
+    assert_eq!(
+        descriptor.get_idx(&[2, 0], 0).unwrap_err(),
+        Error::InvalidNullFlag(2)
+    );
+}
+
+#[test]
+fn lookup_rejects_null_variable_nullable_with_payload() {
+    let descriptor = descriptor([ValueType::Nullable(Box::new(ValueType::String))]);
+
+    assert_eq!(
+        descriptor.get_idx(&[0, b'x'], 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_invalid_utf8_string() {
+    let descriptor = descriptor([ValueType::String]);
+
+    assert_eq!(
+        descriptor.get_idx(&[2, 1, 0xff], 0).unwrap_err(),
+        Error::InvalidUtf8
+    );
+}
+
+#[test]
+fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_arm() {
+    let descriptor = descriptor([ValueType::String]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        b"large logical text",
+    )
+    .unwrap();
+    let record = descriptor
+        .create(&[Value::Large(Box::new(prepared.value_ref.clone()))])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Large(Box::new(prepared.value_ref))
+    );
+    assert_eq!(
+        descriptor.bind(&record).get_str(0).unwrap_err(),
+        Error::LargeValue(crate::large_values::Error::RequiresEvaluation)
+    );
+}
+
+#[test]
+fn lookup_rejects_offset_before_variable_payload_start() {
+    let descriptor = descriptor([ValueType::U8, ValueType::String, ValueType::Bytes]);
+    let mut record = vec![1];
+    record.extend(4_u32.to_le_bytes());
+    record.extend(b"ab");
+
+    assert_eq!(
+        descriptor.get_idx(&record, 1).unwrap_err(),
+        Error::InvalidOffset
+    );
+
+    let later_field_record = vec![2, 0, 0, 0, 0];
+    assert_eq!(
+        descriptor.get_idx(&later_field_record, 2).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_offset_past_record_end() {
+    let descriptor = descriptor([ValueType::String, ValueType::Bytes]);
+    let mut record = Vec::new();
+    record.extend(99_u32.to_le_bytes());
+    record.extend(b"ab");
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_truncated_offset_table() {
+    let descriptor = descriptor([ValueType::String, ValueType::Bytes]);
+
+    assert_eq!(
+        descriptor.get_idx(&[1, 2, 3], 0).unwrap_err(),
+        Error::UnexpectedEof
+    );
+}
+
+#[test]
+fn lookup_rejects_fixed_array_with_partial_element() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::U16))]);
+
+    assert_eq!(
+        descriptor.get_idx(&[1, 2, 3], 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_empty_variable_array_missing_count() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+
+    assert_eq!(
+        descriptor.get_idx(&[], 0).unwrap_err(),
+        Error::UnexpectedEof
+    );
+}
+
+#[test]
+fn lookup_rejects_zero_count_variable_array_with_payload() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+    let mut record = Vec::new();
+    record.extend(0_u32.to_le_bytes());
+    record.extend(b"extra");
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn lookup_rejects_variable_array_offset_before_payload_start() {
+    let descriptor = descriptor([ValueType::Array(Box::new(ValueType::String))]);
+    let mut record = Vec::new();
+    record.extend(2_u32.to_le_bytes());
+    record.extend(6_u32.to_le_bytes());
+    record.extend(b"ab");
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
+fn project_rejects_source_record_count_mismatch() {
+    let descriptor = descriptor([ValueType::U8]);
+
+    assert_eq!(
+        RecordDescriptor::project(&[descriptor], &[], &[]).unwrap_err(),
+        Error::ArityMismatch {
+            expected: 1,
+            actual: 0
+        }
+    );
+}
+
+#[test]
+fn project_rejects_descriptor_index_out_of_bounds() {
+    assert_eq!(
+        RecordDescriptor::project(&[], &[], &[(0, 0)]).unwrap_err(),
+        Error::FieldIndexOutOfBounds { index: 0, len: 0 }
+    );
+}
+
+#[test]
+fn project_rejects_field_index_out_of_bounds() {
+    let descriptor = descriptor([ValueType::U8]);
+    let record = descriptor.create(&[Value::U8(1)]).unwrap();
+
+    assert_eq!(
+        RecordDescriptor::project(&[descriptor], &[record.as_ref()], &[(0, 1)]).unwrap_err(),
+        Error::FieldIndexOutOfBounds { index: 1, len: 1 }
+    );
+}
+
+#[test]
+fn descriptor_round_trips_through_postcard_as_schema_fields() {
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::Uuid),
+        ("name", ValueType::String),
+        ("flags", ValueType::Array(Box::new(ValueType::Bool))),
+        (
+            "rating",
+            ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::U8,
+                ValueType::U16,
+            ]))),
+        ),
+    ]);
+
+    let encoded = postcard::to_allocvec(&descriptor).unwrap();
+    let decoded: RecordDescriptor = postcard::from_bytes(&encoded).unwrap();
+
+    assert_eq!(decoded.fields(), descriptor.fields());
+}
+
+#[test]
+fn owned_record_round_trips_through_postcard_as_descriptor_and_raw_bytes() {
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U32),
+        ("name", ValueType::String),
+        ("payload", ValueType::Bytes),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::U32(42),
+            Value::String("blue note".to_owned()),
+            Value::Bytes(vec![1, 3, 5, 8]),
+        ])
+        .unwrap();
+    let record = OwnedRecord::new(raw.clone(), descriptor);
+
+    let encoded = postcard::to_allocvec(&record).unwrap();
+    let decoded: OwnedRecord = postcard::from_bytes(&encoded).unwrap();
+
+    assert_eq!(decoded.raw(), raw.as_slice());
+    assert_eq!(decoded.descriptor().fields(), record.descriptor().fields());
+    assert_eq!(decoded.get("id").unwrap(), Value::U32(42));
+    assert_eq!(
+        decoded.get("name").unwrap(),
+        Value::String("blue note".to_owned())
+    );
+    assert_eq!(
+        decoded.get("payload").unwrap(),
+        Value::Bytes(vec![1, 3, 5, 8])
+    );
+}
+
+#[test]
+fn unwrap_nested_nullable_preserves_outer_none_as_inner_null() {
+    let inner = ValueType::Nullable(Box::new(ValueType::I32));
+    let source = RecordDescriptor::new([("value", ValueType::Nullable(Box::new(inner.clone())))]);
+    let target = RecordDescriptor::new([("value", inner)]);
+    let mut output = bytes::BytesMut::new();
+    let mut scratch = RawProjectionScratch::default();
+
+    for (source_value, expected) in [
+        (Value::Nullable(None), Value::Nullable(None)),
+        (
+            Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(Value::I32(
+                7,
+            ))))))),
+            Value::Nullable(Some(Box::new(Value::I32(7)))),
+        ),
+    ] {
+        output.clear();
+        let raw = source.create(&[source_value]).unwrap();
+        let span = target
+            .unwrap_nullable_field_into(&source, &raw, 0, &mut output, &mut scratch)
+            .unwrap()
+            .expect("nested nullable absence remains a row");
+        assert_eq!(target.get_idx(&output[span], 0).unwrap(), expected);
+    }
+}
+
+// Internal byte-admission coverage is necessary here: database APIs cannot
+// construct malformed OwnedRecord payloads or expose canonicality errors.
+#[test]
+fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
+    fn check(descriptor: RecordDescriptor, raw: &[u8]) {
+        let expected = descriptor.bind(raw).to_values().and_then(|values| {
+            if descriptor.create(&values)? == raw {
+                Ok(())
+            } else {
+                Err(Error::NonCanonicalRecord)
+            }
+        });
+        let record = OwnedRecord::new(raw.to_vec(), descriptor);
+        let actual = values::ensure_value_type(
+            &Value::Record(record.clone()),
+            &ValueType::Record(Box::new(descriptor)),
+        );
+        assert_eq!(
+            actual, expected,
+            "record {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+        let schema = EnumSchema::new("fixture", [EnumCase::new("payload", descriptor)]).unwrap();
+        let actual = values::ensure_value_type(
+            &Value::Enum(EnumValue::new(0, record)),
+            &ValueType::Enum(Box::new(schema)),
+        );
+        assert_eq!(
+            actual, expected,
+            "enum {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+    }
+    let child = descriptor([
+        ValueType::Bool,
+        ValueType::Nullable(Box::new(ValueType::U16)),
+    ]);
+    let event = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("empty", RecordDescriptor::default()),
+            EnumCase::new("value", child),
+        ],
+    )
+    .unwrap();
+    let cases = vec![
+        (RecordDescriptor::default(), vec![]),
+        (
+            epoch_1_scalar_record_descriptor(),
+            EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec(),
+        ),
+        (
+            descriptor([ValueType::F64]),
+            f64::NAN.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::F64))]),
+            [b"\x01".as_slice(), f64::NAN.to_le_bytes().as_slice()].concat(),
+        ),
+        (descriptor([ValueType::raw_bytes()]), vec![]),
+        (descriptor([ValueType::raw_string()]), b"text".to_vec()),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::F64])]),
+            1.0f64.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::Nullable(Box::new(
+                ValueType::U32,
+            ))])]),
+            vec![1, 1, 2, 3, 4],
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::F64,
+            ])))]),
+            vec![0; 9],
+        ),
+        (
+            descriptor([ValueType::Array(Box::new(ValueType::Tuple(vec![])))]),
+            vec![],
+        ),
+    ];
+    let mut cases = cases;
+    // Exercise recursive tuple detection through every containing type. Raw
+    // wrappers are intentional: public encoding rejects some legacy tuple
+    // representations before they can reach the embedding admission boundary.
+    for (inner, raw) in cases.clone() {
+        let record_type = ValueType::Record(Box::new(inner));
+        cases.push((descriptor([record_type.clone()]), raw.clone()));
+        cases.push((
+            descriptor([ValueType::Array(Box::new(record_type.clone()))]),
+            [1u32.to_le_bytes().as_slice(), raw.as_slice()].concat(),
+        ));
+        cases.push((
+            descriptor([ValueType::Nullable(Box::new(record_type))]),
+            [b"\x01".as_slice(), raw.as_slice()].concat(),
+        ));
+        let schema = EnumSchema::new("wrapper", [EnumCase::new("value", inner)]).unwrap();
+        cases.push((
+            descriptor([ValueType::Enum(Box::new(schema))]),
+            [b"\x00".as_slice(), raw.as_slice()].concat(),
+        ));
+    }
+    for value_type in [
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+    ] {
+        let value = if value_type == ValueType::Bytes {
+            Value::Bytes(vec![0, 128, 255])
+        } else {
+            Value::String("null".into())
+        };
+        let d = descriptor([value_type]);
+        cases.push((d, d.create(&[value]).unwrap()));
+        // Primitive, chunked, unknown/future format and nonminimal envelopes.
+        for raw in [
+            vec![2],
+            vec![2, 255],
+            vec![3],
+            vec![3, 255],
+            vec![4, 0],
+            vec![0x82, 0, 1],
+        ] {
+            cases.push((d, raw));
+        }
+    }
+    for (kind, logical) in [
+        (
+            crate::large_values::LargeValueKind::Bytes,
+            b"bytes".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::String,
+            b"text".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::Json,
+            b"null".as_slice(),
+        ),
+    ] {
+        let prepared = crate::large_values::prepare(kind, logical).unwrap();
+        let d = descriptor([ValueType::stored_scalar(kind)]);
+        cases.push((
+            d,
+            d.create(&[Value::Large(Box::new(prepared.value_ref))])
+                .unwrap(),
+        ));
+    }
+    let composite = descriptor([
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(event)),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ValueType::EnumTag(ScalarEnumSchema::new("status", ["one", "two"]).unwrap()),
+    ]);
+    let child_value = OwnedRecord::new(
+        child
+            .create(&[Value::Bool(true), Value::Nullable(None)])
+            .unwrap(),
+        child,
+    );
+    cases.push((
+        composite,
+        composite
+            .create(&[
+                Value::Record(child_value.clone()),
+                Value::Enum(EnumValue::new(1, child_value.clone())),
+                Value::Array(vec![
+                    Value::Nullable(None),
+                    Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+                ]),
+                Value::Array(vec![Value::Record(child_value)]),
+                Value::EnumTag(1),
+            ])
+            .unwrap(),
+    ));
+    for (descriptor, raw) in cases {
+        check(descriptor, &raw);
+        for length in 0..raw.len() {
+            check(descriptor, &raw[..length]);
+        }
+        for extra in [0, 1, 255] {
+            let mut changed = raw.clone();
+            changed.push(extra);
+            check(descriptor, &changed);
+        }
+        for index in 0..raw.len() {
+            for byte in [0, 1, 2, 3, 127, 128, 254, 255] {
+                let mut changed = raw.clone();
+                changed[index] = byte;
+                check(descriptor, &changed);
+            }
+        }
+    }
+}
+
+// This internal counter checks work, which public query results cannot expose.
+// Reading valid nested bytes must not invoke the record encoder.
+#[test]
+fn nested_record_read_does_not_reencode_descendants() {
+    let leaf = RecordDescriptor::new([("value", ValueType::String)]);
+    let leaf_record = OwnedRecord::new(leaf.create(&[Value::String("kept".into())]).unwrap(), leaf);
+    let middle = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+    let middle_record = OwnedRecord::new(
+        middle
+            .create(&[Value::Record(leaf_record.clone())])
+            .unwrap(),
+        middle,
+    );
+    let root = RecordDescriptor::new([("middle", ValueType::Record(Box::new(middle)))]);
+    let raw = root
+        .create(&[Value::Record(middle_record.clone())])
+        .unwrap();
+    RECORD_ENCODE_COUNT.with(|count| count.set(0));
+    let value = root.bind(&raw).get_idx(0).unwrap();
+    assert_eq!(value, Value::Record(middle_record));
+    let Value::Record(record) = value else {
+        panic!("record expected")
+    };
+    assert_eq!(record.get_idx(0).unwrap(), Value::Record(leaf_record));
+    assert_eq!(RECORD_ENCODE_COUNT.with(|count| count.get()), 0);
+}
+
+// Internal representation tests: byte identity and borrowed storage cannot be
+// observed through a database query, which deliberately hides record layouts.
+#[test]
+fn encoded_field_assembly_matches_value_encoder_and_borrows_nested_record() {
+    let nested = descriptor([ValueType::String, ValueType::U64]);
+    let child = OwnedRecord::new(
+        nested
+            .create(&[Value::String("nested".into()), Value::U64(19)])
+            .unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::U64,
+        ValueType::Record(Box::new(nested)),
+        ValueType::Nullable(Box::new(ValueType::U64)),
+        ValueType::Bytes,
+    ]);
+    let values = [
+        Value::String("first".into()),
+        Value::U64(7),
+        Value::Record(child),
+        Value::Nullable(None),
+        Value::Bytes(vec![1, 2, 3]),
+    ];
+    let expected = d.create(&values).unwrap();
+    let actual = d
+        .create_with_encoded_fields::<Error>(expected.len(), |index, out| {
+            if index == 1 {
+                d.encode_field_into(index, &values[index], out)
+            } else {
+                out.extend_from_slice(&expected[d.field_span(&expected, index)?]);
+                Ok(())
+            }
+        })
+        .unwrap();
+    assert_eq!(actual, expected);
+    let borrowed = d.bind(&actual).get_record(2).unwrap();
+    assert_eq!(borrowed.get_str(0).unwrap(), "nested");
+    assert_eq!(borrowed.get_u64(1).unwrap(), 19);
+    assert_eq!(
+        borrowed.raw().as_ptr(),
+        actual[d.field_span(&actual, 2).unwrap()].as_ptr()
+    );
+    assert!(d.bind(&actual).get_record(0).is_err());
+    assert!(d.bind(&actual).get_record(99).is_err());
+}
+
+#[test]
+fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
+    use crate::large_values::{LargeValueKind, prepare};
+    let reference = prepare(LargeValueKind::String, b"indirect contents")
+        .unwrap()
+        .value_ref;
+    let nested = descriptor([ValueType::String]);
+    let child = OwnedRecord::new(
+        nested
+            .create(&[Value::Large(Box::new(reference.clone()))])
+            .unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(nested)),
+    ]);
+    let raw = d
+        .create(&[
+            Value::String("inline contents".repeat(100)),
+            Value::Array(vec![
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
+                Value::Nullable(Some(Box::new(Value::String("inline".into())))),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
+            ]),
+            Value::Record(child),
+        ])
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(
+        !d.visit_large_value_refs(&raw, |r| {
+            seen.push(r.clone());
+            false
+        })
+        .unwrap()
+    );
+    assert_eq!(seen, vec![reference.clone(); 3]);
+    let mut count = 0;
+    assert!(
+        d.visit_large_value_refs(&raw, |r| {
+            assert_eq!(r, &reference);
+            count += 1;
+            true
+        })
+        .unwrap()
+    );
+    assert_eq!(count, 1);
+}
+
+// Internal byte fixtures pin array-relative offsets and nullable/scalar framing,
+// which are deliberately not visible in database query results.
+#[test]
+fn variable_fields_append_exact_bytes_into_existing_output() {
+    let nullable_string = ValueType::Nullable(Box::new(ValueType::String));
+    let nested_type = ValueType::Array(Box::new(ValueType::Array(Box::new(
+        nullable_string.clone(),
+    ))));
+    let cases = [
+        (
+            nullable_string,
+            Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+            vec![1, 2, b'a', b'b', b'c'],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("bc".into()),
+                Value::String(String::new()),
+            ]),
+            vec![
+                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 2, b'a', 2, b'b', b'c', 2,
+            ],
+        ),
+        (
+            nested_type,
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Nullable(Some(Box::new(Value::String("a".into())))),
+                    Value::Nullable(None),
+                ]),
+                Value::Array(vec![]),
+            ]),
+            vec![
+                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 2, b'a', 0, 0, 0, 0, 0,
+            ],
+        ),
+        (
+            ValueType::Bytes,
+            Value::Bytes(vec![0, 255]),
+            vec![2, 0, 255],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![]),
+            vec![0, 0, 0, 0],
+        ),
+    ];
+    for (value_type, value, expected) in cases {
+        let d = descriptor([value_type]);
+        let mut output = Vec::with_capacity(512);
+        output.extend_from_slice(&[91, 92, 93]);
+        let pointer = output.as_ptr();
+        d.encode_field_into(0, &value, &mut output).unwrap();
+        assert_eq!(&output[..3], &[91, 92, 93]);
+        assert_eq!(&output[3..], expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(d.bind(&output[3..]).get_idx(0).unwrap(), value);
+    }
+}
+
+#[test]
+fn variable_field_failure_preserves_preexisting_output() {
+    let d = descriptor([ValueType::Array(Box::new(ValueType::stored_scalar(
+        crate::large_values::LargeValueKind::Json,
+    )))]);
+    let value = Value::Array(vec![
+        Value::String("{}".into()),
+        Value::String("invalid-json".into()),
+    ]);
+    let mut output = vec![91, 92, 93];
+    assert!(d.encode_field_into(0, &value, &mut output).is_err());
+    assert_eq!(output, [91, 92, 93]);
+}
+
+// An internal representation budget: every ordinary scalar in a materialized
+// row pays Value's inline width, even when no indirect large value is present.
+#[test]
+fn materialized_value_cells_have_a_small_inline_representation() {
+    assert!(
+        std::mem::size_of::<Value>() <= 64,
+        "Value occupies {} bytes; uncommon payloads must not inflate every cell",
+        std::mem::size_of::<Value>()
+    );
+}
+
+// Boxing changes Rust ownership only. Pin both the native scalar carrier and
+// the existing serde enum discriminant/payload independently of Value's layout.
+#[test]
+fn compact_large_value_preserves_native_and_serde_encodings() {
+    use crate::large_values::{LargeValueKind, StoredScalar, encode_stored_scalar, prepare};
+    let reference = prepare(LargeValueKind::Bytes, b"same payload")
+        .unwrap()
+        .value_ref;
+    let value = Value::Large(reference.clone().into());
+    let descriptor = descriptor([ValueType::Bytes]);
+    let stored = descriptor.create(std::slice::from_ref(&value)).unwrap();
+    assert_eq!(
+        stored,
+        encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Chunked(reference.clone())
+        )
+        .unwrap()
+    );
+    assert_eq!(descriptor.bind(&stored).get_idx(0).unwrap(), value);
+    // Large remains enum variant 8 in the existing generic Value carrier.
+    let mut expected = vec![8];
+    expected.extend(postcard::to_allocvec(&reference).unwrap());
+    let encoded = postcard::to_allocvec(&value).unwrap();
+    assert_eq!(encoded, expected);
+    assert_eq!(postcard::from_bytes::<Value>(&encoded).unwrap(), value);
+    assert_eq!(
+        serde_json::to_value(&value).unwrap(),
+        serde_json::json!({"Large": reference})
+    );
+}

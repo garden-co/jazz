@@ -1,0 +1,33 @@
+:root {
+  background: #111;
+  color: #f8f2e5;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 48rem;
+  margin: auto;
+  padding: 5rem 1.5rem;
+}
+.eyebrow {
+  color: #e8b34f;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
+}
+h1 {
+  font-size: clamp(3rem, 10vw, 6rem);
+  margin: 0.3rem 0;
+}
+.record {
+  width: 11rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: repeating-radial-gradient(#181818 0 4px, #303030 5px 6px);
+  box-shadow:
+    0 0 0 1.8rem #28211c,
+    0 0 0 2rem #dfa84e;
+  margin: 2rem 0;
+}

@@ -1,0 +1,151 @@
+# jazz — Specification · Appendix E. Glossary
+
+## Overview
+
+_Non-normative (guidance)._ This appendix is a dependency-ordered terminology
+index. Each entry gives a compact gloss and points to the chapter that _owns_
+the term; this appendix is never the source of truth for behavior. Code spelling
+is authoritative (`DurabilityTier::Global`, not `global`).
+
+**jazz** — the distributed, local-first database specified here. It is built by
+lowering onto **groove**, the storage and incremental-view-maintenance engine
+beneath it, which has its own specification. jazz is not a second query engine
+(ch. 1, ch. 14).
+
+This chapter is compact reference material; the glossary entries remain together in Details, with unresolved terminology work collected below.
+
+Invariant digest: no `INV-*` ids are defined or cited by this chapter.
+
+## Details
+
+### Identity (ch. 2)
+
+- **`NodeUuid` / `RowUuid` / `SchemaVersionId` / `MigrationLensId`** —
+  wire-stable UUID identities.
+- **`AuthorSubject`** — session principal or trusted internal capability;
+  admitted account and exact identity are interned together (ch. 7).
+- **`RowAuthor`** — non-null account and exact principal provenance, encoded as
+  a native record. System provenance includes its originating node. Intern
+  handles never enter wire, storage, or public ordering.
+- **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
+  never on the wire (ch. 14).
+- **`AuthorSubject::SYSTEM`** — the trusted internal capability that bypasses policy (ch. 7), distinct from persisted system authorship (reserved account/issuer plus originating node).
+
+### Time & order (ch. 2–4)
+
+- **`TxTime`** — opaque packed HLC time: 46-bit Unix ms + 18-bit counter.
+  It is used only for version ordering; public provenance is physical Unix ms.
+- **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
+- **`GlobalTime`** — the core-assigned packed HLC settlement position: 46-bit
+  physical milliseconds plus an 18-bit logical counter. It is strictly monotone
+  per core authority but not dense. A
+  persisted `settled_through: GlobalTime` is known-state possession for
+  payload dedup/repair, not proof of a live authority connection or a settled
+  Global subscription (ch. 8, `INV-SYNC-30`).
+
+### Schema (ch. 2, ch. 10)
+
+- **`JazzSchema` / `TableSchema` / `ColumnSchema`** — the logical schema.
+- **`MergeStrategy::{Lww, Counter}`**.
+- **schema version** — a content-addressed `SchemaVersionId`; **migration lens**
+  — bidirectional translation between versions; **catalogue** — the published
+  schema, lens, and pointer store; **current write schema** — the moving write
+  pointer; **schema-version storage partition** — the physical per-version
+  table.
+
+### Transactions (ch. 3)
+
+- **mergeable transaction** (`TxKind::Mergeable`) — an eventually-consistent
+  column-LWW write; the high-level facade spelling is _batch_ (ch. 13).
+- **exclusive transaction** (`TxKind::Exclusive`) — serializable compare-and-set;
+  the facade spelling is _transaction_. **open exclusive transaction** — its
+  pre-commit local state.
+- **commit unit** — the atomic `CommitUnit { tx, versions }` shipped at commit.
+- **fate** (`Fate::{Pending, Accepted, Rejected}`) — an authority's verdict.
+- **durability tier** (`DurabilityTier::{None, Local, Global}`) — how far a
+  write has settled. _Fate and durability are separate axes._
+- **snapshot** (`Snapshot`) · **read sets** (`RowRead`/`AbsentRead`/`PredicateRead`).
+
+### History & merge (ch. 4)
+
+- **version / parents** — a row version and its DAG edges; **frontier / heads** —
+  the undominated versions; **argmax history** — current is the
+  argmax-by-`TxId` version.
+- **current row** — visible content winner gated by the deletion register; **local
+  current** vs **global current** (`HistoryEntry::is_locally/globally_current`).
+- **deletion register** (`MergeAspect::Deletion`, `DeletionEvent::{Deleted,
+Restored}`) · **global-current overwrite table** — node-local derived current
+  state · **merge version** — an upstream-created merge of concurrent heads.
+
+### Reads & queries (ch. 5–6)
+
+- **settled read** vs **local read**; **historical / settled-history read** at a
+  `GlobalTime` (ch. 11).
+- **shape** (`ShapeId`) — a validated, schema-stamped query; **binding**
+  (`BindingId`) — its parameter assignment; **claim** (`claim(name)`) —
+  server-injected identity data (ch. 7).
+- **result set** — typed `ResultMemberEntry` membership plus `ProgramFactEntry`
+  facts for matched include paths, relation edges, and join witnesses;
+  real-row members expose `(table, row_uuid, tx_id)` only as their final/public
+  row projection; **settled subscription result set** — the subscriber-side
+  complete member/fact state and matched include material for one binding.
+  Server-side
+  `maintained_subscription_views` and the subscriber-side settled result set
+  share the entry shape but play different roles.
+
+### Sync & topology (ch. 8–9)
+
+- **`SyncMessage`** — the one wire vocabulary (`CommitUnit`, `FateUpdate`,
+  `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
+  messages).
+- **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
+  role. A local **relay** owns persistence and transport without independent
+  authorization or fate authority. **Core** is history-complete and authorizes
+  both mergeable and exclusive transactions. A **client** retains authorized
+  history and optimistic local edits. These roles share the same query and
+  transaction machinery; there is no intermediary server edge.
+- **scope-isolated client relay** — a non-authority persistent relay whose store
+  and attached foreground runtimes belong to exactly one app/environment/auth
+  scope. It serves retained authorized knowledge to those foregrounds without
+  re-evaluating policy; upstream authorities still narrow delegated requests
+  under topology-admitted immutable session bindings (ch. 9).
+- **payload coverage / peer payload inventory** — the sync vocabulary for what
+  payload bytes a peer can safely reference instead of resending. Inventory facts
+  are deliberately narrow today: **complete-tx payload dedup / complete tx
+  payload refs** means transactions whose full version payload has already been
+  shipped and may be referenced by `peer_payload_inventory.complete_tx_payloads`.
+  Partial mergeable and view-complete exclusive payloads are not represented by
+  today's complete-tx payload tier and must not be described as broad "known
+  versions". Add row-version or maintained-view-complete coverage facts only if
+  partial payload dedup needs them.
+
+### API & branch views (ch. 13, ch. 11)
+
+- **`Db` / `DbIdentity`** — the client-side application facade: no role, always
+  a synced client over a `NodeState`. **`NodeState`** (local engine) / **`Node`**
+  (sync participant) are the node-level types beneath it.
+- **`read` / `one` / `all` / `subscribe`** · **`ReadOpts` / internal
+  `LocalUpdates` / `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
+  subscription stream** · **`RowIdSource`**
+  (`Production` / `Seeded`).
+- **branch column** · **branch key** · **branch-local row** ·
+  **branch view** · **live base** · **frozen base** ·
+  **supplying branch-key provenance**.
+
+## Terminology under review
+
+These links track definitions that are intentionally not settled by this
+appendix: [Publication #1795](https://github.com/garden-co/jazz/issues/1795),
+[Cursor #1796](https://github.com/garden-co/jazz/issues/1796), [typed policy
+claim #1797](https://github.com/garden-co/jazz/issues/1797), [maintained
+witness #1798](https://github.com/garden-co/jazz/issues/1798), [padded
+projection #1799](https://github.com/garden-co/jazz/issues/1799), [projection
+#1800](https://github.com/garden-co/jazz/issues/1800), [route
+#1801](https://github.com/garden-co/jazz/issues/1801), [ArgMaxBy
+#1802](https://github.com/garden-co/jazz/issues/1802), and [`batch` facade
+spelling #1803](https://github.com/garden-co/jazz/issues/1803).
+
+## Open Questions
+
+- 🔶 [#1786](https://github.com/garden-co/jazz/issues/1786) — Whether the glossary needs a flat alphabetical index.
+- 🔶 [#1803](https://github.com/garden-co/jazz/issues/1803) — Mergeable-transaction `batch` facade spelling.

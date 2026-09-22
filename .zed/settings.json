@@ -1,0 +1,55 @@
+{
+  "lsp": {
+    "oxfmt": {
+      "initialization_options": {
+        "settings": {
+          "fmt.configPath": null
+        }
+      }
+    }
+  },
+  "languages": {
+    "JavaScript": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    },
+    "JSX": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    },
+    "TypeScript": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    },
+    "TSX": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    },
+    "Svelte": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    },
+    "Vue.js": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": {
+        "language_server": { "name": "oxfmt" }
+      }
+    }
+  }
+}

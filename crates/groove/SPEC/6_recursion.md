@@ -1,0 +1,158 @@
+# groove — Specification · 6. Recursion & fixpoint
+
+## Overview
+
+groove evaluates recursive (transitive-closure-style) queries by running a
+bounded fixpoint _inside_ a single tick. This chapter defines the recursive
+operator, its monotone set semantics, and the recompute fallback for
+retractions. It builds directly on the tick and arrangement machinery of
+chapter 4.
+
+Invariant digest:
+
+- `INV-REC-1`: A recursive graph MUST have a seed child and a step child whose output `RecordDescriptor`s are identical; otherwise subscription/compilation MUST fail with `GraphOutputMismatch`.
+- `INV-REC-2`: `FrontierSourceOp` MUST read only the `RecordDeltas` bound for its `FrontierName` in the current `EvalContext`; when absent it MUST yield an empty weighted record set with the declared output descriptor.
+- `INV-REC-3`: Recursive facts MUST use set semantics: an encoded fact already present in `RecursiveState::accumulated` MUST NOT be emitted again or have its weight increased by duplicate derivations.
+- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight `1`; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
+- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with `IvmRuntimeError::UnsupportedNonMonotoneRecursion`.
+- `INV-REC-6`: A recursive fixpoint MUST stop when the accepted frontier is empty and MUST converge on cyclic inputs by deduplicating against accumulated facts.
+- `INV-REC-7`: Fixpoint recursion MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds its independent safety limit.
+- `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the resulting net recursive delta.
+- `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental use.
+- `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by `ScopePath` and recursive `sub_tick`; root-scope arrangements MUST use `sub_tick = 0` and MUST absorb a public tick's table delta exactly once even when recursive and non-recursive consumers share them.
+- `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for existing subscribers.
+- `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
+- `INV-REC-13`: Jazz MUST reject user-authored logical operations that would lower to `arg_max_by` or `arg_min_by` inside a recursive seed or step before resolving physical current-row sources. Physical ArgBy introduced by that source expansion MAY occur inside recursion and MUST use the same declared-key direction and ascending full-record tie-breaker as non-recursive evaluation before its winners enter recursive set accumulation.
+- `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
+- `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
+- `INV-REC-16`: A terminal collector's touched-rendered-group bound MUST NOT be applied to recursive fixed-point state, iterations, or nested logical time.
+- `INV-REC-17`: Semantically depth-bounded recursion MUST include the depth-zero seed and facts produced by at most `max_iters` step evaluations, including no step frontier when `max_iters = 0`, and discard the next frontier without reporting non-convergence; maintained base or binding changes MUST preserve that seed-relative depth.
+
+## Details
+
+### 6.1 The recursive operator
+
+Recursive queries are expressed as an explicit graph construct. A recursive
+node pairs an initial derivation with an iterative derivation, and the iterative
+derivation receives the facts accepted in the previous iteration through a
+scoped frontier source. In the reference API,
+`GraphBuilder::recursive(seed, step, frontier, max_iters)` uses `max_iters` as
+a non-convergence guard, while
+`GraphBuilder::recursive_bounded(seed, step, frontier, max_iters)` uses it as a
+semantic step-depth cutoff. Both use
+`GraphBuilder::frontier_source(frontier, output)` inside the step graph.
+
+**Implementation-status note.** SQL `WITH RECURSIVE` is currently rejected as
+`UnsupportedQuery("recursive CTE lowering is not implemented yet")`; the
+planner test `rejects_recursive_ctes_until_recursive_lowering_exists` verifies
+that explicit rejection (`INV-REC-14`).
+
+The recursive node has exactly two child graphs: the seed graph and the step
+graph. Their compiled output descriptors must be identical (`INV-REC-1`), so
+that every fact produced by either graph belongs to the same recursive relation.
+The step graph reads a **frontier source**, identified by `FrontierName`, rather
+than a stored weighted record set. The frontier is the evaluator-supplied set of
+facts newly discovered in the previous iteration. `FrontierName` is scoped to
+its recursive node: it names the channel by which the evaluator hands that
+iteration's accepted facts to the step graph, and it is meaningful only inside
+that step evaluation, not as a globally named weighted record set. A frontier
+source with no bound deltas in the current context yields an empty weighted
+record set with its declared descriptor (`INV-REC-2`).
+
+Jazz validates recursive seed and step plans before resolving current-row
+sources. A user-authored logical unordered `limit(1)`, which would lower to
+ArgBy, is rejected at that logical boundary. Current-row source resolution may
+then introduce internal `arg_max_by` operators inside the already-validated
+recursive graph. Those physical `arg_max_by` and `arg_min_by` operators use the
+same declared-key and ascending full-record ordering used outside recursion
+before their winners enter the accumulated set (`INV-REC-13`,
+`INV-QUERY-20`). Nested recursive graphs are rejected at graph
+validation/compilation time rather than accepted under ambiguous recursive
+scope (`INV-REC-15`).
+
+### 6.2 Monotone set semantics and the fixpoint
+
+Recursive evaluation produces a set, not a multiset. The accumulated recursive
+result (`RecursiveState::accumulated` in the reference implementation) follows
+**monotone set semantics**: each accepted fact is stored and emitted at weight
+`1`, and a fact already accumulated is never re-emitted nor has its weight
+increased by duplicate derivations (`INV-REC-3`). A positive recursive delta of
+weight > 1 collapses to one accepted fact (`INV-REC-4`).
+
+The accumulated set is maintained per recursive node and per evaluation scope
+(`OperatorStateKey`). A plain subscription evaluates the node at root scope. A
+recursive node inside a prepared shape has a distinct scope, and therefore a
+distinct accumulated set, for each binding context.
+
+The fixpoint begins by evaluating the seed and accepting only facts not already
+in the accumulated set. That accepted set becomes the frontier bound to
+`recursive.frontier`; the step graph is then evaluated against that frontier,
+newly discovered facts are accepted, and the process repeats until the accepted
+frontier is empty (`INV-REC-6`). In a from-scratch recompute (§6.3), the
+fixpoint runs over the _full_ seed output. In positive-incremental maintenance,
+it runs over the seed's delta for that tick and again accepts only facts not
+already in `accumulated`. Cyclic input converges because each iteration is
+deduplicated against the accumulated set. Fixpoint recursion has an independent
+safety bound and stops with `RecursiveIterationLimit { node, max_iters }` when
+the frontier remains non-empty beyond it (`INV-REC-7`).
+
+A semantic depth bound is different: the seed is depth zero, exactly
+`max_iters` step frontiers are accepted, and the next frontier is discarded as
+out of range rather than interpreted as non-convergence. In particular, a zero
+bound returns the seed only and MUST NOT evaluate or admit a one-hop frontier.
+Because positive incremental recursion normally resumes from the accumulated
+closure, which no longer records seed-relative depth, a semantically bounded
+node recomputes from its seed on relevant table or binding changes
+(`INV-REC-17`).
+
+_Further invariants._ `INV-REC-5` — positive-only recursive evaluation rejects a
+non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone
+change is handled by recompute (§6.3), not by propagating negative frontiers
+through the loop.
+
+**Implementation-status note.** After recompute hydrates recursive step
+arrangements, the reference implementation resumes positive-incremental
+maintenance for a later insert-only commit. The
+`prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute`
+test verifies that transition.
+
+### 6.3 Retractions: recompute and diff
+
+Recursive maintenance does not propagate negative frontiers through the loop.
+When a change retracts recursive facts, such as a base-table delete or an
+anti-join input change, the node performs a **full recompute from storage, then
+a diff against the previous accumulated set, so subscribers receive only the net
+recursive delta (`INV-REC-8`)**. This preserves minimal output even though the
+algorithm is expensive. Because an update lowers to `-old, +new` (§4.1), any
+update touching a recursion input carries a negative delta and therefore takes
+the recompute path rather than the incremental one. A conforming engine MAY
+recompute more often than strictly necessary, but it MUST still emit the same
+minimal diff (`INV-REC-8`). After a recompute, the recursive step arrangements
+are hydrated from the full table snapshots and the full accumulated weighted
+record set before any later positive-incremental use (`INV-REC-9`).
+
+### 6.4 Scope and logical time
+
+Recursive sub-iterations use logical time (ch. 4). Frontier-dependent graph
+fragments are scoped under the recursive node and use the recursive `sub_tick`.
+Context-independent base-table arrangements stay root-scoped (`sub_tick = 0`),
+remain shareable with non-recursive consumers, and absorb a public tick's table
+delta exactly once (`INV-REC-10`). Hydrating a new subscriber to an
+already-shared recursive node returns the full current accumulated result and
+does not consume or suppress future tick deltas for existing subscribers
+(`INV-REC-11`).
+
+_Further invariants._ `INV-REC-12` — recursive recompute does not persist
+per-context child operator state in the runtime state maps after it completes.
+
+**Target boundary rule (2026-08-04).** A terminal `CollectBy` may render a
+structured value after recursive evaluation has produced its flat output, but
+its touched-rendered-group exception to `INV-INC-1` does **not** bound recursive
+work. Fixed-point iteration count, frontier growth, recursive arrangements, and
+nested logical-time costs retain the contracts of this chapter. A conforming
+implementation MUST NOT attribute recursive cost to the terminal merely because
+the final rendered value is grouped (`INV-REC-16`).
+
+## Open Questions
+
+- 🔶 [#1786](https://github.com/garden-co/jazz/issues/1786) — Conservative recursive recomputation policy.

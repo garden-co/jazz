@@ -1,0 +1,36 @@
+{
+  "name": "auth-simple-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:auth": "node server/main.ts",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.browser.ts"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "jazz-tools": "workspace:*",
+    "jose": "^6.2.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "jsdom": "catalog:default",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

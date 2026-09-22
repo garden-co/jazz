@@ -1,0 +1,145 @@
+name: Rust throughput shadow
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # Opting a PR into the shadow after it already exists must launch the
+    # measurement immediately; a later push must not be required.
+    # An unlabel event re-evaluates the jobs as skipped and cancels any queued
+    # or running opt-in shadow in this workflow's concurrency group.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  push:
+    branches: [main]
+
+# This is intentionally a separate, non-required workflow. Its aggregate is
+# fail-closed for measurement integrity, but does not feed the protected CI
+# check while the speed study is evaluated.
+concurrency:
+  group: rust-throughput-shadow-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  shard:
+    # A full duplicate Rust suite is useful only while explicitly studying
+    # throughput. Keep ordinary PRs (and unlabelled fork PRs) from consuming
+    # the same runner capacity as required CI. Main pushes and manual runs
+    # retain the longitudinal signal.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
+    name: Rust shadow shard ${{ matrix.index }} of 2
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        index: [1, 2]
+    # The two deterministic workspace shards run concurrently. The existing
+    # CI suite retains its independent workspace/all-target build gate.
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Reject pre-checkout source residue
+        # This must run before actions/checkout: even with `clean: false`, its
+        # forced branch checkout can overwrite tracked residue. Inspect the
+        # inherited workspace before any action can repair it.
+        shell: bash
+        run: |
+          workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
+          if [[ -L "$workspace" ]]; then
+            echo "pre-checkout workspace is a symlink: $workspace" >&2
+            exit 1
+          fi
+          if [[ -e "$workspace/.git" ]]; then
+            if ! status="$(git -C "$workspace" status --short --untracked-files=all)"; then
+              echo "cannot inspect pre-checkout Git workspace: $workspace" >&2
+              exit 1
+            fi
+            if [[ -n "$status" ]]; then
+              echo "pre-checkout workspace contains source residue:" >&2
+              printf '%s\n' "$status" >&2
+              git -C "$workspace" diff --summary >&2
+              git -C "$workspace" diff --cached --summary >&2
+              exit 1
+            fi
+          elif [[ -d "$workspace" ]] && [[ -n "$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+            echo "pre-checkout workspace is not an empty Git checkout:" >&2
+            find "$workspace" -mindepth 1 -maxdepth 1 -printf '%f\n' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Do not perform checkout's preliminary clean/reset. Tracked residue
+          # is guarded above because checkout itself later forces its branch.
+          clean: false
+      # The checkout is owned by the runner while this job's container executes
+      # the source-integrity diagnostics. Trust only this exact workspace before
+      # the first diagnostic Git command; setup-blacksmith repeats the same
+      # scoped configuration for later tool invocations.
+      - name: Trust checked-out workspace for Git diagnostics
+        shell: bash
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
+      - name: Record checkout source state
+        # Never repair an unexpected checkout and then attest to the repaired
+        # tree: the next baseline step must fail closed for any tracked, index,
+        # or unignored source residue. These diagnostics make that failure
+        # actionable without exposing source contents.
+        run: |
+          git status --short --untracked-files=all
+          git diff --summary
+          git diff --cached --summary
+      - name: Seal clean checked-out source baseline
+        # `runner` is only available once this job has been assigned a runner;
+        # keeping it at step scope avoids Actions rejecting the workflow before
+        # it creates any jobs for an eligible push.
+        env:
+          RUST_SHADOW_SOURCE_BASELINE: ${{ runner.temp }}/rust-shadow-source.json
+        run: node dev/gates/rust-shadow-matrix.mjs clean-source-baseline "$RUST_SHADOW_SOURCE_BASELINE" "${{ github.sha }}"
+      - uses: ./.github/actions/setup-blacksmith
+      - name: Run exact-inventory Rust shadow shard
+        env:
+          RUST_SHADOW_SOURCE_BASELINE: ${{ runner.temp }}/rust-shadow-source.json
+        run: node dev/gates/rust-shadow-matrix.mjs shard ${{ matrix.index }} 2 "target/rust-shadow/shard-${{ matrix.index }}.json"
+      - name: Upload shadow shard receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-shadow-shard-${{ matrix.index }}
+          path: target/rust-shadow/
+          if-no-files-found: error
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  aggregate:
+    name: Rust throughput shadow
+    if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark'))
+    needs: [shard]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 3
+    steps:
+      # checkout cleans the worktree by default, so it must precede receipt
+      # download or the aggregate will observe an empty artifact directory.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: rust-shadow-shard-*
+          path: rust-shadow-receipts
+          merge-multiple: true
+      - name: Require exact partition receipts and folded M3 coverage
+        # This catches accidental checkout/worktree drift across runners. It is
+        # not intended to attest against a malicious artifact producer.
+        run: node dev/gates/rust-shadow-matrix.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts/aggregate.json "${{ github.sha }}"
+      - name: Upload shadow aggregate receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-shadow-aggregate
+          path: rust-shadow-receipts/
+          if-no-files-found: error

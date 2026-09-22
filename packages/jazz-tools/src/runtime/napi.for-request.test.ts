@@ -1,0 +1,1169 @@
+import { createServer } from "node:http";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
+import { createHmac, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { schema as s } from "jazz-tools";
+import { deploy } from "../dev/catalogue.js";
+import { startLocalJazzServer } from "../testing/index.js";
+
+// ---------------------------------------------------------------------------
+// Inline schema + permissions
+// ---------------------------------------------------------------------------
+const todoApp = s.defineApp({
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      owner_id: s.uuid(),
+    },
+    {},
+  ),
+});
+
+const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowUpdate.where({ owner_id: session.user.account });
+  policy.todos.allowDelete.where({ owner_id: session.user.account });
+});
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ExternalIdentity = {
+  token: string;
+  userId: string;
+  user: string;
+};
+
+const EXTERNAL_ISSUER = "https://napi-request.test";
+const EXTERNAL_JWT_KID = "napi-request-test";
+const EXTERNAL_JWT_SECRET = "napi-request-test-secret";
+
+const externalJwtPublicKey = {
+  kty: "oct" as const,
+  kid: EXTERNAL_JWT_KID,
+  alg: "HS256",
+  k: Buffer.from(EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Mints a signed external bearer token for a named test actor. These serving
+ * tests exercise public request admission; reserved Jazz issuers are covered
+ * separately by the local-first rejection test below.
+ */
+async function createExternalIdentity(
+  actorName: string,
+  server: { url: string },
+  appId: string,
+): Promise<ExternalIdentity> {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT", kid: EXTERNAL_JWT_KID }),
+    "utf8",
+  ).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({
+      iss: EXTERNAL_ISSUER,
+      sub: actorName,
+      aud: "napi-request-audience",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }),
+    "utf8",
+  ).toString("base64url");
+  const signature = createHmac("sha256", EXTERNAL_JWT_SECRET)
+    .update(`${header}.${payload}`, "utf8")
+    .digest("base64url");
+  const token = `${header}.${payload}.${signature}`;
+  const userId = actorName;
+  const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
+  const response = await requestAccountRegistry(
+    accountRegistryUrl(server.url, appId),
+    "register",
+    token,
+  );
+  return { token, userId, user: readAccountAssignment(response, identity) };
+}
+
+async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
+  const jwks = createServer((_request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ keys: [externalJwtPublicKey] }));
+  });
+  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+  onTestFinished(
+    () =>
+      new Promise<void>((resolve, reject) =>
+        jwks.close((error) => (error ? reject(error) : resolve())),
+      ),
+  );
+  const address = jwks.address();
+  if (!address || typeof address === "string") throw new Error("No JWKS port");
+  return startLocalJazzServer({
+    ...options,
+    jwksUrl: `http://127.0.0.1:${address.port}`,
+    jwtIssuer: EXTERNAL_ISSUER,
+    jwtAudience: "napi-request-audience",
+  });
+}
+
+async function createLocalFirstIdentity(
+  actorName: string,
+  appId: string,
+): Promise<{ token: string }> {
+  const { mintLocalFirstToken } = await import("jazz-napi");
+  const seed = Buffer.from(actorName.padEnd(32, "-").slice(0, 32)).toString("base64url");
+  return { token: mintLocalFirstToken(seed, appId, 60) };
+}
+
+async function removeTempDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        attempt === 4 ||
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOTEMPTY"
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+/**
+ * Publishes the todo app schema + permissions to the server, creates a
+ * persistent `JazzContext`, registers `onTestFinished` cleanup, and returns
+ * the context.
+ */
+async function createTestContext(
+  server: { url: string },
+  appId: string,
+  backendSecret: string,
+  adminSecret: string,
+) {
+  await deploy({
+    appId,
+    serverUrl: server.url,
+    adminSecret,
+    schema: todoApp,
+    permissions: todoAppPermissions,
+  });
+
+  const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-concurrent-request-"));
+  const dataPath = join(dataRoot, "runtime.db");
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
+  const context = createJazzContext({
+    appId,
+    app: todoApp,
+    permissions: todoAppPermissions,
+    driver: { type: "persistent", dataPath },
+    serverUrl: server.url,
+    backendSecret,
+    jwtPublicKey: externalJwtPublicKey,
+    env: "test",
+    tier: "local",
+  });
+
+  onTestFinished(async () => {
+    await context.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await removeTempDir(dataRoot);
+  });
+
+  return context;
+}
+
+/**
+ * Full concurrent-test environment: server, context, alice+bob identities,
+ * and pre-opened Db handles for both users.  Registers all cleanup via
+ * `onTestFinished`; callers need no teardown boilerplate.
+ */
+async function createConcurrentTestEnv() {
+  const appId = randomUUID();
+  const backendSecret = "napi-concurrent-backend-secret";
+  const adminSecret = "napi-concurrent-admin-secret";
+  const scopeTag = `concurrent-scope-${randomUUID()}`;
+
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+  const context = await createTestContext(server, appId, backendSecret, adminSecret);
+
+  onTestFinished(async () => {
+    await server.stop();
+  });
+
+  const alice = await createExternalIdentity("alice", server, appId);
+  const bob = await createExternalIdentity("bob", server, appId);
+
+  const [aliceDb, bobDb] = await Promise.all([
+    context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+    context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
+  ]);
+
+  return { context, server, appId, alice, bob, aliceDb, bobDb, scopeTag };
+}
+
+// ---------------------------------------------------------------------------
+// Standalone (non-concurrent) forRequest scenarios
+// ---------------------------------------------------------------------------
+
+describe("forRequest auth and policy", () => {
+  /**
+   * Alice inserts her own row; then tries to insert with a foreign owner_id.
+   * Backend Db sees the row regardless of ownership.
+   *
+   *   alice ──forRequest──► context
+   *             │
+   *             ├─ insert({ owner_id: alice })  ──► OK
+   *             ├─ insert({ owner_id: "other" }) ──► REJECT (policy)
+   *             └─ all(...)                            ──► [alice-todo]
+   *
+   *   backend ──asBackend──► context
+   *             └─ all(...)  ──► [alice-todo]  (no filter)
+   */
+  it("insert respects ownership policy — own-row insert succeeds, foreign owner_id is rejected", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-request-backend-secret";
+    const adminSecret = "napi-request-admin-secret";
+    const scopeTag = `request-scope-${randomUUID()}`;
+
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+    const context = await createTestContext(server, appId, backendSecret, adminSecret);
+
+    onTestFinished(async () => {
+      await server.stop();
+    });
+
+    const alice = await createExternalIdentity("alice", server, appId);
+    const aliceDb = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const backendDb = context.asBackend();
+
+    const row = await aliceDb
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.user,
+      })
+      .wait({ tier: "global" });
+
+    // forRequest session surfaces its own row.
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows).toEqual([
+          expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.user }),
+        ]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // The client stages this optimistically; the serving authority rejects it.
+    await expect(
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "imposter",
+          done: false,
+          description: scopeTag,
+          owner_id: "00000000-0000-4000-8000-000000000099",
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+
+    // Backend can see the row regardless of ownership.
+    await vi.waitFor(
+      async () => {
+        const rows = await backendDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows).toContainEqual(expect.objectContaining({ id: row.id }));
+      },
+      { timeout: 10_000 },
+    );
+  }, 30_000);
+
+  /**
+   * Context configured with allowLocalFirstAuth=false rejects local-first JWTs
+   * before any DB interaction occurs.
+   *
+   *   alice ──forRequest──► context (allowLocalFirstAuth=false)
+   *                                  └─ REJECT (token type not allowed)
+   */
+  it("rejects local-first token when allowLocalFirstAuth is false", async () => {
+    const appId = randomUUID();
+    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-no-local-first-"));
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app: todoApp,
+      permissions: todoAppPermissions,
+      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+      serverUrl: "http://127.0.0.1:1",
+      allowLocalFirstAuth: false,
+    });
+
+    onTestFinished(async () => {
+      await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    });
+
+    const alice = await createLocalFirstIdentity("alice", appId);
+    await expect(
+      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+    ).rejects.toThrow(/allowLocalFirstAuth/i);
+  });
+
+  /**
+   * A garbage bearer token is rejected before any DB interaction occurs.
+   *
+   *   forRequest({ authorization: "Bearer not-a-valid-jwt" }) ──► REJECT
+   */
+  it("rejects a malformed bearer token", async () => {
+    const appId = randomUUID();
+    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-bad-token-"));
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app: todoApp,
+      permissions: todoAppPermissions,
+      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+      serverUrl: "http://127.0.0.1:1",
+    });
+
+    onTestFinished(async () => {
+      await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    });
+
+    await expect(
+      context.forRequest({ headers: { authorization: "Bearer not-a-valid-jwt" } }),
+    ).rejects.toThrow("Invalid JWT payload");
+  });
+
+  /**
+   * Two contexts share the same server. One writes rows for alice, bob, and
+   * carol as backend. The other reads back through backend, forSession, and
+   * forRequest — verifying that backend sees everything while each user-scoped
+   * handle sees only that user's rows.
+   *
+   *   writerContext ──asBackend──► insert alice-item, bob-item, carol-item
+   *
+   *   readerContext ──asBackend──────► all() ──► [alice-item, bob-item, carol-item]
+   *                ──forSession(alice)──► all() ──► [alice-item]
+   *                ──forRequest(alice)──► all() ──► [alice-item]
+   *                ──forSession(bob)───► all() ──► [bob-item]
+   */
+  it("backend sees all rows; forSession and forRequest Db filter to the authenticated user", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-query-backend-secret";
+    const adminSecret = "napi-query-admin-secret";
+    const scopeTag = `session-scope-${randomUUID()}`;
+
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+
+    // Publish schema once via the writer context; the reader shares the same published schema.
+    const writerContext = await createTestContext(server, appId, backendSecret, adminSecret);
+    const readerDataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-query-reader-"));
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const readerContext = createJazzContext({
+      appId,
+      app: todoApp,
+      permissions: todoAppPermissions,
+      driver: { type: "persistent", dataPath: join(readerDataRoot, "runtime.db") },
+      serverUrl: server.url,
+      backendSecret,
+      adminSecret,
+      jwtPublicKey: externalJwtPublicKey,
+      env: "test",
+    });
+
+    onTestFinished(async () => {
+      await readerContext.shutdown();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await rm(readerDataRoot, { recursive: true, force: true });
+      await server.stop();
+    });
+
+    const alice = await createExternalIdentity("alice", server, appId);
+    const bob = await createExternalIdentity("bob", server, appId);
+    const carol = await createExternalIdentity("carol", server, appId);
+
+    const writerBackend = writerContext.asBackend();
+    const readerBackend = readerContext.asBackend();
+
+    // Seed rows for all three users through the backend writer context.
+    await Promise.all([
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "alice-item",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.user,
+        })
+        .wait({ tier: "global" }),
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "bob-item",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.user,
+        })
+        .wait({ tier: "global" }),
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "carol-item",
+          done: false,
+          description: scopeTag,
+          owner_id: carol.user,
+        })
+        .wait({ tier: "global" }),
+    ]);
+
+    const aliceSessionDb = readerContext.forSession({
+      user_id: alice.userId,
+      account_id: alice.user,
+      claims: {},
+      issuer: EXTERNAL_ISSUER,
+      authMode: "external",
+    });
+    const aliceRequestDb = await readerContext.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const bobSessionDb = readerContext.forSession({
+      user_id: bob.userId,
+      account_id: bob.user,
+      claims: {},
+      issuer: EXTERNAL_ISSUER,
+      authMode: "external",
+    });
+
+    // Backend reader sees all three rows.
+    await vi.waitFor(
+      async () => {
+        const rows = await readerBackend.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((r) => r.title).sort()).toEqual(["alice-item", "bob-item", "carol-item"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // Each user-scoped handle surfaces only that user's rows.
+    await vi.waitFor(
+      async () => {
+        const [aliceSession, aliceRequest, bobSession] = await Promise.all([
+          aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+        ]);
+        expect(aliceSession.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(aliceRequest.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(bobSession.map((r) => r.title)).toEqual(["bob-item"]);
+      },
+      { timeout: 10_000 },
+    );
+  }, 30_000);
+});
+
+describe("forRequest concurrent session isolation", () => {
+  /**
+   * Two forRequest sessions run concurrently on the same context. Each user
+   * can insert their own row; each query sees only their own row; cross-user
+   * inserts are rejected. A later additional Db handle for alice (simulating a
+   * subsequent HTTP request from the same user) also stays isolated.
+   *
+   *   alice ──forRequest──┐
+   *                       ├──► context ──► server
+   *   bob   ──forRequest──┘
+   *
+   *   alice: insert({ owner_id: alice })  ──► OK
+   *   bob:   insert({ owner_id: bob })    ──► OK
+   *   alice: insert({ owner_id: bob })    ──► REJECT
+   *   bob:   insert({ owner_id: alice })  ──► REJECT
+   *   alice: all()  ──► [alice-todo]
+   *   bob:   all()  ──► [bob-todo]
+   *   aliceAgain (new Db handle, same user): all() ──► [alice-todo]
+   */
+  it("isolates concurrent forRequest sessions on the same context — alice and bob see only their own rows", async () => {
+    const { context, alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
+
+    // Fire writes for both users in parallel.
+    await Promise.all([
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.user,
+        })
+        .wait({ tier: "global" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.user,
+        })
+        .wait({ tier: "global" }),
+    ]);
+
+    // Alice's scoped Db should only surface her own row.
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // Bob's scoped Db should only surface his own row.
+    await vi.waitFor(
+      async () => {
+        const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((r) => r.title)).toEqual(["bob-todo"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // Cross-user writes stage locally but are rejected by the serving authority.
+    await expect(
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-as-bob",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.user,
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+    await expect(
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-as-alice",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.user,
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+
+    // A new Db handle for alice (same identity, new forRequest call — simulating
+    // a subsequent HTTP request from the same user) must stay isolated from bob's data.
+    const aliceAgain = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceAgain.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
+      },
+      { timeout: 10_000 },
+    );
+  }, 30_000);
+
+  /**
+   * Each user inserts their own row, then both update their own row
+   * concurrently. Cross-user updates are rejected.
+   *
+   *   alice: insert alice-todo  ──► aliceRow
+   *   bob:   insert bob-todo    ──► bobRow
+   *
+   *   alice: update(aliceRow) ──► OK    alice: all() ──► [alice-updated]
+   *   bob:   update(bobRow)   ──► OK    bob:   all() ──► [bob-updated]
+   *
+   *   alice: update(bobRow)   ──► REJECT
+   *   bob:   update(aliceRow) ──► REJECT
+   */
+  it("concurrent update respects per-user ownership — cross-user update is rejected", async () => {
+    const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
+
+    const [aliceRow, bobRow] = await Promise.all([
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.user,
+        })
+        .wait({ tier: "global" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.user,
+        })
+        .wait({ tier: "global" }),
+    ]);
+
+    // Each user can update their own row concurrently.
+    await Promise.all([
+      aliceDb
+        .update(todoApp.todos, aliceRow.id, { title: "alice-updated" })
+        .wait({ tier: "global" }),
+      bobDb.update(todoApp.todos, bobRow.id, { title: "bob-updated" }).wait({ tier: "global" }),
+    ]);
+
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+        ]);
+        expect(aliceRows.map((r) => r.title)).toEqual(["alice-updated"]);
+        expect(bobRows.map((r) => r.title)).toEqual(["bob-updated"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // Existing rows retain their ordinary own-row UPSERT path. The direct
+    // admission turn must not turn all existing-row UPSERTs into synchronous
+    // failures merely to surface a foreign-row denial.
+    await aliceDb
+      .upsert(todoApp.todos, aliceRow.id, {
+        title: "alice-upserted",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.user,
+      })
+      .wait({ tier: "global" });
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((row) => row.title)).toEqual(["alice-upserted"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    // Cross-user update must be rejected.
+    expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+    );
+    expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+    );
+
+    // Upsert of an existing foreign row follows the same read-before-write
+    // admission boundary; it must not become an optimistic insert-shaped
+    // bypass merely because the caller supplies a complete replacement.
+    expect(() =>
+      aliceDb.upsert(todoApp.todos, bobRow.id, {
+        title: "alice-as-bob-upsert",
+        done: false,
+        description: scopeTag,
+        owner_id: bob.user,
+      }),
+    ).toThrow(
+      'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
+    );
+
+    // A synchronous admission denial has no returned write handle. It must be
+    // terminal and quiet: a later permitted write cannot inherit a stale queued
+    // failure from the rejected attempt.
+    await bobDb.update(todoApp.todos, bobRow.id, { title: "bob-still-writable" }).wait({
+      tier: "global",
+    });
+    await vi.waitFor(
+      async () => {
+        const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows.map((row) => row.title)).toEqual(["bob-still-writable"]);
+      },
+      { timeout: 10_000 },
+    );
+  }, 30_000);
+
+  /**
+   * Each user inserts their own row. Cross-user deletes are rejected while
+   * both rows still exist; then each user deletes their own row concurrently,
+   * leaving both lists empty.
+   *
+   *   alice: insert alice-todo  ──► aliceRow
+   *   bob:   insert bob-todo    ──► bobRow
+   *
+   *   alice: delete(bobRow)   ──► REJECT
+   *   bob:   delete(aliceRow) ──► REJECT
+   *
+   *   alice: delete(aliceRow) ──► OK    alice: all() ──► []
+   *   bob:   delete(bobRow)   ──► OK    bob:   all() ──► []
+   */
+  it("concurrent delete respects per-user ownership — cross-user delete is rejected", async () => {
+    const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
+
+    const [aliceRow, bobRow] = await Promise.all([
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.user,
+        })
+        .wait({ tier: "global" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.user,
+        })
+        .wait({ tier: "global" }),
+    ]);
+
+    // Cross-user deletes stage locally but are rejected by the serving authority.
+    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" })).rejects.toThrow(
+      /AuthorizationDenied|Write rejected by server authorization/,
+    );
+    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" })).rejects.toThrow(
+      /AuthorizationDenied|Write rejected by server authorization/,
+    );
+
+    // Each user can delete their own row concurrently.
+    await Promise.all([
+      aliceDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" }),
+      bobDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" }),
+    ]);
+
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+        ]);
+        expect(aliceRows).toEqual([]);
+        expect(bobRows).toEqual([]);
+      },
+      { timeout: 10_000 },
+    );
+  }, 30_000);
+
+  /**
+   * Two independent forRequest Db handles for the same user (alice) are
+   * opened concurrently alongside a handle for bob. Both alice handles see
+   * alice's row; bob's row, inserted after, is invisible to both.
+   *
+   *   alice ──forRequest──► aliceDb1 ─┐
+   *   alice ──forRequest──► aliceDb2 ─┼──► context
+   *   bob   ──forRequest──► bobDb    ─┘
+   *
+   *   aliceDb1: insert alice-todo
+   *   aliceDb1: all() ──► [alice-todo]
+   *   aliceDb2: all() ──► [alice-todo]
+   *
+   *   bobDb: insert bob-todo
+   *   bobDb: all() ──► [bob-todo]  (confirms bob's write landed)
+   *   aliceDb1: all() ──► [alice-todo]  (bob's row invisible)
+   *   aliceDb2: all() ──► [alice-todo]  (bob's row invisible)
+   */
+  it("two concurrent forRequest sessions for the same user both see only that user's rows", async () => {
+    const { context, alice, bob, bobDb, scopeTag } = await createConcurrentTestEnv();
+
+    // Two Db handles opened with the same token — same identity, two independent sessions.
+    const [aliceDb1, aliceDb2] = await Promise.all([
+      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+    ]);
+
+    await aliceDb1
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.user,
+      })
+      .wait({ tier: "global" });
+
+    // Both alice handles surface the row; neither should see bob's (not yet inserted).
+    await vi.waitFor(
+      async () => {
+        const [rows1, rows2] = await Promise.all([
+          aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+        ]);
+        expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
+        expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
+      },
+      { timeout: 10_000 },
+    );
+
+    await bobDb
+      .insert(todoApp.todos, {
+        title: "bob-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: bob.user,
+      })
+      .wait({ tier: "global" });
+
+    // After bob's insert lands, neither alice handle should see bob's row.
+    await vi.waitFor(
+      async () => {
+        const bobRows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(bobRows).toHaveLength(1);
+      },
+      { timeout: 10_000 },
+    );
+
+    const [rows1, rows2] = await Promise.all([
+      aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+      aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+    ]);
+    expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
+    expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
+  }, 30_000);
+
+  /**
+   * Carol has no rows. Alice inserts one. After alice's row is confirmed
+   * visible to alice, carol's query still returns empty — not alice's data.
+   *
+   *   alice ──forRequest──► aliceDb ──► insert alice-todo ──► all() ──► [alice-todo]
+   *   carol ──forRequest──► carolDb ──► all() ──► []
+   */
+  it("forRequest user with no rows gets empty results, not another user's rows", async () => {
+    const { context, server, appId, alice, aliceDb, scopeTag } = await createConcurrentTestEnv();
+
+    const carol = await createExternalIdentity("carol", server, appId);
+    const carolDb = await context.forRequest({
+      headers: { authorization: `Bearer ${carol.token}` },
+    });
+
+    await aliceDb
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.user,
+      })
+      .wait({ tier: "global" });
+
+    // Wait for alice's row to be visible to alice, then verify carol sees nothing.
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "global",
+        });
+        expect(rows).toHaveLength(1);
+      },
+      { timeout: 10_000 },
+    );
+
+    const carolRows = await carolDb.all(todoApp.todos.where({ description: scopeTag }), {
+      tier: "global",
+    });
+    expect(carolRows).toEqual([]);
+  }, 30_000);
+});
+
+it.each(["table", "relation"] as const)(
+  "keeps concurrent same-identity request claims isolated through %s reads",
+  async (kind) => {
+    const appId = randomUUID();
+    const backendSecret = "request-scope-backend";
+    const adminSecret = "request-scope-admin";
+    const app = s.defineApp({
+      rooms: s.table(
+        { title: s.string(), code: s.string() },
+        { linksViaRoom: s.reverse("links", "roomRelation") },
+      ),
+      links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
+    });
+    const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.rooms.allowRead.where({ code: session.claims["join_code"] });
+      policy.links.allowRead.where({});
+    });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+    onTestFinished(() => server.stop());
+    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const writer = createJazzContext({
+      appId,
+      app,
+      permissions,
+      serverUrl: server.url,
+      backendSecret,
+      env: "test",
+      tier: "local",
+      driver: { type: "memory" },
+    });
+    const reader = createJazzContext({
+      appId,
+      app,
+      permissions,
+      serverUrl: server.url,
+      backendSecret,
+      env: "test",
+      tier: "local",
+      driver: { type: "memory" },
+    });
+    onTestFinished(async () => {
+      await reader.shutdown();
+      await writer.shutdown();
+    });
+    await writer
+      .asBackend()
+      .insert(app.rooms, { title: "room-a", code: "code-a" })
+      .wait({ tier: "global" })
+      .then(async (row) => {
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
+        return row;
+      });
+    await writer
+      .asBackend()
+      .insert(app.rooms, { title: "room-b", code: "code-b" })
+      .wait({ tier: "global" })
+      .then(async (row) => {
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
+        return row;
+      });
+    const identity = await createExternalIdentity("same-actor", server, appId);
+    const base = {
+      user_id: identity.userId,
+      account_id: identity.user,
+      issuer: EXTERNAL_ISSUER,
+      authMode: "external" as const,
+    };
+    const a = reader.forSession({ ...base, claims: { join_code: "code-a" } });
+    const b = reader.forSession({ ...base, claims: { join_code: "code-b" } });
+    const neither = reader.forSession({ ...base, claims: {} });
+    for (let round = 0; round < 3; round++) {
+      const [rowsA, rowsB, rowsNeither, rowsBackend] = await Promise.all([
+        a.all(query, { tier: "global" }),
+        b.all(query, { tier: "global" }),
+        neither.all(query, { tier: "global" }),
+        reader.asBackend().all(query, { tier: "global" }),
+      ]);
+      expect(rowsA.map((row) => row.title)).toEqual(["room-a"]);
+      expect(rowsB.map((row) => row.title)).toEqual(["room-b"]);
+      expect(rowsNeither).toEqual([]);
+      expect(rowsBackend.map((row) => row.title).sort()).toEqual(["room-a", "room-b"]);
+    }
+    const seenA: string[][] = [],
+      seenB: string[][] = [],
+      seenNeither: string[][] = [],
+      seenBackend: string[][] = [];
+    const stops = [
+      a.subscribe(query, (rows) => seenA.push(rows.map((row) => row.title).sort()), {
+        tier: "global",
+      }),
+      b.subscribe(query, (rows) => seenB.push(rows.map((row) => row.title).sort()), {
+        tier: "global",
+      }),
+      neither.subscribe(query, (rows) => seenNeither.push(rows.map((row) => row.title).sort()), {
+        tier: "global",
+      }),
+      reader
+        .asBackend()
+        .subscribe(query, (rows) => seenBackend.push(rows.map((row) => row.title).sort()), {
+          tier: "global",
+        }),
+    ];
+    try {
+      await vi.waitFor(() => {
+        expect(seenA.at(-1)).toEqual(["room-a"]);
+        expect(seenB.at(-1)).toEqual(["room-b"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+        expect(seenBackend.at(-1)).toEqual(["room-a", "room-b"]);
+      });
+      await writer
+        .asBackend()
+        .insert(app.rooms, { title: "room-a-next", code: "code-a" })
+        .wait({ tier: "global" })
+        .then(async (row) => {
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
+          return row;
+        });
+      await writer
+        .asBackend()
+        .insert(app.rooms, { title: "room-b-next", code: "code-b" })
+        .wait({ tier: "global" })
+        .then(async (row) => {
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
+          return row;
+        });
+      await vi.waitFor(() => {
+        expect(seenA.at(-1)).toEqual(["room-a", "room-a-next"]);
+        expect(seenB.at(-1)).toEqual(["room-b", "room-b-next"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+      });
+      // The backend cache is broader than either request. Local subscriptions
+      // must enforce claims; remote subscriptions must not overlay these writes.
+      const backend = reader.asBackend();
+      await backend.disconnect();
+      await backend
+        .insert(app.rooms, { title: "local-a", code: "code-a" })
+        .wait({ tier: "local" })
+        .then(async (row) => {
+          await backend.insert(app.links, { room: row.id }).wait({ tier: "local" });
+          return row;
+        });
+      await backend
+        .insert(app.rooms, { title: "local-b", code: "code-b" })
+        .wait({ tier: "local" })
+        .then(async (row) => {
+          await backend.insert(app.links, { room: row.id }).wait({ tier: "local" });
+          return row;
+        });
+      expect(
+        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "global" }),
+      ).toEqual([]);
+      const localA: string[][] = [],
+        localB: string[][] = [];
+      const stopLocalA = a.subscribe(
+        query,
+        (rows) => localA.push(rows.map((row) => row.title).sort()),
+        { tier: "local" },
+      );
+      const stopLocalB = b.subscribe(
+        query,
+        (rows) => localB.push(rows.map((row) => row.title).sort()),
+        { tier: "local" },
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(localA.at(-1)).toContain("local-a");
+          expect(localB.at(-1)).toContain("local-b");
+        });
+        expect(localA.flat()).not.toContain("local-b");
+        expect(localB.flat()).not.toContain("local-a");
+        expect(seenA.at(-1)).toEqual(["room-a", "room-a-next"]);
+        expect(seenB.at(-1)).toEqual(["room-b", "room-b-next"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+      } finally {
+        stopLocalA();
+        stopLocalB();
+      }
+      expect(seenA.flat().every((title) => title.startsWith("room-a"))).toBe(true);
+      expect(seenB.flat().every((title) => title.startsWith("room-b"))).toBe(true);
+    } finally {
+      stops.forEach((stop) => stop());
+    }
+  },
+);
+
+it("shares explicit backend transport state across scoped Db wrappers", async () => {
+  const appId = randomUUID();
+  const backendSecret = "shared-transport-backend";
+  const adminSecret = "shared-transport-admin";
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const permissions = s.definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.where({});
+  });
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+  onTestFinished(() => server.stop());
+  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
+  const writer = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  const reader = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  onTestFinished(async () => {
+    await reader.shutdown();
+    await writer.shutdown();
+  });
+
+  const owner = reader.asBackend();
+  const sibling = reader.asBackend();
+  await owner.disconnect();
+  await sibling.insert(app.notes, { title: "offline-sibling" }).wait({ tier: "local" });
+
+  // A new request-scoped facade must observe the source's explicit-offline
+  // state; constructing it must not reconnect the shared client.
+  const later = reader.asBackend();
+  await later.insert(app.notes, { title: "offline-later" }).wait({ tier: "local" });
+  expect(await writer.asBackend().all(app.notes, { tier: "global" })).toEqual([]);
+
+  await sibling.reconnect();
+  await vi.waitFor(async () => {
+    expect(
+      (await writer.asBackend().all(app.notes, { tier: "global" }))
+        .map((note) => note.title)
+        .sort(),
+    ).toEqual(["offline-later", "offline-sibling"]);
+  });
+}, 30_000);
+
+it("rejects a scoped remote wait when its context shuts down offline", async () => {
+  const appId = randomUUID();
+  const backendSecret = "shutdown-transport-backend";
+  const adminSecret = "shutdown-transport-admin";
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const permissions = s.definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.where({});
+  });
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+  onTestFinished(() => server.stop());
+  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
+  const context = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  onTestFinished(() => context.shutdown());
+
+  const owner = context.asBackend();
+  const sibling = context.asBackend();
+  await owner.disconnect();
+  const pendingRemoteRead = sibling.all(app.notes, { tier: "global" });
+  const rejectedRead = expect(pendingRemoteRead).rejects.toThrow("JazzContext is shutting down");
+  const closing = context.shutdown();
+  expect(() => sibling.insert(app.notes, { title: "during-close" })).toThrow(
+    "JazzContext is shutting down",
+  );
+  await closing;
+  await rejectedRead;
+  expect(() => sibling.insert(app.notes, { title: "after-close" })).toThrow(
+    "JazzContext is shutting down",
+  );
+  expect(() => context.asBackend()).toThrow("JazzContext is shutting down");
+}, 30_000);

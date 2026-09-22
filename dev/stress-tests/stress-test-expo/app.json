@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "stress-test-expo",
+    "slug": "stress-test-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "android": {
+      "package": "dev.jazz.stresstest.expo"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.stresstest.expo"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "title": "Jazz 2",
+  "pages": [
+    "index",
+    "quickstart",
+    "install",
+    "---Getting Started---",
+    "getting-started/client-setup",
+    "getting-started/server-setup",
+    "concepts",
+    "schemas",
+    "---Working with Data---",
+    "reading",
+    "writing",
+    "auth",
+    "---Recipes---",
+    "recipes/access-control",
+    "recipes/data-patterns",
+    "recipes/auth",
+    "recipes/testing",
+    "---Reference---",
+    "reference",
+    "faq"
+  ]
+}

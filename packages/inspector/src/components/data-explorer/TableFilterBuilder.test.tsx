@@ -1,0 +1,256 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder";
+import type { ColumnDescriptor } from "jazz-tools";
+
+const schemaColumns = [
+  { name: "title", column_type: { type: "Text" }, nullable: false },
+  { name: "done", column_type: { type: "Boolean" }, nullable: false },
+  { name: "count", column_type: { type: "Integer" }, nullable: false },
+  { name: "bytes", column_type: { type: "Bytea" }, nullable: false },
+  { name: "assignee_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+  { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
+] satisfies ColumnDescriptor[];
+
+const bigintSchemaColumns = [
+  ...schemaColumns,
+  { name: "rank", column_type: { type: "BigInt" }, nullable: false },
+] satisfies ColumnDescriptor[];
+
+describe("TableFilterBuilder", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("derives operator options from jazz-tools support", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "done" } });
+    const operatorSelect = screen.getByLabelText("Operator");
+    const booleanOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(booleanOperators).toEqual(["eq", "ne", "in", "notIn"]);
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
+    const numericOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(numericOperators).toEqual(["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"]);
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "bytes" } });
+    const byteaOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(byteaOperators).toEqual(["eq", "ne", "in", "notIn"]);
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
+    const refOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(refOperators).toEqual(["eq", "ne", "in", "notIn", "isNull"]);
+  });
+
+  it("does not show unsupported columns", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    const columnSelect = screen.getByLabelText("Column");
+    const columnNames = Array.from(columnSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(columnNames).toEqual(["id", "title", "done", "count", "bytes", "assignee_id"]);
+  });
+
+  it("parses numeric values for numeric operators", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "gt" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "count",
+      operator: "gt",
+      value: 3,
+    });
+  });
+
+  it("parses notIn values as a membership list", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "notIn" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "3, 5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "count",
+      operator: "notIn",
+      value: [3, 5],
+    });
+  });
+
+  it("renders the inline filter panel by default", () => {
+    const onClausesChange = vi.fn();
+    const { container } = render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    expect(container.querySelector("dialog")).toBeNull();
+    expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
+  });
+
+  it("shows validation errors for invalid values", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "done" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "not-boolean" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(screen.getByText('Boolean values must be "true" or "false".')).not.toBeNull();
+    expect(onClausesChange).not.toHaveBeenCalled();
+  });
+
+  it("parses isNull=false as a boolean false value", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "isNull" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "false" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "assignee_id",
+      operator: "isNull",
+      value: false,
+    });
+  });
+
+  it("removes an existing clause", () => {
+    const onClausesChange = vi.fn();
+    const clauses: TableFilterClause[] = [
+      { id: "a", column: "title", operator: "contains", value: "alpha" },
+      { id: "b", column: "count", operator: "gt", value: 1 },
+    ];
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={clauses}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove filter on title" })[0] as Element,
+    );
+    expect(onClausesChange).toHaveBeenCalledWith([
+      { id: "b", column: "count", operator: "gt", value: 1 },
+    ]);
+  });
+
+  it("shows active filters in the inline panel", () => {
+    const onClausesChange = vi.fn();
+    const clauses: TableFilterClause[] = [
+      { id: "a", column: "title", operator: "contains", value: "alpha" },
+      { id: "b", column: "count", operator: "gt", value: 1 },
+    ];
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={clauses}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /Filter/ })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /Remove filter on/ })[0]?.textContent).toBe("×");
+    expect(screen.getAllByText("title contains alpha").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("count gt 1").length).toBeGreaterThan(0);
+  });
+
+  it("renders BigInt filter values as exact decimal text", () => {
+    render(
+      <TableFilterBuilder
+        schemaColumns={bigintSchemaColumns}
+        clauses={[{ id: "rank-filter", column: "rank", operator: "eq", value: 9007199254740993n }]}
+        onClausesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("rank eq 9007199254740993").length).toBeGreaterThan(0);
+  });
+
+  it("renders BigInt membership filters as exact decimal text", () => {
+    render(
+      <TableFilterBuilder
+        schemaColumns={bigintSchemaColumns}
+        clauses={[
+          {
+            id: "rank-membership-filter",
+            column: "rank",
+            operator: "in",
+            value: [9007199254740993n, -9007199254740993n],
+          },
+        ]}
+        onClausesChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByText('rank in ["9007199254740993","-9007199254740993"]').length,
+    ).toBeGreaterThan(0);
+  });
+});

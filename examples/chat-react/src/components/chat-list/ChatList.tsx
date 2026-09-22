@@ -1,0 +1,108 @@
+import { useDb, useAll, useSession } from "jazz-tools/react";
+import { LockIcon, MessageSquarePlusIcon } from "lucide-react";
+import { ChatListItem } from "@/components/chat-list/ChatListItem";
+import { Button } from "@/components/ui/button";
+import { useMyProfile } from "@/hooks/useMyProfile";
+import { navigate } from "@/hooks/useRouter";
+import { fireAndReport, waitForWrite } from "@/lib/db-write";
+import { app } from "../../../schema.js";
+import { DurabilityTier } from "jazz-tools";
+
+export const ChatList = () => {
+  const db = useDb();
+  const session = useSession();
+  const userId = session?.user.account ?? null;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "global" : "local",
+  };
+
+  const myProfile = useMyProfile();
+
+  const { data: memberships = [] } = useAll(
+    userId ? app.chatMembers.where({ userId }).include({ chat: true }) : undefined,
+  );
+
+  const createPublicChat = async () => {
+    if (!userId || !myProfile) return;
+
+    const chat = await waitForWrite(
+      db.insert(app.chats, {
+        isPublic: true,
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(db.insert(app.chatMembers, { chatId: chat.id, userId }), sharedWriteOptions);
+    await waitForWrite(
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "Hello world",
+        senderId: myProfile.id,
+      }),
+      sharedWriteOptions,
+    );
+
+    navigate(`/#/chat/${chat.id}`);
+  };
+
+  const createPrivateChat = async () => {
+    if (!userId || !myProfile) return;
+
+    const shareCode = crypto.randomUUID().slice(0, 8);
+
+    const chat = await waitForWrite(
+      db.insert(app.chats, {
+        isPublic: false,
+        joinCode: shareCode,
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId,
+        joinCode: shareCode,
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "This is a private chat.",
+        senderId: myProfile.id,
+      }),
+      sharedWriteOptions,
+    );
+
+    navigate(`/#/chat/${chat.id}`);
+  };
+
+  return (
+    <div className="p-2 flex flex-col gap-2">
+      <div className="grid grid-cols-2 gap-2">
+        <Button onClick={() => void createPublicChat()}>
+          <MessageSquarePlusIcon /> New Chat
+        </Button>
+        <Button variant="outline" onClick={() => void createPrivateChat()}>
+          <LockIcon /> New Private Chat
+        </Button>
+      </div>
+
+      {memberships.map((membership) => {
+        // useAll erases .include() type info; chat is Chat at runtime
+        const chat = membership.chat as unknown as
+          | { id: string; isPublic: boolean; name?: string }
+          | undefined;
+        return (
+          <ChatListItem
+            key={membership.id}
+            chatId={chat?.id ?? membership.id}
+            chat={chat}
+            onDelete={() =>
+              fireAndReport(db.delete(app.chatMembers, membership.id), "failed to delete chat")
+            }
+          />
+        );
+      })}
+    </div>
+  );
+};

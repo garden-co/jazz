@@ -1,0 +1,446 @@
+import {
+  PersistedWriteRejectedError,
+  ReadTier,
+  schema as s,
+  type Db,
+  type RowAuthor,
+} from "jazz-tools";
+import { app } from "../schema.js";
+
+const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
+const EXAMPLE_OWNER_ID = "local:example-owner";
+const todoIdA = "00000000-0000-0000-0000-000000000001";
+const todoIdB = "00000000-0000-0000-0000-000000000002";
+
+// #region reading-oneshot-ts
+export async function readTodosOneshot(db: Db) {
+  return db.all(app.todos.where({ done: false }));
+}
+// #endregion reading-oneshot-ts
+
+// #region reading-subscriptions-ts
+export function subscribeTodos(db: Db, onCount: (count: number) => void) {
+  return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length));
+}
+// #endregion reading-subscriptions-ts
+
+// #region where-subscription-ts
+export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void) {
+  return db.subscribe(app.todos.where({ done: false }), (todos) => onChange(todos));
+}
+// #endregion where-subscription-ts
+
+// #region reading-durability-tier-ts
+export async function readTodosAtEdgeDurability(db: Db) {
+  return db.all(app.todos.where({ done: false }), { tier: ReadTier.Remote });
+}
+// #endregion reading-durability-tier-ts
+
+// #region reading-composing-queries-ts
+// Store a base query and reuse it for different views.
+const openTodos = app.todos.where({ done: false });
+
+const byNewest = openTodos.orderBy("id", "desc");
+const byTitle = openTodos.orderBy("title", "asc").limit(20);
+const urgent = openTodos.where({ title: { contains: "urgent" } });
+// #endregion reading-composing-queries-ts
+
+// #region reading-chained-query-ts
+const incompleteTodos = app.todos.where({ done: false }).orderBy("title", "asc").limit(50);
+// #endregion reading-chained-query-ts
+
+// #region reading-filters-ts
+export async function readTodosWithFilters(db: Db) {
+  return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
+}
+// #endregion reading-filters-ts
+
+// #region reading-where-operators-ts
+export async function readTodosWithWhereOperators(db: Db) {
+  await db.all(app.todos.where({ done: false }));
+  await db.all(app.todos.where({ title: { contains: "milk" } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
+}
+// #endregion reading-where-operators-ts
+
+export async function whereOperatorExamples(db: Db) {
+  const searchTerm = "milk";
+
+  // #region where-eq-ne-ts
+  // Exact match (shorthand — no operator object needed)
+  const incompleteTodos = await db.all(app.todos.where({ done: false }));
+
+  // Not equal
+  const nonDraftTodos = await db.all(app.todos.where({ title: { ne: "Draft" } }));
+
+  // One of a set
+  const selectedTodos = await db.all(app.todos.where({ id: { in: [todoIdA, todoIdB] } }));
+  // #endregion where-eq-ne-ts
+
+  // #region where-numeric-ts
+  const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const recentTodos = await db.all(app.todos.where({ $createdAt: { gt: oneWeekAgo } }));
+  const highPriority = await db.all(app.todos.where({ priority: { gte: 3 } }));
+  const lowPriority = await db.all(app.todos.where({ priority: { lt: 10 } }));
+  // #endregion where-numeric-ts
+
+  // #region where-contains-ts
+  // Substring match (case-sensitive)
+  const matches = await db.all(app.todos.where({ title: { contains: searchTerm } }));
+  // #endregion where-contains-ts
+
+  // #region where-null-ts
+  // Rows where the optional ref is not set
+  const unlinkedTodos = await db.all(app.todos.where({ parentId: { isNull: true } }));
+
+  // Rows where it is set
+  const linkedTodos = await db.all(app.todos.where({ parentId: { isNull: false } }));
+  // #endregion where-null-ts
+
+  // #region where-and-ts
+  // done AND assigned to a project
+  const doneWithProject = await db.all(
+    app.todos.where({
+      done: true,
+      projectId: { isNull: false },
+    }),
+  );
+  // #endregion where-and-ts
+
+  // #region where-order-limit-ts
+  const recentIncomplete = await db.all(
+    app.todos.where({ done: false }).orderBy("$createdAt", "asc").limit(50),
+  );
+  // #endregion where-order-limit-ts
+
+  return {
+    incompleteTodos,
+    nonDraftTodos,
+    selectedTodos,
+    recentTodos,
+    highPriority,
+    lowPriority,
+    matches,
+    unlinkedTodos,
+    linkedTodos,
+    doneWithProject,
+    recentIncomplete,
+  };
+}
+
+// #region reading-sorting-ts
+export async function readTodosSortedByTitle(db: Db) {
+  return db.all(app.todos.where({ done: false }).orderBy("title", "asc"));
+}
+// #endregion reading-sorting-ts
+
+// #region reading-pagination-ts
+export async function readTodoPage(db: Db, page: number, pageSize = 20) {
+  const offset = Math.max(0, (page - 1) * pageSize);
+  return db.all(
+    app.todos
+      .where({ done: false })
+      .orderBy("title", "asc")
+      .orderBy("id", "asc")
+      .limit(pageSize)
+      .offset(offset),
+  );
+}
+// #endregion reading-pagination-ts
+
+// #region reading-includes-ts
+export async function readTodosWithIncludes(db: Db) {
+  return db.all(
+    app.todos.where({ done: false }).include({ project: true, parent: { project: true } }),
+  );
+}
+// #endregion reading-includes-ts
+
+// #region reading-select-ts
+export async function readTodoTitlesWithSelectedProject(db: Db) {
+  return db.all(
+    app.todos
+      .select("title")
+      .where({ done: false })
+      .include({ project: app.projects.select("name") }),
+  );
+}
+// #endregion reading-select-ts
+
+// #region dry-run-permissions-ts
+export async function canReadTodo(db: Db, todoId: string) {
+  return db.canRead(app.todos, todoId);
+}
+
+export async function readTodosWithDeletePermission(db: Db) {
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  const advice = await Promise.all(todos.map((todo) => db.canDelete(app.todos, todo.id)));
+  return todos.filter((_, index) => advice[index] === "allowed");
+}
+
+export async function readEditableTodos(db: Db) {
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  const advice = await Promise.all(
+    todos.map((todo) => db.canUpdate(app.todos, todo.id, { title: todo.title })),
+  );
+  return todos.filter((_, index) => advice[index] === "allowed");
+}
+
+export async function canCreateTodo(db: Db, title: string) {
+  return db.canInsert(app.todos, { title, done: false });
+}
+// #endregion dry-run-permissions-ts
+
+// #region reading-edit-metadata-magic-columns-ts
+export async function readTodoEditMetadata(db: Db, author: RowAuthor, updatedSinceMs: number) {
+  return db.all(
+    app.todos
+      .where({
+        $createdBy: author,
+        $updatedAt: { gt: updatedSinceMs },
+      })
+      .select("title", "$createdBy", "$createdAt", "$updatedBy", "$updatedAt"),
+  );
+}
+// #endregion reading-edit-metadata-magic-columns-ts
+
+// #region reading-reverse-relation-ts
+export async function readProjectsWithTodos(db: Db) {
+  return db.all(app.projects.include({ todos: app.todos.where({ done: false }) }));
+}
+// #endregion reading-reverse-relation-ts
+
+// #region reading-require-includes-ts
+const requiredReferences = s.defineApp({
+  customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
+  orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
+});
+
+export async function readOrdersWithRequiredCustomer(db: Db) {
+  return db.all(requiredReferences.orders.include({ customer: true }).requireIncludes());
+}
+// #endregion reading-require-includes-ts
+
+// #region reading-recursive-ts
+export function buildTodoLineageQuery() {
+  return app.todos.gather({
+    start: { done: false },
+    step: ({ current }) => app.todos.where({ id: current }).hopTo("parent"),
+    maxDepth: 10,
+  });
+}
+// #endregion reading-recursive-ts
+
+// #region reading-seeding-ts
+export async function seedDefaultProject(db: Db) {
+  // Wait for the global core before reading — prevents duplicate seeding
+  // from concurrent fresh clients on first visit.
+  const existing = await db.all(app.projects, { tier: "global" });
+
+  if (existing.length === 0) {
+    db.insert(app.projects, { name: "Default" });
+  }
+}
+// #endregion reading-seeding-ts
+
+// #region writing-crud-ts
+export async function writeTodoCrud(db: Db, todoId: string) {
+  db.insert(app.todos, {
+    title: "Write docs",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+  db.update(app.todos, todoId, { done: true });
+  db.delete(app.todos, todoId);
+}
+// #endregion writing-crud-ts
+
+// #region writing-upsert-ts
+export async function upsertTodo(db: Db, importedTodoId: string) {
+  const write = db.upsert(app.todos, importedTodoId, {
+    title: "Imported task",
+    done: false,
+  });
+
+  await write.wait({ tier: "global" });
+}
+// #endregion writing-upsert-ts
+
+// #region writing-restore-ts
+export async function restoreDeletedTodo(db: Db, todoId: string) {
+  db.delete(app.todos, todoId);
+
+  const deletedTodo = await db.one(app.todos.where({ id: todoId }).includeDeleted());
+  if (!deletedTodo) throw new Error("Deleted todo not found");
+
+  const { value: restored } = db.restore(app.todos, todoId, {
+    title: "Restored task",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  return restored;
+}
+// #endregion writing-restore-ts
+
+// #region writing-nullable-update-ts
+export function clearNullableTodoFields(db: Db, todoId: string) {
+  db.update(app.todos, todoId, { owner_id: null }); // clears the nullable FK
+  db.update(app.todos, todoId, { description: undefined }); // leaves the field unchanged
+}
+// #endregion writing-nullable-update-ts
+
+// #region writing-durability-tier-ts
+export async function writeTodoWithDurabilityTiers(db: Db) {
+  const { id } = await db
+    .insert(app.todos, {
+      title: "Write docs with durability tier",
+      done: false,
+      owner_id: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
+    })
+    .wait({ tier: "global" });
+
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
+}
+// #endregion writing-durability-tier-ts
+
+// #region writing-mutation-errors-ts
+export async function insertTodoAndWait(db: Db) {
+  const pending = db.insert(app.todos, {
+    title: "Ship review fixes",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  console.log(await pending.txId);
+
+  try {
+    const row = await pending.wait({ tier: "global" });
+    console.log(row.id);
+  } catch (error) {
+    if (error instanceof PersistedWriteRejectedError) {
+      console.error(error.code, error.reason);
+      return;
+    }
+
+    throw error;
+  }
+}
+// #endregion writing-mutation-errors-ts
+
+// #region writing-mutation-error-listener-ts
+export function listenForMutationErrors(db: Db) {
+  return db.onMutationError((event) => {
+    console.error("DB mutation failed:", event.code, event.reason);
+  });
+}
+// #endregion writing-mutation-error-listener-ts
+
+// #region writing-transaction-ts
+export async function groupTodoWrites(db: Db, existingTodoId: string) {
+  const result = await db.transaction(async (tx) => {
+    const created = tx.insert(app.todos, {
+      title: "Write transaction docs",
+      done: false,
+      owner_id: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
+    });
+
+    tx.update(app.todos, existingTodoId, { done: true });
+
+    const staged = await tx.one(app.todos.where({ id: created.id }));
+    if (!staged) throw new Error("Staged todo not found");
+
+    return staged.id;
+  });
+
+  await result.wait({ tier: "global" });
+  return result.value;
+}
+// #endregion writing-transaction-ts
+
+// #region writing-exclusive-transaction-ts
+export async function finishTodoExclusively(db: Db, todoId: string) {
+  const result = await db.exclusiveTransaction(async (tx) => {
+    const todo = await tx.one(app.todos.where({ id: todoId }));
+    if (!todo) throw new Error("Todo not found");
+
+    tx.update(app.todos, todo.id, { done: true });
+    return todo.id;
+  });
+
+  return result.wait();
+}
+// #endregion writing-exclusive-transaction-ts
+
+// #region writing-transaction-errors-ts
+export async function completeTodoInTransaction(db: Db, todoId: string) {
+  try {
+    const result = await db.transaction((tx) => {
+      tx.update(app.todos, todoId, { done: true });
+    });
+
+    await result.wait({ tier: "global" });
+  } catch (error) {
+    if (error instanceof PersistedWriteRejectedError) {
+      console.error(error.code, error.reason);
+      return;
+    }
+
+    throw error;
+  }
+}
+// #endregion writing-transaction-errors-ts
+
+// #region writing-manual-transaction-ts
+export async function stageTodoAcrossSteps(db: Db, shouldCancel: boolean) {
+  const tx = db.beginTransaction();
+
+  tx.insert(app.todos, {
+    title: "Review staged changes",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  if (shouldCancel) {
+    await tx.rollback();
+    return;
+  }
+
+  const result = await tx.commit();
+  await result.wait({ tier: "global" });
+}
+// #endregion writing-manual-transaction-ts
+
+// #region chaining-ts
+export async function chainingExamples(db: Db) {
+  // Multiple where calls produce AND semantics
+  const results = await db.all(
+    app.todos.where({ done: false }).where({ title: { contains: "docs" } }),
+  );
+
+  return results;
+}
+// #endregion chaining-ts
+
+// #region combining-ts
+export async function combinedQuery(db: Db) {
+  const results = await db.all(
+    app.todos
+      .where({ done: false, title: { contains: "docs" } })
+      .include({ project: true, parent: true })
+      .orderBy("title", "asc")
+      .limit(20)
+      .offset(0),
+  );
+
+  return results;
+}
+// #endregion combining-ts

@@ -1,0 +1,3679 @@
+//! Authorization-scope protocol validation and hostile-peer boundaries.
+
+use super::*;
+
+fn schema_with_explicit_public_read() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    )
+}
+
+fn open_memory_subscription_db(
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<groove::storage::MemoryStorage> {
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: groove::storage::MemoryStorage::new(&refs).unwrap(),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xda; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
+    }))
+    .unwrap()
+}
+
+// A standalone memory cache owns its local view even while its remote peer
+// cannot respond. This distinguishes storage choice from foreground ownership.
+#[test]
+fn standalone_memory_subscription_does_not_wait_for_remote_upstream() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let db = open_memory_subscription_db(author, &schema);
+    let (up, _unresponsive_remote) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let query = prepared(&db, &Query::from("todos"));
+    let mut stream = block_on(db.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+}
+
+// Internal topology receipt: the public client factory cannot hold back an
+// owner connection while observing the foreground's raw subscription stream.
+fn assert_foreground_initial_owner_snapshot(seed_owner: bool) {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let owner = open_db(0xd8, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let expected = row(0xd9);
+    if seed_owner {
+        owner
+            .insert(
+                "todos",
+                cells("saved", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(expected),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        owner.tick().unwrap();
+    }
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(&foreground, &Query::from("todos"));
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    for _ in 0..3 {
+        foreground.tick().unwrap();
+        assert!(
+            stream.try_next_event().is_none(),
+            "memory is not the owner's answer"
+        );
+    }
+    // LocalOnly explicitly observes this foreground, without contacting its owner.
+    let mut local = block_on(foreground.subscribe(
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        matches!(local.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+    drop(local);
+    // A cancelled opening must not hold up a sibling's initial result.
+    let cancelled = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    drop(cancelled);
+    let (up, down) = duplex();
+    let upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut initial = None;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        owner.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            initial = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        settled: true,
+        ..
+    }) = initial
+    else {
+        panic!(
+            "owner result must complete the first snapshot, including an empty result: {initial:?}"
+        );
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        if seed_owner { vec![expected] } else { vec![] }
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    // Once initialized, losing upstream must not suppress ordinary local writes.
+    drop(upstream);
+    let offline = row(0xdb);
+    foreground
+        .insert(
+            "todos",
+            cells("offline", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(offline),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    foreground.tick().unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { added, .. })
+        if added.iter().any(|row| row.row_uuid() == offline))
+    );
+}
+
+#[test]
+fn foreground_initial_subscription_waits_for_owner_rows() {
+    assert_foreground_initial_owner_snapshot(true);
+}
+
+#[test]
+fn foreground_initial_subscription_completes_empty_owner_answer() {
+    assert_foreground_initial_owner_snapshot(false);
+}
+
+// Internal topology receipt: ordinary single-Db subscriptions do not enter
+// the foreground owner's initial reset path. Observe only public stream output.
+#[test]
+fn foreground_owner_reset_preserves_flat_join_occurrences() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users")
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let owner = open_db(0xe4, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let user = row(0xe5);
+    owner
+        .insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("user".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(user),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for id in [row(0xe6), row(0xe7)] {
+        owner
+            .insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("todo".to_owned())),
+                    (
+                        "ownerId".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
+                    ),
+                ]),
+                crate::db::InsertOptions {
+                    row_id: Some(id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    owner.tick().unwrap();
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(
+        &foreground,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(stream.try_next_event().is_none());
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut first = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            first = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = first
+    else {
+        panic!("expected a complete first join snapshot: {first:?}");
+    };
+    assert_eq!(added.len(), 2);
+    assert!(added.iter().all(|output| output.row_uuid() == user));
+    let expected = [row(0xe6), row(0xe7)].map(|todo| {
+        OutputOccurrenceId::new(ObjectId::from_uuid(user.0), [ObjectId::from_uuid(todo.0)])
+    });
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected.iter().cloned().collect()
+    );
+    assert_eq!(
+        added.iter().map(|output| output.index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    // Removing one joined row must address only that occurrence of the user.
+    owner
+        .delete("todos", row(0xe6), Default::default())
+        .unwrap();
+    let mut removed_occurrences = Vec::new();
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            let SubscriptionEvent::Delta { removed, .. } = event else {
+                panic!("join subscription failed after its initial reset: {event:?}");
+            };
+            removed_occurrences.extend(removed.into_iter().map(|output| output.occurrence_id));
+        }
+        if !removed_occurrences.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(removed_occurrences, vec![expected[0].clone()]);
+}
+
+/// Alice's foreground receives Bob's persistent owner's truthful Local answer
+/// after cold storage resumes, without an authority or unsolicited polling.
+/// This covers host callback progress, not dependence on one specific wake:
+/// deferred scheduler callbacks may also resume cold query work.
+/// Alice --Local attachment--> Bob --cold storage wake--> owner tick --> Alice.
+/// This is internal because the public client harness cannot suspend storage or
+/// constrain owner turns to the host's actual scheduler/transport callbacks.
+#[test]
+fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct HostWake {
+        owner: usize,
+        queue: Arc<Mutex<VecDeque<usize>>>,
+    }
+    impl HostWake {
+        fn enqueue(&self) {
+            self.queue.lock().unwrap().push_back(self.owner);
+        }
+    }
+    impl std::task::Wake for HostWake {
+        fn wake(self: Arc<Self>) {
+            self.enqueue();
+        }
+    }
+    impl TickScheduler for HostWake {
+        fn schedule_tick(&self, _: TickUrgency) {
+            self.enqueue();
+        }
+        fn schedule_tick_after(&self, _: u64) {
+            panic!("offline Local delivery must not require a protocol retry timer");
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(Waker::from(Arc::new(self.clone())))
+        }
+    }
+    struct DeliveringTransport {
+        inner: Box<dyn Transport>,
+        receiver: HostWake,
+    }
+    impl Transport for DeliveringTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.inner.send(message)?;
+            self.receiver.enqueue();
+            Ok(())
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+
+    for seed_cache in [false, true] {
+        let schema = schema_with_explicit_public_read();
+        let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&refs);
+        let eviction = storage.clone();
+        let relay = block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x74; 16]),
+                author,
+            },
+        )))
+        .unwrap();
+        relay.set_relay_authority_session_owner_for_test();
+        let cached = row(0x75);
+        if seed_cache {
+            relay
+                .insert(
+                    "todos",
+                    cells("saved", false, author),
+                    crate::db::InsertOptions {
+                        row_id: Some(cached),
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let foreground = open_db(0x76, author, &schema);
+        foreground.set_non_durable_client();
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let wakes = [
+            HostWake {
+                owner: 0,
+                queue: queue.clone(),
+            },
+            HostWake {
+                owner: 1,
+                queue: queue.clone(),
+            },
+        ];
+        relay.set_tick_scheduler(Some(Rc::new(wakes[0].clone())));
+        foreground.set_tick_scheduler(Some(Rc::new(wakes[1].clone())));
+        let (up, down) = duplex();
+        let _upstream = block_on(foreground.connect_upstream(Box::new(DeliveringTransport {
+            inner: up,
+            receiver: wakes[0].clone(),
+        })));
+        let _subscriber = relay.accept_subscriber_with_claims(
+            Box::new(DeliveringTransport {
+                inner: down,
+                receiver: wakes[1].clone(),
+            }),
+            author,
+            BTreeMap::new(),
+        );
+        let query = prepared(&foreground, &Query::from("todos"));
+        let opts = ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        };
+        eviction.evict_all();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::Get);
+        control.pause_on(TestStorageOperation::ScanOpen);
+        let attachment = foreground
+            .attach_query_with_opts(&query, opts.clone())
+            .unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+
+        // Retain suspended owner turns, just as an async host retains tickAsync.
+        // Transport sends and scheduler callbacks are the only queue producers.
+        let mut turns: [Option<std::pin::Pin<Box<dyn Future<Output = ()> + '_>>>; 2] = [None, None];
+        let mut resumed = false;
+        for _ in 0..256 {
+            let owner = queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("Local delivery stalled without a scheduled host wake");
+            if owner == 0 {
+                // A real server-shell query wake marks the subscriber dirty
+                // before queuing this owner turn. Mirror that private bridge
+                // here because this test intentionally uses a generic host
+                // scheduler to control every turn.
+                relay.mark_subscriber_connections_dirty_for_test();
+            }
+            if turns[owner].is_none() {
+                turns[owner] = Some(if owner == 0 {
+                    Box::pin(async {
+                        relay.tick().await.unwrap();
+                    })
+                } else {
+                    Box::pin(async {
+                        foreground.tick().await.unwrap();
+                    })
+                });
+            }
+            let waker = Waker::from(Arc::new(wakes[owner].clone()));
+            if turns[owner]
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+            {
+                turns[owner] = None;
+            }
+            if !resumed
+                && control.observed().iter().any(|op| {
+                    matches!(
+                        op,
+                        TestStorageOperation::Get | TestStorageOperation::ScanOpen
+                    )
+                })
+            {
+                assert!(
+                    !foreground.query_attachment_is_covered(&attachment),
+                    "cold owner must not certify an unassembled answer"
+                );
+                control.resume();
+                resumed = true;
+            }
+            if foreground.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(resumed, "fixture must suspend an actual cold owner read");
+        assert!(
+            foreground.query_attachment_is_covered(&attachment),
+            "Local delivery did not complete within 256 scheduled callbacks (seed_cache={seed_cache})"
+        );
+        drop(turns);
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+            if seed_cache { vec![cached] } else { vec![] }
+        );
+        foreground.detach_query(attachment);
+    }
+}
+
+/// Alice's initial Local opening survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn initial_local_opening_retries_after_transport_backpressure() {
+    assert_initial_opening_backpressure(false, false, false);
+}
+
+/// Alice receives Bob's exact retained opening before a later committed row.
+#[test]
+fn retained_local_opening_precedes_writes_arriving_during_backpressure() {
+    assert_initial_opening_backpressure(true, false, false);
+}
+
+/// Alice cancels while Bob's initial opening is unaccepted; it must not leak later.
+#[test]
+fn cancelled_local_opening_is_not_sent_after_backpressure() {
+    assert_initial_opening_backpressure(false, true, false);
+}
+
+/// Bob's shared evaluator retries only Alice's unaccepted sibling opening.
+/// The internal sibling key models the shared-group path, as claim-refresh tests do.
+#[test]
+fn initial_group_openings_do_not_replay_accepted_siblings_after_backpressure() {
+    assert_initial_opening_backpressure(false, false, true);
+}
+
+/// Alice cancels her stalled opening while Bob keeps a sibling usage alive.
+#[test]
+fn cancelled_group_opening_does_not_block_or_replace_its_live_sibling() {
+    assert_initial_opening_backpressure(false, true, true);
+}
+
+fn assert_initial_opening_backpressure(
+    write_while_pending: bool,
+    cancel_while_pending: bool,
+    with_sibling: bool,
+) {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+        rejected_message: Option<SyncMessage>,
+        reject_at: usize,
+        cancelled_opening: bool,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                if self.accepted.get() + 1 == self.reject_at && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
+                    return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    if self.cancelled_opening {
+                        let (SyncMessage::ViewUpdate(actual), SyncMessage::ViewUpdate(cancelled)) =
+                            (&message, &expected)
+                        else {
+                            unreachable!()
+                        };
+                        assert_ne!(
+                            actual.subscription, cancelled.subscription,
+                            "a cancelled opening must not be sent for the surviving sibling"
+                        );
+                    } else {
+                        assert_eq!(
+                            message, expected,
+                            "retry retains the exact opening generation and row occurrences"
+                        );
+                    }
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(cached),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            rejected_message: None,
+            reject_at: if with_sibling && !cancel_while_pending {
+                2
+            } else {
+                1
+            },
+            cancelled_opening: cancel_while_pending,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    if with_sibling {
+        foreground.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        let mut second = attachment.subscription();
+        second.read_view.id = uuid::Uuid::from_bytes([0xd7; 16]);
+        let mut connection = subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!()
+        };
+        let coverage = state.served[&attachment.subscription()].clone();
+        state.served.insert(second, coverage.clone());
+        let group = state.coverage_groups.get_mut(&coverage).unwrap();
+        group.subscribers.insert(second);
+        group.pending_initial_subscribers.insert(second);
+        state
+            .peer
+            .set_subscription_policy_binding(second, group.policy_binding.clone());
+    }
+    let later = row(0x7a);
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        let previously_rejected = rejected.get();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+        if !previously_rejected && rejected.get() {
+            if write_while_pending {
+                relay
+                    .insert(
+                        "todos",
+                        cells("later", false, author),
+                        crate::db::InsertOptions {
+                            row_id: Some(later),
+                            identity: crate::db::WriteIdentity::Attribution(author),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            if cancel_while_pending {
+                foreground.detach_query(attachment.clone());
+            }
+        }
+    }
+    assert!(rejected.get(), "fixture must reject the initial ViewUpdate");
+    if cancel_while_pending {
+        assert_eq!(
+            accepted.get(),
+            usize::from(with_sibling),
+            "only the surviving sibling may receive an opening after cancellation"
+        );
+        return;
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the unsent initial Local opening must retry after capacity returns"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        if write_while_pending {
+            vec![cached, later]
+        } else {
+            vec![cached]
+        }
+    );
+    assert_eq!(
+        accepted.get(),
+        if write_while_pending || with_sibling {
+            2
+        } else {
+            1
+        },
+        "retry accepts one initial opening and only the subsequent delta"
+    );
+    foreground.detach_query(attachment);
+}
+
+/// Alice's incremental Local update survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn incremental_local_update_retries_after_transport_backpressure() {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+        seen: usize,
+        rejected_message: Option<SyncMessage>,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                self.seen += 1;
+                if self.seen == 2 && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
+                    return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    assert_eq!(
+                        message, expected,
+                        "retry preserves the exact incremental publication"
+                    );
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(cached),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            seen: 0,
+            rejected_message: None,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        relay.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    let later = row(0x7a);
+    relay
+        .insert(
+            "todos",
+            cells("later", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(later),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+    }
+    assert!(
+        rejected.get(),
+        "fixture must reject the incremental ViewUpdate"
+    );
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the established Local attachment remains covered while its incremental update retries"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        vec![cached, later]
+    );
+    assert_eq!(
+        accepted.get(),
+        2,
+        "retry accepts one initial opening and one incremental update"
+    );
+    foreground.detach_query(attachment);
+}
+
+/// Alice must not receive Bob's never-accepted opening after policy revocation.
+/// Bob --opening/backpressure--> policy False --> fresh denied reset --> Alice.
+/// Internal transport control is needed to distinguish unaccepted bytes from
+/// previously delivered copies under INV-SYNC-13/14 (#2653).
+#[test]
+fn retained_initial_opening_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(false);
+}
+
+/// Alice's established subscription must not receive a retained forbidden delta.
+/// The old local copy may remain, but the future settled view must become empty.
+#[test]
+fn retained_incremental_update_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(true);
+}
+
+fn assert_retained_publication_policy_revocation(incremental: bool) {
+    struct PolicyBoundaryTransport {
+        inner: Box<dyn Transport>,
+        reject_at: usize,
+        sent_views: usize,
+        rejected: Rc<RefCell<Option<SyncMessage>>>,
+        revoked: Rc<Cell<bool>>,
+        after_revocation: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+    impl Transport for PolicyBoundaryTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if let SyncMessage::ViewUpdate(update) = &message {
+                if self.sent_views + 1 == self.reject_at && self.rejected.borrow().is_none() {
+                    *self.rejected.borrow_mut() = Some(message);
+                    return Err(TransportError::Backpressure);
+                }
+                if self.revoked.get() {
+                    assert!(
+                        update.version_carriers.is_empty(),
+                        "never-accepted version carriers must not leak after policy revocation"
+                    );
+                    assert!(
+                        !update
+                            .supporting_rows
+                            .added_rows()
+                            .iter()
+                            .any(|fact| matches!(fact, _)),
+                        "forbidden CoveredInput additions must not survive in the saved envelope"
+                    );
+                    self.after_revocation.borrow_mut().push(message.clone());
+                }
+                self.sent_views += 1;
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = owner_read_schema();
+    let author = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let authority = open_core(0x7b, AuthorSubject::SYSTEM, &schema);
+    let claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(author.test_uuid()))]);
+    let first = row(0x7c);
+    authority
+        .insert_with_id("todos", first, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x7d, author, &schema);
+    foreground.set_test_provider_claims(author, claims.clone());
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(RefCell::new(None));
+    let revoked = Rc::new(Cell::new(false));
+    let after_revocation = Rc::new(RefCell::new(Vec::new()));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = authority.accept_subscriber_with_claims(
+        Box::new(PolicyBoundaryTransport {
+            inner: down,
+            reject_at: if incremental { 2 } else { 1 },
+            sent_views: 0,
+            rejected: rejected.clone(),
+            revoked: revoked.clone(),
+            after_revocation: after_revocation.clone(),
+        }),
+        author,
+        claims.clone(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let attachment = foreground
+        .attach_query_with_opts(&query, global_subscribe_opts())
+        .unwrap();
+    if incremental {
+        for _ in 0..16 {
+            foreground.tick().unwrap();
+            authority.tick().unwrap();
+        }
+        assert!(foreground.query_attachment_is_covered(&attachment));
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, global_subscribe_opts())).unwrap()),
+            vec![first]
+        );
+        authority
+            .insert_with_id("todos", row(0x7e), cells("unsent", false, author))
+            .unwrap();
+    }
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        authority.tick().unwrap();
+        if rejected.borrow().is_some() {
+            break;
+        }
+    }
+    {
+        let rejected = rejected.borrow();
+        let Some(SyncMessage::ViewUpdate(update)) = rejected.as_ref() else {
+            panic!("fixture must retain a real publication");
+        };
+        assert!(
+            !update.version_carriers.is_empty(),
+            "blocked publication must contain sensitive row bytes"
+        );
+        assert!(
+            update
+                .supporting_rows
+                .added_rows()
+                .iter()
+                .any(|fact| matches!(fact, _)),
+            "blocked publication must contain an authorized input fact"
+        );
+    }
+    let denied_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::False)),
+        ),
+    );
+    assert_eq!(schema.version_id(), denied_schema.version_id());
+    let catalogue_seq = authority.server.node().borrow().active_catalogue_seq();
+    authority
+        .activate_schema_for_test(1, denied_schema)
+        .unwrap();
+    assert_eq!(
+        authority.server.node().borrow().active_catalogue_seq(),
+        catalogue_seq,
+        "same-version policy activation is not a lineage-sequence change"
+    );
+    revoked.set(true);
+
+    // A fresh subscriber independently proves that the governing policy is
+    // active before the old connection is allowed to retry its saved payload.
+    let fresh = open_db(0x7f, author, &schema);
+    fresh.set_test_provider_claims(author, claims.clone());
+    let (up, down) = duplex();
+    let _fresh_upstream = block_on(fresh.connect_upstream(up));
+    let fresh_subscriber = authority.accept_subscriber_with_claims(down, author, claims);
+    let fresh_query = prepared(&fresh, &Query::from("todos"));
+    let fresh_attachment = fresh
+        .attach_query_with_opts(&fresh_query, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..16 {
+        fresh.tick().unwrap();
+        fresh_subscriber.borrow_mut().tick().unwrap();
+    }
+    assert!(fresh.query_attachment_is_covered(&fresh_attachment));
+    assert!(
+        block_on(fresh.all(&fresh_query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    fresh.detach_query(fresh_attachment);
+
+    for _ in 0..16 {
+        authority.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(foreground.all(&query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(after_revocation.borrow().iter().any(|message| matches!(message,
+        SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending && update.supporting_rows.added_rows().is_empty())),
+        "replacement must carry a truthful empty snapshot");
+    foreground.detach_query(attachment);
+}
+
+/// Alice's fresh foreground cannot treat its empty memory as the persistent
+/// owner's answer. Initial local delivery must work without any authority.
+/// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
+#[test]
+fn foreground_local_attachment_waits_for_owner_delivery_not_authority() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    for seed_cache in [false, true] {
+        let relay = open_db(0x71, author, &schema);
+        relay.set_relay_authority_session_owner_for_test();
+        let cached = row(0x72);
+        if seed_cache {
+            relay
+                .insert(
+                    "todos",
+                    cells("saved", false, author),
+                    crate::db::InsertOptions {
+                        row_id: Some(cached),
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            relay.tick().unwrap();
+        }
+        let foreground = open_db(0x73, author, &schema);
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        let _upstream = block_on(foreground.connect_upstream(up));
+        let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+        let query = prepared(&foreground, &Query::from("todos"));
+        let local = ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        };
+        let attachment = foreground
+            .attach_query_with_opts(&query, local.clone())
+            .unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+        foreground.tick().unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+        for _ in 0..16 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        assert!(foreground.query_attachment_is_covered(&attachment));
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, local)).unwrap()),
+            if seed_cache { vec![cached] } else { vec![] },
+        );
+        foreground.detach_query(attachment);
+        let remote = foreground
+            .attach_query_with_opts(&query, global_subscribe_opts())
+            .unwrap();
+        for _ in 0..16 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        assert!(!foreground.query_attachment_is_covered(&remote));
+        foreground.detach_query(remote);
+    }
+}
+
+/// Alice inserts after both clients settle empty reads; Bob must receive the
+/// update through his separate scope-isolated relay, including after a transient
+/// read joins and releases the same query.
+/// Alice foreground -> relay -> core -> relay -> Bob foreground.
+#[test]
+fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let core = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let alice_relay = open_db(0x61, alice, &schema);
+    let bob_relay = open_db(0x62, bob, &schema);
+    let alice_fg = open_db(0x63, alice, &schema);
+    let bob_fg = open_db(0x64, bob, &schema);
+    for (relay, foreground, author) in
+        [(&alice_relay, &alice_fg, alice), (&bob_relay, &bob_fg, bob)]
+    {
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    }
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let query = Query::from("todos");
+    let filtered = query.clone().filter(eq(col("done"), lit(false)));
+    let mut streams = Vec::new();
+    for foreground in [&alice_fg, &bob_fg] {
+        for (query, opts) in [
+            (&query, local.clone()),
+            (&filtered, local.clone()),
+            (&query, global_subscribe_opts()),
+        ] {
+            streams.push(prepared_subscribe(foreground, query, opts).unwrap());
+        }
+    }
+    let drive = || {
+        for _ in 0..32 {
+            alice_fg.tick().unwrap();
+            bob_fg.tick().unwrap();
+            alice_relay.tick().unwrap();
+            bob_relay.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    drive();
+    for foreground in [&alice_fg, &bob_fg] {
+        assert!(prepared_all(foreground, &query, local.clone()).is_empty());
+        assert!(prepared_all(foreground, &query, global_subscribe_opts()).is_empty());
+    }
+    drive();
+    // Inspect internal ownership because equal result rows alone cannot prove
+    // that Local and remote have one upstream predecessor sequence.
+    for relay in [&alice_relay, &bob_relay] {
+        let owners = relay.node.relay_upstream_subscription_owners.borrow();
+        assert_eq!(
+            owners.len(),
+            3,
+            "three independent downstream evaluator pins"
+        );
+        assert_eq!(
+            owners
+                .keys()
+                .map(|(subscription, _, _)| *subscription)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2,
+            "two query bindings, not three tier-specific upstream streams"
+        );
+    }
+    let inserted = row(0x65);
+    let write = alice_fg
+        .insert(
+            "todos",
+            cells("new", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(inserted),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(write.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    let mut observed = Vec::new();
+    for stream in &mut streams {
+        let mut saw_insert = false;
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                saw_insert |= added.iter().any(|row| row.row.row_uuid() == inserted);
+            }
+        }
+        observed.push(saw_insert);
+    }
+    assert_eq!(
+        observed,
+        vec![true; 6],
+        "every live subscription must receive the new row"
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&bob_fg, &query, local.clone())),
+        vec![inserted]
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&bob_fg, &query, global_subscribe_opts())),
+        vec![inserted]
+    );
+    // Retiring remote readers must not retire their Local siblings' shared
+    // authority stream, even when both pins belong to the same connection.
+    for index in [5, 2] {
+        let mut remote = streams.remove(index);
+        block_on(remote.close()).unwrap();
+    }
+    drive();
+    let second = row(0x66);
+    alice_fg
+        .insert(
+            "todos",
+            cells("second", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(second),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drive();
+    for stream in &mut streams {
+        let mut saw_second = false;
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                saw_second |= added.iter().any(|row| row.row.row_uuid() == second);
+            }
+        }
+        assert!(saw_second, "a sibling close must preserve live delivery");
+    }
+}
+
+#[test]
+fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
+    let creator = public_session_eq("$createdBy", &["user"]);
+    let room_read = PublicPolicyExpr::or(vec![
+        creator.clone(),
+        public_exists(
+            "members",
+            [
+                public_outer_eq("room", "id"),
+                public_session_eq("author", &["user", "identity", "subject"]),
+            ],
+        ),
+    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("rooms")
+                    .column("name", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(room_read)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(creator.clone()), creator),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("room", "rooms")
+                    .column("author", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::Inherits {
+                                operation: PublicOperation::Select,
+                                via_column: "room".into(),
+                                max_depth: None,
+                            })
+                            .with_insert(PublicPolicyExpr::Inherits {
+                                operation: PublicOperation::Update,
+                                via_column: "room".into(),
+                                max_depth: None,
+                            }),
+                    ),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let core = open_core(0x70, AuthorSubject::SYSTEM, &schema);
+    let alice_relay = open_db(0x71, alice, &schema);
+    let bob_relay = open_db(0x72, bob, &schema);
+    let alice_fg = open_db(0x73, alice, &schema);
+    let bob_fg = open_db(0x74, bob, &schema);
+    for (relay, foreground, author) in
+        [(&alice_relay, &alice_fg, alice), (&bob_relay, &bob_fg, bob)]
+    {
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    }
+    let query = Query::from("rooms").order_by("name", OrderDirection::Asc);
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let mut bob_rooms = prepared_subscribe(&bob_fg, &query, local.clone()).unwrap();
+    let drive = || {
+        for _ in 0..32 {
+            alice_fg.tick().unwrap();
+            bob_fg.tick().unwrap();
+            alice_relay.tick().unwrap();
+            bob_relay.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    drive();
+    let room = row(0x75);
+    let write = alice_fg
+        .insert(
+            "rooms",
+            BTreeMap::from([("name".into(), Value::String("Owner room".into()))]),
+            crate::db::InsertOptions {
+                row_id: Some(room),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(write.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    while let Some(event) = bob_rooms.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                added.is_empty(),
+                "the uninvited reader must not see the room"
+            );
+        }
+    }
+    let invite = alice_fg
+        .insert(
+            "members",
+            BTreeMap::from([
+                ("room".into(), Value::Uuid(room.0)),
+                ("author".into(), Value::String(bob.principal_parts().1)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x76)),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(invite.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    let mut saw_room = false;
+    while let Some(event) = bob_rooms.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            saw_room |= added.iter().any(|value| value.row.row_uuid() == room);
+        }
+    }
+    assert!(
+        saw_room,
+        "a newly admitted existing room must flow through relay to foreground"
+    );
+}
+
+#[test]
+fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader() {
+    for malformed_closure in [false, true] {
+        let schema = schema_with_explicit_public_read();
+        let author = AuthorSubject::for_test_bytes([0xb7; 16]);
+        let core = open_core(0x80, AuthorSubject::SYSTEM, &schema);
+        core.insert_with_id("todos", row(0x83), cells("visible", false, author))
+            .unwrap();
+        let relay = open_db(0x81, author, &schema);
+        let foreground = open_db(0x82, author, &schema);
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down, inbound) = duplex_with_server_outbound_tap();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+        let query = Query::from("todos");
+        let mut streams = [
+            prepared_subscribe(
+                &foreground,
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    propagation: Propagation::Full,
+                    ..ReadOpts::default()
+                },
+            )
+            .unwrap(),
+            prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap(),
+        ];
+        let mut opening = None;
+        let mut healthy = prepared_subscribe(
+            &foreground,
+            &query.clone().filter(eq(col("title"), lit("healthy"))),
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                propagation: Propagation::Full,
+                ..ReadOpts::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..32 {
+            foreground.tick().unwrap();
+            relay.tick().unwrap();
+            core.tick().unwrap();
+            for message in inbound.borrow().iter() {
+                if let SyncMessage::ViewUpdate(payload) = message
+                    && !payload.peer_payload_inventory.opening_pending
+                    && payload
+                        .supporting_rows
+                        .added_rows()
+                        .iter()
+                        .any(|fact| matches!(fact, _))
+                {
+                    opening = Some(payload.clone());
+                }
+            }
+        }
+        for stream in &mut streams {
+            while stream.try_next_event().is_some() {}
+        }
+        let mut opening = opening.expect("authority sends a populated exact closure");
+        let failure = if malformed_closure {
+            // A complete snapshot cannot name the same physical row version
+            // twice. The relay must reject it and expose that error below.
+            let duplicate = opening.supporting_rows.added_rows()[0].clone();
+            opening.supporting_rows.added_rows_mut().push(duplicate);
+            SyncMessage::ViewUpdate(opening)
+        } else {
+            SyncMessage::SubscribeRejected {
+                subscription: SubscriptionKey {
+                    binding_id: crate::query::BindingId(uuid::Uuid::nil()),
+                    ..opening.subscription
+                },
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::Internal,
+                },
+            }
+        };
+        inbound.borrow_mut().push_back(failure);
+        for _ in 0..32 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+            core.tick().unwrap();
+        }
+        for stream in &mut streams {
+            let mut rejected = false;
+            while let Some(event) = stream.try_next_event() {
+                if let SubscriptionEvent::Rejected { reason } = event {
+                    assert_eq!(
+                        matches!(
+                            reason,
+                            SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
+                        ),
+                        malformed_closure
+                    );
+                    rejected = true;
+                }
+            }
+            assert!(
+                rejected,
+                "every shared reader must see the failure, not wait forever"
+            );
+        }
+        assert_eq!(
+            relay.node.relay_upstream_subscription_owners.borrow().len(),
+            1,
+            "an unrelated query retains its upstream ownership"
+        );
+        core.insert_with_id("todos", row(0x84), cells("healthy", false, author))
+            .unwrap();
+        for _ in 0..32 {
+            core.tick().unwrap();
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        let mut delivered = false;
+        while let Some(event) = healthy.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "unrelated query: {event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                delivered |= added.iter().any(|value| value.row.row_uuid() == row(0x84));
+            }
+        }
+        assert!(delivered, "an unrelated query remains live after rejection");
+    }
+}
+
+/// Peer updates disclose the exact authority-approved source closure. A client
+/// derives result membership locally, so protocol-facing tests inspect source
+/// inputs rather than the retired authority-rendered member payload.
+fn covered_input_rows(facts: &[crate::protocol::SupportingRow]) -> Vec<RowUuid> {
+    facts.iter().map(|input| input.row).collect()
+}
+
+// Wire inspection is required because coverage-group keys and server-stamped
+// authorization generations are intentionally absent from the public API.
+// Final convergence is still asserted through the receiver's public read.
+fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let stale = row(0x61);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+
+    let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let _first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![stale]
+    );
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(BTreeMap::from([(
+            "generation".to_owned(),
+            Value::U64(1),
+        )]));
+    subscriber.borrow_mut().tick().unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(BTreeMap::from([(
+            "generation".to_owned(),
+            Value::U64(2),
+        )]));
+    subscriber.borrow_mut().tick().unwrap();
+
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    let fresh = replacement_row.then(|| {
+        let fresh = row(0x62);
+        server
+            .insert_with_id("todos", fresh, cells("live", false, owner))
+            .unwrap();
+        fresh
+    });
+
+    // Fully drain the canonical maintained view before the duplicate attaches,
+    // but hold its first-usage delivery so the client still advertises stale A.
+    subscriber.borrow_mut().tick().unwrap();
+    let held_first_usage_updates = server_sent.borrow_mut().drain(..).collect::<Vec<_>>();
+
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_subscription = second_attachment.subscription();
+    client.tick().unwrap();
+    let second_subscribe = client_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) if subscribe.subscription == second_subscription => {
+                Some(subscribe.clone())
+            }
+            _ => None,
+        })
+        .expect("second usage site must send a real Subscribe");
+    let known_authorization_progress = match &second_subscribe.known_state {
+        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            authorization_progress,
+            ..
+        }) => *authorization_progress,
+        other => panic!("expected authorization-aware fast cursor, got {other:?}"),
+    };
+    assert_ne!(
+        known_authorization_progress, 2,
+        "the second usage site must exercise a stale authorization cursor"
+    );
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                    if *subscription == second_subscription
+            )
+        }) {
+            break;
+        }
+    }
+    // Both pins now use one ordered wire stream. Hold delivery, but preserve
+    // its FIFO order: the earlier delta precedes the refresh reset.
+    let refresh_updates = server_sent.borrow_mut().drain(..).collect::<Vec<_>>();
+    server_sent.borrow_mut().extend(held_first_usage_updates);
+    server_sent.borrow_mut().extend(refresh_updates);
+
+    let second_update = server_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription, ..
+            }) if *subscription == second_subscription => Some(message.clone()),
+            _ => None,
+        })
+        .expect("duplicate usage site must receive its own ViewUpdate");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = &second_update
+    else {
+        unreachable!();
+    };
+    assert!(!peer_payload_inventory.opening_pending);
+    assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
+    assert_eq!(
+        covered_input_rows(program_fact_adds.added_rows()).len(),
+        usize::from(replacement_row)
+    );
+    if let Some(fresh) = fresh {
+        assert_eq!(
+            covered_input_rows(program_fact_adds.added_rows()),
+            vec![fresh]
+        );
+    }
+
+    upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        fresh.into_iter().collect::<Vec<_>>(),
+        "authoritative duplicate fanout must replace stale client membership"
+    );
+}
+
+#[test]
+fn delayed_duplicate_usage_resets_stale_authorization_with_empty_canonical_set() {
+    assert_delayed_duplicate_usage_reset(false);
+}
+
+#[test]
+fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
+    assert_delayed_duplicate_usage_reset(true);
+}
+
+#[test]
+fn late_detached_view_update_does_not_cover_equal_shape_reattachment() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+
+    let first = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("attach first Global query usage");
+    let first_subscription = first.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    peer_payload_inventory,
+                    ..
+                }) if *subscription == first_subscription
+                    && !peer_payload_inventory.opening_pending
+            )
+        }) {
+            break;
+        }
+    }
+    let late_update_index = server_sent
+        .borrow()
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    peer_payload_inventory,
+                    ..
+                }) if *subscription == first_subscription
+                    && !peer_payload_inventory.opening_pending
+            )
+        })
+        .expect("first usage receives a complete ViewUpdate");
+    let late_first_update = server_sent
+        .borrow_mut()
+        .remove(late_update_index)
+        .expect("held first ViewUpdate");
+    upstream.borrow_mut().tick().unwrap();
+
+    client.detach_query(first);
+    client.tick().unwrap();
+    let second = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("reattach equal-shape Global query");
+    assert_ne!(
+        second.subscription(),
+        first_subscription,
+        "fresh authority coverage owns a distinct wire subscription"
+    );
+    client.tick().unwrap();
+
+    server_sent.borrow_mut().push_back(late_first_update);
+    upstream.borrow_mut().tick().unwrap();
+    assert!(
+        !client.query_attachment_is_covered(&second),
+        "a processed late update for the detached subscription cannot cover the reattachment"
+    );
+
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if client.query_attachment_is_covered(&second) {
+            break;
+        }
+    }
+    assert!(
+        client.query_attachment_is_covered(&second),
+        "the reattachment is covered by its own complete ViewUpdate"
+    );
+    client.detach_query(second);
+}
+
+#[test]
+fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
+    let schema = schema_with_explicit_public_read();
+    let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: row(1),
+                },
+            },
+        })
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let mut received_view = false;
+    let mut received_receipt = false;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::CatalogueSnapshot(_) => {}
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription: received,
+                ..
+            }) => {
+                assert_eq!(received, subscription);
+                received_view = true;
+            }
+            SyncMessage::AuthorizationScopeReceipt {
+                subscription: received,
+                receipt,
+            } => {
+                assert!(received_view, "receipt must follow its support view");
+                assert_eq!(received, subscription);
+                assert_eq!(receipt.link, identity);
+                assert_eq!(receipt.key.subject, identity);
+                received_receipt = true;
+            }
+            other => panic!("unexpected authorization-scope response: {other:?}"),
+        }
+    }
+    assert!(!received_view);
+    assert!(!received_receipt);
+}
+
+/* Retired with the caller-authored scope protocol.  Authority-owned intent
+ * coverage lives with the permission advice tests above.
+fn legacy_authorization_scope_subscribe_refreshes_claims() {
+    server.node().borrow_mut().set_test_provider_claims(
+        identity,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    subscriber.borrow_mut().tick().unwrap();
+    let mut refreshed_view = false;
+    let mut refreshed_receipt = None;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => refreshed_view = true,
+            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
+                assert!(
+                    refreshed_view,
+                    "replacement receipt follows replacement view"
+                );
+                refreshed_receipt = Some(receipt);
+            }
+            other => panic!("unexpected claims-refresh response: {other:?}"),
+        }
+    }
+    let refreshed_receipt = refreshed_receipt.expect("claims change must reissue receipt");
+    assert_eq!(refreshed_receipt.claims_revision, 1);
+}
+*/
+
+#[test]
+fn authorization_scope_rejects_unrelated_caller_intent() {
+    let schema = schema_with_explicit_public_read();
+    let identity = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "not_todos".to_owned(),
+                    row: row(1),
+                },
+            },
+        })
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an unrelated action must not produce a support view or receipt"
+    );
+}
+
+#[test]
+fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(PublicTableSchemaBuilder::new("support_using"))
+            .table(PublicTableSchemaBuilder::new("support_check")),
+    );
+    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    server
+        .node()
+        .borrow_mut()
+        .mutate_current_schema_for_testing(|compiled| {
+            compiled
+                .tables
+                .iter_mut()
+                .find(|table| table.name == "todos")
+                .expect("todos table")
+                .write_policies = WritePolicies {
+                update_using: Some(Query::from("support_using")),
+                update_check: Some(Query::from("support_check")),
+                ..WritePolicies::default()
+            };
+        });
+    let action = PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(1),
+        patch: BTreeMap::new(),
+    };
+    let expected = server
+        .node()
+        .borrow()
+        .authorization_support_scope(identity, &action)
+        .unwrap();
+    assert_eq!(expected.subscriptions.len(), 2);
+    let entries = expected
+        .subscriptions
+        .iter()
+        .map(|(shape, binding)| {
+            let subscription = SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            };
+            (shape.clone(), subscription)
+        })
+        .collect::<Vec<_>>();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    for (shape, _) in &entries {
+        client_transport
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .unwrap();
+    }
+    let send_scope = |client: &mut Box<dyn Transport>, shape: &ValidatedQuery, subscription| {
+        client
+            .send(SyncMessage::AuthorizationScopeSubscribe {
+                subscribe: Subscribe {
+                    shape_id: shape.shape_id(),
+                    subscription,
+                    values: Vec::new(),
+                    known_state: None,
+                    delegated_session: None,
+                },
+                purpose: AuthorizationScopePurpose {
+                    action: action.clone(),
+                },
+            })
+            .unwrap();
+    };
+    send_scope(&mut client_transport, &entries[1].0, entries[1].1);
+    subscriber.borrow_mut().tick().unwrap();
+    while let Some(message) = client_transport.try_recv() {
+        assert!(
+            !matches!(message, SyncMessage::AuthorizationScopeReceipt { .. }),
+            "one update clause must never prove the full update scope"
+        );
+    }
+    send_scope(&mut client_transport, &entries[0].0, entries[0].1);
+    subscriber.borrow_mut().tick().unwrap();
+    let mut saw_second_view = false;
+    let mut saw_receipt = false;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => {
+                saw_second_view = true
+            }
+            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
+                assert!(
+                    saw_second_view,
+                    "aggregate receipt follows final clause view"
+                );
+                assert_eq!(receipt.key, expected.key);
+                saw_receipt = true;
+            }
+            SyncMessage::CatalogueSnapshot(_) => {}
+            other => panic!("unexpected aggregate-scope response: {other:?}"),
+        }
+    }
+    assert!(!saw_receipt);
+}
+
+#[test]
+fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
+    let subscription = |seed| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let mut applied = BTreeMap::new();
+    applied.insert(subscription(1), (GlobalTime(5), 100));
+    applied.insert(subscription(2), (GlobalTime(10), 1));
+
+    assert_eq!(
+        aggregate_authorization_scope_bounds(&applied),
+        Some((GlobalTime(5), 1)),
+        "a later support view may be the limiting authorization generation"
+    );
+}
+
+// The server-only generation stamp and scope receipt are wire details that the
+// public query API intentionally hides, so this stays a narrow internal test.
+#[test]
+fn sibling_scope_receipt_uses_the_view_stamped_canonical_generation() {
+    let canonical_generation = PeerPayloadInventory {
+        authorization_progress: Some(7),
+        ..PeerPayloadInventory::default()
+    };
+    assert_eq!(
+        authorization_progress_for_view_receipt(&canonical_generation, 0),
+        7,
+        "a sibling receipt must use the canonical generation already stamped on its view"
+    );
+    assert_eq!(
+        authorization_progress_for_view_receipt(&PeerPayloadInventory::default(), 3),
+        3,
+        "an ordinary unstamped view keeps its usage-site generation"
+    );
+}
+
+#[test]
+fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
+    let subscription = |seed| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let first = subscription(0x21);
+    let second = subscription(0x31);
+    let expected_support = BTreeSet::from([
+        (first.shape_id, first.binding_id),
+        (second.shape_id, second.binding_id),
+    ]);
+    let key = AuthorizationSupportScopeKey {
+        support_shape_digest: [0x41; 32],
+        subject: AuthorSubject::for_test_bytes([0x42; 16]),
+        claims_digest: [0x43; 32],
+        policy_digest: [0x44; 32],
+    };
+    let mut aggregates = BTreeMap::from([(
+        key.clone(),
+        ScopeAggregate {
+            expected_support: expected_support.clone(),
+            members: BTreeMap::from([
+                (first, (first.shape_id, first.binding_id)),
+                (second, (second.shape_id, second.binding_id)),
+            ]),
+            applied: BTreeMap::from([(first, (GlobalTime(5), 5)), (second, (GlobalTime(5), 5))]),
+        },
+    )]);
+
+    // A claims or policy transition can make both compiled clauses disappear.
+    // Returning to the same digest must not revive either previous cut.
+    remove_scope_aggregate_member(&mut aggregates, &key, first);
+    remove_scope_aggregate_member(&mut aggregates, &key, second);
+    assert!(aggregates.is_empty());
+
+    let aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
+        expected_support,
+        members: BTreeMap::new(),
+        applied: BTreeMap::new(),
+    });
+    aggregate
+        .members
+        .insert(first, (first.shape_id, first.binding_id));
+    aggregate
+        .members
+        .insert(second, (second.shape_id, second.binding_id));
+    assert!(
+        aggregate.applied.is_empty(),
+        "the first returning clause has no receipt until its replacement view arrives"
+    );
+    aggregate.applied.insert(first, (GlobalTime(6), 6));
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .any(|member| !aggregate.applied.contains_key(member)),
+        "one refreshed clause still cannot prove the aggregate"
+    );
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .any(|member| !aggregate.applied.contains_key(member))
+    );
+    aggregate.applied.insert(second, (GlobalTime(6), 6));
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .all(|member| aggregate.applied.contains_key(member))
+    );
+}
+
+#[test]
+fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
+    let link = AuthorSubject::for_test_bytes([0x8b; 16]);
+    let context = AuthorityContext {
+        authority: [0x8a; 16],
+        link,
+        connection_id: 1,
+        connection_epoch: 7,
+        claims_revision: 3,
+        policy_epoch: 11,
+        authorization_progress: 9,
+        settled_through: 17,
+    };
+    let key = AuthorizationSupportScopeKey {
+        support_shape_digest: [1; 32],
+        subject: link,
+        claims_digest: [2; 32],
+        policy_digest: [3; 32],
+    };
+    let receipt = AuthorizationScopeReceipt {
+        key,
+        authority: context.authority,
+        link,
+        authority_epoch: context.connection_epoch,
+        claims_revision: context.claims_revision,
+        policy_epoch: context.policy_epoch,
+        settled_through: GlobalTime(17),
+        authorization_progress: 9,
+    };
+    assert!(authorization_scope_receipt_matches_transport_context(
+        &receipt,
+        context,
+        context.link,
+        Some(GlobalTime(17)),
+    ));
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                authorization_progress: 8,
+                ..receipt.clone()
+            },
+            context,
+            context.link,
+            Some(GlobalTime(17)),
+        ),
+        "a stale authorization generation must not ride a fresh support view"
+    );
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                settled_through: GlobalTime(16),
+                ..receipt
+            },
+            context,
+            context.link,
+            Some(GlobalTime(17)),
+        ),
+        "a stale support cut must not ride a fresh authorization generation"
+    );
+}
+
+#[test]
+fn authorization_scope_requires_canonical_current_global_support_options() {
+    let expected = RegisterShapeOptions::default();
+    let subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x51; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x52; 16])),
+        read_view: opts.read_view_key(),
+    };
+    assert!(authorization_scope_support_options_match(
+        &expected,
+        &expected,
+        subscription_for(&expected),
+    ));
+    let variants = [
+        RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x54; 16]),
+                        global_base: GlobalTime(0),
+                        local_base: TxTime(0),
+                        dots: Vec::new(),
+                    },
+                },
+            },
+            ..RegisterShapeOptions::default()
+        },
+        RegisterShapeOptions {
+            tier: DurabilityTier::Local,
+            read_view: ReadViewSpec::default(),
+            ..RegisterShapeOptions::default()
+        },
+    ];
+    for actual in variants {
+        assert!(
+            !authorization_scope_support_options_match(
+                &expected,
+                &actual,
+                subscription_for(&actual),
+            ),
+            "noncanonical scope support must not satisfy the pure admission fence"
+        );
+    }
+}
+
+#[test]
+fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
+    let schema = schema_with_explicit_public_read();
+    let identity = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let historical = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x61; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: TxTime(0),
+                    dots: Vec::new(),
+                },
+            },
+        },
+        ..RegisterShapeOptions::default()
+    };
+    let variants = [
+        historical,
+        RegisterShapeOptions {
+            tier: DurabilityTier::Local,
+            read_view: ReadViewSpec::default(),
+            ..RegisterShapeOptions::default()
+        },
+    ];
+
+    // This is the matching positive control: the same shape/binding receives
+    // a proof under the sole canonical current/global registration. Removing
+    // both admission guards below makes the noncanonical cases fail instead.
+    let canonical_opts = RegisterShapeOptions::default();
+    let canonical_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: canonical_opts.read_view_key(),
+    };
+    let canonical_server = open_core(0x64, AuthorSubject::SYSTEM, &schema);
+    let (mut canonical_client, canonical_transport) = duplex();
+    let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
+    canonical_client
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: canonical_opts,
+        })
+        .unwrap();
+    canonical_client
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription: canonical_subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: row(1),
+                },
+            },
+        })
+        .unwrap();
+    canonical_subscriber.borrow_mut().tick().unwrap();
+    let mut saw_view = false;
+    let mut saw_receipt = false;
+    while let Some(message) = canonical_client.try_recv() {
+        match message {
+            SyncMessage::CatalogueSnapshot(_) => {}
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => saw_view = true,
+            SyncMessage::AuthorizationScopeReceipt { .. } => {
+                assert!(saw_view, "canonical receipt follows its support view");
+                saw_receipt = true;
+            }
+            other => panic!("unexpected canonical support response: {other:?}"),
+        }
+    }
+    assert!(
+        !saw_view && !saw_receipt,
+        "the authority-owned protocol rejects client-selected support even at the canonical view"
+    );
+
+    for opts in variants {
+        let server = open_core(0x63, AuthorSubject::SYSTEM, &schema);
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        let (mut client_transport, server_transport) = duplex();
+        let subscriber = server.accept_subscriber(server_transport, identity);
+        client_transport
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts,
+            })
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        while client_transport.try_recv().is_some() {}
+        client_transport
+            .send(SyncMessage::AuthorizationScopeSubscribe {
+                subscribe: Subscribe {
+                    shape_id: shape.shape_id(),
+                    subscription,
+                    values: Vec::new(),
+                    known_state: None,
+                    delegated_session: None,
+                },
+                purpose: AuthorizationScopePurpose {
+                    action: PermissionAdviceAction::Read {
+                        table: "todos".to_owned(),
+                        row: row(1),
+                    },
+                },
+            })
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        assert!(
+            client_transport.try_recv().is_none(),
+            "branch, historic, and local support must never receive a receipt"
+        );
+    }
+}
+
+#[test]
+fn subscriber_cannot_spoof_authority_view_updates() {
+    let schema = schema();
+    let edge = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
+    let (edge_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let query = Query::from("todos");
+    let mut stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
+    edge.tick().unwrap();
+    let subscription = loop {
+        match authority_transport
+            .try_recv()
+            .expect("opening remote coverage must send an upstream subscription")
+        {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    let view_update = |opening_pending, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(settled_through),
+
+            version_carriers: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending,
+                ..Default::default()
+            },
+            supporting_rows: if opening_pending {
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
+            } else {
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
+            },
+        })
+    };
+    authority_transport.send(view_update(true, 1)).unwrap();
+    edge.tick().unwrap();
+    assert!(
+        stream.try_next_event().is_none(),
+        "pending is neither a result nor a rejection"
+    );
+    let authority_result_key = edge
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    assert!(
+        edge.node
+            .node
+            .borrow()
+            .opening_pending_for_authority_result(&authority_result_key),
+        "normal authority opening must install the pending marker"
+    );
+    let before_generation = edge
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result_key);
+    let before_watermark = edge.node.node.borrow().committed_global_time();
+    let before_drops = edge
+        .node
+        .node
+        .borrow()
+        .sync_metrics()
+        .dropped_peer_request_messages;
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber =
+        edge.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
+
+    client_transport.send(view_update(false, 100)).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
+    assert_eq!(node.committed_global_time(), before_watermark);
+    assert_eq!(
+        node.applied_authority_result_generation(&authority_result_key),
+        before_generation,
+        "subscriber spoof must not mutate the maintained view"
+    );
+    assert!(
+        node.opening_pending_for_authority_result(&authority_result_key),
+        "subscriber spoof must not clear authority-owned opening state"
+    );
+    assert_eq!(
+        node.sync_metrics().dropped_peer_request_messages,
+        before_drops + 1,
+        "the subscriber frame must be rejected before NodeState dispatch"
+    );
+    drop(node);
+
+    let mut malformed_pending = view_update(false, 2);
+    if let SyncMessage::ViewUpdate(payload) = &mut malformed_pending {
+        payload.peer_payload_inventory.opening_pending = true;
+        payload
+            .supporting_rows
+            .added_rows_mut()
+            .push(crate::protocol::SupportingRow {
+                physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
+                version_table: "todos".to_owned().into(),
+                row: row(1),
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: TxId {
+                        time: crate::time::TxTime(1),
+                        node: NodeUuid(uuid::Uuid::from_u128(1)),
+                    },
+                    schema_version: Some(schema.version_id()),
+                    layer: crate::protocol::ResultRowLayer::Content,
+                    batch: None,
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            });
+    }
+    authority_transport.send(malformed_pending).unwrap();
+    edge.tick().unwrap();
+    assert!(matches!(
+        stream.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+        })
+    ));
+    assert_eq!(
+        edge.node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result_key),
+        before_generation,
+        "a pending marker carrying source data must fail before mutating the receipt"
+    );
+
+    authority_transport.send(view_update(false, 2)).unwrap();
+    edge.tick().unwrap();
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
+    assert_eq!(
+        node.applied_authority_result_generation(&authority_result_key),
+        before_generation + 1,
+        "the same message class must remain admitted from an authority link"
+    );
+    assert!(!node.opening_pending_for_authority_result(&authority_result_key));
+    drop(node);
+    assert!(opened_rows(block_on(stream.next_event()).unwrap()).is_empty());
+}
+
+// This stays internal because the admission ordering and retained peer registration
+// state are not exposed through the public client API.
+#[test]
+fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_retention() {
+    let schema = schema();
+    let server = open_core(0x5d, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let oversized_opts = RegisterShapeOptions {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x98; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: TxTime(0),
+                    dots: vec![
+                        TxId::new(TxTime(1), NodeUuid::from_bytes([0x97; 16]));
+                        MAX_SHAPE_REGISTRATION_BYTES
+                    ],
+                },
+            },
+        },
+        ..RegisterShapeOptions::default()
+    };
+    let shape_id = shape.shape_id();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber =
+        server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x96; 16]));
+
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id,
+            ast: ShapeAst::from_validated(&shape),
+            opts: oversized_opts,
+        })
+        .unwrap();
+    let error = subscriber.borrow_mut().tick().unwrap_err();
+
+    assert_eq!(error.code, crate::db::ErrorCode::Protocol);
+    assert!(error.message.contains("shape registration size"));
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an invalid oversized registration must terminate the link instead of using a new wire-level rejection convention"
+    );
+    let subscriber = subscriber.borrow();
+    let crate::db::peer_connection::ConnectionLink::Subscriber(state) = &subscriber.link else {
+        panic!("accepted subscriber must retain subscriber connection state");
+    };
+    assert!(
+        state.shape_registrations.is_empty(),
+        "oversized read-view options must not be retained"
+    );
+}
+
+#[test]
+fn oversized_register_shape_is_rejected_at_admission() {
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let huge_table = "t".repeat(MAX_SHAPE_REGISTRATION_BYTES + 1);
+    let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
+    let error = server
+        .node()
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x99; 16])),
+            ast,
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::node::Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
+    ));
+}
+
+#[test]
+fn resume_cursor_restores_connection_claims_before_serving_same_identity_siblings() {
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let normal_claims = BTreeMap::new();
+    let invite_claims = BTreeMap::from([
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
+        (
+            "join_code".to_owned(),
+            Value::String("resume-only-invite".to_owned()),
+        ),
+    ]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc6, reader, &schema);
+    let sibling = open_db(0xc7, reader, &schema);
+    let chat = row(0xc3);
+    server
+        .insert_with_id(
+            "chats",
+            chat,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("secret".to_owned())),
+                ("is_public".to_owned(), Value::Bool(false)),
+                ("created_by".to_owned(), Value::String("author".to_owned())),
+                (
+                    "join_code".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String(
+                        "resume-only-invite".to_owned(),
+                    )))),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    assert!(server.server.detach_connection(&subscriber));
+    assert!(client.detach_connection(&upstream));
+
+    // This same-identity sibling is admitted with a broader invite claim. The
+    // resumed ordinary session must restore its own empty invite context, not
+    // inherit the process-local compiler cache that this sibling last bound.
+    let (sibling_transport, sibling_server_transport) = duplex();
+    let _sibling_upstream = crate::db::block_on(sibling.connect_upstream(sibling_transport));
+    let _sibling_subscriber =
+        server.accept_subscriber_with_claims(sibling_server_transport, reader, invite_claims);
+    let (resumed_transport, resumed_server_transport) = duplex();
+    let _resumed_upstream = crate::db::block_on(client.connect_upstream(resumed_transport));
+    let _resumed = server.accept_subscriber_with_resume(resumed_server_transport, reader, cursor);
+
+    let query = prepared(
+        &client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let attachment = client
+        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(client.all(&query, edge_subscribe_opts()))
+            .unwrap()
+            .is_empty(),
+        "a resumed empty-claim session must not inherit its sibling's invite claim",
+    );
+}
+
+#[test]
+fn subscriber_wire_claims_cannot_escalate_host_admission() {
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let normal_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(reader.test_uuid().to_string()),
+    )]);
+    let self_asserted_invite = BTreeMap::from([
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
+        (
+            "join_code".to_owned(),
+            Value::String("self-asserted-invite".to_owned()),
+        ),
+    ]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc8, reader, &schema);
+    let chat = row(0xc4);
+    server
+        .insert_with_id(
+            "chats",
+            chat,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("secret".to_owned())),
+                ("is_public".to_owned(), Value::Bool(false)),
+                ("created_by".to_owned(), Value::String("author".to_owned())),
+                (
+                    "join_code".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String(
+                        "self-asserted-invite".to_owned(),
+                    )))),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    let (client_transport, server_transport, client_sent) = duplex_with_client_outbound_tap();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let dropped_before = server
+        .node()
+        .borrow()
+        .sync_metrics()
+        .dropped_peer_request_messages;
+
+    // An ordinary session transport no longer forwards its local provider
+    // claims at all. Inject the malicious frame at the wire boundary instead:
+    // it is an unverified peer assertion from an already admitted session, not
+    // an authenticated host refresh, and must not replace the admission map.
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::SessionClaims {
+            identity: reader,
+            claims: self_asserted_invite,
+        });
+    server.tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        dropped_before + 1,
+    );
+
+    let query = prepared(
+        &client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let attachment = client
+        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(client.all(&query, edge_subscribe_opts()))
+            .unwrap()
+            .is_empty(),
+        "a subscriber cannot grant itself an invite claim after host admission",
+    );
+}
+
+#[test]
+fn identical_live_usages_share_one_ordered_upstream_transition() {
+    // INV-SYNC-44: exercise the complete-snapshot receiver contract.
+    // Public streams assert the result; the tapped wire additionally proves
+    // that sharing happens before delivery, not through replay tolerance.
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc2, client_author, &schema);
+    let stale = row(0x63);
+    let fresh = row(0x64);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+    let (client_transport, server_transport, _, server_sent) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let mut first = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut second = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let first_read = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_read = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    assert_eq!(first_read.subscription(), second_read.subscription());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(first.next_event()).unwrap())),
+        vec![stale]
+    );
+    assert_eq!(
+        row_ids(&opened_rows(block_on(second.next_event()).unwrap())),
+        vec![stale]
+    );
+    assert!(client.query_attachment_is_covered(&first_read));
+    assert!(client.query_attachment_is_covered(&second_read));
+    {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(state.served.len(), 1);
+    }
+    server_sent.borrow_mut().clear();
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id("todos", fresh, cells("live", false, owner))
+        .unwrap();
+    // A new one-shot joins during the change and requests fresh coverage on
+    // the same stream. It must not reset either existing listener's history.
+    let refresh = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    assert_eq!(refresh.subscription(), first_read.subscription());
+    assert!(!client.query_attachment_is_covered(&refresh));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    {
+        let messages = server_sent.borrow();
+        let updates = messages
+            .iter()
+            .filter_map(|message| match message {
+                SyncMessage::ViewUpdate(update) => Some(update),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            updates.len(),
+            1,
+            "refresh has one shared successor, not one per listener"
+        );
+        assert_eq!(
+            covered_input_rows(updates[0].supporting_rows.added_rows()),
+            vec![fresh]
+        );
+    }
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&refresh));
+    for stream in [&mut first, &mut second] {
+        // A complete wire snapshot preserves each established listener's
+        // incremental history: stale leaves and fresh enters exactly once.
+        let event = block_on(stream.next_event()).unwrap();
+        let SubscriptionEvent::Delta { reset, removed, .. } = &event else {
+            panic!("expected subscription delta");
+        };
+        assert!(!reset);
+        assert_eq!(
+            removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+            vec![stale]
+        );
+        assert_eq!(row_ids(&opened_rows(event)), vec![fresh]);
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![fresh]
+    );
+    server_sent.borrow_mut().clear();
+    server
+        .update(
+            "todos",
+            fresh,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    server.tick().unwrap();
+    let removals = server_sent
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => {
+                Some(!covered_input_rows(update.supporting_rows.added_rows()).contains(&fresh))
+            }
+            _ => None,
+        })
+        .filter(|absent| *absent)
+        .count();
+    assert_eq!(removals, 1, "ordinary removal is transmitted only once");
+    client.tick().unwrap();
+    for stream in [&mut first, &mut second] {
+        let (added, updated, removed) = delta_rows(block_on(stream.next_event()).unwrap());
+        assert!(added.is_empty());
+        assert!(updated.is_empty());
+        assert_eq!(
+            removed
+                .into_iter()
+                .map(|row| row.row_uuid)
+                .collect::<Vec<_>>(),
+            vec![fresh]
+        );
+    }
+    client.detach_query(first_read);
+    client.detach_query(second_read);
+    assert!(client.query_attachment_is_covered(&refresh));
+    client.detach_query(refresh);
+    drop(first);
+    drop(second);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    assert!(state.served.is_empty());
+}
+
+#[test]
+fn scope_relay_local_read_delivers_cache_before_authority_opens() {
+    assert_scope_relay_local_read_before_authority(false, false);
+    assert_scope_relay_local_read_before_authority(true, false);
+}
+
+#[test]
+fn scope_relay_empty_includes_publish_complete_source_manifest() {
+    assert_scope_relay_local_read_before_authority(false, true);
+}
+
+fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_includes: bool) {
+    // Match a browser host: query I/O may yield to a later scheduled turn.
+    // This test drives those turns explicitly rather than running a JS loop.
+    struct HostScheduler;
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _urgency: TickUrgency) {}
+        fn schedule_tick_after(&self, _delay_ms: u64) {}
+        fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+            Some(futures::task::noop_waker())
+        }
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid)
+                    .nullable_fk_column("parent", "todos")
+                    .nullable_fk_column("project", "projects")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(None, PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let core = open_core(0x64, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0x65, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x66, author, &schema);
+    relay.set_tick_scheduler(Some(Rc::new(HostScheduler)));
+    foreground.set_tick_scheduler(Some(Rc::new(HostScheduler)));
+    foreground.set_non_durable_client();
+    let cached = row(0x67);
+    if seed_cache {
+        relay
+            .insert(
+                "todos",
+                cells("cached", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(cached),
+                    identity: crate::db::WriteIdentity::Attribution(author),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let (relay_transport, core_transport) = duplex();
+    let _relay_upstream = block_on(relay.connect_upstream(relay_transport));
+    let (foreground_transport, relay_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _relay_foreground =
+        relay.accept_subscriber_with_claims(relay_transport, author, BTreeMap::new());
+    let query = if with_includes {
+        Query::from("todos")
+            .include_with(
+                crate::query::Include::new("parent").join_mode(crate::query::JoinMode::Holes),
+            )
+            .include_with(
+                crate::query::Include::new("project").join_mode(crate::query::JoinMode::Holes),
+            )
+    } else {
+        Query::from("todos")
+    };
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let mut stream = prepared_subscribe(&foreground, &query, opts.clone()).unwrap();
+    let mut strict = prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
+    // The authority is connected but deliberately not driven. Local reads must
+    // still receive the relay's cached/pending row, without a terminal error.
+    // This test drives a generic host scheduler, so mirror the server-shell
+    // owner bridge before each relay turn; production wake handling marks the
+    // relay subscriber dirty before requesting its next turn.
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
+        relay.tick().unwrap();
+    }
+    foreground.tick().unwrap();
+    while let Some(event) = stream.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+    }
+    while let Some(event) = strict.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        assert!(
+            !event_settled(&event),
+            "strict read settled without authority: {event:?}"
+        );
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&foreground, &query, opts.clone())),
+        if seed_cache { vec![cached] } else { vec![] }
+    );
+    if !seed_cache {
+        relay
+            .insert(
+                "todos",
+                cells("cached", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(cached),
+                    identity: crate::db::WriteIdentity::Attribution(author),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for _ in 0..16 {
+            relay.mark_subscriber_connections_dirty_for_test();
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+        }
+        assert_eq!(
+            row_ids(&prepared_all(&foreground, &query, opts.clone())),
+            vec![cached]
+        );
+    }
+    let _core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
+    for _ in 0..16 {
+        core.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&foreground, &query, opts)),
+        vec![cached]
+    );
+    let mut strict_settled = false;
+    while let Some(event) = strict.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        strict_settled |= event_settled(&event);
+    }
+    assert!(
+        strict_settled,
+        "strict read must finish when its authority opens"
+    );
+}
+
+#[test]
+fn scope_relay_shares_upstream_across_foregrounds_until_final_detach() {
+    // Public reads prove convergence; connection inspection pins the wire
+    // ownership invariant that cannot be inferred from equal result values.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let core = open_core(0x54, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0x55, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let first = open_db(0x56, author, &schema);
+    let second = open_db(0x57, author, &schema);
+    let original = row(0x58);
+    core.insert_with_id("todos", original, cells("live", false, author))
+        .unwrap();
+    let (relay_transport, core_transport) = duplex();
+    let relay_upstream = block_on(relay.connect_upstream(relay_transport));
+    let core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
+    let (first_transport, relay_first_transport) = duplex();
+    let _first_upstream = block_on(first.connect_upstream(first_transport));
+    let relay_first =
+        relay.accept_subscriber_with_claims(relay_first_transport, author, BTreeMap::new());
+    let (second_transport, relay_second_transport) = duplex();
+    let _second_upstream = block_on(second.connect_upstream(second_transport));
+    let _relay_second =
+        relay.accept_subscriber_with_claims(relay_second_transport, author, BTreeMap::new());
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let first_query = prepared(&first, &query);
+    let second_query = prepared(&second, &query);
+    let first_read = first
+        .attach_query_with_opts(&first_query, global_subscribe_opts())
+        .unwrap();
+    let second_read = second
+        .attach_query_with_opts(&second_query, global_subscribe_opts())
+        .unwrap();
+    let drive = || {
+        first.tick().unwrap();
+        second.tick().unwrap();
+        relay.tick().unwrap();
+        core.tick().unwrap();
+        relay.tick().unwrap();
+        first.tick().unwrap();
+        second.tick().unwrap();
+    };
+    for _ in 0..32 {
+        drive();
+        if first.query_attachment_is_covered(&first_read)
+            && second.query_attachment_is_covered(&second_read)
+        {
+            break;
+        }
+    }
+    assert!(first.query_attachment_is_covered(&first_read));
+    assert!(second.query_attachment_is_covered(&second_read));
+    assert_eq!(
+        row_ids(&prepared_all(&first, &query, global_subscribe_opts())),
+        vec![original]
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&second, &query, global_subscribe_opts())),
+        vec![original]
+    );
+    {
+        let owners = relay.node.relay_upstream_subscription_owners.borrow();
+        assert_eq!(owners.len(), 2, "each foreground owns its own pin");
+        assert_eq!(
+            owners
+                .keys()
+                .map(|(subscription, _, _)| *subscription)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(state.served.len(), 1);
+    }
+    assert!(relay.detach_connection(&relay_upstream));
+    assert!(core.server.detach_connection(&core_relay));
+    let (relay_transport, core_transport) = duplex();
+    let _replacement_upstream = block_on(relay.connect_upstream(relay_transport));
+    let core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 2);
+    for _ in 0..8 {
+        drive();
+    }
+    {
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(
+            state.served.len(),
+            1,
+            "reconnect replays the shared stream only once"
+        );
+    }
+    assert!(relay.detach_connection(&relay_first));
+    for _ in 0..4 {
+        drive();
+    }
+    {
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(
+            state.served.len(),
+            1,
+            "one departing foreground cannot retire its sibling's stream"
+        );
+    }
+    core.update(
+        "todos",
+        original,
+        BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+    )
+    .unwrap();
+    for _ in 0..32 {
+        drive();
+        if prepared_all(&second, &query, global_subscribe_opts()).is_empty() {
+            break;
+        }
+    }
+    assert!(prepared_all(&second, &query, global_subscribe_opts()).is_empty());
+    second.detach_query(second_read);
+    for _ in 0..4 {
+        drive();
+    }
+    let connection = core_relay.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    assert!(
+        state.served.is_empty(),
+        "final pin releases the upstream receiver"
+    );
+    assert!(
+        relay
+            .node
+            .relay_upstream_subscription_owners
+            .borrow()
+            .is_empty()
+    );
+    first.detach_query(first_read);
+}
+
+#[test]
+fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling() {
+    // INV-SYNC-45: exercise the complete-snapshot receiver contract.
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, client_author, &schema);
+    let stale = row(0x65);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+
+    let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let first_subscription = first_attachment.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
+    // Deliberately exercise server fanout at the protocol seam. Ordinary Db
+    // usages coalesce; these extra wire consumers have no receiver state in
+    // this client and must not be applied to its first stream's predecessor.
+    let second_subscription = SubscriptionKey {
+        binding_id: BindingId(uuid::Uuid::from_bytes([0xd2; 16])),
+        ..first_subscription
+    };
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(Subscribe {
+            shape_id: prepared.shape.shape_id(),
+            subscription: second_subscription,
+            values: prepared
+                .shape
+                .params()
+                .keys()
+                .map(|name| prepared.binding.values()[name].clone())
+                .collect(),
+            known_state: None,
+            delegated_session: None,
+        }));
+    client.tick().unwrap();
+    let mut second_opening_received = false;
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        second_opening_received = server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    ..
+                }) if *subscription == second_subscription
+            )
+        });
+        upstream.borrow_mut().tick().unwrap();
+        if second_opening_received {
+            break;
+        }
+    }
+    assert!(
+        second_opening_received,
+        "second usage must receive its own opening view before the client consumes it"
+    );
+    server_sent.borrow_mut().clear();
+
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    let fresh = row(0x66);
+    server
+        .insert_with_id("todos", fresh, cells("live", false, owner))
+        .unwrap();
+
+    crate::peer::fail_next_cloned_subscription_reset_for_test();
+    let failed_subscription = SubscriptionKey {
+        binding_id: BindingId(uuid::Uuid::from_bytes([0xd3; 16])),
+        ..first_subscription
+    };
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(Subscribe {
+            shape_id: prepared.shape.shape_id(),
+            subscription: failed_subscription,
+            values: prepared
+                .shape
+                .params()
+                .keys()
+                .map(|name| prepared.binding.values()[name].clone())
+                .collect(),
+            known_state: None,
+            delegated_session: None,
+        }));
+    client.tick().unwrap();
+    let failed_subscribe = client_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) if subscribe.subscription == failed_subscription => {
+                Some(subscribe.clone())
+            }
+            _ => None,
+        })
+        .expect("the failed clone must have a concrete wire admission to retry");
+    // `server_sent` is the upstream connection's live inbound queue. Keep the
+    // receiver idle until the subscription-addressed ordering is inspected.
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::SubscribeRejected { subscription, .. }
+                    if *subscription == failed_subscription
+            )
+        }) {
+            break;
+        }
+    }
+
+    let messages = server_sent.borrow();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::SubscribeRejected { .. }))
+            .count(),
+        1,
+        "the reset failure must reject only the new usage"
+    );
+    let rejection_index = messages
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::SubscribeRejected {
+                    subscription,
+                    reason: SubscribeRejectReason::ServerFailure {
+                        code: SubscribeServerFailureCode::SchemaResolution,
+                    },
+                } if *subscription == failed_subscription
+            )
+        })
+        .expect("injected clone reset failure must reject only the new usage");
+    let mut sibling_authorization_progress = Vec::new();
+    for sibling in [first_subscription, second_subscription] {
+        let updates = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| match message {
+                SyncMessage::ViewUpdate(payload) if payload.subscription == sibling => {
+                    Some((index, payload))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            updates.len(),
+            1,
+            "each established sibling must receive the consumed canonical transition exactly once"
+        );
+        let (update_index, update) = updates[0];
+        assert!(update_index < rejection_index);
+        assert_eq!(
+            covered_input_rows(update.supporting_rows.added_rows()),
+            vec![fresh]
+        );
+        assert!(!covered_input_rows(update.supporting_rows.added_rows()).contains(&stale));
+        sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
+    }
+    assert_eq!(
+        sibling_authorization_progress[0], sibling_authorization_progress[1],
+        "failure fanout must retain one canonical authorization generation"
+    );
+    assert!(
+        messages.iter().all(|message| !matches!(
+            message,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription,
+                ..
+            }) if *subscription == failed_subscription
+        )),
+        "the injected target reset failure must not fabricate a clone update"
+    );
+    assert!(
+        messages.iter().all(|message| !matches!(
+            message,
+            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
+                if [first_subscription, second_subscription, failed_subscription]
+                    .contains(subscription)
+        )),
+        "ordinary query usages must not acquire unpaired authorization-scope receipts"
+    );
+    drop(messages);
+
+    // This test stays at the connection seam because the injected clone reset
+    // failure is deliberately below the public client API. The rejected usage
+    // must leave no served registration, policy binding, or shared-group
+    // ownership behind; the two established siblings remain intact.
+    {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("core keeps serving the client link");
+        };
+        let coverage = state.served[&first_subscription].clone();
+        let group = &state.coverage_groups[&coverage];
+        assert!(!state.served.contains_key(&failed_subscription));
+        assert_eq!(
+            group.subscribers,
+            BTreeSet::from([first_subscription, second_subscription])
+        );
+        assert_eq!(
+            group.pending_initial_subscribers,
+            BTreeSet::new(),
+            "a rejected usage cannot remain eligible for a later initial reset"
+        );
+        assert!(
+            state
+                .peer
+                .subscription_policy_binding(failed_subscription)
+                .is_none(),
+            "rejection must discard the usage-site authorization snapshot"
+        );
+    }
+
+    let later = row(0x67);
+    server
+        .insert_with_id("todos", later, cells("live", false, owner))
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    assert!(
+        server_sent.borrow().iter().all(|message| !matches!(
+            message,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                if *subscription == failed_subscription
+        )),
+        "later canonical deltas must not resurrect a rejected usage"
+    );
+    // Replay the exact rejected wire handle. This is intentionally not a new
+    // attachment: callers may retry after a transient server failure, and the
+    // usage-site id must be cleanly reusable.
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(failed_subscribe));
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                    if *subscription == failed_subscription
+            )
+        }) {
+            break;
+        }
+    }
+    assert!(
+        server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                    if *subscription == failed_subscription
+            )
+        }),
+        "the same usage-site id must be admitted after its failed clone reset is rolled back"
+    );
+
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh, later] {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![fresh, later],
+        "established siblings must converge even though the new clone was rejected"
+    );
+}
+
+// Internal seam: deterministic cancellation between clause hydrations checks
+// temporary proof-owner retirement without relying on storage timing.
+#[test]
+fn review_cancelled_multiclause_authorization_releases_completed_clauses() {
+    review_multiclause_cleanup(0xa4);
+}
+
+#[test]
+fn review_failed_multiclause_authorization_releases_completed_clauses() {
+    review_multiclause_cleanup(0xa5);
+}
+
+fn review_multiclause_cleanup(mode: u8) {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("support_using"))
+            .table(PublicTableSchemaBuilder::new("support_check")),
+    );
+    let identity = AuthorSubject::for_test_bytes([mode; 16]);
+    let server = open_core(0xa6, AuthorSubject::SYSTEM, &schema);
+    server
+        .node()
+        .borrow_mut()
+        .mutate_current_schema_for_testing(|compiled| {
+            compiled
+                .tables
+                .iter_mut()
+                .find(|table| table.name == "todos")
+                .unwrap()
+                .write_policies = WritePolicies {
+                update_using: Some(Query::from("support_using")),
+                update_check: Some(Query::from("support_check")),
+                ..WritePolicies::default()
+            };
+        });
+    let action = PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(1),
+        patch: BTreeMap::new(),
+    };
+    let node = server.node();
+    assert_eq!(
+        node.borrow()
+            .authorization_support_scope(identity, &action)
+            .unwrap()
+            .subscriptions
+            .len(),
+        2
+    );
+    let mut peer = crate::peer::PeerState::relay();
+    let mut pending = VecDeque::new();
+    let mut hydrations = BTreeMap::new();
+    let mut count = 0;
+    let mut hook = crate::db::peer_connection::AuthorizationScopeTestHook {
+        fail: mode == 0xa5,
+        reached_second_clause: false,
+    };
+    let mut future = Box::pin(
+        crate::db::peer_connection::serve_authorization_scope_intent(
+            &node,
+            &mut peer,
+            &mut pending,
+            identity,
+            BTreeMap::new(),
+            1,
+            crate::protocol::PermissionAdviceRequestId([0xa7; 16]),
+            action,
+            crate::node::CommitUnitTrust::TrustedBackend,
+            &mut hydrations,
+            &mut count,
+            Some(&mut hook),
+        ),
+    );
+    let mut failed = false;
+    for _ in 0..256 {
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Pending => {}
+            Poll::Ready(Err(error)) if mode == 0xa5 => {
+                assert!(error.to_string().contains("later-clause storage failure"));
+                failed = true;
+                break;
+            }
+            result => panic!("unexpected hydration result: {result:?}"),
+        }
+    }
+    drop(future);
+    assert_eq!(failed, mode == 0xa5);
+    assert_eq!(count, 1);
+    assert!(
+        hook.reached_second_clause,
+        "the first clause completed before cancellation/error"
+    );
+    assert!(pending.is_empty(), "no incomplete proof was published");
+    assert_eq!(
+        peer.review_publication_count(),
+        0,
+        "cancelled whole proof must retire earlier successful clause owners"
+    );
+}
+
+// This scheduling boundary is internal: invalidate the accepted owner answer
+// before the waiting foreground polls it, while retaining its receipt counter.
+#[test]
+fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let relay = open_db(0x74, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x75, author, &schema);
+    foreground.set_non_durable_client();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let query = prepared(&foreground, &Query::from("todos"));
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let waiting = foreground
+        .attach_query_with_opts(&query, local.clone())
+        .unwrap();
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&waiting));
+    foreground
+        .node
+        .node
+        .borrow_mut()
+        .invalidate_subscription_scopes();
+    assert!(
+        !foreground.query_attachment_is_covered(&waiting),
+        "the counter alone must not revive an invalidated owner answer"
+    );
+    let refreshed = foreground.attach_query_with_opts(&query, local).unwrap();
+    assert!(!foreground.query_attachment_is_covered(&refreshed));
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&waiting),
+        "fresh owner delivery releases the older read without upstream authority"
+    );
+    assert!(foreground.query_attachment_is_covered(&refreshed));
+    foreground.detach_query(waiting);
+    foreground.detach_query(refreshed);
+}

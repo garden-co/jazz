@@ -1,0 +1,2737 @@
+#[test]
+fn project_preserves_logical_binding_fields() {
+    // Query results use the same projection transform as current rows. The
+    // descriptor tag must survive so a logical public `user_check` is not
+    // decoded as physical application column `check` by a native host.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("$createdBy".to_owned(), RowAuthor::value_type()),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), RowAuthor::value_type()),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6d).0),
+            Value::Bool(true),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(10),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingRole::LogicalField,
+    )
+    .project(&table, &["check".to_owned()])
+    .expect("project logical result");
+
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingRole::LogicalField
+    );
+}
+
+#[test]
+fn project_keeps_literal_aggregate_shaped_column_names() {
+    let table = TableSchema::new(
+        "items",
+        [ColumnSchema::new("__jazz_aggregate_foo", ColumnType::U64)],
+    );
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name(
+            "__jazz_aggregate_foo".to_owned(),
+        )),
+        records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x70).0),
+            Value::U64(9),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(10),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingRole::PhysicalColumn,
+    )
+    .project(&table, &["__jazz_aggregate_foo".to_owned()])
+    .expect("project aggregate-shaped literal column");
+
+    assert_eq!(
+        projected.cell(&table, "__jazz_aggregate_foo"),
+        Some(Value::U64(9))
+    );
+    assert_eq!(
+        projected.publication_fields[1].application_name(),
+        Some("__jazz_aggregate_foo")
+    );
+    let cells = projected.test_cells_by_descriptor();
+    assert_eq!(cells["__jazz_aggregate_foo"], Value::U64(9));
+    assert_eq!(projected.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::system_at(node(1)),
+        created_at: 10,
+        updated_by: AuthorSubject::system_at(node(1)),
+        updated_at: 20,
+    }));
+}
+
+#[test]
+fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
+    // A terminal can reuse `_app_title` as its private carrier for the public
+    // application field `title`, while also exposing a genuine logical output
+    // named `_app_title`. The explicit override, rather than prefix stripping,
+    // distinguishes them.
+    let table = TableSchema::new("items", [ColumnSchema::new("title", ColumnType::String)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
+        ])
+        .unwrap();
+    let terminal = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+
+    assert_eq!(
+        terminal.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    let projected = terminal.project(&table, &["title".to_owned()]).unwrap();
+    assert_eq!(
+        projected.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    assert_eq!(projected.publication_fields[1].application_name(), Some("title"));
+
+    let physical_descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+    ]);
+    let physical_raw = physical_descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
+        ])
+        .unwrap();
+    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+    assert!(
+        terminal.subscription_equivalent(&physical_then_logical),
+        "a cache handoff must not emit a reset solely because the terminal carrier changed"
+    );
+}
+
+#[test]
+fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
+    // A hybrid collector may expose a logical `_app_check` beside the physical
+    // storage field `_app_check`. Descriptor position is not provenance: the
+    // logical field deliberately comes first here, and projecting schema
+    // column `check` must still select the physical true value.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_check".to_owned(), records::ValueType::Bool),
+        ("_app_check".to_owned(), records::ValueType::Bool),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6e).0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ])
+        .unwrap();
+    let hybrid = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
+        ],
+    );
+
+    assert_eq!(hybrid.cell(&table, "check"), Some(Value::Bool(true)));
+    let projected = hybrid
+        .project(&table, &["check".to_owned()])
+        .expect("project hybrid result");
+    assert_eq!(projected.cell(&table, "check"), Some(Value::Bool(true)));
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingRole::PhysicalColumn
+    );
+}
+
+#[test]
+fn subscription_equivalence_keeps_hybrid_physical_and_logical_user_names_distinct() {
+    // Before descriptor provenance was consulted here, both fields were
+    // normalized to `check`. Swapping their values then made two observably
+    // different public rows compare equal and suppressed an update.
+    fn hybrid_row(physical_check: bool, logical_user_check: bool) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new([
+            ("row_uuid".to_owned(), records::ValueType::Uuid),
+            ("user_check".to_owned(), records::ValueType::Bool),
+            ("user_check".to_owned(), records::ValueType::Bool),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(row(0x6f).0),
+                Value::Bool(logical_user_check),
+                Value::Bool(physical_check),
+            ])
+            .unwrap();
+        CurrentRow::new_with_explicit_binding_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::PhysicalColumn,
+            ],
+        )
+    }
+
+    assert!(!hybrid_row(true, false).subscription_equivalent(&hybrid_row(false, true)));
+}
+
+#[test]
+fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
+    fn current_row(
+        physical: bool,
+        created_by: AuthorSubject,
+        created_at: u64,
+        updated_by: AuthorSubject,
+        updated_at: u64,
+        title: &str,
+    ) -> CurrentRow {
+        let row_uuid = row(0x68);
+        let (descriptor, values) = if physical {
+            (
+                records::RecordDescriptor::new([
+                    ("branch_key".to_owned(), records::ValueType::Bytes),
+                    ("row_uuid".to_owned(), records::ValueType::Uuid),
+                    ("schema_version".to_owned(), records::ValueType::U64),
+                    ("created_by".to_owned(), RowAuthor::value_type()),
+                    ("created_at".to_owned(), records::ValueType::U64),
+                    ("updated_by".to_owned(), RowAuthor::value_type()),
+                    ("updated_at".to_owned(), records::ValueType::U64),
+                    (user_column_field("title"), records::ValueType::String),
+                ]),
+                vec![
+                    Value::Bytes(Vec::new()),
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(1),
+                    RowAuthor::from_persisted_subject(created_by).unwrap().to_value(),
+                    Value::U64(created_at),
+                    RowAuthor::from_persisted_subject(updated_by).unwrap().to_value(),
+                    Value::U64(updated_at),
+                    Value::String(title.to_owned()),
+                ],
+            )
+        } else {
+            (
+                records::RecordDescriptor::new([
+                    ("row_uuid".to_owned(), records::ValueType::Uuid),
+                    ("title".to_owned(), records::ValueType::String),
+                    ("$createdBy".to_owned(), RowAuthor::value_type()),
+                    ("$createdAt".to_owned(), records::ValueType::U64),
+                    ("$updatedBy".to_owned(), RowAuthor::value_type()),
+                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                ]),
+                vec![
+                    Value::Uuid(row_uuid.0),
+                    Value::String(title.to_owned()),
+                    RowAuthor::from_persisted_subject(created_by).unwrap().to_value(),
+                    Value::U64(created_at),
+                    RowAuthor::from_persisted_subject(updated_by).unwrap().to_value(),
+                    Value::U64(updated_at),
+                ],
+            )
+        };
+        let raw = descriptor.create(&values).unwrap();
+        CurrentRow::new_with_binding_fields("todos", OwnedRecord::new(raw, descriptor),
+            if physical { CurrentRowBindingRole::PhysicalColumn } else { CurrentRowBindingRole::LogicalField })
+    }
+
+    let created_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x68; 16]));
+    let original_updated_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x69; 16]));
+    let changed_updated_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x6a; 16]));
+    let physical = current_row(true, created_by, 10, original_updated_by, 20, "same title");
+    let same_public = current_row(false, created_by, 10, original_updated_by, 20, "same title");
+    let changed_provenance = current_row(false, created_by, 10, changed_updated_by, 21, "same title");
+    let changed_content = current_row(false, created_by, 10, original_updated_by, 20, "new title");
+
+    assert!(physical.subscription_equivalent(&same_public));
+    assert!(!physical.subscription_equivalent(&changed_provenance));
+    assert!(!physical.subscription_equivalent(&changed_content));
+}
+
+#[test]
+fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() {
+    const CELL_COUNT: usize = 512;
+    let row_uuid = row(0x6b);
+    let mut physical_fields = vec![
+        ("branch_key".to_owned(), records::ValueType::Bytes),
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("schema_version".to_owned(), records::ValueType::U64),
+        ("created_by".to_owned(), RowAuthor::value_type()),
+        ("created_at".to_owned(), records::ValueType::U64),
+        ("updated_by".to_owned(), RowAuthor::value_type()),
+        ("updated_at".to_owned(), records::ValueType::U64),
+    ];
+    let mut physical_values = vec![
+        Value::Bytes(Vec::new()),
+        Value::Uuid(row_uuid.0),
+        Value::U64(1),
+        RowAuthor::system_at(node(1)).to_value(),
+        Value::U64(10),
+        RowAuthor::system_at(node(1)).to_value(),
+        Value::U64(20),
+    ];
+    let mut public_fields = vec![
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("$createdBy".to_owned(), RowAuthor::value_type()),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), RowAuthor::value_type()),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ];
+    let mut public_values = vec![
+        Value::Uuid(row_uuid.0),
+        RowAuthor::system_at(node(1)).to_value(),
+        Value::U64(10),
+        RowAuthor::system_at(node(1)).to_value(),
+        Value::U64(20),
+    ];
+    for idx in 0..CELL_COUNT {
+        physical_fields.push((format!("user_column_{idx}"), records::ValueType::U64));
+        physical_values.push(Value::U64(idx as u64));
+    }
+    // Reverse public descriptor order to ensure equality is independent of
+    // layout while still decoding only the two linear cell iterators once.
+    for idx in (0..CELL_COUNT).rev() {
+        public_fields.push((format!("column_{idx}"), records::ValueType::U64));
+        public_values.push(Value::U64(idx as u64));
+    }
+    let physical_descriptor = records::RecordDescriptor::new(physical_fields);
+    let public_descriptor = records::RecordDescriptor::new(public_fields);
+    let physical_raw = physical_descriptor.create(&physical_values).unwrap();
+    let public_raw = public_descriptor.create(&public_values).unwrap();
+    let physical = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+    );
+    let public = CurrentRow::new("todos", OwnedRecord::new(public_raw, public_descriptor));
+
+    assert!(physical.subscription_equivalent(&public));
+}
+
+#[test]
+fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
+    fn query_row(fields: Vec<(&str, &str)>, values: Vec<Value>) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new_with_fields(
+            [records::DescriptorField::new("row_uuid", records::ValueType::Uuid)]
+                .into_iter()
+                .chain(fields.into_iter().map(|(carrier, logical)| {
+                    records::DescriptorField::new(carrier, records::ValueType::U64)
+                        .with_identity(records::FieldIdentity::Name(logical.to_owned()))
+                }))
+                .chain([
+                    records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+                    records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                    records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+                    records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+                ]),
+        );
+        let values = [Value::Uuid(row(0x6c).0)]
+            .into_iter()
+            .chain(values)
+            .chain([
+                RowAuthor::system_at(node(1)).to_value(),
+                Value::U64(10),
+                RowAuthor::system_at(node(1)).to_value(),
+                Value::U64(20),
+            ])
+            .collect::<Vec<_>>();
+        let raw = descriptor.create(&values).unwrap();
+        CurrentRow::new_with_binding_fields("scores", OwnedRecord::new(raw, descriptor), CurrentRowBindingRole::LogicalField)
+    }
+
+    let aggregate_layout = query_row(
+        vec![
+            ("foo", "foo"),
+            ("__jazz_aggregate_foo", "foo"),
+        ],
+        vec![Value::U64(1), Value::U64(2)],
+    );
+    let public_layout = query_row(
+        vec![
+            ("user___jazz_aggregate_foo", "foo"),
+            ("user_foo", "foo"),
+        ],
+        vec![Value::U64(2), Value::U64(1)],
+    );
+    let foo = query_row(
+        vec![("foo", "foo")],
+        vec![Value::U64(1)],
+    );
+    let bar = query_row(
+        vec![("bar", "bar")],
+        vec![Value::U64(1)],
+    );
+
+    assert!(aggregate_layout.subscription_equivalent(&public_layout));
+    assert!(!foo.subscription_equivalent(&bar));
+}
+
+#[test]
+fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name("foo".to_owned())),
+        records::DescriptorField::new(
+            user_column_field("user___jazz_aggregate_foo"),
+            records::ValueType::U64,
+        ).with_identity(records::FieldIdentity::Name("user___jazz_aggregate_foo".to_owned())),
+        records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x71).0),
+            Value::U64(2),
+            Value::U64(7),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(10),
+            RowAuthor::system_at(node(1)).to_value(),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let row = CurrentRow::new("scores", OwnedRecord::new(raw, descriptor));
+
+    assert_eq!(
+        row.test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("foo".to_owned(), Value::U64(2)),
+            (
+                "user___jazz_aggregate_foo".to_owned(),
+                Value::U64(7),
+            ),
+
+        ])
+    );
+    assert_eq!(row.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::system_at(node(1)),
+        created_at: 10,
+        updated_by: AuthorSubject::system_at(node(1)),
+        updated_at: 20,
+    }));
+}
+
+#[test]
+fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline() {
+    let schema = two_column_schema();
+    let node_uuid = node(0x71);
+    let (temp_dir, mut node) = open_node_with_schema(node_uuid, schema.clone());
+    let body = "large logical body/".repeat(20_000);
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x71), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String(body.clone())),
+        ])),
+    )
+    .unwrap();
+
+    let stored = node.query_table_versions("todos").unwrap();
+    assert!(matches!(
+        stored[0].cell(node.table("todos").unwrap(), "body"),
+        Ok(Some(Value::Large(_)))
+    ));
+    let current = node.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        current[0].cell(node.table("todos").unwrap(), "body"),
+        Some(Value::String(body.clone()))
+    );
+    node.database.close().unwrap();
+    drop(node);
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut reopened = NodeState::new(node_uuid, schema, storage).unwrap();
+    assert_eq!(
+        reopened.current_rows("todos", DurabilityTier::Local).unwrap()[0]
+            .cell(reopened.table("todos").unwrap(), "body"),
+        Some(Value::String(body))
+    );
+}
+
+#[test]
+fn failed_large_scalar_staging_publishes_no_row() {
+    #[derive(Clone)]
+    struct FailingStage;
+    impl groove::chunks::ChunkStorage for FailingStage {
+        fn get(
+            &self,
+            _locator: groove::large_values::Locator,
+            _expected_hash: groove::large_values::ContentHash,
+        ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkStorageError>> {
+            Box::pin(async { Err(groove::chunks::ChunkStorageError::Unavailable) })
+        }
+
+        fn stage(
+            &self,
+            _chunks: Vec<groove::large_values::StagedChunk>,
+        ) -> groove::chunks::ChunkFuture<
+            '_,
+            Result<
+                groove::large_values::StagedLargeValueAccounting,
+                groove::chunks::ChunkStorageError,
+            >,
+        > {
+            Box::pin(async { Err(groove::chunks::ChunkStorageError::Backend("planted".to_owned())) })
+        }
+    }
+
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x72), schema);
+    node.set_chunk_storage(std::rc::Rc::new(FailingStage));
+    let result = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x72), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String("x".repeat(70_000))),
+        ])),
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::Groove(GrooveDbError::IvmRuntime(
+            groove::ivm::runtime::IvmRuntimeError::Chunk(
+                groove::chunks::ChunkError::Backend(message)
+            )
+        ))) if message.contains("planted")
+    ));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn jazz_incoming_data_rate_limit_evicts_the_rejected_root_and_publishes_no_row() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7a), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let result = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x7a), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String("x".repeat(70_000))),
+        ])),
+    );
+
+    assert!(matches!(result, Err(Error::LargeValueIngressRateLimited)));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn default_large_value_staging_policy_is_finite() {
+    let policy = LargeValueStagingPolicy::default();
+    assert_eq!(policy.incoming_bytes_per_window, 256 * 1024 * 1024);
+    assert_eq!(policy.window_ms, 1_000);
+    assert_eq!(policy.max_age_ms, 10 * 60 * 1_000);
+}
+
+#[test]
+fn malformed_version_receipts_fail_closed_at_direct_semantic_ingress() {
+    let (_writer_dir, mut writer) = open_node();
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x7d), 10).cells(title_cells("malformed")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, mut versions } = unit else {
+        panic!("commit unit expected");
+    };
+    let valid = versions.pop().unwrap();
+    let mut raw = valid.record().raw().to_vec();
+    raw.push(0xa5); // planted: the central guard must reject unconsumed raw bytes
+    let malformed = VersionRecord::new(
+        valid.table(),
+        valid.schema_version(),
+        OwnedRecord::new(raw, *valid.record().descriptor()),
+    );
+
+    let assert_no_panic = |result: std::thread::Result<Result<(), Error>>| {
+        assert!(result.is_ok(), "direct semantic ingress must not panic");
+        assert!(result.unwrap().is_err());
+    };
+
+    let (_apply_dir, mut apply) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = apply.apply_sync_message_settled(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: vec![malformed.clone()],
+        })?;
+        if matches!(
+            outcome.as_slice(),
+            [SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                ..
+            }]
+        ) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+
+    let (_authority_dir, mut authority) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = authority
+            .ingest_commit_unit(tx.clone(), vec![malformed.clone()], 10)
+            .resolve()?;
+        if matches!(
+            outcome.value.as_slice(),
+            [SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                ..
+            }]
+        ) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+
+    let (_relay_dir, mut relay) = open_node();
+    assert_no_panic(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || {
+            relay
+                .ingest_relay_commit_unit(tx.clone(), vec![malformed.clone()])
+                .resolve()
+        },
+    )));
+
+    let (_exclusive_dir, mut exclusive) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = exclusive
+            .finalize_local_exclusive_commit(tx.clone(), vec![malformed.clone()])
+            .resolve()?;
+        if matches!(outcome.value, Fate::Rejected(RejectionReason::MalformedCommit(_))) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+}
+
+#[test]
+fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 0,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        b"rate-admitted upload start",
+    )
+    .unwrap();
+    let outcome = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref,
+            }),
+            Some(CommitUnitIngestContext {
+                identity: AuthorSubject::SYSTEM,
+                trust: CommitUnitTrust::Session,
+                admitted_write_authorization: false,
+            }),
+        )
+        .resolve()
+        .unwrap()
+        .value;
+
+    assert!(matches!(
+        outcome.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::RateLimited,
+            ..
+        })]
+    ));
+    assert!(
+        crate::db::block_on(receiver.database.pending_large_value_uploads())
+            .unwrap()
+            .is_empty(),
+        "rate-limited starts must not create durable pending metadata"
+    );
+}
+
+#[test]
+fn expired_staged_tree_requires_reupload_before_row_publication() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7b), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 1,
+    });
+    let logical = "expired staged body/".repeat(8_000);
+    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
+        MergeableCommit::new("todos", row(0x7b), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+    ))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    assert_eq!(
+        crate::db::block_on(node.evict_expired_staged_large_values()).unwrap(),
+        1,
+        "host maintenance evicts the abandoned staged root"
+    );
+
+    assert!(matches!(
+        node.commit_mergeable_settled(commit),
+        Err(Error::LargeValueStageExpired)
+    ));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn delayed_staged_tree_publishes_while_receipt_remains_present() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7c), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    let logical = "delayed staged body/".repeat(8_000);
+    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
+        MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+    ))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    node.commit_mergeable_settled(commit)
+        .expect("wall-clock age alone must not reject a present receipt");
+    assert_eq!(node.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+}
+
+#[test]
+fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
+    let schema = two_column_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x7c), schema.clone());
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7d), schema.clone());
+    let (_missing_dir, mut missing) = open_node_with_schema(node(0x7e), schema);
+    let logical = "pushed body/".repeat(8_000);
+    let (commit, value_ref) = crate::db::block_on(writer.attach_large_cell_for_test(
+        MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+    ))
+    .unwrap();
+    let (_, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorSubject::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        admitted_write_authorization: false,
+    });
+    assert!(matches!(
+        missing
+            .apply_sync_message_with_ingest_context(unit.clone(), context)
+            .resolve(),
+        Err(Error::LargeValueStageExpired)
+    ));
+
+    let mut upload_result = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    loop {
+        let status = match upload_result.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status,
+                ..
+            })] => status.clone(),
+            other => panic!("unexpected upload result: {other:?}"),
+        };
+        match status {
+            crate::protocol::ChunkUploadStatus::Need(nodes) => {
+                let chunks = nodes
+                    .into_iter()
+                    .map(|node_ref| {
+                        let encoded = crate::db::block_on(writer.local_chunk(
+                            node_ref.locator,
+                            node_ref.object_hash,
+                        ))
+                        .expect("writer retains each requested immutable node");
+                        groove::large_values::StagedChunk {
+                            node_ref,
+                            encoded: encoded.to_vec(),
+                        }
+                    })
+                    .collect();
+                upload_result = receiver
+                    .apply_sync_message_with_ingest_context(
+                        SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                            value_ref: value_ref.clone(),
+                            chunks,
+                        }),
+                        context,
+                    )
+                    .resolve()
+                    .unwrap()
+                    .value;
+            }
+            crate::protocol::ChunkUploadStatus::Staged => break,
+            other => panic!("upload failed: {other:?}"),
+        }
+    }
+    let outcome = receiver
+        .apply_sync_message_with_ingest_context(unit, context)
+        .resolve()
+        .unwrap();
+    settle_outcome(&mut receiver, outcome).unwrap();
+}
+
+#[test]
+fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
+    let schema = two_column_schema();
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7f), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "corrupt upload/".repeat(8_000).as_bytes(),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorSubject::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        admitted_write_authorization: false,
+    });
+    let mut root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    root.encoded[0] ^= 0xff;
+    let rejected = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        rejected.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Rejected,
+            ..
+        })]
+    ));
+
+    let retry = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        retry.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] if nodes == &[prepared.value_ref.root]
+    ));
+}
+
+#[test]
+fn rate_limited_upload_preserves_pending_claim_for_retry() {
+    let schema = two_column_schema();
+    let node_uuid = node(0x80);
+    let (_temp_dir, mut receiver) = open_node_with_schema(node_uuid, schema.clone());
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "terminal cleanup/".repeat(20_000).as_bytes(),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorSubject::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        admitted_write_authorization: false,
+    });
+    let start = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let root = match start.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes[0].clone(),
+        other => panic!("unexpected upload start result: {other:?}"),
+    };
+    let root_chunk = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == root)
+        .unwrap()
+        .clone();
+    let accepted = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root_chunk.clone()],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let mut pending_nodes = match accepted.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes.clone(),
+        other => panic!("expected a partial upload frontier: {other:?}"),
+    };
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let rate_limited = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root_chunk.clone()],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        rate_limited.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::RateLimited,
+            ..
+        })]
+    ));
+    assert_eq!(
+        crate::db::block_on(receiver.database.pending_large_value_uploads())
+            .unwrap()
+            .len(),
+        1,
+        "rate limiting is resumable and retains prior accepted nodes"
+    );
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy::default());
+    loop {
+        let chunks = pending_nodes
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let retried = receiver
+            .apply_sync_message_with_ingest_context(
+                SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                    value_ref: prepared.value_ref.clone(),
+                    chunks,
+                }),
+                context,
+            )
+            .resolve()
+            .unwrap()
+            .value;
+        match retried.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Need(nodes),
+                ..
+            })] => pending_nodes = nodes.clone(),
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Staged,
+                ..
+            })] => break,
+            other => panic!("retry did not resume the upload: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn maintenance_evicts_pending_upload_after_the_configured_age() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x81), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "pending expiry/".repeat(20_000).as_bytes(),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorSubject::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        admitted_write_authorization: false,
+    });
+    let _ = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref,
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap();
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        crate::db::block_on(receiver.evict_expired_staged_large_values()).unwrap(),
+        1
+    );
+    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+        .unwrap()
+        .is_empty());
+}
+
+/// An authenticated sender starts a large upload, then waits past the receiver
+/// configured TTL without running maintenance. The still-present journal may
+/// continue all the way through finalization: TTL is GC policy, not a
+/// synchronous admission deadline.
+///
+/// ```text
+/// alice ──start──► receiver ──Need(root)──► alice
+/// alice ──delay──► receiver ──nodes──► Staged
+/// ```
+#[test]
+fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "delayed finalization/".repeat(20_000).as_bytes(),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorSubject::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        admitted_write_authorization: false,
+    });
+    let started = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let mut pending_nodes = match started.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes.clone(),
+        other => panic!("unexpected upload start: {other:?}"),
+    };
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    loop {
+        let chunks = pending_nodes
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let response = receiver
+            .apply_sync_message_with_ingest_context(
+                SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                    value_ref: prepared.value_ref.clone(),
+                    chunks,
+                }),
+                context,
+            )
+            .resolve()
+            .unwrap()
+            .value;
+        match response.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Need(nodes),
+                ..
+            })] => pending_nodes = nodes.clone(),
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Staged,
+                ..
+            })] => break,
+            other => panic!("delayed upload did not resume: {other:?}"),
+        }
+    }
+    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        crate::db::block_on(receiver.database.staged_large_values())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn synced_descriptor_reads_through_shared_opaque_chunk_backend() {
+    let schema = two_column_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x73), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x74), schema);
+    let backend = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    writer.set_chunk_storage(backend.clone());
+    reader.set_chunk_storage(backend);
+    let body = "shared backend value/".repeat(15_000);
+    let (_, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x73), 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("title".to_owned())),
+                ("body".to_owned(), Value::String(body.clone())),
+            ])),
+        )
+        .unwrap();
+
+    reader.apply_sync_message_settled(unit).unwrap();
+
+    let rows = reader.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        rows[0].cell(reader.table("todos").unwrap(), "body"),
+        Some(Value::String(body))
+    );
+}
+
+#[test]
+fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publish() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x75), schema);
+    let logical = "prepared logical value/".repeat(10_000);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+    )
+    .unwrap();
+    let forged = MergeableCommit::new("todos", row(0x75), 10).cells(BTreeMap::from([
+        ("title".to_owned(), Value::String("title".to_owned())),
+        ("body".to_owned(), Value::Large(Box::new(prepared.value_ref.clone()))),
+    ]));
+    assert!(matches!(
+        node.commit_mergeable_settled(forged),
+        Err(Error::InvalidMergeableCommit(_))
+    ));
+
+    let logical_commit = MergeableCommit::new("todos", row(0x75), 11).cells(BTreeMap::from([(
+        "title".to_owned(),
+        Value::String("title".to_owned()),
+    )]));
+    let (admitted, _) = crate::db::block_on(node.attach_large_cell_for_test(
+        logical_commit,
+        "body",
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+    ))
+    .unwrap();
+    node.commit_mergeable_settled(admitted).unwrap();
+
+    let rows = node.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        rows[0].cell(node.table("todos").unwrap(), "body"),
+        Some(Value::String(logical))
+    );
+}
+
+#[test]
+fn parent_tuple_encoding_matches_tx_id_tuple_order() {
+    let tx_id = TxId::new(TxTime::from(0x0102_0304_0506), node(0x12));
+    let parent_value = Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)]);
+    let descriptor = groove::records::RecordDescriptor::new([(
+        "parents",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Tuple(vec![
+            groove::records::ValueType::U64,
+            groove::records::ValueType::Uuid,
+        ]))),
+    )]);
+    let record = descriptor
+        .create(&[Value::Array(vec![parent_value.clone()])])
+        .unwrap();
+
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&tx_id.time.0.to_be_bytes());
+    expected.extend_from_slice(tx_id.node.as_bytes());
+    assert_eq!(record, expected);
+    assert_eq!(
+        descriptor.bind(&record).get_array_element(0, 0).unwrap(),
+        parent_value
+    );
+}
+
+#[test]
+fn lowered_record_wrapper_field_indexes_match_open_descriptors() {
+    let schema = two_column_schema();
+    debug_assert_lowered_layouts(&schema);
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x19), schema.clone());
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x19), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("layout".to_owned())),
+            ("body".to_owned(), Value::String("descriptor".to_owned())),
+        ])),
+    )
+    .unwrap();
+
+    let rows = node.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows[0].row_uuid(), row(0x19));
+    assert_eq!(rows[0].cell_at(0), Some(Value::String("layout".to_owned())));
+    assert_eq!(
+        rows[0].cell_at(1),
+        Some(Value::String("descriptor".to_owned()))
+    );
+}
+
+#[test]
+fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
+    fn fixture_schema() -> JazzSchema {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
+        let source: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let source = serde_json::from_value::<std::collections::BTreeMap<_, _>>(
+            source["mergedSchema"].clone(),
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+        crate::schema::JazzSchema::new(&source).unwrap()
+    }
+
+    fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {
+        match column_type {
+            groove::schema::ColumnType::U8 => Value::U8(seed),
+            groove::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
+            groove::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
+            groove::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
+            groove::schema::ColumnType::I32 => Value::I32(i32::from(seed) - 128),
+            groove::schema::ColumnType::I64 => Value::I64(i64::from(seed) - 128),
+            groove::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
+            groove::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
+            groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
+            groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
+            groove::schema::ColumnType::Internal(_) => {
+                panic!("logical fixture values cannot target internal physical columns")
+            }
+            groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
+            groove::schema::ColumnType::EnumTag(_) => Value::EnumTag(0),
+            groove::schema::ColumnType::Tuple(members) => Value::Tuple(
+                members
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, member)| sample_value(member, seed.wrapping_add(idx as u8 + 1)))
+                    .collect(),
+            ),
+            groove::schema::ColumnType::Array(member) => Value::Array(vec![
+                sample_value(member, seed.wrapping_add(1)),
+                sample_value(member, seed.wrapping_add(2)),
+            ]),
+            groove::schema::ColumnType::Nullable(member) => {
+                Value::Nullable(Some(Box::new(sample_value(member, seed.wrapping_add(1)))))
+            }
+            groove::schema::ColumnType::Record(descriptor) => {
+                let values = descriptor
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, field)| sample_value(&field.value_type, seed.wrapping_add(idx as u8 + 1)))
+                    .collect::<Vec<_>>();
+                Value::Record(groove::records::OwnedRecord::new(
+                    descriptor.create(&values).unwrap(),
+                    **descriptor,
+                ))
+            }
+            groove::schema::ColumnType::Enum(_) => {
+                panic!("Jazz public schemas do not expose whole-row Groove enums")
+            }
+        }
+    }
+
+    fn parts_for(table: &TableSchema, seed: u8, deletion: Option<DeletionEvent>) -> VersionRowParts {
+        VersionRowParts {
+            table: table.name.clone(),
+            branch_key: BranchKey::default(),
+            row_uuid: RowUuid(uuid::Uuid::from_bytes([seed; 16])),
+            tx_node_alias: NodeAlias(u64::from(seed) + 10),
+            schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
+            tx_time: TxTime::from(u64::from(seed) + 30),
+            parents: vec![TxId::new(
+                TxTime::from(u64::from(seed) + 1),
+                node(seed.wrapping_add(1)),
+            )],
+            created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
+            created_at: TxTime::from(u64::from(seed) + 40),
+            updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
+            updated_at: TxTime::from(u64::from(seed) + 50),
+            cells: table
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| {
+                    let seed = seed.wrapping_add((idx as u8).wrapping_add(4));
+                    // JSON remains string-shaped in the public schema, but
+                    // its schema-derived storage descriptor uses the sealed
+                    // kind-witnessed scalar representation. Feed it valid
+                    // JSON so the physical codec can construct that record.
+                    let value = if column.large_value_kind
+                        == crate::schema::LargeValueSemanticKind::Json
+                    {
+                        Value::String(format!(r#"{{"fixture":{seed}}}"#))
+                    } else {
+                        sample_value(&column.column_type, seed)
+                    };
+                    (
+                        column.name.clone(),
+                        value,
+                    )
+                })
+                .collect(),
+            authored_columns: deletion
+                .is_none()
+                .then(|| {
+                    table
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| PhysicalColumnId(index as u64 + 1))
+                        .collect()
+                }),
+            deletion,
+        }
+    }
+
+    let schema = fixture_schema();
+    assert!(!schema.tables.is_empty());
+    for (idx, table) in schema.tables.iter().enumerate() {
+        let seed = (idx as u8).wrapping_add(1);
+        let content = VersionRow::from_parts_with_schema_version(
+            table,
+            parts_for(table, seed, None),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(content.record.descriptor().fields(), table.history_storage_table().record_schema().fields());
+        let content_values = content.record.to_values().unwrap();
+        assert_eq!(
+            table
+                .history_storage_table()
+                .record_schema()
+                .create(&content_values)
+                .unwrap(),
+            content.record.raw()
+        );
+        let authored_columns_idx = content
+            .record
+            .descriptor()
+            .field_index("authored_columns")
+            .unwrap();
+        assert_eq!(
+            content_values[authored_columns_idx],
+            Value::Nullable(Some(Box::new(Value::Array(
+                (1..=table.columns.len() as u64).map(Value::U64).collect()
+            ))))
+        );
+
+        let current_values = global_current_values(table, &content, Some(GlobalTime(7))).unwrap();
+        let global_current_table = table.global_current_storage_tables().remove(0);
+        global_current_table
+            .record_schema()
+            .create(&current_values)
+            .unwrap();
+
+        let deletion = VersionRow::from_parts_with_schema_version(
+            table,
+            parts_for(table, seed.wrapping_add(100), Some(DeletionEvent::Deleted)),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(deletion.record.descriptor().fields(), table.register_storage_table().record_schema().fields());
+        let deletion_values = deletion.record.to_values().unwrap();
+        assert_eq!(
+            table
+                .register_storage_table()
+                .record_schema()
+                .create(&deletion_values)
+                .unwrap(),
+            deletion.record.raw()
+        );
+
+        let register_current_values =
+            register_global_current_values(&deletion, Some(GlobalTime(8))).unwrap();
+        let register_global_current_table = table.global_current_storage_tables().remove(1);
+        register_global_current_table
+            .record_schema()
+            .create(&register_current_values)
+            .unwrap();
+    }
+}
+
+#[test]
+fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(7);
+    let tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+                "title".to_owned(),
+                "write tests".to_owned(),
+            )])),
+        )
+        .unwrap();
+
+    assert_eq!(tx.time, TxTime::from(10));
+    let expected_row_author = AuthorSubject::system_at(node.node_uuid);
+    let stored = node.query_transaction(tx).unwrap().unwrap();
+    assert_eq!(stored.tx.made_by, expected_row_author);
+    assert_eq!(stored.tx.permission_subject, Some(AuthorSubject::SYSTEM));
+    let version = node.query_versions_for_tx(tx).unwrap().remove(0);
+    assert_eq!(version.created_by(), expected_row_author);
+    assert_eq!(version.updated_by(), expected_row_author);
+    assert_eq!(
+        node.visible_current_cells("todos", row)
+            .unwrap()
+            .unwrap()
+            .get("title")
+            .unwrap(),
+        &v("write tests")
+    );
+    let history = node
+        .physical_history_source_graph(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let mut database = node.into_database();
+    assert!(
+        !database
+            .query(select_all("jazz_transactions"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.query_graph(history).unwrap().iter().next().is_some());
+}
+
+#[test]
+fn stored_authored_columns_require_a_canonical_physical_id_array() {
+    assert_eq!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(5)]))
+            .unwrap(),
+        BTreeSet::from([PhysicalColumnId(2), PhysicalColumnId(5)])
+    );
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(2)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(5), Value::U64(2)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Bytes(Vec::new())),
+        Err(Error::InvalidStoredValue(
+            "authored columns must be an array of physical column ids"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![
+            Value::U64(1),
+            Value::String("not an id".to_owned()),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "authored columns must contain physical column ids"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(0)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be nonzero"
+        ))
+    ));
+}
+
+#[test]
+fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state() {
+    // Internal storage-boundary receipt: applications cannot manufacture a
+    // physical id, so exercise a deliberately corrupted durable history row.
+    // Reopen must preserve the fail-closed boundary rather than regenerating
+    // ahead/global current carriers from malformed history.
+    for invalid_id in [0, 9_999] {
+        let schema = schema();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tx_id;
+        {
+            let mut node = open_node_at(&temp_dir, schema.clone());
+            tx_id = node
+                .commit_mergeable_settled(
+                    MergeableCommit::new("todos", row(invalid_id as u8), 10)
+                        .cells(title_cells("corrupt authored ids")),
+                )
+                .unwrap();
+            let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+
+            // Remove the valid derived carrier first, then replace only the
+            // immutable persisted history row with malformed raw bytes.
+            let mut cleanup = node.database.open_batch();
+            node.write_ahead_current_delete(&mut cleanup, &version).unwrap();
+            let applied = crate::db::block_on(node.database.apply_batch(cleanup)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+            assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+
+            let schema_version = node
+                .schema_version_for_alias(version.schema_version_alias())
+                .unwrap();
+            let table = node
+                .table_in_schema(version.table(), schema_version)
+                .unwrap()
+                .clone();
+            let corrupted = VersionRow::from_parts_with_schema_version(
+                &table,
+                VersionRowParts {
+                    table: version.table().to_owned(),
+                    branch_key: version.branch_key().clone(),
+                    row_uuid: version.row_uuid(),
+                    tx_node_alias: version.tx_node_alias(),
+                    schema_version_alias: version.schema_version_alias(),
+                    tx_time: version.tx_time(),
+                    parents: version.parents(),
+                    created_by: version.created_by(),
+                    created_at: version.created_at(),
+                    updated_by: version.updated_by(),
+                    updated_at: version.updated_at(),
+                    cells: version.cells(&table).unwrap(),
+                    authored_columns: Some(BTreeSet::from([PhysicalColumnId(invalid_id)])),
+                    deletion: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            let (history_table, raw) = node.version_storage_write_binding(&corrupted).unwrap();
+            let mut corruption = node.database.open_batch();
+            corruption.update_raw(
+                history_table.to_string(),
+                node.version_storage_primary_key(&corrupted).unwrap(),
+                raw,
+            );
+            let applied = crate::db::block_on(node.database.apply_batch(corruption)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+        }
+
+        let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+        let corrupted = reopened.query_versions_for_tx(tx_id).unwrap().remove(0);
+        let mut ahead = reopened.database.open_batch();
+        assert!(reopened
+            .write_ahead_current_insert(&mut ahead, &corrupted)
+            .is_err());
+        let mut global = reopened.database.open_batch();
+        assert!(reopened
+            .write_global_current_update(&mut global, &corrupted, GlobalTime(1))
+            .is_err());
+        assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+        let table_id = reopened
+            .physical_table_id_for_schema(reopened.catalogue.local_schema_version_id, "todos")
+            .unwrap();
+        assert!(reopened
+            .database
+            .primary_key_scan_raw(&physical_global_current_table_name(table_id), &[])
+            .unwrap()
+            .is_empty());
+    }
+}
+
+// This is intentionally an internal codec test: malformed derived storage is
+// not constructible through the public API. It guards the canonical form used
+// for physical merge-head rows before they are consumed by merge semantics.
+#[test]
+fn stored_merge_heads_require_a_canonical_transaction_id_array() {
+    let first = TxId::new(TxTime::from(2), node(1));
+    let second = TxId::new(TxTime::from(2), node(2));
+    let heads = BTreeSet::from([first, second]);
+    assert_eq!(merge_heads_from_value(merge_heads_value(&heads)).unwrap(), heads);
+    assert_eq!(
+        merge_heads_value(&heads),
+        Value::Array(vec![tx_id_value(first), tx_id_value(second)]),
+        "same-time transaction IDs use their canonical node UUID tie-breaker"
+    );
+
+    assert!(matches!(
+        merge_heads_from_value(Value::Array(vec![
+            tx_id_value(first),
+            tx_id_value(first),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        merge_heads_from_value(Value::Array(vec![
+            tx_id_value(second),
+            tx_id_value(first),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        merge_heads_from_value(Value::Bytes(Vec::new())),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be an array of transaction ids"
+        ))
+    ));
+}
+
+#[test]
+fn authoring_stamps_explicit_child_after_parent_time() {
+    let (_temp_dir, mut core) = open_node();
+    let parent = TxId::new(TxTime::from(10_000), node(0x77));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x71), 1)
+                .parents(vec![parent])
+                .cells(title_cells("child")),
+        )
+        .unwrap();
+
+    assert!(
+        child.time > parent.time,
+        "author must stamp explicit child after parent: child={child:?}, parent={parent:?}"
+    );
+}
+#[test]
+fn deletion_register_hides_and_restore_reveals_current_content() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(7);
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
+        .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Deleted))
+        .unwrap();
+
+    assert!(node.visible_current_cells("todos", row).unwrap().is_none());
+
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 13).cells(title_cells("revived")))
+        .unwrap();
+    assert!(node.visible_current_cells("todos", row).unwrap().is_none());
+
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 14).deletion(DeletionEvent::Restored))
+        .unwrap();
+
+    assert_eq!(
+        node.visible_current_cells("todos", row)
+            .unwrap()
+            .unwrap()
+            .get("title")
+            .unwrap(),
+        &v("revived")
+    );
+    assert_eq!(
+        node.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.cell(&schema().tables[0], "title").unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        [v("revived")]
+    );
+    assert!(
+        node.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn durability_tier_ladder_orders_local_before_global() {
+    assert!(DurabilityTier::None < DurabilityTier::Local);
+    assert!(DurabilityTier::Local < DurabilityTier::Global);
+}
+
+#[test]
+fn global_current_rows_exclude_purely_local_pending_writes() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(0xe1);
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 10).cells(title_cells("local only")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        node.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row]
+    );
+    assert!(
+        node.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+
+#[test]
+fn global_fate_cleans_ahead_current_overlay() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(0xe3);
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("globally accepted")),
+        )
+        .unwrap();
+    assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+
+    node.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+    assert_eq!(
+        node.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row, title_cells("globally accepted"))])
+    );
+}
+
+#[test]
+fn writer_subscription_reads_own_pending_at_local_tier() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let mut peer = PeerState::new();
+    let row = row(7);
+    let (tx_id, unit) = client
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+                "title".to_owned(),
+                "optimistic".to_owned(),
+            )])),
+        )
+        .unwrap();
+
+    assert_eq!(
+        client
+            .subscription_current_rows("todos", DurabilityTier::Local)
+            .unwrap(),
+        vec![(row, title_cells("optimistic"))]
+    );
+    assert!(
+        client
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+    assert_eq!(
+        client.transaction_state_settled(tx_id).unwrap(),
+        (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
+    );
+
+    let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut client, "todos");
+    client.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        client
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap(),
+        vec![(row, title_cells("optimistic"))]
+    );
+}
+
+
+#[test]
+fn late_lower_hlc_child_is_rejected_at_admission() {
+    let (_dir, mut core) = open_node_with_uuid(node(9));
+    let row = row(7);
+    let parent = TxId::new(TxTime::from(200), node(1));
+    let child = TxId::new(TxTime::from(50), node(1));
+
+    let [parent_fate] = core
+        .ingest_commit_unit_settled(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(row, Vec::new(), title_cells("parent"), None)],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        parent_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let [child_fate] = core
+        .ingest_commit_unit_settled(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(child.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                row,
+                vec![parent],
+                title_cells("child"),
+                None,
+            )],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        child_fate,
+        SyncMessage::FateUpdate {
+            tx_id: child,
+            fate: Fate::Rejected(RejectionReason::CausalityViolation),
+            global_time: None,
+            durability: None,
+        }
+    );
+    assert!(
+        core.row_history("todos", row)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.tx_id() != child)
+    );
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation)
+    );
+}
+#[test]
+fn unlawful_child_with_known_parent_rejects_before_global_state() {
+    let (_dir, mut core) = open_node_with_uuid(node(9));
+    let row = row(7);
+    let parent = TxId::new(TxTime::from(400), node(1));
+    let child = TxId::new(TxTime::from(100), node(1));
+
+    let parent_state = core
+        .ingest_commit_unit_settled(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(row, Vec::new(), title_cells("parent"), None)],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+    assert!(matches!(
+        parent_state.as_slice(),
+        [SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            global_time: Some(_),
+            ..
+        }]
+    ));
+
+    let child_state = core
+        .ingest_commit_unit_settled(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(child.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                row,
+                vec![parent],
+                title_cells("child"),
+                None,
+            )],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+    assert_eq!(
+        child_state,
+        vec![SyncMessage::FateUpdate {
+            tx_id: child,
+            fate: Fate::Rejected(RejectionReason::CausalityViolation),
+            global_time: None,
+            durability: None,
+        }]
+    );
+    assert_eq!(
+        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        Some(parent)
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global).unwrap(),
+        vec![(row, title_cells("parent"))]
+    );
+}
+
+#[test]
+fn local_history_rejects_noncanonical_parent_order_before_persistence() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x71));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x71), 30)
+                .parents(vec![later, earlier])
+                .cells(title_cells("must not reorder durable parents")),
+        ),
+        Err(Error::InvalidMergeableCommit("row version parents must be sorted and unique"))
+    ));
+    assert!(core.row_history("todos", row(0x71)).unwrap().is_empty());
+}
+
+#[test]
+fn remote_history_rejects_noncanonical_parent_order_before_parking() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x76));
+    let tx_id = TxId::new(TxTime::from(30), node(0x77));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    // `VersionRecord::from_cells` is an authoring helper and deliberately
+    // canonicalizes its parent set. A remote peer can instead construct the
+    // physical wire record directly, so make the malformed spelling below
+    // that guarded helper and prove authority ingress rejects it before it
+    // can become a parked missing-parent edge.
+    let canonical = version_record(
+        row(0x76),
+        vec![later, earlier],
+        title_cells("must reject before parking"),
+        None,
+    );
+    let mut values = (0..canonical.record().descriptor().fields().len())
+        .map(|index| canonical.record().get_idx(index).unwrap())
+        .collect::<Vec<_>>();
+    values[1] = Value::Array(
+        [later, earlier]
+            .into_iter()
+            .map(|parent| Value::Tuple(vec![Value::U64(parent.time.0), Value::Uuid(parent.node.0)]))
+            .collect(),
+    );
+    let raw = canonical.record().descriptor().create(&values).unwrap();
+    let malformed = VersionRecord::new(
+        canonical.table(),
+        canonical.schema_version(),
+        OwnedRecord::new(raw, *canonical.record().descriptor()),
+    );
+    assert!(canonical.validate_receipt().is_ok());
+    assert!(malformed.validate_receipt().is_err());
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::system_at(tx_id.node),
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![malformed],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    let fate = core.transaction_record(tx_id).unwrap().fate;
+    assert!(matches!(
+        fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
+            if detail == "malformed version receipt"
+    ));
+    assert_eq!(core.sync_metrics().parked_orphans, 0);
+}
+
+#[test]
+fn known_parent_must_match_exact_row_coordinate_and_layer() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x72));
+    let content_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x73), 11)
+                .parents(vec![content_parent])
+                .cells(title_cells("wrong row")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let deletion_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 12)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 13)
+                .parents(vec![deletion_parent])
+                .cells(title_cells("wrong layer")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    // A mergeable transaction may still atomically write unrelated rows; the
+    // transaction envelope supplies that atomicity, so no cross-row parent is
+    // available (or needed) to encode a general dependency.
+    let multi_row = core
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", row(0x72), 14)
+                .parents(vec![content_parent])
+                .cells(title_cells("same-row successor")),
+            MergeableCommit::new("todos", row(0x74), 14)
+                .cells(title_cells("independent atomic member")),
+        ])
+        .unwrap();
+    let versions = core.query_versions_for_tx(multi_row).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(versions.iter().any(|version| {
+        version.row_uuid() == row(0x72) && version.parents() == vec![content_parent]
+    }));
+    assert!(versions
+        .iter()
+        .any(|version| version.row_uuid() == row(0x74) && version.parents().is_empty()));
+}
+
+#[test]
+fn known_parent_must_match_exact_physical_table_for_local_and_replicated_versions() {
+    let schema = todos_notes_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x7a), schema.clone());
+    let row_uuid = row(0x7a);
+    let parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 11)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("wrong table"))])),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let notes = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "notes")
+        .expect("notes table");
+    let remote = VersionRecord::from_cells(
+        notes,
+        schema.version_id(),
+        row_uuid,
+        vec![parent],
+        AuthorSubject::system_at(node(1)),
+        12,
+        AuthorSubject::system_at(node(1)),
+        12,
+        &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
+        None,
+    )
+    .unwrap();
+    let error = core
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: TxId::new(TxTime::from(12), node(0x7b)),
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(node(0x7b)),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![remote],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Global,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        )
+    ));
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let child_row = row(0x73);
+    let parent = TxId::new(TxTime::from(40), node(0x74));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", child_row, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::system_at(parent.node),
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row(0x75),
+            Vec::new(),
+            title_cells("wrong parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        "arrival of a parent transaction with only another row must resolve the durable constraint"
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
+    let schema = todos_notes_schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let row_uuid = row(0x7c);
+    let parent = TxId::new(TxTime::from(40), node(0x7d));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("constrained child"))])),
+        )
+        .unwrap();
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+    let todos = core
+        .catalogue
+        .catalogue_schemas
+        .get(&core.catalogue.local_schema_version_id)
+        .expect("current schema")
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table")
+        .clone();
+    let parent_version = VersionRecord::from_cells(
+        &todos,
+        core.catalogue.local_schema_version_id,
+        row_uuid,
+        Vec::new(),
+        AuthorSubject::system_at(node(1)),
+        40,
+        AuthorSubject::system_at(node(1)),
+        40,
+        &title_cells("wrong physical table"),
+        None,
+    )
+    .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::system_at(parent.node),
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![parent_version],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation)
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_survives_matching_parent_arrival() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x78));
+    let row_uuid = row(0x78);
+    let parent = TxId::new(TxTime::from(40), node(0x79));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::system_at(parent.node),
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row_uuid,
+            Vec::new(),
+            title_cells("matching parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a matching parent does not erase a pending child's rejection-cascade edge"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wrong_completion() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut reader = open_node_at(&dir, schema.clone());
+    let parent = TxId::new(TxTime::from(70), node(0x82));
+    let child = TxId::new(TxTime::from(80), node(0x83));
+    let child_row = row(0x84);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(child.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    reader.database.close().unwrap();
+    drop(reader);
+    let mut reader = reopen_node_at(&dir, node(1), schema);
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "accepted-child coordinate constraint must survive reopen"
+    );
+
+    let wrong_partial = version_record(
+        row(0x85),
+        Vec::new(),
+        title_cells("partial wrong parent row"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a wrong partial parent fragment is inconclusive"
+    );
+
+    let wrong_completion = version_record(
+        row(0x86),
+        Vec::new(),
+        title_cells("second wrong parent row"),
+        None,
+    );
+    let error = reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, wrong_completion],
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
+    assert!(reader
+        .query_transaction(parent)
+        .unwrap()
+        .unwrap()
+        .view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 1);
+    assert_eq!(
+        reader.transaction_record(child).unwrap().fate,
+        Fate::Accepted,
+        "an already-accepted partial child is immutable"
+    );
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "failed completion must not erase the durable constraint"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
+    let (_dir, mut reader) = open_node_with_uuid(node(0x87));
+    let parent = TxId::new(TxTime::from(70), node(0x88));
+    let child = TxId::new(TxTime::from(80), node(0x89));
+    let child_row = row(0x8a);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(child.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    let wrong_partial = version_record(
+        row(0x8b),
+        Vec::new(),
+        title_cells("partial sibling"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    let matching = version_record(
+        child_row,
+        Vec::new(),
+        title_cells("matching parent coordinate"),
+        None,
+    );
+    reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::system_at(parent.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, matching],
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+
+    let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
+    assert!(!stored_parent.view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
+    assert!(reader
+        .database
+        .primary_key_scan_raw("jazz_pending_edges", &[])
+        .unwrap()
+        .is_empty());
+    assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
+}
+/// Keeps the active query claim scope opaque and deterministic, and restores
+/// the prior node state when a future holding the scope is cancelled.
+///
+/// ```text
+/// session A scope ──poll pending──► cancel ──► no active scope
+/// session B scope ───────────────────────────► distinct opaque key
+/// ```
+#[test]
+fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
+    let (_dir, mut node) = open_node();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let admin = BTreeMap::from([("admin".to_owned(), Value::Bool(true))]);
+    let denied = BTreeMap::from([("admin".to_owned(), Value::Bool(false))]);
+
+    let first = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("active scope has an opaque key")
+    };
+    let repeat = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("same scope has an opaque key")
+    };
+    let different_claims = {
+        let scope = node.scoped_active_session_claims(alice, denied.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("different claims have an opaque key")
+    };
+    let different_identity = {
+        let scope = node.scoped_active_session_claims(bob, admin.clone());
+        scope
+            .active_session_claim_scope_key(bob)
+            .expect("different identity has an opaque key")
+    };
+    assert_eq!(first, repeat, "scope identities must be deterministic");
+    assert_ne!(first, different_claims, "claims must partition scope keys");
+    assert_ne!(first, different_identity, "identity must partition scope keys");
+    assert!(node.active_session_claim_scope_key(alice).is_none());
+
+    let mut cancelled = Box::pin(async {
+        let _scope = node.scoped_active_session_claims(alice, admin);
+        std::future::pending::<()>().await;
+    });
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(matches!(
+        std::future::Future::poll(cancelled.as_mut(), &mut context),
+        std::task::Poll::Pending
+    ));
+    drop(cancelled);
+    assert!(
+        node.active_session_claim_scope_key(alice).is_none(),
+        "cancelling a scoped query must restore the prior claim context"
+    );
+}
+
+// Pin both supported encoding boundaries. Public durability has no Edge tier,
+// but old bytes must decode as Local without renumbering Global.
+#[test]
+fn durability_encoding_preserves_global_tag_and_decodes_legacy_edge_as_local() {
+    use groove::records::{RecordField, ScalarEnumSchema, ValueType};
+    let ty = ValueType::EnumTag(ScalarEnumSchema::new(
+        "durability", ["none", "local", "edge", "global"],
+    ).unwrap());
+    for (tag, tier, encoded) in [
+        (0, DurabilityTier::None, 0),
+        (1, DurabilityTier::Local, 1),
+        (2, DurabilityTier::Local, 1),
+        (3, DurabilityTier::Global, 3),
+    ] {
+        assert_eq!(postcard::from_bytes::<DurabilityTier>(&[tag]).unwrap(), tier);
+        assert_eq!(postcard::to_allocvec(&tier).unwrap(), vec![encoded]);
+        assert_eq!(DurabilityTier::from_discriminant(tag).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_tuple_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(tier.to_value(), Value::EnumTag(encoded));
+    }
+    assert!(DurabilityTier::from_discriminant(4).is_err());
+    assert!(postcard::from_bytes::<DurabilityTier>(&[4]).is_err());
+}

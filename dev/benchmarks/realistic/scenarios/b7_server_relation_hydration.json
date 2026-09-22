@@ -1,0 +1,8 @@
+{
+  "id": "B7",
+  "name": "server_relation_hydration",
+  "seed": 20260731,
+  "read_cycles": 6,
+  "large_multiplier": 4,
+  "root_task_limit": 400
+}

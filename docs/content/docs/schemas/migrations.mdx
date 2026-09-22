@@ -1,0 +1,200 @@
+---
+title: Migrations
+description: Structural schema evolution workflow and reviewed migration edges.
+reviewedAt: "b29b48d1a"
+---
+
+<Callout type="info" title="You can skip this first">
+  If you are trying to get your first app running, you can skip this page and return later.
+</Callout>
+
+## Why Jazz migrations are different
+
+Most migration systems are one-way: rewrite every row to the new shape, then cut over. That assumes you can stop the world long enough to upgrade&hairsp;—&hairsp;which doesn't hold when your clients are local-first, frequently offline, and updating their app on their own schedule.
+
+Jazz keeps every schema version usable and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
+
+## Adding relations to existing UUID columns
+
+Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
+
+The generated schema witnesses include the referenced tables and preserve their structural defaults, including bigint, timestamp, bytes, arrays, JSON, enum, UUID and nullable defaults. Both witnesses must match their canonical schemas exactly; missing or altered defaults are rejected. The automatic reference-addition path requires otherwise unchanged column defaults. Ordinary default-only changes affect future writes and need no row transform; each witness must retain its own endpoint defaults. Branch-bound column invariants still apply. Timestamp defaults must be exactly representable as JavaScript Dates. Generated witnesses for payload-enum and row-valued columns are not yet supported. CLI-computed hashes for defaults and branch bindings match the existing server schema identities; stored identities are unchanged. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
+
+## Schemas and lenses
+
+Every unique version of your `schema.ts` has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
+
+<LensDiagram />
+
+Rows retain the physical schema identity under which they were written. A read in another compatible
+schema uses lenses to project those rows into the requested shape. Non-adjacent reads compose lenses in sequence to bridge multiple schema
+versions.
+
+In practice, this lets you:
+
+- Ship a schema change without waiting for every user to update their app.
+- Roll out platform-by-platform (mobile, desktop, web) on independent cadences.
+- Accept writes from clients that have been offline since before the new schema landed.
+
+## Workflow
+
+1. If this is the first migration you are creating, run:
+
+   ```bash
+   pnpm dlx jazz-tools@alpha migrations create
+   ```
+
+   This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
+
+2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
+   any policy diagnostics without publishing. `deploy` runs the same checks; `validate` is most
+   useful as a fast pre-publish sanity check or in CI.
+4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
+
+   ```bash
+   pnpm dlx jazz-tools@alpha migrations create --name <your-migration-name>
+   ```
+
+   By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
+   current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
+
+5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
+6. **Deploy**&hairsp;—&hairsp;publish the schema, permissions, and required migrations:
+
+   ```bash
+   pnpm dlx jazz-tools@alpha deploy <appId>
+   ```
+
+   Both `schema.ts` and `permissions.ts` must be present. First deployments and
+   permission-only changes need no migration; compatible schema changes can use an
+   inferred migration. Changes requiring row transformations need a reviewed migration path.
+
+   `deploy` walks through the publish pipeline in one go:
+   1. Before publishing, it checks that permissions and any required migrations are present.
+   2. Publishes the current schema if the server does not already have it.
+   3. If the server is on an older schema hash, asks the server whether
+      it already has a migration path between the two hashes. If not, pushes the local migration
+      file that closes the gap (and fails with a helpful message if you haven't created one yet).
+   4. Publishes the current permissions, attached to the current schema hash.
+
+Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
+`pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
+
+## The migration file
+
+The generated stub describes the diff as declarative operations which carry enough information to run in either direction. That
+is how older clients can still read data written under a newer schema: the same operations replay
+in reverse.
+
+<Callout type="warn">
+  If the diff contains ambiguities (e.g. a column was removed and a same-typed column was added,
+  which could be a rename), the generated lens is marked as a **draft**. Draft lenses will fail at
+  startup if they are in the path to a live schema. You need to review the draft lens and resolve
+  the ambiguity before publishing.
+</Callout>
+
+### Generated stub
+
+Here's a generated stub for adding a `description` column:
+
+<include cwd lang="ts" meta='title="migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"'>
+  ../examples/docs/todo-server-ts/migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts
+</include>
+
+### Customising defaults
+
+Review generated defaults before you publish. For example, you might replace a nullable default with a domain-specific value:
+
+<include
+  cwd
+  lang="ts"
+  meta='title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts
+</include>
+
+### Backwards defaults
+
+When a newer schema drops a column that older clients still expect, define a backwards default so the lens can supply a value for those clients:
+
+<include
+  cwd
+  lang="ts"
+  meta='title="migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
+</include>
+
+## Migrating historical schemas
+
+Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
+Existing data will still be stored in the database, but you will not be able to read it until you create a migration.
+
+This is particularly useful when you are iterating on a feature that is not yet ready to be released.
+
+The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
+
+To do so, you'll need to **create the migration using explicit to/from schema hashes**:
+
+```bash
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+```
+
+`--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
+server and saves a snapshot in `migrations/snapshots/`.
+
+## Inspecting the local schema hash
+
+`pnpm dlx jazz-tools@alpha schema hash` prints the hash of the local `schema.ts` without contacting a server or writing a snapshot, giving you a simple way to compare your local schema against what's deployed.
+
+```bash
+pnpm dlx jazz-tools@alpha schema hash
+```
+
+## Exporting the compiled schema
+
+`pnpm dlx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
+also saves a snapshot of the schema in the local snapshot directory.
+
+```bash
+pnpm dlx jazz-tools@alpha schema export
+pnpm dlx jazz-tools@alpha schema export --schema-dir ./packages/app
+pnpm dlx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
+```
+
+Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it
+loads the schema from the local snapshot folder or, if missing, from the server.
+`--schema-dir` and `--schema-hash` are mutually exclusive.
+
+Server-backed commands require the app id so Jazz can resolve app-scoped routes like
+`/apps/<appId>/schema/:hash`.
+
+| Flag                   | Default             | Description                                                     |
+| ---------------------- | ------------------- | --------------------------------------------------------------- |
+| `--schema-dir <path>`  | current directory   | Path to app root containing `schema.ts`                         |
+| `--schema-hash <hash>` | none                | Export a stored structural schema by hash                       |
+| `--migrations-dir <p>` | `./migrations`      | Path to migrations directory and snapshot folder                |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`   | Server URL used when `--schema-hash` is not available locally   |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET` | Admin secret used when `--schema-hash` is not available locally |
+
+## Migration flags
+
+`migrations create` uses flags rather than positional hashes. When it needs to resolve missing
+schema hashes from a server, pass `<appId>` as the leading positional argument.
+
+| Flag                   | Default             | Description                                      |
+| ---------------------- | ------------------- | ------------------------------------------------ |
+| `--schema-dir <path>`  | current directory   | Path to app root containing `schema.ts`          |
+| `--migrations-dir <p>` | `./migrations`      | Path to migrations directory and snapshot folder |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`   | Server URL used when resolving missing schema    |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET` | Admin secret used when resolving missing schema  |
+| `--fromHash <hash>`    | latest snapshot     | Optional source schema hash                      |
+| `--toHash <hash>`      | current schema      | Optional target schema hash                      |
+| `--name <name>`        | `unnamed`           | Optional migration filename label                |
+
+## Next steps
+
+- [Defining Tables](/docs/schemas/defining-tables)&hairsp;—&hairsp;table and column definitions
+- [Column Types](/docs/schemas/column-types)&hairsp;—&hairsp;full list of available column types

@@ -1,0 +1,62 @@
+.card,
+.form {
+  box-sizing: border-box;
+  width: min(640px, 100%);
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 28px;
+}
+
+.form {
+  display: grid;
+  gap: 16px;
+}
+
+.title {
+  margin: 0;
+  color: #e2e8f3;
+  font-size: 24px;
+}
+
+.description {
+  margin: 12px 0 0;
+  color: #9dacbf;
+  font-size: 15px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  color: #bcc7da;
+  font-size: 15px;
+}
+
+.select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid #324258;
+  border-radius: 6px;
+  background: #101723;
+  color: #e2e8f4;
+  padding: 11px 36px 11px 12px;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.submitButton {
+  border: 1px solid #3a4d66;
+  background: #283a52;
+  color: #ebf1fb;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.submitButton:hover {
+  background: #314761;
+}

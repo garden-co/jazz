@@ -1,0 +1,120 @@
+---
+title: Sessions
+description: "Read account ownership, exact authorship, and provider claims from the current session."
+reviewedAt: "20017a2694"
+---
+
+A context's session describes its account and the exact identity currently acting for it. Linking selects a new handle for a new context; it never mutates the identity of an existing context.
+
+## Get the session and canonical user identity
+
+Public sessions expose a structured author:
+
+```ts
+const author = {
+  account: "00000000-0000-4000-8000-000000000001",
+  identity: { issuer: "https://issuer.example", subject: "alice" },
+};
+```
+
+This illustrates `session.user`; session objects are read-only. Account ownership compares `session.user.account`. Exact authorship compares the entire structure, including issuer and subject.
+
+## System-authored rows
+
+System writes use the same author structure, with a reserved account and issuer:
+
+```ts
+const systemAuthor = {
+  account: "00000000-0000-0000-0000-000000000000",
+  identity: {
+    issuer: "urn:jazz:system",
+    subject: "00000000-0000-4000-8000-000000000042", // originating node UUID
+  },
+};
+```
+
+`SYSTEM_ACCOUNT_ID` and `SYSTEM_ISSUER` are also exported from `jazz-tools`.
+
+The subject records where the write originated and survives replication and
+reload. Comparing accounts groups all system authors; comparing the complete
+structure distinguishes their originating nodes. Neither the reserved account
+nor issuer can be registered or linked to an external identity. This metadata
+does not grant permission to bypass policies.
+
+Row authors always have a non-null UUID account. Anonymous readers have a null
+session account. Their account-ownership policy bindings are absent, so ownership
+checks fail closed.
+Use an explicit anonymous-access policy when that access is intended.
+
+## Observe the current session
+
+| Binding              | Read the current session                                            |
+| -------------------- | ------------------------------------------------------------------- |
+| React / React Native | `const session = useSession()`                                      |
+| Vue                  | `const session = useSession()`; read `session.value`                |
+| Solid                | `const session = useSession()`; read `session()`                    |
+| Svelte               | `const session = getSession()`; read `session.current`              |
+| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+
+Framework hooks must run inside the corresponding Jazz provider or context. These session APIs observe the open context. `useJazzSession()` observes the owning lifecycle: selected account, transition state, errors, and commands. The lower-level `useAccountState(accounts)` observes only an account manager.
+
+## Read rows for the current user
+
+Declare a UUID column for account ownership:
+
+```ts
+import { schema as s } from "jazz-tools";
+
+const app = s.defineApp({
+  todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}),
+});
+```
+
+Filter with the account ID:
+
+```ts
+const session = db.getAuthState().session;
+const accountId = session?.user.account;
+const todos = accountId ? await db.all(app.todos.where({ owner_id: accountId })) : [];
+```
+
+Linked identities share this account ID. The issuer and subject may differ between their contexts.
+
+## Insert a user-owned row
+
+```ts
+if (accountId) {
+  db.insert(app.todos, { title: "First task", owner_id: accountId });
+}
+```
+
+The application chooses ownership columns. Jazz independently stamps `$createdBy` and `$updatedBy` with the structured author, along with edit timestamps. Assigning `owner_id` does not change authorship.
+
+Client-side filters do not enforce access control. Define the corresponding server policy:
+
+```ts
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+});
+```
+
+Declaring those policies leaves update and delete denied until explicitly granted. See [Permissions](/docs/auth/permissions).
+
+## Session claims and authorship
+
+`session.claims` contains the provider's decoded claims. A claim named `user` remains under `session.claims.user`; it cannot shadow `session.user`. Claims do not supply the authoritative account assignment. The core verifies the bearer and resolves the registry assignment separately.
+
+`session.user` is not a profile-row reference, display name, or scalar subject string. Use a UUID account column for application ownership or a matching structured row column when storing exact authorship. Do not serialize the author into a string merely to compare it with native author columns.
+
+### Attribution without impersonation
+
+Backend request contexts have two distinct uses:
+
+- `await client.forRequest(request)` verifies the bearer and registry assignment, then evaluates the requester's row policies and stamps that requester as author.
+- `await client.forAccount(account)` verifies an opaque admitted user handle and returns the same immutable user policy scope without switching the shared owner.
+- `await client.withAttribution(account)` and `await client.withAttributionForRequest(request)` record verified user authorship while retaining backend authority. Use it only in trusted backend code after the relevant authorization decision.
+
+A copied account ID or provider claim is not authorization. Ordinary clients create contexts from opaque account handles; the server verifies their credentials independently.
+
+See [Authentication](/docs/auth/authentication) for preparing handles and [Lifecycle](/docs/auth/lifecycle) for closing, linking, logout, and recovery.

@@ -1,0 +1,827 @@
+name: Realistic Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Profile id (s or m)"
+        required: false
+        default: "s"
+      include_browser:
+        description: "Run browser idb-tree/IndexedDB page-store benchmark suite"
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    branches: [main, release]
+    types: [opened, reopened, synchronize, labeled]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * *"
+
+concurrency:
+  group: realistic-benchmarks
+  cancel-in-progress: false
+
+env:
+  BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
+  BENCH_BRANCH: ${{ github.head_ref || github.ref_name }}
+  BENCH_REF: ${{ github.ref }}
+  BENCH_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  BENCH_TIMEOUT_SECONDS: "60"
+  BENCH_REPEAT_COUNT: "3"
+  BENCH_CPUSET: "1-5"
+  VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
+  VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  native:
+    name: Native Bench (Example + Criterion)
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+      }}
+    runs-on: [self-hosted, linux, x64, jazz-bench]
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+
+      - name: Prepare libclang for bindgen
+        run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
+
+      # Ordinary PR CI retains the deterministic benchmark-derived assertions.
+      # Compile all maintained benchmark APIs on this opt-in/native benchmark
+      # surface instead of extending every PR's Rust critical path.
+      - name: Compile maintained benchmark APIs
+        run: dev/gates/benchmark-smoke.sh --compile-ci
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Collect host metadata
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/native
+          rustc -V > bench-out/native/rustc.txt
+          uname -a > bench-out/native/uname.txt
+          lscpu > bench-out/native/lscpu.txt
+          for engine in rocksdb sqlite; do
+            mkdir -p "bench-out/native/${engine}"
+            printf '%s\n' \
+              '{' \
+              "  \"workflow\": \"${GITHUB_WORKFLOW}\"," \
+              "  \"run_id\": \"${GITHUB_RUN_ID}\"," \
+              "  \"run_attempt\": \"${GITHUB_RUN_ATTEMPT}\"," \
+              "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+              "  \"sha\": \"${BENCH_SHA}\"," \
+              "  \"ref\": \"${BENCH_REF}\"," \
+              "  \"branch\": \"${BENCH_BRANCH}\"," \
+              "  \"profile\": \"${BENCH_PROFILE}\"," \
+              "  \"runner_name\": \"${RUNNER_NAME}\"," \
+              "  \"runner_os\": \"${RUNNER_OS}\"," \
+              "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+              "  \"storage_engine\": \"${engine}\"" \
+              '}' > "bench-out/native/${engine}/metadata.json"
+            cp bench-out/native/rustc.txt "bench-out/native/${engine}/rustc.txt"
+            cp bench-out/native/uname.txt "bench-out/native/${engine}/uname.txt"
+            cp bench-out/native/lscpu.txt "bench-out/native/${engine}/lscpu.txt"
+          done
+          mkdir -p bench-out/native/jazz-sim
+          printf '%s\n' \
+            '{' \
+            "  \"workflow\": \"${GITHUB_WORKFLOW}\"," \
+            "  \"run_id\": \"${GITHUB_RUN_ID}\"," \
+            "  \"run_attempt\": \"${GITHUB_RUN_ATTEMPT}\"," \
+            "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+            "  \"sha\": \"${BENCH_SHA}\"," \
+            "  \"ref\": \"${BENCH_REF}\"," \
+            "  \"branch\": \"${BENCH_BRANCH}\"," \
+            "  \"profile\": \"${BENCH_PROFILE}\"," \
+            "  \"runner_name\": \"${RUNNER_NAME}\"," \
+            "  \"runner_os\": \"${RUNNER_OS}\"," \
+            "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+            "  \"storage_engine\": null" \
+            '}' > bench-out/native/jazz-sim/metadata.json
+          cp bench-out/native/rustc.txt bench-out/native/jazz-sim/rustc.txt
+          cp bench-out/native/uname.txt bench-out/native/jazz-sim/uname.txt
+          cp bench-out/native/lscpu.txt bench-out/native/jazz-sim/lscpu.txt
+
+      - name: Build native benchmark binaries
+        run: |
+          set -euo pipefail
+          cargo build --release -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench
+          cargo build --release -p jazz --features client,sqlite,transport-compression-zstd --example realistic_bench
+          cargo bench -p jazz --features rocksdb,transport-compression-zstd --bench realistic_phase1 --no-run
+          cargo bench -p jazz --features sqlite,transport-compression-zstd --bench realistic_phase1 --no-run
+          cargo bench -p jazz --features testing --bench cold_subscription --no-run
+          cargo bench -p jazz --features testing --bench sync --no-run
+          cargo bench -p jazz --features testing --bench validation --no-run
+          cargo bench -p jazz --features testing --bench relation_include_delivery --no-run
+          cargo bench -p jazz --features testing --bench route_subscription_curve --no-run
+          cargo bench -p jazz-sim --bench s2_canvas --no-run
+          cargo bench -p jazz-sim --bench micro --no-run
+          cargo bench -p jazz-sim --bench s8_branch_views --no-run
+
+      - name: Run native benchmark suite
+        run: |
+          set -euo pipefail
+          sleep 10
+          for engine in rocksdb sqlite; do
+            rm -rf target/criterion
+            out_dir="bench-out/native/${engine}"
+            taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
+              --suite native \
+              --storage-engine "${engine}" \
+              --out-dir "${out_dir}" \
+              --profile "${BENCH_PROFILE}" \
+              --skip-set dev/benchmarks/realistic/ci_skip_set.json \
+              --repeat-count "${BENCH_REPEAT_COUNT}" \
+              --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+            # Historical artifact names retained for update_history ingestion compatibility.
+            node dev/benchmarks/realistic/export_criterion.mjs \
+              --allow-empty \
+              --out "${out_dir}/criterion_realistic_phase1.json" \
+              --summary-md "${out_dir}/criterion_realistic_phase1.md"
+          done
+
+      - name: Run jazz-sim benchmark suite
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/native/jazz-sim
+          taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite jazz-sim \
+            --out-dir bench-out/native/jazz-sim \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set dev/benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+
+      - name: Run legacy Jazz timing suites
+        run: |
+          set -uo pipefail
+          mkdir -p bench-out/native/legacy-jazz/logs
+          status_file=bench-out/native/legacy-jazz/status.tsv
+          : >"${status_file}"
+          failed=0
+          run() { name="$1"; shift; if taskset -c "${BENCH_CPUSET}" "$@" >"bench-out/native/legacy-jazz/logs/${name}.log" 2>&1; then printf '%s\tpassed\n' "$name" >>"${status_file}"; else printf '%s\tfailed\n' "$name" >>"${status_file}"; failed=1; fi; }
+          run cold_subscription env JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --features testing --bench cold_subscription
+          run sync env GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --features testing --bench sync
+          run validation env GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --features testing --bench validation
+          run relation_include_delivery env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --features testing --bench relation_include_delivery
+          run route_subscription_curve env JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const dir = "bench-out/native/legacy-jazz";
+          const names = ["cold_subscription", "sync", "validation", "relation_include_delivery", "route_subscription_curve"];
+          const now = new Date().toISOString();
+          const metadata = { kind: "realistic-bench-legacy-jazz", generated_at: now, repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.BENCH_SHA, ref: process.env.BENCH_REF, branch: process.env.BENCH_BRANCH, profile: process.env.BENCH_PROFILE, runner_name: process.env.RUNNER_NAME, runner_os: process.env.RUNNER_OS, runner_arch: process.env.RUNNER_ARCH };
+          fs.writeFileSync(`${dir}/metadata.json`, `${JSON.stringify(metadata, null, 2)}\n`);
+          const statuses = new Map(fs.readFileSync(`${dir}/status.tsv`, "utf8").trim().split("\n").filter(Boolean).map((line) => line.split("\t")));
+          const benchmarks = names.map((name) => ({ id: `legacy-jazz:${name}`, status: statuses.get(name) ?? "failed", output_path: `logs/${name}.log` }));
+          fs.writeFileSync(`${dir}/suite_status.json`, `${JSON.stringify({ generated_at: now, benchmarks }, null, 2)}\n`);
+          fs.writeFileSync(`${dir}/manifest.json`, `${JSON.stringify({ ...metadata, files: ["metadata.json", "suite_status.json", "status.tsv", ...names.map((name) => `logs/${name}.log`)].map((path) => ({ path })) }, null, 2)}\n`);
+          NODE
+          cat bench-out/native/legacy-jazz/suite_status.json >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
+
+      - name: Publish native execution summary
+        run: |
+          set -euo pipefail
+          for summary in bench-out/native/*/summary.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Build native manifest
+        run: |
+          set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
+          for engine in rocksdb sqlite; do
+            dir="bench-out/native/${engine}"
+            jq -n \
+              --arg workflow "${GITHUB_WORKFLOW}" \
+              --arg run_id "${GITHUB_RUN_ID}" \
+              --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${BENCH_SHA}" \
+              --arg ref "${BENCH_REF}" \
+              --arg branch "${BENCH_BRANCH}" \
+              --arg profile "${BENCH_PROFILE}" \
+              --arg storage_engine "${engine}" \
+              --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg w1_sha256 "$(file_sha "${dir}/w1_interactive.json")" \
+              --arg w4_sha256 "$(file_sha "${dir}/w4_cold_start.json")" \
+              --arg status_sha256 "$(file_sha "${dir}/suite_status.json")" \
+              --arg summary_sha256 "$(file_sha "${dir}/summary.md")" \
+              --arg skip_candidates_sha256 "$(file_sha "${dir}/skip_candidates.json")" \
+              --arg criterion_json_sha256 "$(file_sha "${dir}/criterion_realistic_phase1.json")" \
+              --arg criterion_md_sha256 "$(file_sha "${dir}/criterion_realistic_phase1.md")" \
+              'def nullable($value): if $value == "" then null else $value end;
+              {
+                kind: "realistic-bench-native",
+                generated_at: $generated_at,
+                workflow: $workflow,
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                repository: $repository,
+                sha: $sha,
+                ref: $ref,
+                branch: $branch,
+                profile: $profile,
+                storage_engine: $storage_engine,
+                files: [
+                  { path: "metadata.json" },
+                  { path: "rustc.txt" },
+                  { path: "uname.txt" },
+                  { path: "lscpu.txt" },
+                  { path: "suite_status.json", sha256: nullable($status_sha256) },
+                  { path: "summary.md", sha256: nullable($summary_sha256) },
+                  { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                  { path: "w1_interactive.json", sha256: nullable($w1_sha256) },
+                  { path: "w4_cold_start.json", sha256: nullable($w4_sha256) },
+                  { path: "criterion_realistic_phase1.json", sha256: nullable($criterion_json_sha256) },
+                  { path: "criterion_realistic_phase1.md", sha256: nullable($criterion_md_sha256) }
+                ]
+              }' > "${dir}/manifest.json"
+          done
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          import crypto from "node:crypto";
+          import { JAZZ_SIM_BENCHMARKS } from "./dev/benchmarks/realistic/ci_benchmarks.mjs";
+
+          const dir = "bench-out/native/jazz-sim";
+          const sha256 = (file) =>
+            fs.existsSync(file) ? crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") : null;
+          const fileEntry = (relativePath) => ({
+            path: relativePath,
+            sha256: sha256(path.join(dir, relativePath)),
+          });
+          const benchmarkFiles = JAZZ_SIM_BENCHMARKS.flatMap((benchmark) => [
+            fileEntry(benchmark.output_path),
+            fileEntry(benchmark.log_path),
+          ]);
+          const manifest = {
+            kind: "realistic-bench-jazz-sim",
+            generated_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+            workflow: process.env.GITHUB_WORKFLOW,
+            run_id: process.env.GITHUB_RUN_ID,
+            run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            repository: process.env.GITHUB_REPOSITORY,
+            sha: process.env.BENCH_SHA,
+            ref: process.env.BENCH_REF,
+            branch: process.env.BENCH_BRANCH,
+            profile: process.env.BENCH_PROFILE,
+            storage_engine: null,
+            files: [
+              { path: "metadata.json" },
+              { path: "rustc.txt" },
+              { path: "uname.txt" },
+              { path: "lscpu.txt" },
+              fileEntry("suite_status.json"),
+              fileEntry("summary.md"),
+              fileEntry("skip_candidates.json"),
+              ...benchmarkFiles,
+            ],
+          };
+          fs.writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Upload native artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-out/native
+          if-no-files-found: error
+
+  browser:
+    name: Browser Bench (TS + idb-tree / IndexedDB page store)
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+        && (
+          github.event_name != 'workflow_dispatch'
+          || inputs.include_browser
+        )
+      }}
+    runs-on: [self-hosted, linux, x64, jazz-bench]
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Prepare libclang for bindgen
+        run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: "3.31.x"
+      - run: pnpm --filter jazz-napi build
+      - run: pnpm exec playwright install chromium
+
+      - name: Collect host metadata
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/browser
+          cat > bench-out/browser/metadata.json <<EOF
+          {
+            "workflow": "${GITHUB_WORKFLOW}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "sha": "${BENCH_SHA}",
+            "ref": "${BENCH_REF}",
+            "branch": "${BENCH_BRANCH}",
+            "profile": "${BENCH_PROFILE}",
+            "runner_name": "${RUNNER_NAME}",
+            "runner_os": "${RUNNER_OS}",
+            "runner_arch": "${RUNNER_ARCH}",
+            "storage_engine": "idb-tree-indexeddb-page-store"
+          }
+          EOF
+          node -v > bench-out/browser/node.txt
+          pnpm -v > bench-out/browser/pnpm.txt
+          rustc -V > bench-out/browser/rustc.txt
+          uname -a > bench-out/browser/uname.txt
+
+      - name: Build jazz-tools server binary
+        run: cargo build -p jazz-cli --bin jazz-tools
+
+      - name: Build jazz-napi package
+        run: pnpm --dir crates/jazz-napi run build
+
+      - name: Build jazz-wasm package
+        run: pnpm --dir crates/jazz-wasm run build
+
+      - name: Run browser benchmark suite
+        run: |
+          set -euo pipefail
+          sleep 10
+          taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite browser \
+            --out-dir bench-out/browser \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set dev/benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+
+      - name: Publish browser execution summary
+        run: |
+          set -euo pipefail
+          cat bench-out/browser/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build browser manifest
+        run: |
+          set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
+          jq -n \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${BENCH_SHA}" \
+            --arg ref "${BENCH_REF}" \
+            --arg branch "${BENCH_BRANCH}" \
+            --arg profile "${BENCH_PROFILE}" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg realistic_sha256 "$(file_sha bench-out/browser/realistic.json)" \
+            --arg status_sha256 "$(file_sha bench-out/browser/suite_status.json)" \
+            --arg summary_sha256 "$(file_sha bench-out/browser/summary.md)" \
+            --arg skip_candidates_sha256 "$(file_sha bench-out/browser/skip_candidates.json)" \
+            'def nullable($value): if $value == "" then null else $value end;
+            {
+              kind: "realistic-bench-browser",
+              generated_at: $generated_at,
+              workflow: $workflow,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              repository: $repository,
+              sha: $sha,
+              ref: $ref,
+              branch: $branch,
+              profile: $profile,
+              storage_engine: "idb-tree-indexeddb-page-store",
+              files: [
+                { path: "metadata.json" },
+                { path: "node.txt" },
+                { path: "pnpm.txt" },
+                { path: "rustc.txt" },
+                { path: "uname.txt" },
+                { path: "suite_status.json", sha256: nullable($status_sha256) },
+                { path: "summary.md", sha256: nullable($summary_sha256) },
+                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                { path: "realistic.json", sha256: nullable($realistic_sha256) }
+              ]
+            }' > bench-out/browser/manifest.json
+
+      - name: Upload browser artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-out/browser
+          if-no-files-found: error
+
+  site:
+    name: Build Benchmark Site
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [native, browser]
+    if: >-
+      ${{
+        always()
+        && needs.native.result == 'success'
+        && (needs.browser.result == 'success' || needs.browser.result == 'skipped')
+      }}
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: site-input/native
+
+      - name: Download browser artifacts
+        if: ${{ needs.browser.result == 'success' }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: site-input/browser
+
+      - name: Seed benchmark history snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/site-history
+          history_path=bench-out/site-history/working_history.json
+
+          if git cat-file -e origin/main:dev/benchmarks/realistic/history/bench_history.json 2>/dev/null; then
+            git show origin/main:dev/benchmarks/realistic/history/bench_history.json > "$history_path"
+          elif [ -f dev/benchmarks/realistic/history/bench_history.json ]; then
+            cp dev/benchmarks/realistic/history/bench_history.json "$history_path"
+          else
+            printf '{\n  "version": 1,\n  "updated_at": null,\n  "runs": []\n}\n' > "$history_path"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${PR_NUMBER}" ]; then
+            previous_run_id="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/benchmarks.yml/runs?branch=${BENCH_BRANCH}&status=success&per_page=20" \
+                --jq '[.workflow_runs[]
+                  | select(.id != '"${GITHUB_RUN_ID}"')
+                  | select(.event == "pull_request")
+                  | select(any(.pull_requests[]?; .number == '"${PR_NUMBER}"'))
+                  | .id][0] // empty'
+            )"
+
+            if [ -n "${previous_run_id}" ]; then
+              previous_artifact="$(
+                gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${previous_run_id}/artifacts" \
+                  --jq '[.artifacts[]
+                    | select(.expired == false and (.name | startswith("realistic-site-")))
+                    | .name][0] // empty'
+              )"
+
+              if [ -n "${previous_artifact}" ]; then
+                mkdir -p bench-out/previous-site
+                gh run download "${previous_run_id}" \
+                  --repo "${GITHUB_REPOSITORY}" \
+                  --name "${previous_artifact}" \
+                  --dir bench-out/previous-site
+
+                previous_history="$(find bench-out/previous-site -name history.json -print -quit || true)"
+                if [ -n "${previous_history}" ]; then
+                  node dev/benchmarks/realistic/merge_histories.mjs \
+                    --out "$history_path" \
+                    --history "$history_path" \
+                    --history "$previous_history" \
+                    --max-runs 5000
+                fi
+              fi
+            fi
+          fi
+
+          echo "BENCH_WORKING_HISTORY=$history_path" >> "$GITHUB_ENV"
+
+      - name: Update benchmark history
+        run: |
+          set -euo pipefail
+          args=(
+            --history "${BENCH_WORKING_HISTORY}"
+            --native site-input/native
+            --max-runs 5000
+          )
+          if [ -d site-input/browser ]; then
+            args+=(--browser site-input/browser)
+          fi
+          node dev/benchmarks/realistic/update_history.mjs "${args[@]}"
+
+      - name: Update benchmark skip set
+        run: |
+          set -euo pipefail
+          args=(--skip-set dev/benchmarks/realistic/ci_skip_set.json)
+          while IFS= read -r status_file; do
+            args+=(--status "$status_file")
+          done < <(find site-input/native -name suite_status.json -type f | sort)
+          if [ -f site-input/browser/suite_status.json ]; then
+            args+=(--status site-input/browser/suite_status.json)
+          fi
+          node dev/benchmarks/realistic/update_skip_set.mjs "${args[@]}"
+
+      - name: Build static benchmark site
+        run: |
+          set -euo pipefail
+          node dev/benchmarks/realistic/build_site.mjs \
+            --history "${BENCH_WORKING_HISTORY}" \
+            --out dev/benchmarks/realistic/site
+
+      - name: Sync checked-in history from working snapshot
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          cp "${BENCH_WORKING_HISTORY}" dev/benchmarks/realistic/history/bench_history.json
+
+      - name: Deploy benchmark site preview
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping preview deploy."
+            exit 0
+          fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/dev/benchmarks/realistic"
+          cp -R dev/benchmarks/realistic/site "${deploy_root}/dev/benchmarks/realistic/site"
+          if ! deployment_url="$(
+            npx vercel@latest deploy "${deploy_root}" \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              --local-config "${deploy_root}/dev/benchmarks/realistic/site/vercel.json" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"; then
+            echo "Vercel preview deploy failed; continuing without preview URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel preview deployment did not reach Ready; continuing without preview URL."
+            exit 0
+          fi
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Preview"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy benchmark site to production
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping production deploy."
+            exit 0
+          fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/dev/benchmarks/realistic"
+          cp -R dev/benchmarks/realistic/site "${deploy_root}/dev/benchmarks/realistic/site"
+          if ! deployment_url="$(
+            npx vercel@latest deploy "${deploy_root}" \
+              --prod \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              --local-config "${deploy_root}/dev/benchmarks/realistic/site/vercel.json" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"; then
+            echo "Vercel production deploy failed; continuing without production URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel production deployment did not reach Ready; continuing without production URL."
+            exit 0
+          fi
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Production Site"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render PR benchmark report
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out
+          : > bench-out/pr-report.md
+          if [ -n "${BENCH_SITE_URL:-}" ]; then
+            printf 'Preview site: %s\n\n' "${BENCH_SITE_URL}" >> bench-out/pr-report.md
+          fi
+          for summary in site-input/native/*/summary.md site-input/browser/summary.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> bench-out/pr-report.md
+              printf '\n' >> bench-out/pr-report.md
+            fi
+          done
+          node dev/benchmarks/realistic/render_history_report.mjs \
+            --history "${BENCH_WORKING_HISTORY}" \
+            --base-branch main \
+            --head-branch "${BENCH_BRANCH}" \
+            --out bench-out/history-report.md
+          cat bench-out/history-report.md >> bench-out/pr-report.md
+          cat bench-out/pr-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload site artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: realistic-site-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dev/benchmarks/realistic/site
+          if-no-files-found: error
+
+      - name: Update PR benchmark comment
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REPORT_PATH: bench-out/pr-report.md
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- realistic-bench-report -->";
+            const body = `${marker}\n${fs.readFileSync(process.env.REPORT_PATH, "utf8")}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100,
+              });
+              const existing = comments.find(
+                (comment) =>
+                  comment.user?.login === "github-actions[bot]"
+                  && typeof comment.body === "string"
+                  && comment.body.includes(marker),
+              );
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body,
+                });
+              }
+            } catch (error) {
+              core.warning(`Skipping PR benchmark comment update: ${error instanceof Error ? error.message : String(error)}`);
+            }
+
+      - name: Commit updated history and site
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          update_branch="github-actions/realistic-benchmark-site"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dev/benchmarks/realistic/history/bench_history.json dev/benchmarks/realistic/ci_skip_set.json dev/benchmarks/realistic/site
+          if git diff --cached --quiet; then
+            echo "No benchmark history/site changes to commit."
+            exit 0
+          fi
+          git commit -m "bench: update realistic benchmark site (${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT})"
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+          if git ls-remote --exit-code --heads origin "${update_branch}" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/${update_branch}:refs/remotes/origin/${update_branch}"
+          fi
+          git rebase origin/main
+          git push --force-with-lease origin "HEAD:${update_branch}"
+
+          pr_title="bench: update realistic benchmark site"
+          pr_body="$(cat <<EOF
+          Updates the checked-in realistic benchmark history and static site from workflow run ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}.
+
+          Source commit: ${BENCH_SHA}
+          Production site: ${BENCH_SITE_URL:-not published}
+          EOF
+          )"
+          pr_number="$(
+            gh pr list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --head "${update_branch}" \
+              --base main \
+              --state open \
+              --json number \
+              --jq '.[0].number // ""'
+          )"
+          if [ -n "${pr_number}" ]; then
+            gh pr edit "${pr_number}" --repo "${GITHUB_REPOSITORY}" --title "${pr_title}" --body "${pr_body}"
+            pr_url="$(gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
+          else
+            pr_url="$(
+              gh pr create \
+                --repo "${GITHUB_REPOSITORY}" \
+                --base main \
+                --head "${update_branch}" \
+                --title "${pr_title}" \
+                --body "${pr_body}"
+            )"
+          fi
+          {
+            echo "### Benchmark History PR"
+            echo ""
+            echo "${pr_url}"
+          } >> "$GITHUB_STEP_SUMMARY"

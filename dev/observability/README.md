@@ -1,0 +1,59 @@
+# Local Observability Stack
+
+OTel Collector + Grafana/Tempo/Prometheus/Loki for viewing traces and logs locally.
+
+```
+jazz-server ──OTLP HTTP:4318──→ OTel Collector ──OTLP:4317──→ grafana/otel-lgtm
+                                                                ├── Tempo (traces)
+                                                                ├── Prometheus (metrics)
+                                                                ├── Loki (logs)
+                                                                └── Grafana UI (:3000)
+```
+
+## Prerequisites
+
+- Docker
+
+## Start
+
+```sh
+cd dev/observability
+docker compose up -d
+```
+
+## Build the server with OTel
+
+```sh
+cargo build -p jazz-cli --features otel
+```
+
+## Run an instrumented server
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+RUST_LOG=jazz_tools=debug,groove=debug \
+cargo run -p jazz-cli --features otel --bin jazz-tools -- server <APP_ID>
+```
+
+## View traces
+
+Open http://localhost:3000 → Explore → Tempo → Search.
+
+## View logs
+
+Open http://localhost:3000 → Explore → Loki → Search.
+
+## Stop
+
+```sh
+docker compose down      # stop containers
+docker compose down -v   # stop + wipe data
+```
+
+## Environment variables
+
+| Variable                      | Purpose                             | Default                 |
+| ----------------------------- | ----------------------------------- | ----------------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint                  | `http://localhost:4318` |
+| `OTEL_SERVICE_NAME`           | Service name in traces              | `jazz-server`           |
+| `RUST_LOG`                    | Log filter for `tracing` subscriber | —                       |

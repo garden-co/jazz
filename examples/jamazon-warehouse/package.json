@@ -1,0 +1,34 @@
+{
+  "name": "jamazon-warehouse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:schema": "vitest run schema.test.ts --environment node",
+    "typecheck:browser-config": "tsc --project tsconfig.browser.json"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "next": "catalog:default",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

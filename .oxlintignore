@@ -1,0 +1,15 @@
+crates/jazz-rn/src/**
+examples/*/schema/app.ts
+examples/*/schema/migration_*.ts
+examples/docs/*/schema/app.ts
+examples/docs/*/schema/migration_*.ts
+crates/jazz-napi/index.d.ts
+crates/jazz-napi/index.js
+dev/benchmarks/**/*.json
+dev/benchmarks/**/*.html
+specs/TODO.md
+packages/jazz-tools/tests/ts-dsl/fixtures/**
+examples/docs/*/src/**
+
+# Generated pinned Android toolchain, not repository source.
+.cache/android-device-acceptance/**

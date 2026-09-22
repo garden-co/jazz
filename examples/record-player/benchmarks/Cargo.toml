@@ -1,0 +1,16 @@
+[package]
+name = "jazz-example-record-player-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+serde_json = "1"
+
+[[bench]]
+name = "queries"
+harness = false

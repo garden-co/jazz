@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Run one focused Jazz Rust test without Cargo's successful zero-test trap.
+#
+# The default deliberately matches the core-only gate.  Use --test for an
+# integration target rather than relying on Cargo's package-wide target search.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: dev/t [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
+
+Runs exactly one focused Jazz test with -p jazz --no-default-features --features
+test. The default target is --lib. Cargo's --list inventory is authoritative:
+the wrapper resolves a unique canonical module-path test name from FILTER, then
+runs that resolved name with --exact. --exact requires FILTER itself to already
+be that full canonical name; without it FILTER is a literal substring.
+
+Examples:
+  dev/t subscription::tests::reopens
+  dev/t --exact db::tests::round_trips
+  dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+EOF
+}
+
+target_kind="lib"
+target_name=""
+exact=false
+while (($#)); do
+  case "$1" in
+    --lib)
+      target_kind="lib"
+      target_name=""
+      shift
+      ;;
+    --test)
+      (($# >= 2)) || { usage; exit 2; }
+      target_kind="test"
+      target_name="$2"
+      shift 2
+      ;;
+    --exact)
+      exact=true
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      usage
+      echo "dev/t: unknown option: $1" >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+(($# >= 1)) || { usage; exit 2; }
+filter="$1"
+shift
+extra_args=("$@")
+# The separator belongs to this wrapper's syntax; Cargo receives it once,
+# between its filter and libtest's options.
+if ((${#extra_args[@]})) && [[ "${extra_args[0]}" == "--" ]]; then
+  extra_args=("${extra_args[@]:1}")
+fi
+
+for required in cargo mktemp grep sed date; do
+  command -v "$required" >/dev/null 2>&1 || {
+    echo "dev/t: required command not found: $required" >&2
+    exit 127
+  }
+done
+
+cargo_args=(-p jazz --no-default-features --features testing,transport-compression-zstd)
+if [[ "$target_kind" == "lib" ]]; then
+  cargo_args+=(--lib)
+  selected_binary="jazz lib tests"
+else
+  cargo_args+=(--test "$target_name")
+  selected_binary="jazz integration test: $target_name"
+fi
+
+target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+printf 'dev/t: target=%s\n' "$selected_binary"
+printf 'dev/t: features=no-default-features,testing,transport-compression-zstd; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
+  "$target_dir" "${RUSTC_WRAPPER:-none}" "${SCCACHE_DIR:-none}" "${CARGO_INCREMENTAL:-default}"
+printf 'dev/t: inventory command:'
+printf ' %q' cargo test "${cargo_args[@]}" -- --list
+printf '\n'
+
+inventory="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t-inventory.XXXXXX")"
+output="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t.XXXXXX")"
+trap 'rm -f "$inventory" "$output"' EXIT
+
+started="$(date +%s)"
+echo 'dev/t: resolving Cargo test inventory (may compile selected target)...'
+set +e
+cargo test "${cargo_args[@]}" -- --list >"$inventory" 2>&1
+inventory_status=$?
+set -e
+inventory_elapsed=$(( $(date +%s) - started ))
+printf 'dev/t: inventory compile/list elapsed=%ss\n' "$inventory_elapsed"
+if ((inventory_status != 0)); then
+  cat "$inventory"
+  echo "dev/t: inventory command failed (exit $inventory_status); test was not run" >&2
+  exit "$inventory_status"
+fi
+
+# Cargo writes each discovered unit test as "fully::qualified::name: test".
+# Inspect that authoritative inventory before the run so a spelling, target, or
+# feature mismatch cannot look like a successful focused test invocation.
+names="$(sed -n 's/: test$//p' "$inventory")"
+inventory_count="$(printf '%s\n' "$names" | grep -c . || true)"
+printf 'dev/t: selected inventory has %s test(s)\n' "$inventory_count"
+if [[ "$exact" == true ]]; then
+  matches="$(printf '%s\n' "$names" | grep -F -x -- "$filter" || true)"
+else
+  matches="$(printf '%s\n' "$names" | grep -F -- "$filter" || true)"
+fi
+if [[ -z "$matches" ]]; then
+  echo "dev/t: filter matched no selected test inventory entries: $filter" >&2
+  echo "dev/t: check --lib versus --test TARGET, feature selection, or use a shorter substring." >&2
+  exit 1
+fi
+match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
+if ((match_count != 1)); then
+  echo "dev/t: filter must resolve exactly one test, but matched $match_count:" >&2
+  printf '%s\n' "$matches" >&2
+  echo "dev/t: use a longer module path or --exact with a canonical inventory name." >&2
+  exit 1
+fi
+printf 'dev/t: inventory matched %s test(s):\n%s\n' "$match_count" "$matches"
+
+# Always execute the one canonical name selected from Cargo's own inventory.
+# This prevents Cargo's substring filter from silently broadening after a new
+# similarly named test is added, and makes a zero-test run impossible here.
+resolved_test="$matches"
+
+run_args=(test "${cargo_args[@]}" "$resolved_test" -- "${extra_args[@]}" --exact)
+printf 'dev/t: run command:'
+printf ' %q' cargo "${run_args[@]}"
+printf '\n'
+started="$(date +%s)"
+set +e
+cargo "${run_args[@]}" >"$output" 2>&1
+status=$?
+set -e
+run_elapsed=$(( $(date +%s) - started ))
+cat "$output"
+printf 'dev/t: test run elapsed=%ss exit=%s\n' "$run_elapsed" "$status"
+exit "$status"

@@ -1,0 +1,2615 @@
+//! Logical record values, value types, and primitive encoders.
+//!
+//! This module owns [`Value`], [`ValueType`], enum schemas, and the recursive
+//! encode/decode routines for scalars, tuples, arrays, and nullable values. It
+//! does not know field names or physical record ordering; [`super`] wraps these
+//! value encodings in [`super::RecordDescriptor`] layout and exposes
+//! borrowed/owned record access. Query expressions and schemas refer to these
+//! value types but do not perform byte-level encoding themselves.
+
+use super::{DescriptorField, Error, FieldIdentity, OwnedRecord, RecordDescriptor};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+/// Reserved high bit marking an engine-owned registry shared at one explicit
+/// internal relational boundary.
+const SYSTEM_REGISTRY_MARKER: u64 = 1 << 63;
+
+/// Stable compact identity for a physical enum occurrence.
+pub fn variant_registry_id_for_path(path: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let hash = hash & !SYSTEM_REGISTRY_MARKER;
+    if hash == 0 { 1 } else { hash }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum Value {
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    F64(f64),
+    Bool(bool),
+    String(String),
+    Bytes(Vec<u8>),
+    /// Engine-owned indirect physical arm. Public result boundaries
+    /// materialize this back into the declared logical scalar type. Box the
+    /// uncommon reference so every ordinary materialized cell stays compact.
+    Large(Box<crate::large_values::LargeValueRef>),
+    Uuid(uuid::Uuid),
+    EnumTag(u8),
+    Tuple(Vec<Value>),
+    Array(Vec<Value>),
+    Nullable(Option<Box<Value>>),
+    I64(i64),
+    I32(i32),
+    Record(OwnedRecord),
+    Enum(EnumValue),
+}
+
+/// One selected case of a [`EnumSchema`].
+///
+/// The tag is the declaration-order index of the case in its enum schema.
+/// It is encoded with the payload record as a bounded canonical `u32` varint.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct EnumValue {
+    tag: u32,
+    record: OwnedRecord,
+}
+
+impl EnumValue {
+    pub fn new(tag: u32, record: OwnedRecord) -> Self {
+        Self { tag, record }
+    }
+
+    pub fn create(tag: u32, descriptor: RecordDescriptor, values: &[Value]) -> Result<Self, Error> {
+        Ok(Self::new(
+            tag,
+            OwnedRecord::new(descriptor.create(values)?, descriptor),
+        ))
+    }
+
+    pub fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        &self.record
+    }
+
+    pub fn into_record(self) -> OwnedRecord {
+        self.record
+    }
+}
+
+impl From<u8> for Value {
+    fn from(value: u8) -> Self {
+        Self::U8(value)
+    }
+}
+
+impl From<u16> for Value {
+    fn from(value: u16) -> Self {
+        Self::U16(value)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Self::U32(value)
+    }
+}
+
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        Self::U64(value)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Self::I32(value)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::I64(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::F64(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        Self::Bytes(value.to_vec())
+    }
+}
+
+impl From<uuid::Uuid> for Value {
+    fn from(value: uuid::Uuid) -> Self {
+        Self::Uuid(value)
+    }
+}
+
+impl From<Vec<Value>> for Value {
+    fn from(value: Vec<Value>) -> Self {
+        Self::Array(value)
+    }
+}
+
+impl From<Option<Value>> for Value {
+    fn from(value: Option<Value>) -> Self {
+        Self::Nullable(value.map(Box::new))
+    }
+}
+
+/// Named enum schema stored as one order-preserving `u8` discriminant.
+///
+/// Declaration order is sort order. Appending variants is compatible with
+/// existing stored rows; reordering or removing variants changes meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct ScalarEnumSchema {
+    /// Durable identity of this enum occurrence. The enclosing table stamps
+    /// unstamped schemas from their physical field path before persistence.
+    #[serde(default)]
+    registry_id: u64,
+    pub name: String,
+    pub variants: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScalarEnumSchemaSerde {
+    #[serde(default)]
+    registry_id: u64,
+    name: String,
+    variants: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for ScalarEnumSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let schema = <ScalarEnumSchemaSerde as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_parts(schema.registry_id, schema.name, schema.variants)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Opaque token for an engine-owned enum registry shared at an explicitly
+/// defined relational boundary.
+#[derive(Clone, Copy, Debug)]
+pub struct SystemVariantRegistry(u64);
+
+impl SystemVariantRegistry {
+    /// The internal deletion-state register that joins content and deletion
+    /// facts in Jazz's query engine.
+    pub fn deletion_state() -> Self {
+        Self(variant_registry_id_for_path("jazz/internal/deletion") | SYSTEM_REGISTRY_MARKER)
+    }
+}
+
+/// Named enum schema whose declaration-order cases have stable `u32` tags.
+///
+/// A case name and its payload descriptor are part of the persistent schema.
+/// Appending a case preserves existing tags; reordering, removing, or renaming
+/// a case changes the meaning of stored values and is therefore incompatible.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct EnumSchema {
+    /// Durable identity of this enum occurrence.
+    #[serde(default)]
+    pub registry_id: u64,
+    pub name: String,
+    pub cases: Vec<EnumCase>,
+}
+
+/// One named payload layout in a [`EnumSchema`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct EnumCase {
+    pub name: String,
+    pub payload: RecordDescriptor,
+}
+
+/// Persisted append-only case registry for one nested value occurrence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum VariantRegistry {
+    EnumTag { variants: Vec<String> },
+    Enum { cases: Vec<String> },
+}
+
+impl EnumCase {
+    pub fn new(name: impl Into<String>, payload: RecordDescriptor) -> Self {
+        Self {
+            name: name.into(),
+            payload,
+        }
+    }
+}
+
+impl EnumSchema {
+    pub fn new(
+        name: impl Into<String>,
+        cases: impl IntoIterator<Item = EnumCase>,
+    ) -> Result<Self, Error> {
+        let name = name.into();
+        let cases = cases.into_iter().collect::<Vec<_>>();
+        Self::validate_cases(&name, &cases)?;
+        Ok(Self {
+            registry_id: 0,
+            name,
+            cases,
+        })
+    }
+
+    pub fn with_registry_id(mut self, registry_id: u64) -> Self {
+        self.registry_id = registry_id;
+        self
+    }
+
+    fn validate_cases(name: &str, cases: &[EnumCase]) -> Result<(), Error> {
+        if !cases.is_empty() && u32::try_from(cases.len() - 1).is_err() {
+            return Err(Error::EnumTooManyCases {
+                name: name.to_owned(),
+                cases: cases.len(),
+            });
+        }
+        for (index, case) in cases.iter().enumerate() {
+            if cases[..index]
+                .iter()
+                .any(|candidate| candidate.name == case.name)
+            {
+                return Err(Error::DuplicateEnumCaseName {
+                    enum_name: name.to_owned(),
+                    case: case.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        Self::validate_cases(&self.name, &self.cases)
+    }
+
+    pub fn case(&self, tag: u32) -> Result<&EnumCase, Error> {
+        self.cases
+            .get(tag as usize)
+            .ok_or_else(|| Error::UnknownEnumTag {
+                enum_name: self.name.clone(),
+                tag,
+            })
+    }
+
+    pub fn tag(&self, case: &str) -> Result<u32, Error> {
+        self.cases
+            .iter()
+            .position(|candidate| candidate.name == case)
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(|| Error::UnknownEnumCase {
+                enum_name: self.name.clone(),
+                case: case.to_owned(),
+            })
+    }
+}
+
+fn assign_record_variant_registries(
+    descriptor: &RecordDescriptor,
+    path: &str,
+    replace: bool,
+) -> RecordDescriptor {
+    RecordDescriptor::from_logical_fields(
+        descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| super::DescriptorField {
+                name: field.name.clone(),
+                identity: field.identity.clone(),
+                value_type: {
+                    let mut value_type = field.value_type.clone();
+                    value_type.assign_variant_registries(&format!("{path}/field/{index}"), replace);
+                    value_type
+                },
+            })
+            .collect(),
+    )
+}
+
+impl ScalarEnumSchema {
+    pub fn new(
+        name: impl Into<String>,
+        variants: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, Error> {
+        Self::from_parts(
+            0,
+            name.into(),
+            variants.into_iter().map(Into::into).collect::<Vec<_>>(),
+        )
+    }
+
+    fn from_parts(registry_id: u64, name: String, variants: Vec<String>) -> Result<Self, Error> {
+        Self::validate_variants(&name, &variants)?;
+        Ok(Self {
+            registry_id,
+            name,
+            variants,
+        })
+    }
+
+    fn validate_variants(name: &str, variants: &[String]) -> Result<(), Error> {
+        if variants.len() > 256 {
+            return Err(Error::EnumTooManyVariants {
+                name: name.to_owned(),
+                variants: variants.len(),
+            });
+        }
+        for (index, variant) in variants.iter().enumerate() {
+            if variants[..index]
+                .iter()
+                .any(|candidate| candidate == variant)
+            {
+                return Err(Error::DuplicateEnumVariantName {
+                    enum_name: name.to_owned(),
+                    variant: variant.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        Self::validate_variants(&self.name, &self.variants)
+    }
+
+    pub fn with_registry_id(mut self, registry_id: u64) -> Self {
+        self.registry_id = registry_id & !SYSTEM_REGISTRY_MARKER;
+        self
+    }
+
+    pub fn registry_id(&self) -> u64 {
+        self.registry_id
+    }
+
+    /// Mark an engine-owned enum identity that is intentionally shared across
+    /// one explicit internal relational boundary.
+    pub fn with_system_registry(mut self, registry: SystemVariantRegistry) -> Self {
+        self.registry_id = registry.0;
+        self
+    }
+
+    pub fn discriminant(&self, variant: &str) -> Result<u8, Error> {
+        self.variants
+            .iter()
+            .position(|candidate| candidate == variant)
+            .and_then(|idx| u8::try_from(idx).ok())
+            .ok_or_else(|| Error::UnknownEnumVariant {
+                enum_name: self.name.clone(),
+                variant: variant.to_owned(),
+            })
+    }
+
+    pub fn variant(&self, discriminant: u8) -> Result<&str, Error> {
+        self.variants
+            .get(usize::from(discriminant))
+            .map(String::as_str)
+            .ok_or_else(|| Error::InvalidEnumDiscriminant {
+                enum_name: self.name.clone(),
+                discriminant,
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum ValueType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I32,
+    I64,
+    F64,
+    Bool,
+    String,
+    Bytes,
+    /// Private engine-only physical encodings. Its payload type is crate
+    /// private, so public schema/binding callers cannot construct one.
+    Internal(InternalValueType),
+    Uuid,
+    EnumTag(ScalarEnumSchema),
+    /// Fixed-width composite value encoded as concatenated member encodings.
+    /// Variable-width members are deliberately rejected at schema construction.
+    Tuple(Vec<ValueType>),
+    Array(Box<ValueType>),
+    Nullable(Box<ValueType>),
+    /// A variable-width nested record interpreted by this inline descriptor.
+    Record(Box<RecordDescriptor>),
+    /// A variable-width tagged payload record selected by a stable enum case.
+    Enum(Box<EnumSchema>),
+}
+
+/// Opaque marker for physical-only value encodings beneath the public
+/// `ValueType` algebra. Its sole field is private, so callers cannot construct
+/// an internal type through `ValueType` or `ColumnType`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct InternalValueType(InternalValueTypeRepr);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+enum InternalValueTypeRepr {
+    RawString,
+    RawBytes,
+    StoredScalar(crate::large_values::LargeValueKind),
+}
+
+// A self-contained record descriptor occasionally has to cross a durable
+// engine boundary (for example, a maintained result payload). Serde derives
+// are intentionally not that boundary: their layout belongs to Rust types,
+// not Groove's settled storage algebra. These nodes are therefore ordinary
+// Groove records under one fixed descriptor. The tree is flattened in prefix
+// order, so the carrier remains a non-recursive `array<record>` while still
+// representing recursive `ValueType`s exactly.
+const DESCRIPTOR_CODEC_MAX_NODES: usize = 1024;
+
+const DESCRIPTOR_NODE_DESCRIPTOR: u8 = 0;
+const DESCRIPTOR_NODE_FIELD: u8 = 1;
+const DESCRIPTOR_NODE_U8: u8 = 2;
+const DESCRIPTOR_NODE_U16: u8 = 3;
+const DESCRIPTOR_NODE_U32: u8 = 4;
+const DESCRIPTOR_NODE_U64: u8 = 5;
+const DESCRIPTOR_NODE_I32: u8 = 6;
+const DESCRIPTOR_NODE_I64: u8 = 7;
+const DESCRIPTOR_NODE_F64: u8 = 8;
+const DESCRIPTOR_NODE_BOOL: u8 = 9;
+const DESCRIPTOR_NODE_STRING: u8 = 10;
+const DESCRIPTOR_NODE_BYTES: u8 = 11;
+const DESCRIPTOR_NODE_RAW_STRING: u8 = 12;
+const DESCRIPTOR_NODE_RAW_BYTES: u8 = 13;
+const DESCRIPTOR_NODE_STORED_BYTES: u8 = 14;
+const DESCRIPTOR_NODE_STORED_STRING: u8 = 15;
+const DESCRIPTOR_NODE_STORED_JSON: u8 = 16;
+const DESCRIPTOR_NODE_UUID: u8 = 17;
+const DESCRIPTOR_NODE_ENUM_TAG: u8 = 18;
+const DESCRIPTOR_NODE_TUPLE: u8 = 19;
+const DESCRIPTOR_NODE_ARRAY: u8 = 20;
+const DESCRIPTOR_NODE_NULLABLE: u8 = 21;
+const DESCRIPTOR_NODE_RECORD: u8 = 22;
+const DESCRIPTOR_NODE_ENUM: u8 = 23;
+const DESCRIPTOR_NODE_ENUM_CASE: u8 = 24;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DescriptorCodecNode {
+    tag: u8,
+    name: Option<String>,
+    identity_name: Option<String>,
+    identity_slot: Option<u64>,
+    registry_id: u64,
+    children: u32,
+    strings: Vec<String>,
+}
+
+fn descriptor_codec_node_descriptor() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("tag", ValueType::U8),
+            (
+                "name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            (
+                "identity_name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            (
+                "identity_slot",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            ("registry_id", ValueType::U64),
+            ("children", ValueType::U32),
+            (
+                "strings",
+                ValueType::Array(Box::new(ValueType::raw_string())),
+            ),
+        ])
+    })
+}
+
+fn descriptor_codec_envelope() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([(
+            "nodes",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *descriptor_codec_node_descriptor(),
+            )))),
+        )])
+    })
+}
+
+fn descriptor_codec_node_value(node: DescriptorCodecNode) -> Result<Value, Error> {
+    let descriptor = *descriptor_codec_node_descriptor();
+    let raw = descriptor.create(&[
+        Value::U8(node.tag),
+        Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
+        Value::Nullable(node.identity_name.map(|name| Box::new(Value::String(name)))),
+        Value::Nullable(node.identity_slot.map(|slot| Box::new(Value::U64(slot)))),
+        Value::U64(node.registry_id),
+        Value::U32(node.children),
+        Value::Array(node.strings.into_iter().map(Value::String).collect()),
+    ])?;
+    Ok(Value::Record(OwnedRecord::new(raw, descriptor)))
+}
+
+fn descriptor_codec_node_from_value(value: Value) -> Result<DescriptorCodecNode, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    if record.descriptor() != descriptor_codec_node_descriptor() {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let values = record.to_values()?;
+    let [
+        Value::U8(tag),
+        Value::Nullable(name),
+        Value::Nullable(identity_name),
+        Value::Nullable(identity_slot),
+        Value::U64(registry_id),
+        Value::U32(children),
+        Value::Array(strings),
+    ] = values.as_slice()
+    else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    let name = match name.as_deref() {
+        None => None,
+        Some(Value::String(name)) => Some(name.clone()),
+        Some(_) => return Err(Error::NonCanonicalRecord),
+    };
+    let identity_name = match identity_name.as_deref() {
+        None => None,
+        Some(Value::String(name)) => Some(name.clone()),
+        Some(_) => return Err(Error::NonCanonicalRecord),
+    };
+    let identity_slot = match identity_slot.as_deref() {
+        None => None,
+        Some(Value::U64(slot)) => Some(*slot),
+        Some(_) => return Err(Error::NonCanonicalRecord),
+    };
+    let strings = strings
+        .iter()
+        .map(|value| match value {
+            Value::String(value) => Ok(value.clone()),
+            _ => Err(Error::NonCanonicalRecord),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DescriptorCodecNode {
+        tag: *tag,
+        name,
+        identity_name,
+        identity_slot,
+        registry_id: *registry_id,
+        children: *children,
+        strings,
+    })
+}
+
+fn descriptor_codec_push(
+    nodes: &mut Vec<DescriptorCodecNode>,
+    node: DescriptorCodecNode,
+) -> Result<(), Error> {
+    if nodes.len() == DESCRIPTOR_CODEC_MAX_NODES {
+        return Err(Error::LengthOverflow);
+    }
+    nodes.push(node);
+    Ok(())
+}
+
+fn descriptor_codec_push_descriptor(
+    nodes: &mut Vec<DescriptorCodecNode>,
+    descriptor: &RecordDescriptor,
+) -> Result<(), Error> {
+    descriptor_codec_push(
+        nodes,
+        DescriptorCodecNode {
+            tag: DESCRIPTOR_NODE_DESCRIPTOR,
+            name: None,
+            identity_name: None,
+            identity_slot: None,
+            registry_id: 0,
+            children: u32::try_from(descriptor.fields().len())
+                .map_err(|_| Error::LengthOverflow)?,
+            strings: Vec::new(),
+        },
+    )?;
+    for field in descriptor.fields() {
+        descriptor_codec_push(
+            nodes,
+            DescriptorCodecNode {
+                tag: DESCRIPTOR_NODE_FIELD,
+                name: field.name.clone(),
+                identity_name: match field.identity.as_ref() {
+                    Some(FieldIdentity::Name(name)) => Some(name.clone()),
+                    Some(FieldIdentity::NamedSlot { name, .. }) => Some(name.clone()),
+                    _ => None,
+                },
+                identity_slot: match field.identity.as_ref() {
+                    Some(FieldIdentity::Slot(slot)) => Some(*slot),
+                    Some(FieldIdentity::NamedSlot { slot, .. }) => Some(*slot),
+                    _ => None,
+                },
+                registry_id: 0,
+                children: 1,
+                strings: Vec::new(),
+            },
+        )?;
+        descriptor_codec_push_value_type(nodes, &field.value_type)?;
+    }
+    Ok(())
+}
+
+fn descriptor_codec_push_value_type(
+    nodes: &mut Vec<DescriptorCodecNode>,
+    value_type: &ValueType,
+) -> Result<(), Error> {
+    let scalar = |tag| DescriptorCodecNode {
+        tag,
+        name: None,
+        identity_name: None,
+        identity_slot: None,
+        registry_id: 0,
+        children: 0,
+        strings: Vec::new(),
+    };
+    match value_type {
+        ValueType::U8 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U8)),
+        ValueType::U16 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U16)),
+        ValueType::U32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U32)),
+        ValueType::U64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U64)),
+        ValueType::I32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I32)),
+        ValueType::I64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I64)),
+        ValueType::F64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_F64)),
+        ValueType::Bool => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_BOOL)),
+        ValueType::String => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STRING)),
+        ValueType::Bytes => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_BYTES)),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
+            descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_RAW_STRING))
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => {
+            descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_RAW_BYTES))
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+            crate::large_values::LargeValueKind::Bytes,
+        ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_BYTES)),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+            crate::large_values::LargeValueKind::String,
+        ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_STRING)),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+            crate::large_values::LargeValueKind::Json,
+        ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_JSON)),
+        ValueType::Uuid => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_UUID)),
+        ValueType::EnumTag(schema) => descriptor_codec_push(
+            nodes,
+            DescriptorCodecNode {
+                tag: DESCRIPTOR_NODE_ENUM_TAG,
+                name: Some(schema.name.clone()),
+                identity_name: None,
+                identity_slot: None,
+                registry_id: schema.registry_id,
+                children: 0,
+                strings: schema.variants.clone(),
+            },
+        ),
+        ValueType::Tuple(members) => {
+            descriptor_codec_push(
+                nodes,
+                DescriptorCodecNode {
+                    tag: DESCRIPTOR_NODE_TUPLE,
+                    name: None,
+                    identity_name: None,
+                    identity_slot: None,
+                    registry_id: 0,
+                    children: u32::try_from(members.len()).map_err(|_| Error::LengthOverflow)?,
+                    strings: Vec::new(),
+                },
+            )?;
+            for member in members {
+                descriptor_codec_push_value_type(nodes, member)?;
+            }
+            Ok(())
+        }
+        ValueType::Array(inner) | ValueType::Nullable(inner) => {
+            let tag = if matches!(value_type, ValueType::Array(_)) {
+                DESCRIPTOR_NODE_ARRAY
+            } else {
+                DESCRIPTOR_NODE_NULLABLE
+            };
+            descriptor_codec_push(
+                nodes,
+                DescriptorCodecNode {
+                    tag,
+                    name: None,
+                    identity_name: None,
+                    identity_slot: None,
+                    registry_id: 0,
+                    children: 1,
+                    strings: Vec::new(),
+                },
+            )?;
+            descriptor_codec_push_value_type(nodes, inner)
+        }
+        ValueType::Record(descriptor) => {
+            descriptor_codec_push(
+                nodes,
+                DescriptorCodecNode {
+                    tag: DESCRIPTOR_NODE_RECORD,
+                    name: None,
+                    identity_name: None,
+                    identity_slot: None,
+                    registry_id: 0,
+                    children: 1,
+                    strings: Vec::new(),
+                },
+            )?;
+            descriptor_codec_push_descriptor(nodes, descriptor)
+        }
+        ValueType::Enum(schema) => {
+            descriptor_codec_push(
+                nodes,
+                DescriptorCodecNode {
+                    tag: DESCRIPTOR_NODE_ENUM,
+                    name: Some(schema.name.clone()),
+                    identity_name: None,
+                    identity_slot: None,
+                    registry_id: schema.registry_id,
+                    children: u32::try_from(schema.cases.len())
+                        .map_err(|_| Error::LengthOverflow)?,
+                    strings: Vec::new(),
+                },
+            )?;
+            for case in &schema.cases {
+                descriptor_codec_push(
+                    nodes,
+                    DescriptorCodecNode {
+                        tag: DESCRIPTOR_NODE_ENUM_CASE,
+                        name: Some(case.name.clone()),
+                        identity_name: None,
+                        identity_slot: None,
+                        registry_id: 0,
+                        children: 1,
+                        strings: Vec::new(),
+                    },
+                )?;
+                descriptor_codec_push_descriptor(nodes, &case.payload)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn descriptor_codec_take<'a>(
+    nodes: &'a [DescriptorCodecNode],
+    cursor: &mut usize,
+) -> Result<&'a DescriptorCodecNode, Error> {
+    let node = nodes.get(*cursor).ok_or_else(|| Error::UnexpectedEof)?;
+    *cursor += 1;
+    Ok(node)
+}
+
+fn descriptor_codec_metadata_empty(node: &DescriptorCodecNode) -> Result<(), Error> {
+    if node.name.is_none()
+        && node.identity_name.is_none()
+        && node.identity_slot.is_none()
+        && node.registry_id == 0
+        && node.children == 0
+        && node.strings.is_empty()
+    {
+        Ok(())
+    } else {
+        Err(Error::NonCanonicalRecord)
+    }
+}
+
+fn descriptor_codec_field_identity(
+    node: &DescriptorCodecNode,
+) -> Result<Option<FieldIdentity>, Error> {
+    match (&node.identity_name, node.identity_slot) {
+        (Some(name), Some(slot)) => Ok(Some(FieldIdentity::NamedSlot {
+            name: name.clone(),
+            slot,
+        })),
+        (Some(name), None) => Ok(Some(FieldIdentity::Name(name.clone()))),
+        (None, Some(slot)) => Ok(Some(FieldIdentity::Slot(slot))),
+        (None, None) => Ok(None),
+    }
+}
+
+fn descriptor_codec_decode_descriptor(
+    nodes: &[DescriptorCodecNode],
+    cursor: &mut usize,
+) -> Result<RecordDescriptor, Error> {
+    let node = descriptor_codec_take(nodes, cursor)?;
+    if node.tag != DESCRIPTOR_NODE_DESCRIPTOR
+        || node.name.is_some()
+        || node.identity_name.is_some()
+        || node.identity_slot.is_some()
+        || node.registry_id != 0
+        || !node.strings.is_empty()
+    {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let mut fields =
+        Vec::with_capacity(usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?);
+    for _ in 0..node.children {
+        let field = descriptor_codec_take(nodes, cursor)?;
+        if field.tag != DESCRIPTOR_NODE_FIELD
+            || field.registry_id != 0
+            || field.children != 1
+            || !field.strings.is_empty()
+        {
+            return Err(Error::NonCanonicalRecord);
+        }
+        fields.push(DescriptorField {
+            name: field.name.clone(),
+            identity: descriptor_codec_field_identity(field)?,
+            value_type: descriptor_codec_decode_value_type(nodes, cursor)?,
+        });
+    }
+    // `from_logical_fields` is the trusted schema constructor and deliberately
+    // panics when a programmer supplies an impossible descriptor. These bytes
+    // are durable/untrusted instead, so validate before crossing that trusted
+    // constructor boundary.
+    for field in &fields {
+        validate_schema_value_type(&field.value_type)?;
+    }
+    Ok(RecordDescriptor::from_logical_fields(fields))
+}
+
+fn descriptor_codec_decode_value_type(
+    nodes: &[DescriptorCodecNode],
+    cursor: &mut usize,
+) -> Result<ValueType, Error> {
+    let node = descriptor_codec_take(nodes, cursor)?;
+    let scalar = |expected, value| {
+        if node.tag == expected {
+            descriptor_codec_metadata_empty(node)?;
+            Ok(value)
+        } else {
+            Err(Error::NonCanonicalRecord)
+        }
+    };
+    match node.tag {
+        DESCRIPTOR_NODE_U8 => scalar(DESCRIPTOR_NODE_U8, ValueType::U8),
+        DESCRIPTOR_NODE_U16 => scalar(DESCRIPTOR_NODE_U16, ValueType::U16),
+        DESCRIPTOR_NODE_U32 => scalar(DESCRIPTOR_NODE_U32, ValueType::U32),
+        DESCRIPTOR_NODE_U64 => scalar(DESCRIPTOR_NODE_U64, ValueType::U64),
+        DESCRIPTOR_NODE_I32 => scalar(DESCRIPTOR_NODE_I32, ValueType::I32),
+        DESCRIPTOR_NODE_I64 => scalar(DESCRIPTOR_NODE_I64, ValueType::I64),
+        DESCRIPTOR_NODE_F64 => scalar(DESCRIPTOR_NODE_F64, ValueType::F64),
+        DESCRIPTOR_NODE_BOOL => scalar(DESCRIPTOR_NODE_BOOL, ValueType::Bool),
+        DESCRIPTOR_NODE_STRING => scalar(DESCRIPTOR_NODE_STRING, ValueType::String),
+        DESCRIPTOR_NODE_BYTES => scalar(DESCRIPTOR_NODE_BYTES, ValueType::Bytes),
+        DESCRIPTOR_NODE_RAW_STRING => scalar(DESCRIPTOR_NODE_RAW_STRING, ValueType::raw_string()),
+        DESCRIPTOR_NODE_RAW_BYTES => scalar(DESCRIPTOR_NODE_RAW_BYTES, ValueType::raw_bytes()),
+        DESCRIPTOR_NODE_STORED_BYTES => scalar(
+            DESCRIPTOR_NODE_STORED_BYTES,
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ),
+        DESCRIPTOR_NODE_STORED_STRING => scalar(
+            DESCRIPTOR_NODE_STORED_STRING,
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ),
+        DESCRIPTOR_NODE_STORED_JSON => scalar(
+            DESCRIPTOR_NODE_STORED_JSON,
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ),
+        DESCRIPTOR_NODE_UUID => scalar(DESCRIPTOR_NODE_UUID, ValueType::Uuid),
+        DESCRIPTOR_NODE_ENUM_TAG => {
+            if node.name.as_deref().is_none()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.children != 0
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            let schema = ScalarEnumSchema::from_parts(
+                node.registry_id,
+                node.name.clone().expect("checked"),
+                node.strings.clone(),
+            )?;
+            Ok(ValueType::EnumTag(schema))
+        }
+        DESCRIPTOR_NODE_TUPLE => {
+            if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.registry_id != 0
+                || !node.strings.is_empty()
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            let mut members = Vec::with_capacity(
+                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
+            );
+            for _ in 0..node.children {
+                members.push(descriptor_codec_decode_value_type(nodes, cursor)?);
+            }
+            // Reuse Groove's constructor-time tuple validation rather than
+            // accepting an impossible variable-width tuple descriptor.
+            let value_type = ValueType::Tuple(members);
+            if value_type.fixed_size().is_none() {
+                return Err(Error::InvalidTupleMember {
+                    member_type: value_type,
+                });
+            }
+            Ok(value_type)
+        }
+        DESCRIPTOR_NODE_ARRAY | DESCRIPTOR_NODE_NULLABLE => {
+            if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.registry_id != 0
+                || node.children != 1
+                || !node.strings.is_empty()
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            let inner = Box::new(descriptor_codec_decode_value_type(nodes, cursor)?);
+            Ok(if node.tag == DESCRIPTOR_NODE_ARRAY {
+                ValueType::Array(inner)
+            } else {
+                ValueType::Nullable(inner)
+            })
+        }
+        DESCRIPTOR_NODE_RECORD => {
+            if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.registry_id != 0
+                || node.children != 1
+                || !node.strings.is_empty()
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            Ok(ValueType::Record(Box::new(
+                descriptor_codec_decode_descriptor(nodes, cursor)?,
+            )))
+        }
+        DESCRIPTOR_NODE_ENUM => {
+            if node.name.as_deref().is_none()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || !node.strings.is_empty()
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            let mut cases = Vec::with_capacity(
+                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
+            );
+            for _ in 0..node.children {
+                let case = descriptor_codec_take(nodes, cursor)?;
+                if case.tag != DESCRIPTOR_NODE_ENUM_CASE
+                    || case.name.as_deref().is_none()
+                    || case.identity_name.is_some()
+                    || case.identity_slot.is_some()
+                    || case.registry_id != 0
+                    || case.children != 1
+                    || !case.strings.is_empty()
+                {
+                    return Err(Error::NonCanonicalRecord);
+                }
+                cases.push(EnumCase::new(
+                    case.name.clone().expect("checked"),
+                    descriptor_codec_decode_descriptor(nodes, cursor)?,
+                ));
+            }
+            let mut schema = EnumSchema::new(node.name.clone().expect("checked"), cases)?;
+            schema.registry_id = node.registry_id;
+            Ok(ValueType::Enum(Box::new(schema)))
+        }
+        _ => Err(Error::NonCanonicalRecord),
+    }
+}
+
+/// Encode a record descriptor through Groove's ordinary canonical record/value
+/// algebra. The inverse rejects non-canonical, trailing, or incomplete trees.
+pub fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, Error> {
+    let mut nodes = Vec::new();
+    descriptor_codec_push_descriptor(&mut nodes, descriptor)?;
+    let nodes = nodes
+        .into_iter()
+        .map(descriptor_codec_node_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    descriptor_codec_envelope().create(&[Value::Array(nodes)])
+}
+
+/// Decode one exact canonical descriptor encoding produced by
+/// [`encode_record_descriptor`].
+pub fn decode_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Error> {
+    let envelope = descriptor_codec_envelope();
+    let values = envelope.bind(encoded).to_values()?;
+    if envelope.create(&values)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let [Value::Array(nodes)] = values.as_slice() else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    if nodes.len() > DESCRIPTOR_CODEC_MAX_NODES {
+        return Err(Error::LengthOverflow);
+    }
+    let nodes = nodes
+        .iter()
+        .cloned()
+        .map(descriptor_codec_node_from_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut cursor = 0;
+    let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
+    if cursor != nodes.len() || encode_record_descriptor(&descriptor)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(descriptor)
+}
+
+// The persisted descriptor grammar is distinct from execution bindings. Its
+// node record is frozen: tag, name, registry_id, children, strings. FieldIdentity
+// is compiler state and never adds a field to this authoritative encoding.
+fn persisted_descriptor_node() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("tag", ValueType::U8),
+            (
+                "name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            ("registry_id", ValueType::U64),
+            ("children", ValueType::U32),
+            (
+                "strings",
+                ValueType::Array(Box::new(ValueType::raw_string())),
+            ),
+        ])
+    })
+}
+
+fn persisted_descriptor_envelope() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([(
+            "nodes",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *persisted_descriptor_node(),
+            )))),
+        )])
+    })
+}
+
+/// Encode a canonical persisted descriptor using exact durable field names and
+/// types. Names are taken from `DescriptorField::name`, never inferred from
+/// execution identities or stripped prefixes. Callers must establish that these
+/// names/types are the authoritative value schema before crossing this boundary.
+/// Runtime Name/Slot/NamedSlot bindings are not persisted. Nested descriptors
+/// follow the same rule, preserving enum registry identities and field order.
+pub fn encode_persisted_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, Error> {
+    let mut nodes = Vec::new();
+    descriptor_codec_push_descriptor(&mut nodes, descriptor)?;
+    let node_descriptor = *persisted_descriptor_node();
+    let nodes = nodes
+        .into_iter()
+        .map(|node| {
+            let raw = node_descriptor.create(&[
+                Value::U8(node.tag),
+                Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
+                Value::U64(node.registry_id),
+                Value::U32(node.children),
+                Value::Array(node.strings.into_iter().map(Value::String).collect()),
+            ])?;
+            Ok(Value::Record(OwnedRecord::new(raw, node_descriptor)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    persisted_descriptor_envelope().create(&[Value::Array(nodes)])
+}
+
+/// Decode the canonical persisted descriptor grammar. Execution bindings are
+/// reconstructed by their owning catalogue/query boundary, not by this reader.
+/// The reader accepts one exact canonical tree and rejects trailing bytes.
+pub fn decode_persisted_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Error> {
+    let envelope = persisted_descriptor_envelope();
+    let values = envelope.bind(encoded).to_values()?;
+    if envelope.create(&values)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let [Value::Array(records)] = values.as_slice() else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    if records.len() > DESCRIPTOR_CODEC_MAX_NODES {
+        return Err(Error::LengthOverflow);
+    }
+    let nodes = records
+        .iter()
+        .map(|record| {
+            let Value::Record(record) = record else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let values = record.to_values()?;
+            let [
+                Value::U8(tag),
+                Value::Nullable(name),
+                Value::U64(registry_id),
+                Value::U32(children),
+                Value::Array(strings),
+            ] = values.as_slice()
+            else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let name = match name.as_deref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(Error::NonCanonicalRecord),
+            };
+            let strings = strings
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => Ok(value.clone()),
+                    _ => Err(Error::NonCanonicalRecord),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DescriptorCodecNode {
+                tag: *tag,
+                name,
+                identity_name: None,
+                identity_slot: None,
+                registry_id: *registry_id,
+                children: *children,
+                strings,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut cursor = 0;
+    let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
+    if cursor != nodes.len() || encode_persisted_record_descriptor(&descriptor)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(descriptor)
+}
+
+/// Whether a value can be used as an ordered `collect_by` key.
+///
+/// Nullable values retain the ordering of their inner scalar. Composite values
+/// deliberately do not: collector keys must be independently ordered values.
+pub fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
+        _ => false,
+    }
+}
+
+impl ValueType {
+    /// Returns the underlying type after removing all outer `Nullable` wrappers.
+    /// Does not unwrap containers or change the nullability of their members.
+    pub fn non_nullable(&self) -> &Self {
+        let mut value_type = self;
+        while let Self::Nullable(inner) = value_type {
+            value_type = inner;
+        }
+        value_type
+    }
+
+    /// Whether this has the `Array<Uuid>` shape used for array foreign keys.
+    /// Call `non_nullable()` first to accept outer `Nullable` wrappers.
+    /// This checks the value type, not schema reference metadata.
+    pub fn is_array_fk(&self) -> bool {
+        matches!(self, Self::Array(inner) if **inner == Self::Uuid)
+    }
+
+    /// Whether this is an engine-only physical backing type. Public schema and
+    /// binding layers use this predicate to reject it without gaining access to
+    /// the private representation.
+    pub fn is_internal_storage_type(&self) -> bool {
+        matches!(self, Self::Internal(_))
+    }
+
+    pub(crate) fn raw_string() -> Self {
+        Self::Internal(InternalValueType(InternalValueTypeRepr::RawString))
+    }
+
+    pub(crate) fn raw_bytes() -> Self {
+        Self::Internal(InternalValueType(InternalValueTypeRepr::RawBytes))
+    }
+
+    pub(crate) fn stored_scalar(kind: crate::large_values::LargeValueKind) -> Self {
+        Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind)))
+    }
+
+    /// Whether a value of this type can contain an indirect stored scalar.
+    ///
+    /// The IVM evaluator uses this schema-only proof to avoid decoding and
+    /// rebuilding records when an operator inspects fields that cannot block
+    /// on large-value hydration.
+    pub(crate) fn may_contain_stored_scalar(&self) -> bool {
+        match self {
+            Self::String
+            | Self::Bytes
+            | Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
+            Self::Tuple(members) => members.iter().any(Self::may_contain_stored_scalar),
+            Self::Array(inner) | Self::Nullable(inner) => inner.may_contain_stored_scalar(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| field.value_type.may_contain_stored_scalar()),
+            Self::Enum(schema) => schema.cases.iter().any(|case| {
+                case.payload
+                    .fields()
+                    .iter()
+                    .any(|field| field.value_type.may_contain_stored_scalar())
+            }),
+            _ => false,
+        }
+    }
+}
+
+impl ValueType {
+    pub(crate) fn variant_registry_occurrence_count(&self) -> usize {
+        match self {
+            Self::EnumTag(_) => 1,
+            Self::Enum(schema) => {
+                1 + schema
+                    .cases
+                    .iter()
+                    .flat_map(|case| case.payload.fields())
+                    .map(|field| field.value_type.variant_registry_occurrence_count())
+                    .sum::<usize>()
+            }
+            Self::Tuple(members) => members
+                .iter()
+                .map(Self::variant_registry_occurrence_count)
+                .sum(),
+            Self::Array(inner) | Self::Nullable(inner) => inner.variant_registry_occurrence_count(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .map(|field| field.value_type.variant_registry_occurrence_count())
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn registry_compatible_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::EnumTag(left), Self::EnumTag(right))
+                if left.registry_id == right.registry_id =>
+            {
+                left.variants.starts_with(&right.variants)
+                    || right.variants.starts_with(&left.variants)
+            }
+            (Self::Enum(left), Self::Enum(right)) if left.registry_id == right.registry_id => {
+                let shared = left.cases.len().min(right.cases.len());
+                left.cases[..shared]
+                    .iter()
+                    .zip(&right.cases[..shared])
+                    .all(|(a, b)| {
+                        a.name == b.name
+                            && a.payload.fields().len() == b.payload.fields().len()
+                            && a.payload
+                                .fields()
+                                .iter()
+                                .zip(b.payload.fields())
+                                .all(|(x, y)| {
+                                    x.name == y.name
+                                        && x.value_type.registry_compatible_with(&y.value_type)
+                                })
+                    })
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(a, b)| a.registry_compatible_with(b))
+            }
+            (Self::Array(left), Self::Array(right))
+            | (Self::Nullable(left), Self::Nullable(right)) => left.registry_compatible_with(right),
+            (Self::Record(left), Self::Record(right)) => {
+                left.fields().len() == right.fields().len()
+                    && left.fields().iter().zip(right.fields()).all(|(a, b)| {
+                        a.name == b.name && a.value_type.registry_compatible_with(&b.value_type)
+                    })
+            }
+            _ => self == other,
+        }
+    }
+
+    /// True when two descriptors have exactly the same byte layout and differ
+    /// only in the durable identities assigned to their enum registries.
+    ///
+    /// Unlike [`Self::registry_compatible_with`], this deliberately does not
+    /// admit append-only growth: a raw record projector copies enum bytes, so
+    /// the target must be able to decode every tag without a semantic remap.
+    pub(crate) fn registry_rebound_layout_compatible_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::EnumTag(left), Self::EnumTag(right)) => left.variants == right.variants,
+            (Self::Enum(left), Self::Enum(right)) => {
+                left.cases.len() == right.cases.len()
+                    && left.cases.iter().zip(&right.cases).all(|(a, b)| {
+                        a.name == b.name
+                            && a.payload.fields().len() == b.payload.fields().len()
+                            && a.payload
+                                .fields()
+                                .iter()
+                                .zip(b.payload.fields())
+                                .all(|(x, y)| {
+                                    x.name == y.name
+                                        && x.value_type
+                                            .registry_rebound_layout_compatible_with(&y.value_type)
+                                })
+                    })
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(a, b)| a.registry_rebound_layout_compatible_with(b))
+            }
+            (Self::Array(left), Self::Array(right))
+            | (Self::Nullable(left), Self::Nullable(right)) => {
+                left.registry_rebound_layout_compatible_with(right)
+            }
+            (Self::Record(left), Self::Record(right)) => {
+                left.fields().len() == right.fields().len()
+                    && left.fields().iter().zip(right.fields()).all(|(a, b)| {
+                        a.name == b.name
+                            && a.value_type
+                                .registry_rebound_layout_compatible_with(&b.value_type)
+                    })
+            }
+            _ => self == other,
+        }
+    }
+
+    /// Whether this durable value occurrence may advance to `next` without
+    /// changing the interpretation of any value already stored under `self`.
+    ///
+    /// `registry_compatible_with` is deliberately symmetric: it is useful at
+    /// read/projection boundaries where either descriptor may describe an
+    /// existing value.  Live table evolution is stricter.  It is directional:
+    /// only `next` may append cases, while names, payload layouts, nesting and
+    /// registry identities remain fixed.
+    pub(crate) fn can_evolve_registry_to(&self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::EnumTag(current), Self::EnumTag(next))
+                if current.registry_id == next.registry_id =>
+            {
+                next.variants.starts_with(&current.variants)
+            }
+            (Self::Enum(current), Self::Enum(next)) if current.registry_id == next.registry_id => {
+                next.cases.len() >= current.cases.len()
+                    && current
+                        .cases
+                        .iter()
+                        .zip(&next.cases)
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.payload.fields().len() == next.payload.fields().len()
+                                && current
+                                    .payload
+                                    .fields()
+                                    .iter()
+                                    .zip(next.payload.fields())
+                                    .all(|(current, next)| {
+                                        current.name == next.name
+                                            && current
+                                                .value_type
+                                                .can_evolve_registry_to(&next.value_type)
+                                    })
+                        })
+            }
+            (Self::Tuple(current), Self::Tuple(next)) => {
+                current.len() == next.len()
+                    && current
+                        .iter()
+                        .zip(next)
+                        .all(|(current, next)| current.can_evolve_registry_to(next))
+            }
+            (Self::Array(current), Self::Array(next))
+            | (Self::Nullable(current), Self::Nullable(next)) => {
+                current.can_evolve_registry_to(next)
+            }
+            (Self::Record(current), Self::Record(next)) => {
+                current.fields().len() == next.fields().len()
+                    && current
+                        .fields()
+                        .iter()
+                        .zip(next.fields())
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.value_type.can_evolve_registry_to(&next.value_type)
+                        })
+            }
+            _ => self == next,
+        }
+    }
+
+    pub(crate) fn collect_variant_registries(&self, output: &mut BTreeMap<u64, VariantRegistry>) {
+        match self {
+            Self::EnumTag(schema) => {
+                output.insert(
+                    schema.registry_id,
+                    VariantRegistry::EnumTag {
+                        variants: schema.variants.clone(),
+                    },
+                );
+            }
+            Self::Tuple(members) => {
+                for member in members {
+                    member.collect_variant_registries(output);
+                }
+            }
+            Self::Array(inner) | Self::Nullable(inner) => {
+                inner.collect_variant_registries(output);
+            }
+            Self::Record(descriptor) => {
+                for field in descriptor.fields() {
+                    field.value_type.collect_variant_registries(output);
+                }
+            }
+            Self::Enum(schema) => {
+                output.insert(
+                    schema.registry_id,
+                    VariantRegistry::Enum {
+                        cases: schema.cases.iter().map(|case| case.name.clone()).collect(),
+                    },
+                );
+                for case in &schema.cases {
+                    for field in case.payload.fields() {
+                        field.value_type.collect_variant_registries(output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Stamp every nested enum occurrence with its durable physical path.
+    /// Existing explicit identities are retained so schema evolution can carry
+    /// them across renames and descriptor reconstruction.
+    pub(crate) fn stamp_variant_registries(mut self, path: &str) -> Self {
+        self.assign_variant_registries(path, false);
+        self
+    }
+
+    /// Bind the complete nested registry tree to a durable physical
+    /// occurrence. This is used by catalogue lowerers after logical renames.
+    pub fn rebind_variant_registries(mut self, path: &str) -> Self {
+        self.assign_variant_registries(path, true);
+        self
+    }
+
+    fn assign_variant_registries(&mut self, path: &str, replace: bool) {
+        match self {
+            Self::EnumTag(schema) => {
+                if schema.registry_id & SYSTEM_REGISTRY_MARKER == 0
+                    && (replace || schema.registry_id == 0)
+                {
+                    schema.registry_id = variant_registry_id_for_path(path);
+                }
+            }
+            Self::Tuple(members) => {
+                for (index, member) in members.iter_mut().enumerate() {
+                    member.assign_variant_registries(&format!("{path}/tuple/{index}"), replace);
+                }
+            }
+            Self::Array(inner) => {
+                inner.assign_variant_registries(&format!("{path}/array"), replace);
+            }
+            Self::Nullable(inner) => {
+                inner.assign_variant_registries(&format!("{path}/nullable"), replace);
+            }
+            Self::Record(descriptor) => {
+                **descriptor = assign_record_variant_registries(
+                    descriptor,
+                    &format!("{path}/record"),
+                    replace,
+                );
+            }
+            Self::Enum(schema) => {
+                if replace || schema.registry_id == 0 {
+                    schema.registry_id = variant_registry_id_for_path(path);
+                }
+                for (index, case) in schema.cases.iter_mut().enumerate() {
+                    case.payload = assign_record_variant_registries(
+                        &case.payload,
+                        &format!("{path}/case/{index}"),
+                        replace,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Wrap this type in an explicit nullable representation.
+    pub fn nullable(self) -> Self {
+        Self::Nullable(Box::new(self))
+    }
+
+    /// Wrap this type in a variable-length array representation.
+    pub fn array_of(self) -> Self {
+        Self::Array(Box::new(self))
+    }
+
+    /// Whether this type contains an inline record at any nesting depth.
+    pub(crate) fn contains_record(&self) -> bool {
+        match self {
+            Self::Tuple(members) => members.iter().any(Self::contains_record),
+            Self::Array(inner) | Self::Nullable(inner) => inner.contains_record(),
+            Self::Record(_) | Self::Enum(_) => true,
+            _ => false,
+        }
+    }
+
+    pub(super) fn fixed_size(&self) -> Option<usize> {
+        match self {
+            Self::U8 | Self::Bool => Some(1),
+            Self::U16 => Some(2),
+            Self::U64 | Self::I64 => Some(8),
+            Self::U32 | Self::I32 => Some(4),
+            Self::F64 => Some(8),
+            Self::Uuid => Some(16),
+            Self::EnumTag(_) => Some(1),
+            Self::Tuple(members) => members
+                .iter()
+                .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
+            Self::Nullable(value_type) => value_type.fixed_size().map(|size| size + 1),
+            Self::String
+            | Self::Bytes
+            | Self::Internal(_)
+            | Self::Array(_)
+            | Self::Record(_)
+            | Self::Enum(_) => None,
+        }
+    }
+
+    pub(super) fn is_fixed_size(&self) -> bool {
+        self.fixed_size().is_some()
+    }
+}
+
+pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    encode_value_into(&mut bytes, value, value_type)?;
+    Ok(bytes)
+}
+
+pub(super) fn encode_value_into(
+    bytes: &mut Vec<u8>,
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<(), Error> {
+    match (value, value_type) {
+        (Value::String(value), ValueType::String) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                crate::large_values::LargeValueKind::String,
+                value.as_bytes(),
+                bytes,
+            )?;
+        }
+        (Value::Bytes(value), ValueType::Bytes) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                crate::large_values::LargeValueKind::Bytes,
+                value,
+                bytes,
+            )?;
+        }
+        (
+            Value::String(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)),
+        ) => bytes.extend_from_slice(value.as_bytes()),
+        (
+            Value::Bytes(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)),
+        ) => bytes.extend_from_slice(value),
+        (
+            Value::Bytes(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+                crate::large_values::LargeValueKind::Bytes,
+            ))),
+        ) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                crate::large_values::LargeValueKind::Bytes,
+                value,
+                bytes,
+            )?;
+        }
+        (
+            Value::String(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+                kind @ (crate::large_values::LargeValueKind::String
+                | crate::large_values::LargeValueKind::Json),
+            ))),
+        ) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                *kind,
+                value.as_bytes(),
+                bytes,
+            )?;
+        }
+        (
+            Value::Large(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
+        ) if value.kind == *kind => bytes.extend(crate::large_values::encode_stored_scalar(
+            *kind,
+            &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+        )?),
+        (Value::Large(value), ValueType::String)
+            if value.kind == crate::large_values::LargeValueKind::String =>
+        {
+            bytes.extend(crate::large_values::encode_stored_scalar(
+                crate::large_values::LargeValueKind::String,
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )?)
+        }
+        (Value::Large(value), ValueType::Bytes)
+            if value.kind == crate::large_values::LargeValueKind::Bytes =>
+        {
+            bytes.extend(crate::large_values::encode_stored_scalar(
+                crate::large_values::LargeValueKind::Bytes,
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )?)
+        }
+        (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
+        (Value::Tuple(values), ValueType::Tuple(members)) => {
+            encode_tuple(bytes, values, members)?;
+        }
+        (Value::Array(values), ValueType::Array(element_type)) => {
+            encode_array(bytes, values, element_type)?;
+        }
+        (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
+            encode_nullable(bytes, value.as_deref(), inner_type)?;
+        }
+        (Value::Record(record), ValueType::Record(_)) => {
+            ensure_value_type(value, value_type)?;
+            bytes.extend_from_slice(record.raw());
+        }
+        (Value::Enum(enum_value), ValueType::Enum(schema)) => {
+            ensure_enum_value(enum_value, schema)?;
+            super::append_variant_record(bytes, enum_value.tag, enum_value.record.raw());
+        }
+        _ if value_type.is_fixed_size() => encode_fixed_value(bytes, value, value_type)?,
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn encode_fixed_value(
+    bytes: &mut Vec<u8>,
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<(), Error> {
+    match (value, value_type) {
+        (Value::U8(value), ValueType::U8) => bytes.push(*value),
+        (Value::U16(value), ValueType::U16) => bytes.extend(value.to_le_bytes()),
+        (Value::U32(value), ValueType::U32) => bytes.extend(value.to_le_bytes()),
+        (Value::U64(value), ValueType::U64) => bytes.extend(value.to_le_bytes()),
+        (Value::I32(value), ValueType::I32) => bytes.extend(value.to_le_bytes()),
+        (Value::I64(value), ValueType::I64) => bytes.extend(value.to_le_bytes()),
+        (Value::F64(value), ValueType::F64) => {
+            if value.is_nan() {
+                return Err(Error::InvalidF64NaN);
+            }
+            bytes.extend(value.to_le_bytes());
+        }
+        (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
+        (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
+        (Value::Tuple(values), ValueType::Tuple(members)) => {
+            encode_tuple(bytes, values, members)?;
+        }
+        (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
+            encode_nullable(bytes, value.as_deref(), inner_type)?;
+        }
+        (_, ValueType::Record(_)) => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+        (_, ValueType::Enum(_)) => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
+    match value_type {
+        ValueType::U8 => Ok(Value::U8(read_exact::<1>(bytes)?[0])),
+        ValueType::U16 => Ok(Value::U16(u16::from_le_bytes(read_exact::<2>(bytes)?))),
+        ValueType::U32 => Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?))),
+        ValueType::U64 => Ok(Value::U64(u64::from_le_bytes(read_exact::<8>(bytes)?))),
+        ValueType::I32 => Ok(Value::I32(i32::from_le_bytes(read_exact::<4>(bytes)?))),
+        ValueType::I64 => Ok(Value::I64(i64::from_le_bytes(read_exact::<8>(bytes)?))),
+        ValueType::F64 => {
+            let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
+            if value.is_nan() {
+                Err(Error::InvalidF64NaN)
+            } else {
+                Ok(Value::F64(value))
+            }
+        }
+        ValueType::Bool => match read_exact::<1>(bytes)?[0] {
+            0 => Ok(Value::Bool(false)),
+            1 => Ok(Value::Bool(true)),
+            value => Err(Error::InvalidBool(value)),
+        },
+        ValueType::String => match crate::large_values::decode_stored_scalar(
+            crate::large_values::LargeValueKind::String,
+            bytes,
+        )
+        .map_err(|error| match error {
+            crate::large_values::Error::InvalidUtf8 => Error::InvalidUtf8,
+            other => Error::LargeValue(other),
+        })? {
+            crate::large_values::StoredScalar::Primitive(bytes) => String::from_utf8(bytes)
+                .map(Value::String)
+                .map_err(|_| Error::InvalidUtf8),
+            crate::large_values::StoredScalar::Chunked(value)
+                if value.kind == crate::large_values::LargeValueKind::String =>
+            {
+                Ok(Value::Large(Box::new(value)))
+            }
+            crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            }),
+        },
+        ValueType::Bytes => match crate::large_values::decode_stored_scalar(
+            crate::large_values::LargeValueKind::Bytes,
+            bytes,
+        )? {
+            crate::large_values::StoredScalar::Primitive(bytes) => Ok(Value::Bytes(bytes)),
+            crate::large_values::StoredScalar::Chunked(value)
+                if value.kind == crate::large_values::LargeValueKind::Bytes =>
+            {
+                Ok(Value::Large(Box::new(value)))
+            }
+            crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            }),
+        },
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
+            String::from_utf8(bytes.to_vec())
+                .map(Value::String)
+                .map_err(|_| Error::InvalidUtf8)
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => {
+            Ok(Value::Bytes(bytes.to_vec()))
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
+            match crate::large_values::decode_stored_scalar(*kind, bytes)? {
+                crate::large_values::StoredScalar::Primitive(bytes) => match kind {
+                    crate::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
+                    crate::large_values::LargeValueKind::String
+                    | crate::large_values::LargeValueKind::Json => String::from_utf8(bytes)
+                        .map(Value::String)
+                        .map_err(|_| Error::InvalidUtf8),
+                },
+                crate::large_values::StoredScalar::Chunked(value) if value.kind == *kind => {
+                    Ok(Value::Large(Box::new(value)))
+                }
+                crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }),
+            }
+        }
+        ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(
+            bytes,
+        )?))),
+        ValueType::EnumTag(schema) => {
+            let discriminant = read_exact::<1>(bytes)?[0];
+            schema
+                .variant(discriminant)
+                .map(|_| Value::EnumTag(discriminant))
+        }
+        ValueType::Tuple(members) => decode_tuple(bytes, members),
+        ValueType::Array(element_type) => decode_array(bytes, element_type),
+        ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
+        ValueType::Record(descriptor) => {
+            // Nested values are lazy records, just like top-level OwnedRecord.
+            // Encoding/admission owns validity; reading a field must not decode
+            // and re-encode every descendant to establish canonicality again.
+            Ok(Value::Record(OwnedRecord::new(
+                bytes.to_vec(),
+                **descriptor,
+            )))
+        }
+        ValueType::Enum(schema) => {
+            let (tag, payload) =
+                super::split_variant_record(bytes).map_err(|error| match error {
+                    Error::InvalidSchemaVersionHeader => Error::InvalidEnumHeader,
+                    other => other,
+                })?;
+            let case = schema.case(tag)?;
+            Ok(Value::Enum(EnumValue::new(
+                tag,
+                OwnedRecord::new(payload.to_vec(), case.payload),
+            )))
+        }
+    }
+}
+
+pub(super) fn validate_value(bytes: &[u8], value_type: &ValueType) -> Result<(), Error> {
+    validate_value_inner(bytes, value_type, false)
+}
+
+pub(super) fn validate_canonical_value(bytes: &[u8], value_type: &ValueType) -> Result<(), Error> {
+    validate_value_inner(bytes, value_type, true)
+}
+
+fn validate_value_inner(
+    bytes: &[u8],
+    value_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    match value_type {
+        ValueType::U8 => read_exact::<1>(bytes).map(|_| ()),
+        ValueType::U16 => read_exact::<2>(bytes).map(|_| ()),
+        ValueType::U32 | ValueType::I32 => read_exact::<4>(bytes).map(|_| ()),
+        ValueType::U64 | ValueType::I64 => read_exact::<8>(bytes).map(|_| ()),
+        ValueType::F64 => {
+            let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
+            // NaN has no representation in any persisted record state. This
+            // structural check intentionally does not depend on the stronger
+            // constructibility mode: `OwnedRecord::validate` is a durable
+            // admission boundary for externally supplied raw VariantRecords.
+            if value.is_nan() {
+                Err(Error::InvalidF64NaN)
+            } else {
+                Ok(())
+            }
+        }
+        ValueType::Bool => match read_exact::<1>(bytes)?[0] {
+            0 | 1 => Ok(()),
+            value => Err(Error::InvalidBool(value)),
+        },
+        ValueType::String | ValueType::Bytes => {
+            use crate::large_values::{Error as LargeValueError, LargeValueKind};
+            let kind = match value_type {
+                ValueType::String => LargeValueKind::String,
+                ValueType::Bytes => LargeValueKind::Bytes,
+                _ => unreachable!("matched string or bytes value type"),
+            };
+            match crate::large_values::inline_scalar_bytes(kind, bytes) {
+                Ok(_) | Err(LargeValueError::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
+            std::str::from_utf8(bytes)
+                .map(|_| ())
+                .map_err(|_| Error::InvalidUtf8)
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
+            match crate::large_values::inline_scalar_bytes(*kind, bytes) {
+                Ok(_) | Err(crate::large_values::Error::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        ValueType::Uuid => read_exact::<16>(bytes).map(|_| ()),
+        ValueType::EnumTag(schema) => {
+            let discriminant = read_exact::<1>(bytes)?[0];
+            schema.variant(discriminant).map(|_| ())
+        }
+        ValueType::Tuple(members) => validate_tuple(bytes, members, require_constructible),
+        ValueType::Array(element_type) => {
+            validate_array(bytes, element_type, require_constructible)
+        }
+        ValueType::Nullable(inner_type) => {
+            validate_nullable(bytes, inner_type, require_constructible)
+        }
+        ValueType::Record(descriptor) => descriptor.bind(bytes).validate_canonical(),
+        ValueType::Enum(schema) => {
+            let (tag, payload) =
+                super::split_variant_record(bytes).map_err(|error| match error {
+                    Error::InvalidSchemaVersionHeader => Error::InvalidEnumHeader,
+                    other => other,
+                })?;
+            schema.case(tag)?.payload.bind(payload).validate_canonical()
+        }
+    }
+}
+
+fn validate_nullable(
+    bytes: &[u8],
+    inner_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+    match flag {
+        0 if inner_type.fixed_size().is_some() && payload.iter().any(|byte| *byte != 0) => {
+            Err(Error::InvalidOffset)
+        }
+        0 if inner_type.fixed_size().is_none() && !payload.is_empty() => Err(Error::InvalidOffset),
+        0 => Ok(()),
+        1 => validate_value_inner(payload, inner_type, require_constructible),
+        value => Err(Error::InvalidNullFlag(value)),
+    }
+}
+
+fn validate_array(
+    bytes: &[u8],
+    element_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    if let Some(element_size) = element_type.fixed_size() {
+        if element_size == 0 || !bytes.len().is_multiple_of(element_size) {
+            return Err(Error::InvalidOffset);
+        }
+        return bytes.chunks_exact(element_size).try_for_each(|chunk| {
+            validate_value_inner(chunk, element_type, require_constructible)
+        });
+    }
+
+    let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+    if count == 0 {
+        return if bytes.len() == 4 {
+            Ok(())
+        } else {
+            Err(Error::InvalidOffset)
+        };
+    }
+    let values_start = checked_add(4, count.saturating_sub(1) * 4)?;
+    if bytes.len() < values_start {
+        return Err(Error::UnexpectedEof);
+    }
+    let mut start = values_start;
+    for index in 0..count {
+        let end = if index + 1 == count {
+            bytes.len()
+        } else {
+            u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+        };
+        if end < start || end > bytes.len() {
+            return Err(Error::InvalidOffset);
+        }
+        validate_value_inner(&bytes[start..end], element_type, require_constructible)?;
+        start = end;
+    }
+    Ok(())
+}
+
+fn validate_tuple(
+    bytes: &[u8],
+    members: &[ValueType],
+    require_constructible: bool,
+) -> Result<(), Error> {
+    let mut offset = 0;
+    for member in members {
+        let width = member
+            .fixed_size()
+            .ok_or_else(|| Error::InvalidTupleMember {
+                member_type: member.clone(),
+            })?;
+        let end = checked_add(offset, width)?;
+        validate_value_inner(
+            bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?,
+            member,
+            require_constructible,
+        )?;
+        offset = end;
+    }
+    if offset == bytes.len() {
+        Ok(())
+    } else {
+        Err(Error::InvalidOffset)
+    }
+}
+
+fn encode_nullable(
+    bytes: &mut Vec<u8>,
+    value: Option<&Value>,
+    inner_type: &ValueType,
+) -> Result<(), Error> {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            if inner_type.is_fixed_size() {
+                // The parent already owns the output buffer. Fixed payloads
+                // need no temporary Vec, including nested nullable values.
+                encode_fixed_value(bytes, value, inner_type)?;
+            } else {
+                encode_value_into(bytes, value, inner_type)?;
+            }
+        }
+        None => {
+            bytes.push(0);
+            if let Some(size) = inner_type.fixed_size() {
+                // Fixed-width nulls reserve their payload width so the parent
+                // fixed record layout stays seekable without offsets.
+                bytes.resize(bytes.len() + size, 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Inspect only framing needed to find an indirect scalar. Admission owns
+/// validity of the record; this is not another canonical decoding pass.
+pub(super) fn visit_encoded_indirect_values(
+    bytes: &[u8],
+    value_type: &ValueType,
+    visitor: &mut impl FnMut(&[u8], &ValueType) -> Result<bool, Error>,
+) -> Result<bool, Error> {
+    match value_type {
+        ValueType::String
+        | ValueType::Bytes
+        | ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => {
+            let (tag, _) = super::split_variant_record(bytes)?;
+            match tag {
+                2 => Ok(false),
+                3 => visitor(bytes, value_type),
+                _ => Err(Error::LargeValue(
+                    crate::large_values::Error::MalformedScalar,
+                )),
+            }
+        }
+        ValueType::Nullable(inner) => {
+            let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+            match flag {
+                0 => Ok(false),
+                1 => visit_encoded_indirect_values(payload, inner, visitor),
+                flag => Err(Error::InvalidNullFlag(flag)),
+            }
+        }
+        ValueType::Record(descriptor) => {
+            descriptor.visit_encoded_indirect_fields(bytes, 0..descriptor.fields().len(), visitor)
+        }
+        ValueType::Enum(schema) => {
+            let (tag, payload) = super::split_variant_record(bytes)?;
+            let descriptor = schema.case(tag)?.payload;
+            descriptor.visit_encoded_indirect_fields(payload, 0..descriptor.fields().len(), visitor)
+        }
+        ValueType::Array(inner) if inner.may_contain_stored_scalar() => {
+            // Indirect-capable array elements are variable-width. Bounds-check
+            // the offset table before visiting entries, without allocating it.
+            let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+            let mut start = checked_add(
+                4,
+                count
+                    .saturating_sub(1)
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::InvalidOffset)?,
+            )?;
+            if start > bytes.len() {
+                return Err(Error::UnexpectedEof);
+            }
+            for index in 0..count {
+                let end = if index + 1 == count {
+                    bytes.len()
+                } else {
+                    u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+                };
+                let item = bytes.get(start..end).ok_or_else(|| Error::InvalidOffset)?;
+                if visit_encoded_indirect_values(item, inner, visitor)? {
+                    return Ok(true);
+                }
+                start = end;
+            }
+            Ok(false)
+        }
+        // Tuples are restricted to fixed-size members and cannot contain an
+        // indirect scalar. Raw engine fields and all other scalars cannot either.
+        _ => Ok(false),
+    }
+}
+
+fn decode_nullable(bytes: &[u8], inner_type: &ValueType) -> Result<Value, Error> {
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+    match flag {
+        0 => {
+            if inner_type.fixed_size().is_some() {
+                if payload.iter().any(|byte| *byte != 0) {
+                    return Err(Error::InvalidOffset);
+                }
+            } else if !payload.is_empty() {
+                return Err(Error::InvalidOffset);
+            }
+            Ok(Value::Nullable(None))
+        }
+        1 => decode_value(payload, inner_type).map(|value| Value::Nullable(Some(Box::new(value)))),
+        value => Err(Error::InvalidNullFlag(value)),
+    }
+}
+
+fn encode_array(
+    bytes: &mut Vec<u8>,
+    values: &[Value],
+    element_type: &ValueType,
+) -> Result<(), Error> {
+    for value in values {
+        ensure_value_type(value, element_type)?;
+    }
+
+    if element_type.is_fixed_size() {
+        for value in values {
+            encode_fixed_value(bytes, value, element_type)?;
+        }
+        return Ok(());
+    }
+
+    let base = bytes.len();
+    write_u32(bytes, usize_to_u32(values.len())?);
+    let offset_count = values.len().saturating_sub(1);
+    let payload_start = checked_add(bytes.len(), offset_count * 4)?;
+    bytes.resize(payload_start, 0);
+    for (index, value) in values.iter().enumerate() {
+        encode_value_into(bytes, value, element_type)?;
+        if index < offset_count {
+            // Offsets belong to this array, even when nested inside another
+            // array, nullable value or a record's shared output buffer.
+            let end = usize_to_u32(bytes.len() - base)?;
+            let slot = base + 4 + index * 4;
+            bytes[slot..slot + 4].copy_from_slice(&end.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> {
+    if let Some(element_size) = element_type.fixed_size() {
+        if element_size == 0 || !bytes.len().is_multiple_of(element_size) {
+            return Err(Error::InvalidOffset);
+        }
+        return bytes
+            .chunks_exact(element_size)
+            .map(|chunk| decode_value(chunk, element_type))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array);
+    }
+
+    let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+    if count == 0 {
+        return if bytes.len() == 4 {
+            Ok(Value::Array(Vec::new()))
+        } else {
+            Err(Error::InvalidOffset)
+        };
+    }
+
+    let offset_table_size = count.saturating_sub(1) * 4;
+    let values_start = checked_add(4, offset_table_size)?;
+    if bytes.len() < values_start {
+        return Err(Error::UnexpectedEof);
+    }
+
+    let mut ends = read_offsets(bytes, 4, count.saturating_sub(1))?;
+    ends.push(bytes.len());
+
+    let mut values = Vec::with_capacity(count);
+    let mut start = values_start;
+    for end in ends {
+        if end < start || end > bytes.len() {
+            return Err(Error::InvalidOffset);
+        }
+        values.push(decode_value(&bytes[start..end], element_type)?);
+        start = end;
+    }
+
+    Ok(Value::Array(values))
+}
+
+pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
+    match (value, value_type) {
+        (Value::U8(_), ValueType::U8)
+        | (Value::U16(_), ValueType::U16)
+        | (Value::U32(_), ValueType::U32)
+        | (Value::U64(_), ValueType::U64)
+        | (Value::I32(_), ValueType::I32)
+        | (Value::I64(_), ValueType::I64)
+        | (Value::Bool(_), ValueType::Bool)
+        | (Value::String(_), ValueType::String)
+        | (Value::Bytes(_), ValueType::Bytes)
+        | (
+            Value::String(_),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)),
+        )
+        | (
+            Value::Bytes(_),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)),
+        )
+        | (
+            Value::Bytes(_),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+                crate::large_values::LargeValueKind::Bytes,
+            ))),
+        )
+        | (
+            Value::String(_),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
+                crate::large_values::LargeValueKind::String
+                | crate::large_values::LargeValueKind::Json,
+            ))),
+        )
+        | (Value::Uuid(_), ValueType::Uuid) => Ok(()),
+        (
+            Value::Large(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
+        ) if value.kind == *kind => Ok(()),
+        (Value::Large(value), ValueType::String)
+            if value.kind == crate::large_values::LargeValueKind::String =>
+        {
+            Ok(())
+        }
+        (Value::Large(value), ValueType::Bytes)
+            if value.kind == crate::large_values::LargeValueKind::Bytes =>
+        {
+            Ok(())
+        }
+        (Value::F64(value), ValueType::F64) if !value.is_nan() => Ok(()),
+        (Value::F64(_), ValueType::F64) => Err(Error::InvalidF64NaN),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            schema.discriminant(value).map(|_| ())
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(schema)) => schema.variant(*value).map(|_| ()),
+        (Value::Tuple(values), ValueType::Tuple(members)) => {
+            if values.len() != members.len() {
+                return Err(Error::ArityMismatch {
+                    expected: members.len(),
+                    actual: values.len(),
+                });
+            }
+            for (value, member_type) in values.iter().zip(members) {
+                if member_type.fixed_size().is_none() {
+                    return Err(Error::InvalidTupleMember {
+                        member_type: member_type.clone(),
+                    });
+                }
+                ensure_value_type(value, member_type)?;
+            }
+            Ok(())
+        }
+        (Value::Array(values), ValueType::Array(element_type)) => {
+            for value in values {
+                ensure_value_type(value, element_type)?;
+            }
+            Ok(())
+        }
+        (Value::Nullable(None), ValueType::Nullable(_)) => Ok(()),
+        (Value::Nullable(Some(value)), ValueType::Nullable(inner_type)) => {
+            ensure_value_type(value, inner_type)
+        }
+        (Value::Record(record), ValueType::Record(descriptor)) => {
+            if record.descriptor() != descriptor.as_ref() {
+                return Err(Error::TypeMismatch {
+                    expected: value_type.clone(),
+                });
+            }
+            validate_embedded_record(record.borrowed())
+        }
+        (Value::Enum(enum_value), ValueType::Enum(schema)) => ensure_enum_value(enum_value, schema),
+        _ => Err(Error::TypeMismatch {
+            expected: value_type.clone(),
+        }),
+    }
+}
+
+fn ensure_enum_value(value: &EnumValue, schema: &EnumSchema) -> Result<(), Error> {
+    let case = schema.case(value.tag)?;
+    if value.record.descriptor() != &case.payload {
+        return Err(Error::TypeMismatch {
+            expected: ValueType::Enum(Box::new(schema.clone())),
+        });
+    }
+    validate_embedded_record(value.record.borrowed())
+}
+
+// Tuple decoding and encoding have historically different constructibility
+// rules (including nullable member byte order). Preserve the exact round-trip
+// admission rule for those descriptors rather than broadening accepted bytes.
+fn contains_tuple(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Tuple(_) => true,
+        ValueType::Array(inner) | ValueType::Nullable(inner) => contains_tuple(inner),
+        ValueType::Record(descriptor) => descriptor
+            .fields()
+            .iter()
+            .any(|field| contains_tuple(&field.value_type)),
+        ValueType::Enum(schema) => schema.cases.iter().any(|case| {
+            case.payload
+                .fields()
+                .iter()
+                .any(|field| contains_tuple(&field.value_type))
+        }),
+        _ => false,
+    }
+}
+
+fn validate_embedded_record(record: super::BorrowedRecord<'_>) -> Result<(), Error> {
+    let descriptor = record.descriptor();
+    if !descriptor
+        .fields()
+        .iter()
+        .any(|field| contains_tuple(&field.value_type))
+        && record.validate_canonical().is_ok()
+    {
+        // Record spans cover the complete packed layout; scalar, offset,
+        // nullable and enum validators enforce canonical encodings.
+        return Ok(());
+    }
+    // The diagnostic error ordering of structural validation differs from
+    // decoding (for example malformed UTF-8 scalar payloads). Preserve legacy
+    // errors on invalid input as well as legacy tuple admission semantics.
+    let values = record.to_values()?;
+    if descriptor.create(&values)? != record.raw() {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), Error> {
+    match value_type {
+        ValueType::Tuple(members) => {
+            for member in members {
+                validate_schema_value_type(member)?;
+                if member.fixed_size().is_none() {
+                    return Err(Error::InvalidTupleMember {
+                        member_type: member.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        ValueType::Array(inner) | ValueType::Nullable(inner) => validate_schema_value_type(inner),
+        ValueType::Record(descriptor) => {
+            for field in descriptor.fields() {
+                validate_schema_value_type(&field.value_type)?;
+            }
+            Ok(())
+        }
+        ValueType::EnumTag(schema) => schema.validate(),
+        ValueType::Enum(schema) => {
+            schema.validate()?;
+            for case in &schema.cases {
+                for field in case.payload.fields() {
+                    validate_schema_value_type(&field.value_type)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn encode_tuple(bytes: &mut Vec<u8>, values: &[Value], members: &[ValueType]) -> Result<(), Error> {
+    if values.len() != members.len() {
+        return Err(Error::ArityMismatch {
+            expected: members.len(),
+            actual: values.len(),
+        });
+    }
+    for (value, member_type) in values.iter().zip(members) {
+        encode_tuple_member(bytes, value, member_type)?;
+    }
+    Ok(())
+}
+
+fn encode_tuple_member(
+    bytes: &mut Vec<u8>,
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<(), Error> {
+    match (value, value_type) {
+        (Value::U8(value), ValueType::U8) => bytes.push(*value),
+        (Value::U16(value), ValueType::U16) => bytes.extend(value.to_be_bytes()),
+        (Value::U32(value), ValueType::U32) => bytes.extend(value.to_be_bytes()),
+        (Value::U64(value), ValueType::U64) => bytes.extend(value.to_be_bytes()),
+        (Value::I32(value), ValueType::I32) => bytes.extend(order_preserving_i32(*value)),
+        (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
+        (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
+        (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
+        (Value::Tuple(values), ValueType::Tuple(members)) => encode_tuple(bytes, values, members)?,
+        (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
+            bytes.push(u8::from(value.is_some()));
+            if let Some(value) = value.as_deref() {
+                encode_tuple_member(bytes, value, inner_type)?;
+            } else if let Some(size) = inner_type.fixed_size() {
+                bytes.resize(bytes.len() + size, 0);
+            } else {
+                return Err(Error::InvalidTupleMember {
+                    member_type: inner_type.as_ref().clone(),
+                });
+            }
+        }
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn decode_tuple(bytes: &[u8], members: &[ValueType]) -> Result<Value, Error> {
+    let mut values = Vec::with_capacity(members.len());
+    let mut offset = 0usize;
+    for member_type in members {
+        let width = member_type
+            .fixed_size()
+            .ok_or_else(|| Error::InvalidTupleMember {
+                member_type: member_type.clone(),
+            })?;
+        let end = checked_add(offset, width)?;
+        let member = bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?;
+        values.push(decode_tuple_member(member, member_type)?);
+        offset = end;
+    }
+    if offset != bytes.len() {
+        return Err(Error::InvalidOffset);
+    }
+    Ok(Value::Tuple(values))
+}
+
+fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
+    match value_type {
+        ValueType::U8 => Ok(Value::U8(read_exact::<1>(bytes)?[0])),
+        ValueType::U16 => Ok(Value::U16(u16::from_be_bytes(read_exact::<2>(bytes)?))),
+        ValueType::U32 => Ok(Value::U32(u32::from_be_bytes(read_exact::<4>(bytes)?))),
+        ValueType::U64 => Ok(Value::U64(u64::from_be_bytes(read_exact::<8>(bytes)?))),
+        ValueType::I32 => Ok(Value::I32(i32_from_order_preserving(read_exact::<4>(
+            bytes,
+        )?))),
+        ValueType::I64 => Ok(Value::I64(i64_from_order_preserving(read_exact::<8>(
+            bytes,
+        )?))),
+        ValueType::Bool => match read_exact::<1>(bytes)?[0] {
+            0 => Ok(Value::Bool(false)),
+            1 => Ok(Value::Bool(true)),
+            value => Err(Error::InvalidBool(value)),
+        },
+        ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(
+            bytes,
+        )?))),
+        ValueType::EnumTag(schema) => {
+            let discriminant = read_exact::<1>(bytes)?[0];
+            schema
+                .variant(discriminant)
+                .map(|_| Value::EnumTag(discriminant))
+        }
+        ValueType::Tuple(members) => decode_tuple(bytes, members),
+        ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
+        ValueType::F64
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Internal(_)
+        | ValueType::Array(_)
+        | ValueType::Record(_)
+        | ValueType::Enum(_) => Err(Error::InvalidTupleMember {
+            member_type: value_type.clone(),
+        }),
+    }
+}
+
+fn read_offsets(bytes: &[u8], start: usize, count: usize) -> Result<Vec<usize>, Error> {
+    (0..count)
+        .map(|idx| read_u32_at(bytes, start + idx * 4).and_then(u32_to_usize))
+        .collect()
+}
+
+fn read_u32_at(bytes: &[u8], start: usize) -> Result<u32, Error> {
+    let end = checked_add(start, 4)?;
+    if end > bytes.len() {
+        return Err(Error::UnexpectedEof);
+    }
+    Ok(u32::from_le_bytes(
+        bytes[start..end]
+            .try_into()
+            .map_err(|_| Error::UnexpectedEof)?,
+    ))
+}
+
+fn read_exact<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
+    if bytes.len() != N {
+        return Err(Error::UnexpectedEof);
+    }
+    bytes.try_into().map_err(|_| Error::UnexpectedEof)
+}
+
+fn order_preserving_i64(value: i64) -> [u8; 8] {
+    ((value as u64) ^ (1_u64 << 63)).to_be_bytes()
+}
+
+fn i64_from_order_preserving(bytes: [u8; 8]) -> i64 {
+    (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64
+}
+
+fn order_preserving_i32(value: i32) -> [u8; 4] {
+    ((value as u32) ^ (1_u32 << 31)).to_be_bytes()
+}
+
+fn i32_from_order_preserving(bytes: [u8; 4]) -> i32 {
+    (u32::from_be_bytes(bytes) ^ (1_u32 << 31)) as i32
+}
+
+pub(super) fn write_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend(value.to_le_bytes());
+}
+
+pub(super) fn checked_add(left: usize, right: usize) -> Result<usize, Error> {
+    left.checked_add(right).ok_or_else(|| Error::LengthOverflow)
+}
+
+pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
+    value.try_into().map_err(|_| Error::LengthOverflow)
+}
+
+fn u32_to_usize(value: u32) -> Result<usize, Error> {
+    value.try_into().map_err(|_| Error::LengthOverflow)
+}
+
+#[cfg(test)]
+#[path = "typed_identity_compatibility_proof.rs"]
+mod typed_identity_compatibility_proof;

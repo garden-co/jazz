@@ -1,0 +1,270 @@
+{
+  "name": "jazz-tools",
+  "version": "2.0.0-alpha.55",
+  "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
+  "license": "MIT",
+  "bin": {
+    "jazz-tools": "bin/jazz-tools.js"
+  },
+  "files": [
+    "bin/**",
+    "dist/**",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "browser": {
+    "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js"
+  },
+  "types": "dist/index.d.ts",
+  "react-native": {
+    "./dist/runtime/platform-url.js": "./dist/runtime/platform-url.native.js",
+    "./dist/runtime/telemetry-env.js": "./dist/runtime/telemetry-env.native.js",
+    "./dist/runtime/browser-worker-assets.js": "./dist/runtime/browser-worker-assets.native.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./backend": {
+      "types": "./dist/backend/index.d.ts",
+      "default": "./dist/backend/index.js"
+    },
+    "./better-auth-adapter": {
+      "types": "./dist/better-auth-adapter/index.d.ts",
+      "default": "./dist/better-auth-adapter/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
+    "./react-native": {
+      "types": "./dist/react-native/index.d.ts",
+      "react-native": "./dist/react-native/index.js",
+      "default": "./dist/react-native/index.js"
+    },
+    "./solid": {
+      "types": "./dist/solid/index.d.ts",
+      "browser": "./dist/solid/index.js",
+      "node": "./dist/solid/index.ssr.js",
+      "default": "./dist/solid/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue/index.d.ts",
+      "default": "./dist/vue/index.js"
+    },
+    "./react-core": {
+      "types": "./dist/react-core/index.d.ts",
+      "default": "./dist/react-core/index.js"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "default": "./dist/shared/index.js"
+    },
+    "./permissions": {
+      "types": "./dist/permissions/index.d.ts",
+      "default": "./dist/permissions/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./dev": {
+      "types": "./dist/dev/index.d.ts",
+      "default": "./dist/dev/index.js"
+    },
+    "./_dev/inspector-client": {
+      "types": "./dist/_dev/inspector-client.d.ts",
+      "default": "./dist/_dev/inspector-client.js"
+    },
+    "./_dev/schema-hash": {
+      "types": "./dist/_dev/schema-hash.d.ts",
+      "default": "./dist/_dev/schema-hash.js"
+    },
+    "./_dev/native-binding-codec": {
+      "types": "./dist/_dev/native-binding-codec.d.ts",
+      "default": "./dist/_dev/native-binding-codec.js"
+    },
+    "./dev/next": {
+      "types": "./dist/dev/next.d.ts",
+      "default": "./dist/dev/next.js"
+    },
+    "./dev/vite": {
+      "types": "./dist/dev/vite.d.ts",
+      "default": "./dist/dev/vite.js"
+    },
+    "./dev/expo": {
+      "types": "./dist/dev/expo.d.ts",
+      "default": "./dist/dev/expo.js"
+    },
+    "./dev/sveltekit": {
+      "types": "./dist/dev/sveltekit.d.ts",
+      "default": "./dist/dev/sveltekit.js"
+    },
+    "./svelte": {
+      "types": "./dist/svelte/index.d.ts",
+      "svelte": "./dist/svelte/index.js",
+      "default": "./dist/svelte/index.js"
+    },
+    "./expo": {
+      "types": "./dist/expo/index.d.ts",
+      "react-native": "./dist/expo/index.js",
+      "default": "./dist/expo/index.js"
+    },
+    "./expo/polyfills": {
+      "types": "./dist/expo/polyfills.d.ts",
+      "react-native": "./dist/expo/polyfills.js",
+      "default": "./dist/expo/polyfills.js"
+    },
+    "./passphrase": {
+      "types": "./dist/passphrase.d.ts",
+      "default": "./dist/passphrase.js"
+    },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
+    },
+    "./package.json": "./package.json",
+    "./_dev/native-account-session": {
+      "types": "./dist/_dev/native-account-session.d.ts",
+      "default": "./dist/_dev/native-account-session.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "scripts": {
+    "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
+    "build:react-native": "tsc --project tsconfig.json",
+    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/verify-runtime-sourcemaps.mjs",
+    "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
+    "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
+    "check": "tsc --noEmit",
+    "test": "pnpm test:classic-api || status=1; pnpm test:stage-binary || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
+    "test:stage-binary": "node --test scripts/stage-binary.test.mjs",
+    "test:classic-api": "node --test scripts/classic-api.test.mjs",
+    "test:node": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.ts",
+    "test:topology-fixture": "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'pnpm typecheck:topology && pnpm exec vitest run --config vitest.config.ts tests/topology/harness.test.ts'",
+    "typecheck:topology": "tsc --project tests/topology/tsconfig.json",
+    "test:react": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.react.ts",
+    "test:solid": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.solid.ts",
+    "test:svelte": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.svelte.ts",
+    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:public-api && pnpm typecheck:react-native",
+    "typecheck:public-api": "tsc --project tsconfig.public-api.json",
+    "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs",
+    "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
+    "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",
+    "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
+    "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
+    "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
+    "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
+    "stage:local": "node scripts/stage-local-binary.mjs",
+    "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.0.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.216.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-logs": "^0.216.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@scure/bip39": "^2.0.1",
+    "@standard-schema/spec": "^1.1.0",
+    "esbuild": "^0.27.0",
+    "fs-native-extensions": "1.5.0",
+    "jazz-wasm": "workspace:*",
+    "jose": "^6.2.1",
+    "json-schema-to-ts": "^3.1.1",
+    "tr46": "5.1.1",
+    "web-streams-polyfill": "^4.2.0",
+    "whatwg-url-without-unicode": "8.0.0-3"
+  },
+  "devDependencies": {
+    "@better-auth/test-utils": "^1.7.1",
+    "@sveltejs/package": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "@vue/server-renderer": "^3.5.22",
+    "better-auth": "1.7.1",
+    "fake-indexeddb": "^5.0.2",
+    "jsdom": "^26.0.0",
+    "react-dom": "^19.0.0",
+    "solid-js": "^1.9.13",
+    "svelte": "^5.0.0",
+    "typescript": "catalog:default",
+    "undici": "^7.24.4",
+    "vite": "catalog:default",
+    "vite-plugin-solid": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default",
+    "vue": "^3.5.22",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "better-auth": "1.7.1",
+    "expo": ">=54",
+    "expo-crypto": ">=14.0.0",
+    "expo-secure-store": ">=14.0.0",
+    "jazz-rn": "workspace:*",
+    "react": ">=19",
+    "react-native": ">=0.76",
+    "solid-js": ">=1.9.13",
+    "svelte": "^5.0.0",
+    "vue": "^3.5.0"
+  },
+  "peerDependenciesMeta": {
+    "better-auth": {
+      "optional": true
+    },
+    "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-secure-store": {
+      "optional": true
+    },
+    "jazz-rn": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "jazz-napi": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

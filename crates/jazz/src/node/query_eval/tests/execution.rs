@@ -1,0 +1,1398 @@
+//! execution query-evaluation tests.
+
+use super::*;
+
+#[test]
+fn reachable_query_hydration_preserves_results_and_releases_ownership() {
+    let (_dir, mut node) = open_recursive_node();
+    let schema = recursive_schema();
+    let team1 = row(1);
+    let team2 = row(2);
+    let team3 = row(3);
+    let resource1 = row(101);
+    let resource2 = row(102);
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource1,
+        BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+        10,
+        1,
+    );
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource2,
+        BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+        11,
+        2,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(201),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource1.0)),
+            ("team".to_owned(), Value::Uuid(team3.0)),
+        ]),
+        12,
+        3,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(202),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource2.0)),
+            ("team".to_owned(), Value::Uuid(team1.0)),
+        ]),
+        13,
+        4,
+    );
+    for (idx, member, parent, seq) in [(301, team1, team2, 5), (302, team2, team3, 6)] {
+        commit_global_cells(
+            &mut node,
+            "teamTeamMemberships",
+            row(idx),
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("onlyAdmins".to_owned(), Value::Bool(false)),
+            ]),
+            10 + seq,
+            seq,
+        );
+    }
+
+    let shape = recursive_shape(&schema);
+    // Keep this ownership receipt internal: exact public results cannot reveal
+    // a leaked prepared shape or binding after a short-lived read is released.
+    let baseline = node.database.runtime_stats();
+    for (team, expected) in [
+        (team1, BTreeSet::from([resource1, resource2])),
+        (team3, BTreeSet::from([resource1])),
+        (team1, BTreeSet::from([resource1, resource2])),
+    ] {
+        let binding = shape
+            .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]))
+            .unwrap();
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(rows, expected, "fresh hydration for team {team:?}");
+
+        let after = node.database.runtime_stats();
+        assert_eq!(after.active_subscriptions, baseline.active_subscriptions);
+        assert_eq!(
+            after.active_prepared_shapes,
+            baseline.active_prepared_shapes
+        );
+        assert_eq!(after.active_shape_params, baseline.active_shape_params);
+    }
+}
+
+#[test]
+fn reachable_relation_seed_query_rows_lowers_through_query_engine() {
+    let (_dir, mut node) = open_recursive_node();
+    let schema = recursive_schema();
+    let team1 = row(1);
+    let team2 = row(2);
+    let team3 = row(3);
+    let team4 = row(4);
+    let resource1 = row(101);
+    let resource2 = row(102);
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource1,
+        BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+        10,
+        1,
+    );
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource2,
+        BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+        11,
+        2,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(201),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource1.0)),
+            ("team".to_owned(), Value::Uuid(team3.0)),
+        ]),
+        12,
+        3,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(202),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource2.0)),
+            ("team".to_owned(), Value::Uuid(team4.0)),
+        ]),
+        13,
+        4,
+    );
+    commit_global_cells(
+        &mut node,
+        "teamSeeds",
+        row(401),
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team1.0)),
+            ("kind".to_owned(), Value::String("sync".to_owned())),
+        ]),
+        14,
+        5,
+    );
+    commit_global_cells(
+        &mut node,
+        "teamSeeds",
+        row(402),
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team4.0)),
+            ("kind".to_owned(), Value::String("other".to_owned())),
+        ]),
+        15,
+        6,
+    );
+    for (idx, member, parent, seq) in [(301, team1, team2, 7), (302, team2, team3, 8)] {
+        commit_global_cells(
+            &mut node,
+            "teamTeamMemberships",
+            row(idx),
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("onlyAdmins".to_owned(), Value::Bool(false)),
+            ]),
+            10 + seq,
+            seq,
+        );
+    }
+
+    let mut query = Query::from("resources").reachable_via(
+        "resourceAccess",
+        "resource",
+        "team",
+        lit("ignored-by-relation-seed"),
+        "teamTeamMemberships",
+        "member",
+        "parent",
+        [eq(col("onlyAdmins"), lit(false))],
+    );
+    query.reachable[0].seed = Some(crate::query::ReachableSeed {
+        table: "teamSeeds".to_owned(),
+        user_column: None,
+        user_claim: None,
+        team_column: "team".to_owned(),
+        filters: vec![gt(col("kind"), param("seed_kind_lower_bound"))],
+    });
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "seed_kind_lower_bound".to_owned(),
+            Value::String("s".to_owned()),
+        )]))
+        .unwrap();
+
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rows, BTreeSet::from([resource1]));
+}
+
+#[test]
+fn reachable_relation_seed_hydrates_from_primary_key_scan() {
+    let (_dir, mut node) = open_recursive_node();
+    let schema = recursive_schema();
+    let team1 = row(1);
+    let team2 = row(2);
+    let team3 = row(3);
+    let team4 = row(4);
+    let resource1 = row(101);
+    let resource2 = row(102);
+    let seed = row(401);
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource1,
+        BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+        10,
+        1,
+    );
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource2,
+        BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+        11,
+        2,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(201),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource1.0)),
+            ("team".to_owned(), Value::Uuid(team3.0)),
+        ]),
+        12,
+        3,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(202),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource2.0)),
+            ("team".to_owned(), Value::Uuid(team4.0)),
+        ]),
+        13,
+        4,
+    );
+    for idx in 0..128 {
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            row(500 + idx),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team4.0)),
+                ("kind".to_owned(), Value::String(format!("noise-{idx}"))),
+            ]),
+            1_000 + idx as u64,
+            20 + idx as u64,
+        );
+    }
+    commit_global_cells(
+        &mut node,
+        "teamSeeds",
+        seed,
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team1.0)),
+            ("kind".to_owned(), Value::String("sync".to_owned())),
+        ]),
+        14,
+        5,
+    );
+    for (idx, member, parent, seq) in [(301, team1, team2, 7), (302, team2, team3, 8)] {
+        commit_global_cells(
+            &mut node,
+            "teamTeamMemberships",
+            row(idx),
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("onlyAdmins".to_owned(), Value::Bool(false)),
+            ]),
+            10 + seq,
+            seq,
+        );
+    }
+
+    let mut query = Query::from("resources").reachable_via(
+        "resourceAccess",
+        "resource",
+        "team",
+        lit("ignored-by-relation-seed"),
+        "teamTeamMemberships",
+        "member",
+        "parent",
+        [eq(col("onlyAdmins"), lit(false))],
+    );
+    query.reachable[0].seed = Some(crate::query::ReachableSeed {
+        table: "teamSeeds".to_owned(),
+        user_column: None,
+        user_claim: None,
+        team_column: "team".to_owned(),
+        filters: vec![eq(col("id"), lit(Value::Uuid(seed.0)))],
+    });
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    node.reset_query_engine_read_metrics();
+    let selected = node
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let selected_metrics = node.query_engine_read_metrics().clone();
+    node.reset_query_engine_read_metrics();
+    let forced = node
+        .query_rows_for_link_forced_full_scan_for_test(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let forced_metrics = node.query_engine_read_metrics().clone();
+
+    assert_eq!(selected, forced);
+    assert_eq!(selected, BTreeSet::from([resource1]));
+    assert_eq!(selected_metrics.source_primary_key_scans, 1);
+    assert!(
+        forced_metrics.source_full_scans > selected_metrics.source_full_scans,
+        "forced full scan must scan the seed source instead of using its point lookup"
+    );
+}
+
+#[test]
+fn query_rows_at_lowers_reachable_against_historical_current_sources() {
+    let (_dir, mut node) = open_recursive_node();
+    let schema = recursive_schema();
+    let team1 = row(1);
+    let team2 = row(2);
+    let team3 = row(3);
+    let resource1 = row(101);
+    let resource2 = row(102);
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource1,
+        BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+        10,
+        1,
+    );
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource2,
+        BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+        11,
+        2,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(201),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource1.0)),
+            ("team".to_owned(), Value::Uuid(team3.0)),
+        ]),
+        12,
+        3,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(202),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource2.0)),
+            ("team".to_owned(), Value::Uuid(team1.0)),
+        ]),
+        13,
+        4,
+    );
+    commit_global_cells(
+        &mut node,
+        "teamTeamMemberships",
+        row(301),
+        BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(team1.0)),
+            ("parent".to_owned(), Value::Uuid(team2.0)),
+            ("onlyAdmins".to_owned(), Value::Bool(false)),
+        ]),
+        14,
+        5,
+    );
+    commit_global_cells(
+        &mut node,
+        "teamTeamMemberships",
+        row(302),
+        BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(team2.0)),
+            ("parent".to_owned(), Value::Uuid(team3.0)),
+            ("onlyAdmins".to_owned(), Value::Bool(false)),
+        ]),
+        15,
+        6,
+    );
+    let shape = recursive_shape(&schema);
+    let binding = shape
+        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
+        .unwrap();
+
+    let before_delete = node
+        .query_rows_at(&shape, &binding, GlobalTime(6))
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    delete_global(&mut node, "teamTeamMemberships", row(302), 16, 7);
+    let after_delete = node
+        .query_rows_at(&shape, &binding, GlobalTime(7))
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(before_delete, BTreeSet::from([resource1, resource2]));
+    assert!(
+        after_delete == BTreeSet::from([resource2]),
+        "later historical cuts should see the edge deletion while preserving direct access"
+    );
+}
+
+#[test]
+fn query_filter_matches_naive_local_scan() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    let mut expected = BTreeSet::new();
+    for idx in 0..48 {
+        let state = if idx % 3 == 0 { "done" } else { "open" };
+        let assignee = if idx % 2 == 0 { alice } else { bob };
+        if state == "open" && assignee == alice {
+            expected.insert(row(idx));
+        }
+        commit_issue(&mut node, idx, state, assignee);
+    }
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("open")))
+        .filter(eq(col("assignee"), param("user")))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
+        .unwrap();
+    let actual = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn text_range_predicates_use_lexicographic_row_comparison() {
+    assert_eq!(
+        compare_values(
+            &Value::String("beta".to_owned()),
+            &Value::String("alpha".to_owned())
+        ),
+        Some(std::cmp::Ordering::Greater)
+    );
+    assert_eq!(
+        compare_values(
+            &Value::String("alpha".to_owned()),
+            &Value::String("alpha".to_owned())
+        ),
+        Some(std::cmp::Ordering::Equal)
+    );
+    assert_eq!(
+        compare_values(
+            &Value::String("alpha".to_owned()),
+            &Value::String("beta".to_owned())
+        ),
+        Some(std::cmp::Ordering::Less)
+    );
+}
+
+#[test]
+fn text_range_query_filters_rows_lexicographically() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    for idx in 0..6 {
+        commit_issue(&mut node, idx, "open", alice);
+    }
+    let shape = Query::from("issues")
+        .filter(gt(col("title"), lit("issue-2")))
+        .filter(lte(col("title"), lit("issue-4")))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let actual = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, BTreeSet::from([row(3), row(4)]));
+}
+
+#[test]
+fn public_id_equality_query_filters_rows_by_row_uuid() {
+    let (_dir, mut node) = open_node();
+    for idx in 0..4 {
+        commit_issue(&mut node, idx, "open", author(1));
+    }
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(row(2).0))))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let actual = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, vec![row(2)]);
+}
+
+#[test]
+fn public_id_in_query_filters_rows_by_row_uuid() {
+    let (_dir, mut node) = open_node();
+    for idx in 0..5 {
+        commit_issue(&mut node, idx, "open", author(1));
+    }
+    let shape = Query::from("issues")
+        .filter(in_list(
+            col("id"),
+            [lit(Value::Uuid(row(1).0)), lit(Value::Uuid(row(3).0))],
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let actual = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, BTreeSet::from([row(1), row(3)]));
+}
+
+#[test]
+fn public_id_range_query_and_order_by_use_row_uuid() {
+    let (_dir, mut node) = open_node();
+    for idx in [3, 1, 4, 0, 2] {
+        commit_issue(&mut node, idx, "open", author(1));
+    }
+    let shape = Query::from("issues")
+        .filter(gt(col("id"), lit(Value::Uuid(row(1).0))))
+        .order_by("id", OrderDirection::Desc)
+        .limit(2)
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let actual = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, vec![row(4), row(3)]);
+}
+
+#[test]
+fn query_order_by_sorts_before_limit_offset() {
+    let (_dir, mut node) = open_node();
+    for idx in [3, 1, 4, 0, 2] {
+        commit_issue(&mut node, idx, "open", author(1));
+    }
+
+    let asc_shape = Query::from("issues")
+        .order_by("title", OrderDirection::Asc)
+        .validate(&schema())
+        .unwrap();
+    let asc_binding = asc_shape.bind(BTreeMap::new()).unwrap();
+    let asc_rows = node
+        .query_rows(&asc_shape, &asc_binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(asc_rows, vec![row(0), row(1), row(2), row(3), row(4)]);
+
+    let shape = Query::from("issues")
+        .order_by("title", OrderDirection::Desc)
+        .offset(1)
+        .limit(2)
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec![row(3), row(2)]);
+}
+
+#[test]
+fn query_order_by_multi_key_is_deterministic() {
+    let (_dir, mut node) = open_node();
+    commit_issue(&mut node, 3, "done", author(1));
+    commit_issue(&mut node, 1, "open", author(1));
+    commit_issue(&mut node, 2, "open", author(1));
+    commit_issue(&mut node, 0, "done", author(1));
+
+    let shape = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .order_by("title", OrderDirection::Desc)
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec![row(3), row(0), row(2), row(1)]);
+}
+
+#[test]
+fn aggregate_count_over_filtered_query() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    for idx in 0..8 {
+        let assignee = if idx % 2 == 0 { alice } else { bob };
+        let state = if idx == 6 { "done" } else { "open" };
+        commit_issue(&mut node, idx, state, assignee);
+    }
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("open")))
+        .filter(eq(col("assignee"), param("user")))
+        .count()
+        .validate(&schema())
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
+        .unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(3));
+}
+
+/// An ungrouped aggregate has one empty group. This is intentionally a direct
+/// one-shot query-engine test: it pins the same Groove identity row used by
+/// maintained and authority-covered aggregate evaluation without involving
+/// transport settlement.
+#[test]
+fn aggregate_count_over_empty_query_returns_identity_row() {
+    let (_dir, mut node) = open_node();
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("absent")))
+        .count()
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(0));
+    assert!(rows[0].provenance().unwrap().is_none());
+    for field in ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"] {
+        assert!(
+            rows[0].record.descriptor().field_index(field).is_none(),
+            "aggregate result must not manufacture {field} metadata"
+        );
+    }
+}
+#[test]
+fn aggregate_read_frontiers_and_exclusive_validation() {
+    let metric_schema = signed_metric_schema();
+    let (_empty_dir, mut empty_node) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), metric_schema.clone());
+    let shape = Query::from("metrics")
+        .count()
+        .validate(&metric_schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let empty_tx = OpenTransactionId::new();
+    empty_node.open_exclusive(empty_tx).unwrap();
+    let empty_snapshot = empty_node.open_transaction_snapshot(empty_tx).unwrap();
+    let empty_snapshot_rows = empty_node
+        .query_rows_at_snapshot(&shape, &binding, &empty_snapshot)
+        .unwrap();
+    let empty_tx_rows = empty_node.tx_query(empty_tx, &shape, &binding).unwrap();
+    assert_eq!(empty_snapshot_rows.len(), 1);
+    assert_eq!(empty_tx_rows.len(), 1);
+    assert_eq!(
+        empty_snapshot_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    assert_eq!(
+        empty_tx_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    empty_node
+        .commit_exclusive_settled(empty_tx, AuthorSubject::SYSTEM, 1)
+        .unwrap();
+
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), metric_schema);
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(1),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("all".to_owned())),
+            ("score".to_owned(), Value::I64(1)),
+        ]),
+        1_000,
+        1,
+    );
+    let current_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(1)).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let snapshot = node.open_transaction_snapshot(tx).unwrap();
+    let snapshot_rows = node
+        .query_rows_at_snapshot(&shape, &binding, &snapshot)
+        .unwrap();
+    let tx_rows = node.tx_query(tx, &shape, &binding).unwrap();
+    assert_eq!(current_rows.len(), 1);
+    assert_eq!(historical_rows.len(), 1);
+    assert_eq!(snapshot_rows.len(), 1);
+    assert_eq!(tx_rows.len(), 1);
+    let expected_uuid = current_rows[0].row_uuid();
+    let expected_cells = current_rows[0].test_cells_by_descriptor();
+    for rows in [&historical_rows, &snapshot_rows, &tx_rows] {
+        assert_eq!(rows[0].row_uuid(), expected_uuid);
+        assert_eq!(rows[0].test_cells_by_descriptor(), expected_cells);
+    }
+    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 2)
+        .unwrap();
+
+    let conflicting_tx = OpenTransactionId::new();
+    node.open_exclusive(conflicting_tx).unwrap();
+    let _ = node.tx_query(conflicting_tx, &shape, &binding).unwrap();
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(2),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("all".to_owned())),
+            ("score".to_owned(), Value::I64(2)),
+        ]),
+        1_001,
+        2,
+    );
+    assert!(matches!(
+        node.commit_exclusive_settled(conflicting_tx, AuthorSubject::SYSTEM, 3),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+/// The direct snapshot assertion is needed because aggregate snapshot
+/// materialization is an internal frontier used by exclusive validation.
+#[test]
+fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
+    let schema = signed_metric_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa3; 16]), schema.clone());
+    for (idx, bucket, score, global_time) in [(1, "a", 1, 1), (2, "a", 2, 2), (3, "b", 10, 3)] {
+        commit_global_cells(
+            &mut node,
+            "metrics",
+            row(idx),
+            BTreeMap::from([
+                ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                ("score".to_owned(), Value::I64(score)),
+            ]),
+            1_000 + idx as u64,
+            global_time,
+        );
+    }
+    let shape = Query::from("metrics")
+        .aggregate([Aggregate::count(), Aggregate::sum("score")])
+        .group_by("bucket")
+        .order_by("bucket", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let current_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(3)).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let snapshot = node.open_transaction_snapshot(tx).unwrap();
+    let snapshot_rows = node
+        .query_rows_at_snapshot(&shape, &binding, &snapshot)
+        .unwrap();
+    let tx_rows = node.tx_query(tx, &shape, &binding).unwrap();
+
+    assert_eq!(current_rows.len(), 2);
+    let current_cells = current_rows
+        .iter()
+        .map(|row| row.test_cells_by_descriptor())
+        .collect::<Vec<_>>();
+    assert_eq!(current_cells[0]["bucket"], Value::String("a".to_owned()));
+    assert_eq!(current_cells[0]["count"], Value::U64(2));
+    assert_eq!(current_cells[0]["sum_score"], Value::I64(3));
+    assert_eq!(current_cells[1]["bucket"], Value::String("b".to_owned()));
+    assert_eq!(current_cells[1]["count"], Value::U64(1));
+    assert_eq!(current_cells[1]["sum_score"], Value::I64(10));
+
+    let signature = |rows: &[crate::node::CurrentRow]| {
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.test_cells_by_descriptor()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_signature = signature(&current_rows);
+    assert_eq!(signature(&historical_rows), expected_signature);
+    assert_eq!(signature(&snapshot_rows), expected_signature);
+    assert_eq!(signature(&tx_rows), expected_signature);
+
+    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 5)
+        .unwrap();
+
+    let locally_interfered_tx = OpenTransactionId::new();
+    node.open_exclusive(locally_interfered_tx).unwrap();
+    assert_eq!(
+        node.tx_query(locally_interfered_tx, &shape, &binding)
+            .unwrap()
+            .len(),
+        2
+    );
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(1),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("a".to_owned())),
+            ("score".to_owned(), Value::I64(1)),
+        ]),
+        1_004,
+        4,
+    );
+    let unchanged_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    assert_eq!(signature(&unchanged_rows), expected_signature);
+    assert!(matches!(
+        node.commit_exclusive_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5),
+        Err(Error::TransactionConflict)
+    ));
+    node.abandon_tx(locally_interfered_tx).unwrap();
+}
+
+fn commit_metric_global_to_authority(
+    writer: &mut NodeState<RocksDbStorage>,
+    authority: &mut NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    bucket: &str,
+    score: i64,
+    now_ms: u64,
+) {
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit_settled(MergeableCommit::new("metrics", row_uuid, now_ms).cells(
+            BTreeMap::from([
+                ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                ("score".to_owned(), Value::I64(score)),
+            ]),
+        ))
+        .unwrap();
+    let [fate] = authority
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        &fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+    writer.apply_sync_message_settled(fate).unwrap();
+}
+
+#[test]
+fn grouped_aggregate_authority_validation_compares_public_payloads() {
+    let schema = signed_metric_schema();
+    let (_writer_dir, mut writer) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
+    let (_other_dir, mut other) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa5; 16]), schema.clone());
+    let (_authority_dir, mut authority) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa6; 16]), schema.clone());
+    for (idx, bucket, score) in [(1, "a", 1), (2, "a", 2), (3, "b", 10)] {
+        commit_metric_global_to_authority(
+            &mut writer,
+            &mut authority,
+            row(idx),
+            bucket,
+            score,
+            1_000 + idx as u64,
+        );
+    }
+    let shape = Query::from("metrics")
+        .aggregate([Aggregate::count(), Aggregate::sum("score")])
+        .group_by("bucket")
+        .order_by("bucket", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let signature = |rows: &[crate::node::CurrentRow]| {
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.test_cells_by_descriptor()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_signature = signature(
+        &writer
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap(),
+    );
+    assert_eq!(expected_signature.len(), 2);
+
+    let unchanged_tx = OpenTransactionId::new();
+    writer.open_exclusive(unchanged_tx).unwrap();
+    assert_eq!(
+        writer
+            .tx_query(unchanged_tx, &shape, &binding)
+            .unwrap()
+            .len(),
+        2
+    );
+    commit_metric_global_to_authority(&mut other, &mut authority, row(1), "a", 1, 1_004);
+    assert_eq!(
+        signature(
+            &authority
+                .query_rows(&shape, &binding, DurabilityTier::Global)
+                .unwrap(),
+        ),
+        expected_signature
+    );
+    let (_tx_id, unchanged_unit) = writer
+        .commit_exclusive_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
+        .unwrap();
+    let [unchanged_fate] = authority
+        .apply_sync_message_settled(unchanged_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(
+        matches!(
+            unchanged_fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ),
+        "unexpected unchanged authority fate: {unchanged_fate:?}"
+    );
+
+    let changed_tx = OpenTransactionId::new();
+    writer.open_exclusive(changed_tx).unwrap();
+    assert_eq!(
+        writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
+        2
+    );
+    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 20, 1_006);
+    let (_tx_id, changed_unit) = writer
+        .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
+        .unwrap();
+    let [changed_fate] = authority
+        .apply_sync_message_settled(changed_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        changed_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn aggregate_sum_min_max_over_filtered_query() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    for idx in 0..6 {
+        let assignee = if idx % 2 == 0 { alice } else { bob };
+        commit_issue(&mut node, idx, "open", assignee);
+    }
+    let shape = Query::from("issues")
+        .filter(eq(col("assignee"), param("user")))
+        .aggregate([
+            Aggregate::sum("priority"),
+            Aggregate::min("priority"),
+            Aggregate::max("priority"),
+        ])
+        .validate(&schema())
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
+        .unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    let cells = rows[0].test_cells_by_descriptor();
+    assert_eq!(cells["sum_priority"], Value::U64(6));
+    assert_eq!(cells["min_priority"], Value::U64(0));
+    assert_eq!(cells["max_priority"], Value::U64(4));
+}
+
+#[test]
+fn aggregate_sum_avg_min_max_support_signed_i64_inputs() {
+    let schema = signed_metric_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xb5; 16]), schema.clone());
+    commit_signed_metric(&mut node, 0x10, "a", -3);
+    commit_signed_metric(&mut node, 0x11, "a", 2);
+    let shape = Query::from("metrics")
+        .aggregate([
+            Aggregate::sum("score"),
+            Aggregate::avg("score"),
+            Aggregate::min("score"),
+            Aggregate::max("score"),
+        ])
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    let cells = rows[0].test_cells_by_descriptor();
+    assert_eq!(cells["sum_score"], Value::I64(-1));
+    assert_eq!(cells["avg_score"], Value::F64(-0.5));
+    assert_eq!(cells["min_score"], Value::I64(-3));
+    assert_eq!(cells["max_score"], Value::I64(2));
+}
+
+#[test]
+fn aggregate_explicit_user_prefix_alias_remains_a_logical_name() {
+    let schema = signed_metric_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xb6; 16]), schema.clone());
+    commit_signed_metric(&mut node, 0x12, "a", -3);
+    commit_signed_metric(&mut node, 0x13, "a", 2);
+    let shape = Query::from("metrics")
+        .aggregate([Aggregate::sum("score").alias("user_total")])
+        .validate(&schema)
+        .expect("explicit user-prefix aggregate alias is valid");
+    let rows = node
+        .query_rows(
+            &shape,
+            &shape.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor()["user_total"],
+        Value::I64(-1),
+    );
+}
+
+#[test]
+fn aggregate_grouped_count_orders_before_limit_offset() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    for idx in 0..6 {
+        let state = match idx {
+            0 => "done",
+            1 | 2 => "open",
+            _ => "blocked",
+        };
+        commit_issue(&mut node, idx, state, alice);
+    }
+    let shape = Query::from("issues")
+        .count()
+        .group_by("state")
+        .order_by("count", OrderDirection::Desc)
+        .order_by("state", OrderDirection::Asc)
+        .offset(1)
+        .limit(1)
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let cells = rows[0].test_cells_by_descriptor();
+    assert_eq!(cells["state"], Value::String("open".to_owned()));
+    assert_eq!(cells["count"], Value::U64(2));
+}
+
+#[test]
+fn query_join_via_matches_junction_semantics() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    for idx in 0..6 {
+        commit_issue(&mut node, idx, "open", bob);
+    }
+    commit_member(&mut node, 0, row(0), alice);
+    commit_member(&mut node, 1, row(2), alice);
+    commit_member(&mut node, 2, row(2), bob);
+    commit_member(&mut node, 3, row(5), bob);
+    let shape = Query::from("issues")
+        .join_via("issue_members", "issue", [eq(col("user"), param("user"))])
+        .validate(&schema())
+        .unwrap();
+    let alice_binding = shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
+        .unwrap();
+    let bob_binding = shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(bob.test_uuid()),
+        )]))
+        .unwrap();
+    let alice_rows = node
+        .query_rows(&shape, &alice_binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let bob_rows = node
+        .query_rows(&shape, &bob_binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(alice_rows, BTreeSet::from([row(0), row(2)]));
+    assert_eq!(bob_rows, BTreeSet::from([row(2), row(5)]));
+}
+
+#[test]
+fn query_join_via_nested_joins_filters_visible_roots() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    commit_global_user(&mut node, alice, "Alice", 1);
+    commit_global_user(&mut node, bob, "Bob", 2);
+    for idx in 0..4 {
+        commit_issue(&mut node, idx, "open", bob);
+    }
+    commit_member(&mut node, 0, row(0), alice);
+    commit_member(&mut node, 1, row(1), bob);
+    commit_member(&mut node, 2, row(2), alice);
+
+    let nested = Query::from("issue_members")
+        .join_via_row_id("users", "user", [eq(col("name"), lit("Alice"))])
+        .joins
+        .into_iter()
+        .next()
+        .unwrap();
+    let shape = Query::from("issues")
+        .join_via_with_nested_joins("issue_members", "issue", [], [nested])
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rows, BTreeSet::from([row(0), row(2)]));
+}
+
+#[test]
+fn query_join_via_source_lookup_filters_visible_roots() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    commit_global_user(&mut node, alice, "Alice", 1);
+    commit_global_user(&mut node, bob, "Bob", 2);
+    commit_issue(&mut node, 0, "open", alice);
+    commit_issue(&mut node, 1, "open", bob);
+    commit_issue(&mut node, 2, "open", alice);
+    commit_member(&mut node, 0, row(100), alice);
+    commit_member(&mut node, 1, row(101), bob);
+
+    let shape = Query::from("issues")
+        .join_via_source_lookup(
+            "issue_members",
+            "user",
+            JoinSourceLookup {
+                table: "users".to_owned(),
+                row_id_source_column: "assignee".to_owned(),
+                value_column: "id".to_owned(),
+            },
+            [eq(col("issue"), lit(Value::Uuid(row(100).0)))],
+        )
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rows, BTreeSet::from([row(0), row(2)]));
+}
+
+#[test]
+fn unsettled_query_reads_own_pending_write() {
+    let (_dir, mut node) = open_node();
+    commit_issue(&mut node, 1, "open", author(1));
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("open")))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        node.query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        node.query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn tx_query_snapshot_is_stable_after_concurrent_arrival() {
+    let (_dir, mut node) = open_node();
+    commit_issue(&mut node, 1, "open", author(1));
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("open")))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
+    commit_issue(&mut node, 2, "open", author(1));
+    assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
+    node.abandon_tx(tx).unwrap();
+}
+
+#[test]
+fn tx_query_reachable_uses_shared_snapshot_sources() {
+    let (_dir, mut node) = open_recursive_node();
+    let schema = recursive_schema();
+    let team1 = row(1);
+    let team2 = row(2);
+    let team3 = row(3);
+    let team4 = row(4);
+    let resource1 = row(101);
+    let resource2 = row(102);
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource1,
+        BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+        10,
+        1,
+    );
+    commit_global_cells(
+        &mut node,
+        "resources",
+        resource2,
+        BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+        11,
+        2,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(201),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource1.0)),
+            ("team".to_owned(), Value::Uuid(team3.0)),
+        ]),
+        12,
+        3,
+    );
+    commit_global_cells(
+        &mut node,
+        "resourceAccess",
+        row(202),
+        BTreeMap::from([
+            ("resource".to_owned(), Value::Uuid(resource2.0)),
+            ("team".to_owned(), Value::Uuid(team4.0)),
+        ]),
+        13,
+        4,
+    );
+    for (idx, member, parent, seq) in [(301, team1, team2, 5), (302, team2, team3, 6)] {
+        commit_global_cells(
+            &mut node,
+            "teamTeamMemberships",
+            row(idx),
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("onlyAdmins".to_owned(), Value::Bool(false)),
+            ]),
+            10 + seq,
+            seq,
+        );
+    }
+
+    let shape = recursive_shape(&schema);
+    let binding = shape
+        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
+        .unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let rows = node
+        .tx_query(tx, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(rows, BTreeSet::from([resource1]));
+
+    commit_global_cells(
+        &mut node,
+        "teamTeamMemberships",
+        row(303),
+        BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(team3.0)),
+            ("parent".to_owned(), Value::Uuid(team4.0)),
+            ("onlyAdmins".to_owned(), Value::Bool(false)),
+        ]),
+        20,
+        7,
+    );
+    let rows = node
+        .tx_query(tx, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(rows, BTreeSet::from([resource1]));
+    node.abandon_tx(tx).unwrap();
+}

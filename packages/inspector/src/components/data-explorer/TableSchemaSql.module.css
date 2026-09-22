@@ -1,0 +1,78 @@
+.container {
+  height: 100%;
+  background: transparent;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+}
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: #9ca8b9;
+  text-decoration: none;
+  font-size: 16px;
+}
+
+.backLink:hover {
+  background: #1b2430;
+  color: #d4dae3;
+}
+
+.title {
+  margin: 0;
+  text-transform: capitalize;
+  font-size: 18px;
+  color: #eff3f8;
+}
+
+.sections {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid #232c3a;
+  background: #0f151e;
+}
+
+.sectionHeader {
+  padding: 10px 12px 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: #c4d0df;
+}
+
+.codeBlock {
+  margin: 0;
+  background: #0b1017;
+  color: #d3deef;
+  padding: 12px;
+  overflow: auto;
+  border-top: 1px solid #232c3a;
+  font-size: 12px;
+  line-height: 1.5;
+}

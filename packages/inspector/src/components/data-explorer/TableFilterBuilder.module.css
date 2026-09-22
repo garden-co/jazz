@@ -1,0 +1,143 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Full-height rule separating the where-clause builder (read) from the
+   row-mutation actions (write). margin-inline-start: auto pushes the divider and
+   the action group to the right as one unit, and lets them wrap together. */
+.toolbarDivider {
+  align-self: stretch;
+  inline-size: 1px;
+  flex: 0 0 1px;
+  margin-inline-start: auto;
+  background: var(--jz-border-strong);
+}
+
+.toolbarActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #95a4b7;
+  font-size: 12px;
+}
+
+.select,
+.input {
+  min-width: 140px;
+  block-size: 28px;
+  border: 1px solid var(--jz-border-control);
+  border-radius: 4px;
+  background: var(--jz-surface);
+  color: #d9e2f0;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.input {
+  min-width: 180px;
+}
+
+.button {
+  border: 1px solid var(--jz-border-control);
+  background: var(--jz-surface);
+  color: #d3dceb;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  block-size: 28px;
+}
+
+.button:hover {
+  background: #1b2430;
+}
+
+.inlinePanel {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--jz-border-strong);
+}
+
+.error {
+  margin: 0;
+  color: #f5b1b1;
+  font-size: 12px;
+}
+
+.clauses {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 26px;
+}
+
+.empty {
+  margin: 0;
+  color: #8393aa;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.filterPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--jz-border-strong);
+  border-radius: 4px;
+  background: var(--jz-surface);
+}
+
+.clauseText {
+  color: var(--jz-text);
+  font-size: 12px;
+}
+
+.removeButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 18px;
+  block-size: 18px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--jz-faint);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.removeButton:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #d3dceb;
+}

@@ -1,0 +1,11 @@
+{
+  "id": "R1",
+  "name": "sustained_crud_throughput",
+  "seed": 20260222,
+  "operation_count": 256,
+  "mix": [
+    { "operation": "insert_task", "weight": 25 },
+    { "operation": "update_task", "weight": 50 },
+    { "operation": "delete_task", "weight": 25 }
+  ]
+}

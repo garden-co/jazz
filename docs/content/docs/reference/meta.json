@@ -1,0 +1,13 @@
+{
+  "title": "Reference",
+  "pages": [
+    "where-operators",
+    "durability-tiers",
+    "framework-patterns",
+    "examples",
+    "inspector",
+    "agent-skills",
+    "internals",
+    "local-first-auth-internals"
+  ]
+}

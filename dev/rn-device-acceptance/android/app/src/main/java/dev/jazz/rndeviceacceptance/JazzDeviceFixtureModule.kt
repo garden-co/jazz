@@ -1,0 +1,350 @@
+package dev.jazz.rndeviceacceptance
+
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import com.facebook.react.bridge.LifecycleEventListener
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import android.os.Build
+import android.system.Os
+import android.util.Log
+import android.security.NetworkSecurityPolicy
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import java.security.MessageDigest
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
+
+/** Test-app-only endpoint, lifecycle control, and receipt adapter. Account
+ * credentials and admission use the production JavaScript/native path. */
+class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
+  private val diagnosticCodes = setOf(
+    "fixture-metadata-failed",
+    "fixture-receipt-call-failed",
+    "fixture-receipt-validation-failed",
+    "fixture-phase-failed",
+    "native-admission-failed",
+    "relay-command-abi-failed",
+    "relay-open-failed",
+    "relay-attach-failed",
+    "relay-probe-failed",
+    "relay-cleanup-failed",
+    "foreground-byte-abi-failed",
+    "foreground-abi-version-failed",
+    "foreground-revocation-failed",
+    "foreground-install-failed",
+    "foreground-open-failed",
+    "foreground-probe-failed",
+    "foreground-tick-failed",
+    "foreground-close-failed",
+    "logout-revocation-failed",
+    "public-client-seed-failed",
+    "public-client-open-failed",
+    "public-client-subscribe-failed",
+    "public-client-write-failed",
+    "public-client-read-failed",
+    "public-client-publish-failed",
+    "public-client-core-observation-failed",
+    "public-client-reconnect-failed",
+    "core-observation-cleartext-denied",
+    "public-client-shutdown-failed",
+    "public-client-relay-readback-failed",
+    "scope-isolation-failed",
+    "scope-isolation-open-failed",
+    "scope-isolation-write-failed",
+    "scope-isolation-writer-read-failed",
+    "scope-isolation-read-failed",
+    "scope-isolation-assert-failed",
+    "auth-switch-failed",
+    "foreground-write-failed",
+    "same-runtime-subscription-failed",
+    "same-runtime-open-failed",
+    "same-runtime-subscribe-failed",
+    "same-runtime-initial-reset-failed",
+    "same-runtime-write-failed",
+    "same-runtime-transaction-open-failed",
+    "same-runtime-mutation-stage-failed",
+    "same-runtime-commit-failed",
+    "same-runtime-delta-failed",
+    "same-runtime-postcommit-wake-failed",
+    "same-runtime-wake-trace-unavailable",
+    "same-runtime-delta-drain-failed",
+    "same-runtime-delta-decode-failed",
+    "same-runtime-delta-content-failed",
+    "same-runtime-delta-row-id-failed",
+    "same-runtime-delta-written-content-row-id-failed",
+    "same-runtime-delta-reset-row-id-failed",
+    "same-runtime-delta-incremental-row-id-failed",
+    "same-runtime-delta-mixed-row-id-failed",
+    "same-runtime-unsubscribe-failed",
+    "scope-reopen-failed",
+    "public-client-restart-failed",
+    "receipt-write-failed",
+  )
+  override fun getName() = "JazzDeviceFixture"
+
+  @ReactMethod fun edgeEndpoint(promise: Promise) {
+    try {
+      val endpoint = reactApplicationContext.currentActivity?.intent
+        ?.getStringExtra("jazzDeviceEdgeEndpoint")
+        ?: error("acceptance launch did not include a local Edge endpoint")
+      val uri = java.net.URI(endpoint)
+      require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrEmpty() &&
+        uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null) {
+        "invalid local Edge endpoint"
+      }
+      promise.resolve(endpoint)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  // Runs on the JS calling thread, so a later synchronous native stall cannot
+  // strand this fixed marker in the asynchronous native-module queue.
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  fun recordSeedBoundary(code: String): Boolean {
+    if (code !in setOf("js-before-core-await", "js-core-await-returned", "js-before-unsubscribe",
+        "js-after-unsubscribe", "js-before-shutdown", "js-after-shutdown")) return false
+    Log.e("JazzCoreObservation", code)
+    return true
+  }
+
+  /** The trace boundary must be acknowledged before the receipt starts its
+   * post-commit epoch; an unobserved marker cannot diagnose that epoch. */
+  @ReactMethod fun recordSameRuntimeWakeBoundary(promise: Promise) {
+    Log.e("JazzForegroundWake", "armed")
+    promise.resolve(null)
+  }
+
+  @ReactMethod fun waitForCoreObservation(promise: Promise) {
+    try {
+      val activity = reactApplicationContext.currentActivity
+        ?: error("acceptance activity is unavailable")
+      val endpoint = activity.intent.getStringExtra("jazzDeviceCoreObservationEndpoint")
+        ?: error("missing Core observation endpoint")
+      val url = URL(endpoint)
+      if (url.protocol == "http" && !NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(url.host)) {
+        Log.e("JazzDeviceAcceptance", "core-observation-cleartext-denied")
+        promise.reject("E_JAZZ_DEVICE_CORE", "Core observation fixture host denied by network policy")
+        return
+      }
+      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+        ?: error("missing acceptance run nonce")
+      val identity = JSONObject().apply {
+        put("platform", "android")
+        put("deviceIdentifier", Build.FINGERPRINT)
+        put("buildFingerprint", sha256File(reactApplicationContext.applicationInfo.sourceDir))
+        put("runNonce", nonce)
+      }.toString().toByteArray(Charsets.UTF_8)
+      Thread({
+        var connection: HttpURLConnection? = null
+        var phase = "setup"
+        try {
+          val request = url.openConnection() as HttpURLConnection
+          connection = request
+          request.requestMethod = "POST"
+          request.connectTimeout = 5_000
+          request.readTimeout = 65_000
+          request.instanceFollowRedirects = false
+          request.doOutput = true
+          request.setRequestProperty("Content-Type", "application/json")
+          request.setFixedLengthStreamingMode(identity.size)
+          phase = "request"
+          Log.e("JazzCoreObservation", "request-started")
+          request.outputStream.use { it.write(identity) }
+          Log.e("JazzCoreObservation", "request-sent")
+          phase = "response"
+          val status = request.responseCode
+          // Log only a bounded status/category. Never log the exception, URL,
+          // request identity or body; JS's generic stage retry uses another tag.
+          Log.e("JazzCoreObservation", if (status in 100..599) "http-status-$status" else "http-status-invalid")
+          check(status == 204) { "Core observation was not acknowledged" }
+          phase = "promise"
+          promise.resolve(null)
+          Log.e("JazzCoreObservation", "promise-resolved")
+        } catch (error: Throwable) {
+          val category = when (error) {
+            is java.net.SocketTimeoutException -> "timeout"
+            is java.net.ConnectException -> "connection"
+            is java.net.UnknownHostException -> "dns"
+            is javax.net.ssl.SSLException -> "tls"
+            is java.net.ProtocolException -> "protocol"
+            is java.io.IOException -> "io"
+            is IllegalStateException -> "state"
+            else -> "other"
+          }
+          Log.e("JazzCoreObservation", "failure-$phase-$category")
+          promise.reject("E_JAZZ_DEVICE_CORE", "Core observation was not acknowledged")
+        } finally { connection?.disconnect() }
+      }, "JazzCoreObservation").start()
+    } catch (_: Throwable) {
+      promise.reject("E_JAZZ_DEVICE_CORE", "Missing Core observation launch metadata")
+    }
+  }
+
+  /** React can start JS before onHostResume installs currentActivity. Wait for
+   * that lifecycle event once; never invent launch identity or retry database work.
+   * All listener state is confined to the UI queue, hashing stays off that queue. */
+  private fun withLaunchActivity(promise: Promise, action: (Activity) -> Unit) {
+    reactApplicationContext.runOnUiQueueThread {
+      val handler = Handler(Looper.getMainLooper())
+      var finished = false
+      lateinit var listener: LifecycleEventListener
+      lateinit var timeout: Runnable
+      fun finish(activity: Activity?) {
+        if (finished) return
+        finished = true
+        handler.removeCallbacks(timeout)
+        reactApplicationContext.removeLifecycleEventListener(listener)
+        if (activity == null) {
+          Log.e("JazzFixtureMetadata", "receipt-failed-activity")
+          promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture launch activity unavailable")
+        } else {
+          reactApplicationContext.runOnNativeModulesQueueThread { action(activity) }
+        }
+      }
+      listener = object : LifecycleEventListener {
+        override fun onHostResume() {
+          reactApplicationContext.currentActivity?.let { finish(it) }
+        }
+        override fun onHostPause() {}
+        override fun onHostDestroy() { finish(null) }
+      }
+      timeout = Runnable { finish(null) }
+      handler.postDelayed(timeout, 5_000)
+      reactApplicationContext.addLifecycleEventListener(listener)
+      // Also covers an Activity installed immediately before listener registration.
+      reactApplicationContext.currentActivity?.let { finish(it) }
+    }
+  }
+
+  @ReactMethod fun receiptContext(promise: Promise) {
+    Log.e("JazzFixtureMetadata", "receipt-started")
+    if (reactApplicationContext.currentActivity == null)
+      Log.e("JazzFixtureMetadata", "receipt-waiting-activity")
+    withLaunchActivity(promise) { activity ->
+      Log.e("JazzFixtureMetadata", "receipt-activity-ready")
+      var stage = "activity"
+      try {
+        stage = "nonce"
+        val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+          ?: error("acceptance launch did not include a run nonce")
+        // Hash the installed package itself, rather than echoing an adb extra.
+        stage = "package-hash"
+        Log.e("JazzFixtureMetadata", "package-hash-started")
+        val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
+        stage = "device-identity"
+        val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
+          ?: error("Android build fingerprint is unavailable")
+        stage = "resolve"
+        promise.resolve(Arguments.createMap().apply {
+          putString("platform", "android")
+          putString("deviceIdentifier", deviceIdentifier)
+          putString("buildFingerprint", buildFingerprint)
+          putString("runNonce", nonce)
+        })
+        Log.e("JazzFixtureMetadata", "receipt-resolved")
+      } catch (_: Throwable) {
+        // Fixed internal stages only; never log intent data or exception text.
+        Log.e("JazzFixtureMetadata", "receipt-failed-$stage")
+        promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture receipt metadata unavailable")
+      }
+    }
+  }
+
+  /** Only the host's bounded acceptance phase crosses this boundary.  It
+   * cannot select a relay scope, identity, or filesystem path. */
+  @ReactMethod fun acceptancePhase(promise: Promise) {
+    Log.e("JazzFixtureMetadata", "phase-started")
+    try {
+      val activity = reactApplicationContext.currentActivity
+      if (activity == null) Log.e("JazzFixtureMetadata", "phase-activity-unavailable")
+      val phase = activity?.intent?.getStringExtra("jazzDeviceAcceptancePhase") ?: "seed"
+      require(phase == "seed" || phase == "verify") { "invalid acceptance phase" }
+      promise.resolve(phase)
+      Log.e("JazzFixtureMetadata", if (phase == "seed") "phase-seed-resolved" else "phase-verify-resolved")
+    } catch (_: Throwable) {
+      Log.e("JazzFixtureMetadata", "phase-failed")
+      promise.reject("E_JAZZ_DEVICE_FIXTURE", "Fixture acceptance phase unavailable")
+    }
+  }
+
+  private fun sha256File(path: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    FileInputStream(path).use { input ->
+      val buffer = ByteArray(32 * 1024)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+  }
+
+  /** See the matching iOS fixture: JavaScript supplies the verified protocol
+   * line after its relay proof; this method only persists that line. */
+  @ReactMethod fun recordReceipt(receipt: String, promise: Promise) {
+    try {
+      require(receipt.startsWith("JAZZ_DEVICE_RESULT ") && receipt.length <= 16_384) {
+        "invalid device receipt"
+      }
+      reactApplicationContext.cacheDir.resolve("jazz-device-receipt.ndjson")
+        .writeText("$receipt\n")
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT", error) }
+  }
+
+  /** Only fixed, non-secret categories may cross from JS into CI diagnostics. */
+  @ReactMethod fun recordDiagnostic(code: String, promise: Promise) {
+    try {
+      require(code in diagnosticCodes) { "invalid device diagnostic" }
+      writeAtomicDiagnostic(code)
+      Log.e("JazzDeviceAcceptance", code)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
+  @ReactMethod fun recordScopeWriterReadDiagnostic(detail: String, promise: Promise) {
+    try {
+      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)$").matches(detail)) { "invalid scope writer read diagnostic" }
+      Log.e("JazzScopeWriterRead", detail)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
+  @ReactMethod fun clearDiagnostic(promise: Promise) {
+    try {
+      val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")
+      check(!target.exists() || target.delete()) { "failed to clear device diagnostic" }
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
+  /**
+   * A receipt timeout can race process teardown. Never leave a partially
+   * written diagnostic for the host to inspect: flush the private temporary
+   * file, then rename it within its own cache directory (POSIX-atomic).
+   */
+  private fun writeAtomicDiagnostic(code: String) {
+    val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")
+    val parent = target.parentFile ?: error("device diagnostic has no parent directory")
+    val temporary = File.createTempFile(".${target.name}.", ".tmp", parent)
+    try {
+      FileOutputStream(temporary).use { output ->
+        output.write(code.toByteArray(Charsets.UTF_8))
+        output.fd.sync()
+      }
+      Os.rename(temporary.absolutePath, target.absolutePath)
+    } catch (failure: Throwable) {
+      if (temporary.exists() && !temporary.delete())
+        failure.addSuppressed(IOException("failed to remove incomplete device diagnostic"))
+      throw failure
+    }
+  }
+}

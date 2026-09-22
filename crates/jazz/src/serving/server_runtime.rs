@@ -1,0 +1,2995 @@
+use std::any::Any;
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::task::Poll;
+use std::thread;
+
+use crate::db::{
+    CommitUnitTrust, ConnectionSessionContext, DbIdentity, TickScheduler, TickUrgency, Transport,
+};
+use crate::groove::records::Value;
+use crate::groove::storage::StorageFactory;
+use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
+use crate::protocol::{MigrationLens, SyncMessage};
+use crate::schema::JazzSchema;
+use crate::serving::{
+    AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
+    StorageConfig,
+};
+use crate::tools::native_transport_connector::{
+    NativeTransportTerminal, NativeTransportTerminalFuture,
+};
+use crate::wire::{TransportError, WireFrame, WireTransport};
+use futures::channel::mpsc;
+use futures::future::LocalBoxFuture;
+use futures::task::LocalSpawnExt;
+use futures::task::{ArcWake, waker};
+use futures::{FutureExt, StreamExt};
+use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
+
+/// Sendable handle for the thread that owns the in-memory server shell.
+///
+/// The underlying `InMemoryServerShell` is intentionally kept on one OS thread
+/// because it currently stores its DB, sessions, and transports behind
+/// `Rc<RefCell<...>>`. Axum request/websocket tasks can clone this handle, but
+/// all shell access is serialized onto that owner thread. Shutdown explicitly
+/// joins the owner before its surrounding server storage lifecycle completes.
+/// This ensures native RocksDB resources are destroyed on their owner thread.
+#[derive(Clone)]
+pub struct ServerRuntimeHandle {
+    inner: Arc<ServerShellInner>,
+}
+
+/// Opaque activity subscription for a server runtime.
+pub struct ServerRuntimeActivity {
+    receiver: watch::Receiver<u64>,
+}
+
+impl ServerRuntimeActivity {
+    /// Wait until runtime work may have produced outbound frames.
+    pub async fn changed(&mut self) -> Result<(), String> {
+        self.receiver
+            .changed()
+            .await
+            .map_err(|_| "server runtime activity channel closed".to_owned())
+    }
+}
+
+/// Opaque stream of per-tick outbound frame batches.
+pub struct ServerRuntimeFrameStream {
+    receiver: tokio_mpsc::UnboundedReceiver<(
+        Result<Vec<AbiBytes>, String>,
+        Option<Arc<FrameQueueCredit>>,
+    )>,
+}
+
+impl ServerRuntimeFrameStream {
+    /// Receive the next completed tick's outbound frames.
+    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
+        self.receiver.recv().await.map(|(result, _credit)| result)
+    }
+}
+
+// Charging at least 16 KiB per frame bounds both count (512) and bytes
+// (8 MiB), including tiny-frame floods. Credits follow queued work to Drop.
+const FRAME_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+struct FrameQueueCredit {
+    used: Arc<AtomicUsize>,
+    charge: usize,
+}
+impl FrameQueueCredit {
+    fn reserve(used: &Arc<AtomicUsize>, frames: &[AbiBytes]) -> Result<Arc<Self>, String> {
+        let charge = frames
+            .iter()
+            .try_fold(0usize, |sum, frame| {
+                sum.checked_add(crate::wire::channel_credit::channel_frame_credit_cost(
+                    frame.len(),
+                ))
+            })
+            .ok_or_else(|| "wire frame queue budget exceeded".to_owned())?
+            .max(16 * 1024);
+        used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(charge)
+                .filter(|next| *next <= FRAME_QUEUE_BUDGET)
+        })
+        .map_err(|_| "wire frame queue backpressure".to_owned())?;
+        Ok(Arc::new(Self {
+            used: Arc::clone(used),
+            charge,
+        }))
+    }
+}
+impl Drop for FrameQueueCredit {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+struct FrameStreamSender {
+    sender:
+        tokio_mpsc::UnboundedSender<(Result<Vec<AbiBytes>, String>, Option<Arc<FrameQueueCredit>>)>,
+    used: Arc<AtomicUsize>,
+    failed: Arc<AtomicBool>,
+    tick_queued: Arc<AtomicBool>,
+    persistent: bool,
+}
+impl FrameStreamSender {
+    fn send(&self, result: Result<Vec<AbiBytes>, String>) -> Result<(), ()> {
+        if result.as_ref().is_ok_and(Vec::is_empty) {
+            return Ok(());
+        }
+        if self.failed.load(Ordering::Acquire) || self.sender.is_closed() {
+            return Err(());
+        }
+        let credit = match &result {
+            Ok(frames) => match FrameQueueCredit::reserve(&self.used, frames) {
+                Ok(credit) => Some(credit),
+                Err(error) => {
+                    if !self.failed.swap(true, Ordering::AcqRel) {
+                        let _ = self.sender.send((Err(error), None));
+                    }
+                    return Err(());
+                }
+            },
+            Err(_) => {
+                self.failed.store(true, Ordering::Release);
+                None
+            }
+        };
+        self.sender.send((result, credit)).map_err(|_| ())
+    }
+    fn is_closed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) || self.sender.is_closed()
+    }
+}
+
+/// Terminal reason for an attached edge-to-authority wire transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerUpstreamTerminalReason {
+    /// The target-owned native socket pump reported its terminal outcome.
+    NativeTransport(NativeTransportTerminal),
+    /// The adapter rejected an outbound frame because its pump had failed.
+    TransportFailed(String),
+    /// Wire decoding or semantic auxiliary routing failed.
+    ProtocolFailed(String),
+    /// The owner dropped the connection to cancel its local wire driver.
+    Cancelled,
+    /// The shell owner stopped without returning a more specific reason.
+    RuntimeStopped,
+}
+
+/// Owned lifetime signal for an attached edge-to-authority wire transport.
+pub struct ServerUpstreamConnection {
+    terminal: Option<oneshot::Receiver<ServerUpstreamTerminalReason>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl ServerUpstreamConnection {
+    /// Resolve with the reason the socket/semantic pump stopped.
+    pub async fn terminal(mut self) -> ServerUpstreamTerminalReason {
+        let terminal = self
+            .terminal
+            .take()
+            .expect("upstream terminal receiver is consumed exactly once");
+        let reason = terminal
+            .await
+            .unwrap_or(ServerUpstreamTerminalReason::RuntimeStopped);
+        self.cancel.take();
+        reason
+    }
+}
+
+impl Drop for ServerUpstreamConnection {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+struct ServerShellInner {
+    jobs: Mutex<Option<mpsc::UnboundedSender<ServerShellCommand>>>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+    shutdown: Mutex<ShutdownState>,
+    shutdown_changed: Condvar,
+    ingress_bytes: Mutex<HashMap<ServerSession, Arc<AtomicUsize>>>,
+    wire_streams: Mutex<HashMap<ServerSession, FrameStreamSender>>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+}
+
+#[derive(Clone)]
+enum ShutdownState {
+    Running,
+    InProgress,
+    Finished(Result<(), String>),
+}
+
+impl Drop for ServerShellInner {
+    fn drop(&mut self) {
+        // `BuiltServer::shutdown` is the public, async lifecycle boundary and
+        // drains request work before reaching this point. This fallback covers
+        // direct builder use that is simply dropped: without it, dropping the
+        // last sender merely asks the owner thread to exit and a caller can
+        // race a reopen of the same RocksDB path before that exit completes.
+        // There can be no remaining `ServerRuntimeHandle` when this runs, so no
+        // public operation can be waiting for an owner-thread reply.
+        let _ = shutdown_blocking(self);
+    }
+}
+
+type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+type AsyncServerShellJob =
+    Box<dyn for<'a> FnOnce(&'a mut InMemoryServerShell) -> LocalBoxFuture<'a, ()> + Send + 'static>;
+
+enum ServerShellCommand {
+    Run(ServerShellJob),
+    RunAsync(AsyncServerShellJob),
+    CloseSession(ServerSession),
+    ReceiveFrames {
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        reply: FrameStreamSender,
+        credit: Arc<FrameQueueCredit>,
+    },
+    AttachUpstreamWire {
+        transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
+        reply: oneshot::Sender<Result<ServerUpstreamConnection, String>>,
+    },
+    Shutdown(std_mpsc::Sender<()>),
+}
+
+/// Bridges database-local progress requests back into the shell owner queue.
+///
+/// The database is intentionally thread-affine, so this scheduler is only
+/// installed and invoked on the owner thread. The command queue preserves that
+/// affinity while ensuring an Immediate request becomes a following shell turn
+/// instead of waiting for unrelated socket activity.
+#[derive(Clone)]
+struct ServerShellTickScheduler {
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    state: Arc<ServerShellTickState>,
+}
+
+// The owner uses LocalPool without a Tokio timer context. One lazily started
+// host worker services all incomplete-channel deadlines for this runtime.
+// Each pending future owns one removable entry; ordinary traffic starts none.
+#[derive(Default)]
+struct ReceiveTimerState {
+    next_id: u64,
+    stopped: bool,
+    deadlines: BTreeMap<(std::time::Instant, u64), Arc<ReceiveTimerSignal>>,
+}
+#[derive(Default)]
+struct ReceiveTimerSignal {
+    callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    ready: AtomicBool,
+    waker: futures::task::AtomicWaker,
+}
+struct ReceiveTimerQueue {
+    shared: Arc<(Mutex<ReceiveTimerState>, Condvar)>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl ReceiveTimerQueue {
+    fn new() -> Self {
+        let shared = Arc::new((Mutex::new(ReceiveTimerState::default()), Condvar::new()));
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::Builder::new()
+            .name("jazz-receive-deadlines".into())
+            .spawn(move || {
+                let (lock, changed) = &*worker_shared;
+                let mut state = lock.lock().unwrap();
+                loop {
+                    if state.stopped {
+                        break;
+                    }
+                    let Some((&(deadline, _), _)) = state.deadlines.first_key_value() else {
+                        state = changed.wait(state).unwrap();
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    if deadline > now {
+                        state = changed.wait_timeout(state, deadline - now).unwrap().0;
+                        continue;
+                    }
+                    let (_, signal) = state.deadlines.pop_first().unwrap();
+                    drop(state);
+                    signal.ready.store(true, Ordering::Release);
+                    signal.waker.wake();
+                    if let Some(callback) = signal.callback.lock().unwrap().take() {
+                        callback();
+                    }
+                    state = lock.lock().unwrap();
+                }
+            })
+            .expect("server receive timer worker starts");
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+    fn after(&self, delay_ms: u64) -> ReceiveTimer {
+        self.register(delay_ms, None)
+    }
+    fn register(&self, delay_ms: u64, callback: Option<Box<dyn FnOnce() + Send>>) -> ReceiveTimer {
+        let signal = Arc::new(ReceiveTimerSignal {
+            callback: Mutex::new(callback),
+            ..Default::default()
+        });
+        let (lock, changed) = &*self.shared;
+        let mut state = lock.lock().unwrap();
+        let key = (
+            std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+            state.next_id,
+        );
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("receive timer id exhausted");
+        state.deadlines.insert(key, Arc::clone(&signal));
+        changed.notify_one();
+        ReceiveTimer {
+            shared: Arc::downgrade(&self.shared),
+            key,
+            signal,
+        }
+    }
+}
+impl Drop for ReceiveTimerQueue {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.shared;
+        lock.lock().unwrap().stopped = true;
+        changed.notify_one();
+        if let Some(worker) = self.worker.take() {
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+struct ReceiveTimer {
+    shared: std::sync::Weak<(Mutex<ReceiveTimerState>, Condvar)>,
+    key: (std::time::Instant, u64),
+    signal: Arc<ReceiveTimerSignal>,
+}
+impl std::future::Future for ReceiveTimer {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        self.signal.waker.register(cx.waker());
+        if self.signal.ready.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+impl Drop for ReceiveTimer {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.upgrade() {
+            let (lock, changed) = &*shared;
+            lock.lock().unwrap().deadlines.remove(&self.key);
+            changed.notify_one();
+        }
+        self.signal.waker.take();
+    }
+}
+
+#[derive(Default)]
+struct ServerShellTickState {
+    receive_timers: std::sync::OnceLock<ReceiveTimerQueue>,
+    queued: AtomicBool,
+    delayed: Mutex<Option<(std::time::Instant, ReceiveTimer)>>,
+    deferred: AtomicBool,
+    query_wake_queued: AtomicBool,
+    #[cfg(test)]
+    deferred_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+    #[cfg(test)]
+    delayed_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+}
+
+impl ServerShellTickState {
+    async fn receive_deadline(&self, delay_ms: Option<u64>) {
+        match delay_ms {
+            Some(delay) => {
+                self.receive_timers
+                    .get_or_init(ReceiveTimerQueue::new)
+                    .after(delay)
+                    .await
+            }
+            None => futures::future::pending::<()>().await,
+        }
+    }
+}
+
+#[cfg(test)]
+struct ServerShellTimerGate {
+    entered: std_mpsc::Sender<()>,
+    release: std_mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+fn wait_for_test_timer_gate(gate: &Mutex<Option<ServerShellTimerGate>>) {
+    let mut guard = match gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let gate = guard.take();
+    drop(guard);
+    if let Some(gate) = gate {
+        gate.entered
+            .send(())
+            .expect("timer test still waits for gate entry");
+        gate.release
+            .recv()
+            .expect("timer test releases the controlled timer");
+    } else {
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+fn install_test_timer_gate(slot: &Mutex<Option<ServerShellTimerGate>>, gate: ServerShellTimerGate) {
+    let mut guard = match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.replace(gate);
+}
+
+/// A storage-future wake is translated back into one serialized shell turn.
+/// The callback contains no database state, so it remains safe for a backend
+/// to invoke through a normal cross-thread `Waker`.
+struct ServerShellQueryRuntimeWake {
+    scheduler: ServerShellTickScheduler,
+}
+
+impl ArcWake for ServerShellQueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.scheduler.schedule_query_runtime_progress();
+    }
+}
+
+impl ServerShellTickScheduler {
+    fn enqueue_tick(
+        jobs: &mpsc::UnboundedSender<ServerShellCommand>,
+        activity_tx: &watch::Sender<u64>,
+        io_wakers: &Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+        state: &Arc<ServerShellTickState>,
+    ) {
+        if state.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let activity_tx = activity_tx.clone();
+        let io_wakers = Arc::clone(io_wakers);
+        let tick_state = Arc::clone(state);
+        if jobs
+            .unbounded_send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+                Box::pin(async move {
+                    // Mark this turn consumed before ticking. Work discovered by
+                    // the tick itself queues one follow-up turn instead of being
+                    // lost behind the currently running command.
+                    tick_state.queued.store(false, Ordering::Release);
+                    if shell.tick_async().await.is_ok() {
+                        notify_shell_activity(&activity_tx);
+                        if let Ok(mut wakers) = io_wakers.lock() {
+                            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+                        }
+                    }
+                })
+            })))
+            .is_err()
+        {
+            state.queued.store(false, Ordering::Release);
+        }
+    }
+
+    fn schedule_query_runtime_progress(&self) {
+        if self.state.query_wake_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        let scheduler = self.clone();
+        if self
+            .jobs
+            .unbounded_send(ServerShellCommand::Run(Box::new(move |shell| {
+                scheduler
+                    .state
+                    .query_wake_queued
+                    .store(false, Ordering::Release);
+                shell.mark_subscriber_connections_dirty_after_query_runtime_wake();
+                scheduler.schedule_tick(TickUrgency::Immediate);
+            })))
+            .is_err()
+        {
+            state.query_wake_queued.store(false, Ordering::Release);
+        }
+    }
+
+    fn schedule_deferred_tick(&self) {
+        // Deferred work gets one bounded host-timer turn. The shell owner must
+        // remain available for inbound transport while an unresolved
+        // subscription or upload coalesces more work.
+        if self.state.deferred.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            #[cfg(test)]
+            wait_for_test_timer_gate(&state.deferred_timer_gate);
+            #[cfg(not(test))]
+            thread::sleep(std::time::Duration::from_millis(1));
+            state.deferred.store(false, Ordering::Release);
+            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+        });
+    }
+}
+
+impl TickScheduler for ServerShellTickScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        match urgency {
+            TickUrgency::Deferred => self.schedule_deferred_tick(),
+            TickUrgency::Immediate | TickUrgency::AfterCurrentTurn => {
+                Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+            }
+        }
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let weak = Arc::downgrade(&self.state);
+        let timer = self
+            .state
+            .receive_timers
+            .get_or_init(ReceiveTimerQueue::new)
+            .register(
+                delay_ms,
+                Some(Box::new(move || {
+                    let Some(state) = weak.upgrade() else {
+                        return;
+                    };
+                    // A cancelled older callback may already have left the timer map.
+                    // It must not consume a replacement deadline or emit an extra tick.
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending
+                        .as_ref()
+                        .is_none_or(|(current, _)| *current != deadline)
+                    {
+                        return;
+                    }
+                    pending.take();
+                    drop(pending);
+                    #[cfg(test)]
+                    wait_for_test_timer_gate(&state.delayed_timer_gate);
+                    Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+                })),
+            );
+        *pending = Some((deadline, timer));
+    }
+
+    fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+        Some(waker(Arc::new(ServerShellQueryRuntimeWake {
+            scheduler: self.clone(),
+        })))
+    }
+}
+
+struct AuxiliaryIngress {
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    _credit: Arc<FrameQueueCredit>,
+}
+
+type SessionPumps = HashMap<ServerSession, crate::db::PeerIoPump>;
+type AuxiliaryWorkers = HashMap<ServerSession, mpsc::UnboundedSender<AuxiliaryIngress>>;
+
+fn snapshot_session_pumps(shell: &InMemoryServerShell) -> SessionPumps {
+    shell
+        .sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(transport, state)| {
+            state.as_ref().map(|state| {
+                (
+                    ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    },
+                    state.auxiliary_pump.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+// Called by the owner even while a semantic job holds its mutable shell borrow.
+// Only host-admitted session capabilities can select a pump. Canonical jobs
+// remain in the original owner FIFO and validate that capability again on use.
+fn dispatch_ingress(
+    session: ServerSession,
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    credit: Arc<FrameQueueCredit>,
+    pumps: &SessionPumps,
+    workers: &mut AuxiliaryWorkers,
+    spawner: &futures::executor::LocalSpawner,
+    scheduler: ServerShellTickScheduler,
+) -> Option<ServerShellCommand> {
+    let activity_tx = scheduler.activity_tx.clone();
+    let Some(pump) = pumps.get(&session).filter(|pump| !pump.is_disconnected()) else {
+        let _ = reply.send(Err("invalid or retired server session".to_owned()));
+        return None;
+    };
+    if reply.is_closed() {
+        return None;
+    }
+    let mut canonical = Vec::new();
+    let mut auxiliary = Vec::new();
+    for frame in frames {
+        match pump.wire_frame_is_auxiliary(&frame) {
+            Ok(true) => auxiliary.push(frame),
+            Ok(false) => canonical.push(frame),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return None;
+            }
+        }
+    }
+    if !auxiliary.is_empty() {
+        let worker = workers.entry(session).or_insert_with(|| {
+            let (sender, mut receiver) = mpsc::unbounded::<AuxiliaryIngress>();
+            let pump = pump.clone();
+            let auxiliary_activity = scheduler.activity_tx.clone();
+            spawner.spawn_local(async move {
+                let mut active_reply: Option<FrameStreamSender> = None;
+                loop {
+                    if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                        if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                        break;
+                    }
+                    let output_enabled = active_reply.as_ref().is_some_and(|reply| !reply.is_closed());
+                    let outbound = async {
+                        if output_enabled {
+                            pump.outbound_ready().await;
+                        } else {
+                            futures::future::pending::<()>().await;
+                        }
+                    }.fuse();
+                    let deadline = scheduler.state.receive_deadline(pump.incomplete_receive_timeout_ms()).fuse();
+                    let incoming = receiver.next().fuse();
+                    futures::pin_mut!(outbound, incoming, deadline);
+                    let work = futures::select! {
+                        _ = deadline => {
+                            if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                                if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                                break;
+                            }
+                            continue;
+                        },
+                        work = incoming => match work { Some(work) => work, None => break },
+                        _ = outbound => {
+                            if pump.is_disconnected() { break; }
+                            if let Some(reply) = &active_reply {
+                                if reply.send(pump.take_outbound_wire_frames(32, 4 * 1024 * 1024)).is_err() {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    if work.reply.is_closed() || pump.is_disconnected() { continue; }
+                    if work.reply.persistent { active_reply = Some(work.reply.clone()); }
+                    for frame in work.frames {
+                        if work.reply.is_closed() || pump.is_disconnected() { break; }
+                        let result = match pump.route_incoming_wire_frame(frame).await {
+                            Ok(None) => pump.take_outbound_wire_frames(32, 4 * 1024 * 1024),
+                            Ok(Some(_)) => Err("canonical frame entered auxiliary worker".to_owned()),
+                            Err(error) => Err(error),
+                        };
+                        if pump.take_canonical_credit_progress() { notify_shell_activity(&auxiliary_activity); }
+                        let failed = result.is_err();
+                        if work.reply.send(result).is_err() || failed { break; }
+                    }
+                }
+            }).expect("owner local executor accepts auxiliary worker");
+            sender
+        });
+        if worker
+            .unbounded_send(AuxiliaryIngress {
+                frames: auxiliary,
+                reply: reply.clone(),
+                _credit: Arc::clone(&credit),
+            })
+            .is_err()
+        {
+            let _ = reply.send(Err("auxiliary worker stopped".to_owned()));
+            return None;
+        }
+    }
+    if canonical.is_empty() {
+        return None;
+    }
+    Some(ServerShellCommand::RunAsync(Box::new(move |shell| {
+        Box::pin(async move {
+            let _credit = credit;
+            for frame in canonical {
+                if reply.is_closed() {
+                    return;
+                }
+                let phase = inbound_frame_phase(&frame);
+                let result = match shell.receive_frames_async(session, [frame]).await {
+                    Err(error) => Err(format!("server receive {phase}: {error}")),
+                    Ok(()) => match shell.tick_async().await {
+                        Err(error) => Err(format!("server tick after {phase}: {error}")),
+                        Ok(()) => shell
+                            .take_frames(session)
+                            .map_err(|error| format!("server drain after {phase}: {error}")),
+                    },
+                };
+                let failed = result.is_err();
+                if reply.send(result).is_err() || failed {
+                    return;
+                }
+                notify_shell_activity(&activity_tx);
+            }
+        })
+    })))
+}
+
+fn run_server_shell_owner(
+    mut shell: InMemoryServerShell,
+    mut receiver: mpsc::UnboundedReceiver<ServerShellCommand>,
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+) {
+    let scheduler = ServerShellTickScheduler {
+        jobs,
+        activity_tx,
+        io_wakers: Arc::clone(&io_wakers),
+        state: Arc::new(ServerShellTickState::default()),
+    };
+    shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+    let mut executor = futures::executor::LocalPool::new();
+    let spawner = executor.spawner();
+    executor.run_until(async move {
+        let mut pending = VecDeque::new();
+        let mut workers = AuxiliaryWorkers::new();
+        loop {
+            let command = match pending.pop_front() {
+                Some(command) => command,
+                None => match receiver.next().await {
+                    Some(command) => command,
+                    None => return,
+                },
+            };
+            let pumps = snapshot_session_pumps(&shell);
+            workers.retain(|session, _| pumps.contains_key(session));
+            match command {
+                ServerShellCommand::ReceiveFrames {
+                    session,
+                    frames,
+                    reply,
+                    credit,
+                } => {
+                    if let Some(command) = dispatch_ingress(
+                        session,
+                        frames,
+                        reply,
+                        credit,
+                        &pumps,
+                        &mut workers,
+                        &spawner,
+                        scheduler.clone(),
+                    ) {
+                        pending.push_front(command);
+                    }
+                }
+                ServerShellCommand::CloseSession(session) => {
+                    let _ = shell.close_session(session);
+                }
+                ServerShellCommand::Run(job) => job(&mut shell),
+                ServerShellCommand::RunAsync(job) => {
+                    let mut operation = job(&mut shell);
+                    loop {
+                        match futures::future::select(operation.as_mut(), receiver.next()).await {
+                            futures::future::Either::Left(((), _)) => break,
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::Shutdown(stopped)),
+                                _,
+                            )) => {
+                                // Dropping the suspended operation releases all
+                                // evaluator leases before storage destruction.
+                                drop(operation);
+                                drop(shell);
+                                let _ = stopped.send(());
+                                return;
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::ReceiveFrames {
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                }),
+                                _,
+                            )) => {
+                                if let Some(command) = dispatch_ingress(
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                    &pumps,
+                                    &mut workers,
+                                    &spawner,
+                                    scheduler.clone(),
+                                ) {
+                                    pending.push_back(command);
+                                }
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::CloseSession(session)),
+                                _,
+                            )) => {
+                                if let Some(pump) = pumps.get(&session) {
+                                    pump.disconnect();
+                                }
+                                pending.push_back(ServerShellCommand::CloseSession(session));
+                            }
+                            futures::future::Either::Right((Some(command), _)) => {
+                                pending.push_back(command);
+                            }
+                            futures::future::Either::Right((None, _)) => return,
+                        }
+                    }
+                }
+                ServerShellCommand::AttachUpstreamWire {
+                    transport,
+                    transport_terminal,
+                    protocol_version,
+                    features,
+                    session_context,
+                    permits_delegated_sessions,
+                    reply,
+                } => {
+                    let io = shell.connect_upstream_wire_io_with_delegated_sessions(
+                        protocol_version,
+                        features,
+                        session_context,
+                        permits_delegated_sessions,
+                    );
+                    let connection_id = io.connection_id;
+                    let (wake_tx, wake_rx) = mpsc::unbounded();
+                    if let Ok(mut wakers) = io_wakers.lock() {
+                        wakers.push(wake_tx);
+                    }
+                    let (terminal_tx, terminal) = oneshot::channel();
+                    let (cancel, cancel_rx) = oneshot::channel();
+                    let wire_scheduler = scheduler.clone();
+                    let spawn_result = spawner.spawn_local(async move {
+                        let reason = drive_upstream_wire(
+                            transport,
+                            transport_terminal,
+                            io,
+                            wake_rx,
+                            wire_scheduler,
+                            cancel_rx,
+                        )
+                        .await;
+                        let _ = terminal_tx.send(reason);
+                    });
+                    let connection = spawn_result
+                        .map(|()| ServerUpstreamConnection {
+                            terminal: Some(terminal),
+                            cancel: Some(cancel),
+                        })
+                        .map_err(|error| {
+                            format!("failed to spawn local upstream wire pump: {error}")
+                        });
+                    if connection.is_ok() {
+                        // Creating the semantic upstream queues its initial
+                        // claims/frontier work, but unlike the in-memory attach
+                        // path it has no caller-owned tick. Queue that first
+                        // shell turn only after the wire pump exists so initial
+                        // bootstrap and reconnect both flush without waiting
+                        // for unrelated downstream activity.
+                        scheduler.schedule_tick(TickUrgency::Immediate);
+                    } else {
+                        shell.disconnect_upstream_wire_io(connection_id);
+                    }
+                    let _ = reply.send(connection);
+                }
+                ServerShellCommand::Shutdown(stopped) => {
+                    // Native storage is destroyed on its owner thread before
+                    // shutdown is acknowledged.
+                    drop(shell);
+                    let _ = stopped.send(());
+                    return;
+                }
+            }
+
+            // A shell tick can discover and enqueue another immediate tick.
+            // The owner also hosts upstream wire pumps in this LocalPool, so
+            // consuming a run of already-ready commands without yielding can
+            // indefinitely delay an edge's inbound/outbound wire progress.
+            // Cooperate once per command: queued shell work remains ordered,
+            // while a ready wire pump gets an opportunity to transfer the
+            // corresponding core update.
+            yield_to_local_tasks().await;
+        }
+    });
+}
+
+/// Yield exactly once through the current local executor without introducing a
+/// host timer or moving the thread-affine shell to another thread.
+async fn yield_to_local_tasks() {
+    let mut yielded = false;
+    futures::future::poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+async fn drive_upstream_wire(
+    mut wire: Box<dyn WireTransport + Send>,
+    mut transport_terminal: NativeTransportTerminalFuture,
+    io: super::ServerUpstreamIo,
+    mut wake_rx: mpsc::UnboundedReceiver<()>,
+    scheduler: ServerShellTickScheduler,
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> ServerUpstreamTerminalReason {
+    let connection_id = io.connection_id;
+    let reason = async {
+        loop {
+            if let Err(error) = io.pump.expire_incomplete_receive() {
+                return ServerUpstreamTerminalReason::ProtocolFailed(error);
+            }
+            let mut staged_semantic_input = false;
+            while let Some(frame) = wire.try_recv_frame() {
+                match io.pump.route_incoming_wire_frame(frame).await {
+                    Ok(Some(canonical)) => {
+                        if let Err(error) =
+                            io.transport.queues.borrow_mut().stage_inbound(canonical)
+                        {
+                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                        }
+                        staged_semantic_input = true;
+                    }
+                    Ok(None) => {
+                        if io.pump.take_canonical_credit_progress() {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
+                        }
+                    }
+                    Err(error) => {
+                        return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                    }
+                }
+            }
+            // The socket callback can notify the host before this local pump gets
+            // a turn to stage its frame. Schedule only after canonical input is
+            // actually visible to the shell, otherwise a downstream activity tick
+            // may observe an empty queue and leave the edge dormant indefinitely.
+            if staged_semantic_input {
+                scheduler.schedule_tick(TickUrgency::Immediate);
+            }
+            let mut transport_backpressured = false;
+            // A bounded turn alternates physical frames so a long canonical
+            // stream cannot starve the reserved chunk channel.
+            for _ in 0..16 {
+                let frame = io.transport.queues.borrow_mut().outbound.pop_front();
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame.clone()) {
+                        Ok(()) => {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
+                        }
+                        Err(TransportError::Backpressure) => {
+                            io.transport.queues.borrow_mut().outbound.push_front(frame);
+                            transport_backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
+                    }
+                }
+                let reservation = match io.pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return ServerUpstreamTerminalReason::ProtocolFailed(error),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            // The endpoint retains the exact compressed extent
+                            // and sequence until this same connection accepts it.
+                            transport_backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !transport_backpressured
+                && (!io.transport.queues.borrow().outbound.is_empty()
+                    || io.pump.outbound_is_ready())
+            {
+                yield_to_local_tasks().await;
+                continue;
+            }
+
+            let deadline = scheduler
+                .state
+                .receive_deadline(io.pump.incomplete_receive_timeout_ms())
+                .fuse();
+            let external_wake = wake_rx.next().fuse();
+            let auxiliary_wake = async {
+                if transport_backpressured {
+                    futures::future::pending::<()>().await;
+                } else {
+                    io.pump.outbound_ready().await;
+                }
+            }
+            .fuse();
+            let transport_stopped = transport_terminal.as_mut().fuse();
+            let cancelled = (&mut cancel_rx).fuse();
+            futures::pin_mut!(
+                external_wake,
+                auxiliary_wake,
+                transport_stopped,
+                cancelled,
+                deadline
+            );
+            futures::select_biased! {
+                _ = cancelled => return ServerUpstreamTerminalReason::Cancelled,
+                _ = deadline => {
+                    if let Err(error) = io.pump.expire_incomplete_receive() {
+                        return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                    }
+                },
+                terminal = transport_stopped => {
+                    return ServerUpstreamTerminalReason::NativeTransport(terminal);
+                }
+                wake = external_wake => {
+                    if wake.is_none() {
+                        return ServerUpstreamTerminalReason::RuntimeStopped;
+                    }
+                }
+                _ = auxiliary_wake => {
+                    if io.pump.is_disconnected() {
+                        return ServerUpstreamTerminalReason::TransportFailed(
+                            "upstream semantic transport disconnected".to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    .await;
+    io.pump.disconnect();
+    let (detached_tx, detached_rx) = oneshot::channel();
+    if scheduler
+        .jobs
+        .unbounded_send(ServerShellCommand::Run(Box::new(move |shell| {
+            shell.disconnect_upstream_wire_io(connection_id);
+            let _ = detached_tx.send(());
+        })))
+        .is_ok()
+    {
+        // Do not expose the terminal event to the reconnect loop until the
+        // dead semantic link has relinquished authority. Otherwise the
+        // replacement wire can attach as a parallel non-owner and strand
+        // writes retained during the outage.
+        let _ = detached_rx.await;
+    }
+    reason
+}
+
+impl ServerRuntimeHandle {
+    /// Read the owned authority snapshot for an authenticated bootstrap socket.
+    /// The socket retains its live adapter until credit-driven delivery ends.
+    pub async fn trusted_catalogue_snapshot(
+        &self,
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
+        self.run(move |shell| {
+            shell
+                .trusted_catalogue_snapshot()
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Replace an already persisted edge's authority catalogue through the
+    /// same authenticated snapshot path used at first bootstrap. The snapshot
+    /// adoption rebuilds the local physical projection registry before this
+    /// call returns, so callers may safely make the edge externally ready.
+    pub async fn apply_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .apply_trusted_catalogue_snapshot(snapshot)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell.set_catalogue_activation_failpoint(failpoint);
+            Ok(())
+        })
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn trusted_catalogue_snapshot_for_test(
+        &self,
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
+        self.run(move |shell| {
+            shell
+                .trusted_catalogue_snapshot()
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains(
+        &self,
+        schema: SchemaVersionId,
+        lens: crate::ids::MigrationLensId,
+    ) -> Result<(bool, bool), String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains(schema, lens)))
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains_schema(
+        &self,
+        schema: SchemaVersionId,
+    ) -> Result<bool, String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains_schema(schema)))
+            .await
+    }
+
+    /// Start a core runtime over the selected storage configuration.
+    pub fn start_with_storage(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
+    ) -> Result<Self, String> {
+        Self::start_with_storage_config_and_permissions(
+            schema,
+            storage_config,
+            storage_factory,
+            NodeRole::Core,
+            false,
+        )
+    }
+
+    /// Start a runtime with an explicit Core or local-relay role.
+    pub fn start_with_storage_config(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
+        role: NodeRole,
+    ) -> Result<Self, String> {
+        Self::start_with_storage_config_and_permissions(
+            schema,
+            storage_config,
+            storage_factory,
+            role,
+            true,
+        )
+    }
+
+    fn start_with_storage_config_and_permissions(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
+        role: NodeRole,
+        permissions_ready: bool,
+    ) -> Result<Self, String> {
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
+
+        let join = thread::Builder::new()
+            .name("jazz-server-shell".to_owned())
+            .spawn(move || {
+                let config = InMemoryServerShellConfig::new(
+                    schema,
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([0x5e; 16]),
+                        author: AuthorSubject::SYSTEM,
+                    },
+                )
+                .with_row_id_seed(0x5e)
+                .with_runtime_schema_bootstrap()
+                .with_role(role);
+                let config = match storage_factory {
+                    Some(factory) => config.with_storage_factory(factory),
+                    None => config,
+                };
+                let shell = match InMemoryServerShell::start_with_storage(config, storage_config) {
+                    Ok(mut shell) => {
+                        if !permissions_ready && let Err(error) = shell.set_permissions_ready(false)
+                        {
+                            let _ = started_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                        let _ = started_tx.send(Ok(()));
+                        shell
+                    }
+                    Err(error) => {
+                        let _ = started_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
+            })
+            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
+
+        started_rx
+            .recv()
+            .map_err(|_| "server shell thread exited before startup".to_owned())??;
+        Ok(Self {
+            inner: Arc::new(ServerShellInner {
+                jobs: Mutex::new(Some(jobs)),
+                join: Mutex::new(Some(join)),
+                shutdown: Mutex::new(ShutdownState::Running),
+                shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
+                activity_tx,
+                io_wakers,
+            }),
+        })
+    }
+
+    /// Subscribe to runtime activity that may make outbound session frames available.
+    pub fn subscribe_activity(&self) -> ServerRuntimeActivity {
+        ServerRuntimeActivity {
+            receiver: self.inner.activity_tx.subscribe(),
+        }
+    }
+
+    /// Admit an authenticated session into the semantic runtime.
+    pub async fn open_with_session_context(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+        negotiated_features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        link_admission: crate::serving::ServerLinkAdmission,
+    ) -> Result<ServerSession, String> {
+        self.run(move |shell| {
+            shell
+                .accept_subscriber_session_with_claims_and_trust_and_context(
+                    identity,
+                    claims,
+                    trust,
+                    negotiated_features,
+                    session_context,
+                    link_admission,
+                )
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Publish a validated schema and optional migration lens to the runtime.
+    pub async fn publish_schema_with_lens(
+        &self,
+        schema: JazzSchema,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
+    ) -> Result<SchemaVersionId, String> {
+        let activity_tx = self.inner.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
+    }
+
+    /// Check a compiled selection without changing runtime or durable state.
+    #[doc(hidden)]
+    pub async fn validate_schema_activation(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .validate_schema_activation(revision, schema)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Install the catalogue's active schema and permissions at one authority revision.
+    pub async fn activate_schema(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
+    ) -> Result<SchemaVersionId, String> {
+        let activity_tx = self.inner.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .activate_schema(revision, schema, permissions)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
+    }
+
+    /// Service one WebSocket message as ordered frame-sized shell ticks.
+    ///
+    /// Results become available as each frame has completed its tick while the
+    /// shell thread keeps ingesting later frames. This is intentionally a
+    /// streaming operation rather than one large `run` job so a route can
+    /// publish a durability fate as soon as it is true.
+    /// Apply an inbound frame batch and stream every immediately available response.
+    pub fn receive_tick_stream(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+    ) -> Result<ServerRuntimeFrameStream, String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: false,
+            },
+        })?;
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn reserve_session_ingress(
+        &self,
+        session: ServerSession,
+        frames: &[AbiBytes],
+    ) -> Result<Arc<FrameQueueCredit>, String> {
+        let used = self
+            .inner
+            .ingress_bytes
+            .lock()
+            .map_err(|_| "ingress budget lock poisoned")?
+            .entry(session)
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        FrameQueueCredit::reserve(&used, frames)
+    }
+
+    /// Open one bounded, ordered output stream for a host-owned socket session.
+    /// All canonical ticks and lock-independent auxiliary replies share this
+    /// FIFO; a pending semantic reply cannot prevent receiving later wire input.
+    pub fn open_wire_stream(
+        &self,
+        session: ServerSession,
+    ) -> Result<ServerRuntimeFrameStream, String> {
+        let mut streams = self
+            .inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?;
+        if streams.contains_key(&session) {
+            return Err("session already has a wire stream".to_owned());
+        }
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        streams.insert(
+            session,
+            FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: true,
+            },
+        );
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn wire_stream_sender(&self, session: ServerSession) -> Result<FrameStreamSender, String> {
+        self.inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?
+            .get(&session)
+            .cloned()
+            .ok_or_else(|| "session has no wire stream".to_owned())
+    }
+
+    /// Stage bounded input while the socket continues polling its output stream.
+    pub fn receive_wire_frames(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+    ) -> Result<(), String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: self.wire_stream_sender(session)?,
+        })
+    }
+
+    /// Coalesce host activity into one semantic tick whose output shares the
+    /// session FIFO with ingress replies. This never waits for the node lock.
+    pub fn request_wire_tick(&self, session: ServerSession) -> Result<(), String> {
+        let reply = self.wire_stream_sender(session)?;
+        if reply.tick_queued.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let activity_tx = self.inner.activity_tx.clone();
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                reply.tick_queued.store(false, Ordering::Release);
+                if reply.is_closed() {
+                    return;
+                }
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                let _ = reply.send(result);
+                if made_progress {
+                    notify_shell_activity(&activity_tx);
+                }
+            })
+        })))
+    }
+
+    /// Tick the runtime once and return pending frames for one session.
+    pub async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
+        let activity_tx = self.inner.activity_tx.clone();
+        self.run_async(move |shell| {
+            Box::pin(async move {
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                // Progress-based re-arm: a tick that yielded frames may have more
+                // behind it (large resets span many ticks), so schedule another.
+                // Empty ticks do NOT re-arm — that unconditional re-arm was the
+                // consolidation-spin feeder. One notification must never buy an
+                // unbounded loop, and delivery must never stall mid-reset; frames
+                // produced is exactly the signal that separates the two.
+                if let Ok(frames) = &result
+                    && !frames.is_empty()
+                {
+                    notify_shell_activity(&activity_tx);
+                }
+                result
+            })
+        })
+        .await
+    }
+
+    /// Attach a negotiated upstream transport to an edge runtime.
+    pub async fn connect_upstream(
+        &self,
+        transport: Box<dyn Transport + Send>,
+    ) -> Result<(), String> {
+        let activity_tx = self.inner.activity_tx.clone();
+        self.run(move |shell| {
+            let result = shell
+                .connect_upstream(transport)
+                .map_err(|error| error.to_string());
+            if result.is_ok() {
+                notify_shell_activity(&activity_tx);
+            }
+            result
+        })
+        .await
+    }
+
+    /// Attach a negotiated native wire transport and drive its semantic and
+    /// auxiliary channels on the shell's local executor.
+    pub async fn connect_upstream_wire(
+        &self,
+        transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> Result<ServerUpstreamConnection, String> {
+        self.connect_upstream_wire_with_delegated_sessions(
+            transport,
+            transport_terminal,
+            protocol_version,
+            features,
+            session_context,
+            false,
+        )
+        .await
+    }
+
+    /// Attach an upstream with the delegation capability established by the
+    /// host's authenticated connector, never by a semantic peer-wire message.
+    pub async fn connect_upstream_wire_with_delegated_sessions(
+        &self,
+        transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
+    ) -> Result<ServerUpstreamConnection, String> {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::AttachUpstreamWire {
+            transport,
+            transport_terminal,
+            protocol_version,
+            features,
+            session_context,
+            permits_delegated_sessions,
+            reply,
+        })?;
+        let result = response
+            .await
+            .map_err(|_| "server shell dropped upstream wire attachment".to_owned())?;
+        if result.is_ok() {
+            self.notify_activity();
+        }
+        result
+    }
+
+    /// Wake shell tasks after an adapter stages inbound work.
+    pub fn notify_activity(&self) {
+        notify_shell_activity(&self.inner.activity_tx);
+        if let Ok(mut wakers) = self.inner.io_wakers.lock() {
+            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+        }
+    }
+
+    /// Close a semantic session without exposing runtime storage or peer state.
+    pub fn close(&self, session: ServerSession) {
+        if let Ok(mut streams) = self.inner.wire_streams.lock() {
+            streams.remove(&session);
+        }
+        if let Ok(mut budgets) = self.inner.ingress_bytes.lock() {
+            budgets.remove(&session);
+        }
+        let _ = self.send(ServerShellCommand::CloseSession(session));
+    }
+
+    /// Retire the job sender, then wait until the owner has dropped the shell
+    /// and its storage. It is safe for multiple shutdown paths to call this.
+    /// Stop and join the runtime owner thread.
+    pub async fn shutdown(&self) -> Result<(), String> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || shutdown_blocking(&inner))
+            .await
+            .map_err(|error| format!("server shell shutdown task failed: {error}"))?
+    }
+
+    fn send(&self, command: ServerShellCommand) -> Result<(), String> {
+        self.inner
+            .jobs
+            .lock()
+            .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
+            .as_ref()
+            .ok_or_else(|| "server shell is shut down".to_owned())?
+            .unbounded_send(command)
+            .map_err(|_| "server shell thread is not running".to_owned())
+    }
+
+    async fn run<T>(
+        &self,
+        run_on_shell: impl FnOnce(&mut InMemoryServerShell) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::Run(Box::new(move |shell| {
+            let _ = reply.send(run_on_shell(shell));
+        })))?;
+        response
+            .await
+            .map_err(|_| "server shell thread dropped response".to_owned())?
+    }
+
+    async fn run_async<T>(
+        &self,
+        run_on_shell: impl for<'a> FnOnce(
+            &'a mut InMemoryServerShell,
+        ) -> LocalBoxFuture<'a, Result<T, String>>
+        + Send
+        + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                let result = run_on_shell(shell).await;
+                let _ = reply.send(result);
+            })
+        })))?;
+        response
+            .await
+            .map_err(|_| "server shell thread dropped async response".to_owned())?
+    }
+}
+
+fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
+    shutdown_blocking_with(inner, perform_shutdown_blocking, || {})
+}
+
+fn shutdown_blocking_with(
+    inner: &ServerShellInner,
+    perform: impl FnOnce(&ServerShellInner) -> Result<(), String>,
+    on_waiting: impl FnOnce(),
+) -> Result<(), String> {
+    let mut on_waiting = Some(on_waiting);
+    {
+        let mut state = inner
+            .shutdown
+            .lock()
+            .map_err(|_| "server shell shutdown mutex poisoned".to_owned())?;
+        loop {
+            match &*state {
+                ShutdownState::Running => {
+                    *state = ShutdownState::InProgress;
+                    break;
+                }
+                ShutdownState::InProgress => {
+                    if let Some(on_waiting) = on_waiting.take() {
+                        on_waiting();
+                    }
+                    state = inner
+                        .shutdown_changed
+                        .wait(state)
+                        .map_err(|_| "server shell shutdown mutex poisoned".to_owned())?;
+                }
+                ShutdownState::Finished(result) => return result.clone(),
+            }
+        }
+    }
+
+    let result = catch_unwind(AssertUnwindSafe(|| perform(inner))).unwrap_or_else(|payload| {
+        Err(format!(
+            "server shell shutdown panicked: {}",
+            panic_payload_message(payload.as_ref())
+        ))
+    });
+    let mut state = inner
+        .shutdown
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = ShutdownState::Finished(result.clone());
+    inner.shutdown_changed.notify_all();
+    result
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
+}
+
+fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
+    let sender = inner
+        .jobs
+        .lock()
+        .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
+        .take();
+    let Some(sender) = sender else {
+        return Ok(());
+    };
+
+    let (stopped_tx, stopped_rx) = std_mpsc::channel();
+    sender
+        .unbounded_send(ServerShellCommand::Shutdown(stopped_tx))
+        .map_err(|_| "server shell thread is not running".to_owned())?;
+    drop(sender);
+    stopped_rx
+        .recv()
+        .map_err(|_| "server shell thread exited before storage shutdown".to_owned())?;
+
+    if let Some(join) = inner
+        .join
+        .lock()
+        .map_err(|_| "server shell join mutex poisoned".to_owned())?
+        .take()
+    {
+        join.join()
+            .map_err(|_| "server shell thread panicked during shutdown".to_owned())?;
+    }
+    Ok(())
+}
+
+fn inbound_frame_phase(frame: &[u8]) -> String {
+    // Diagnostic naming is not admission. Do not perform receipt validation
+    // or canonical re-encoding before the actual connection decoder runs.
+    let Ok(frame) = postcard::from_bytes::<WireFrame>(frame) else {
+        return "malformed wire frame".to_owned();
+    };
+    let WireFrame::Message(envelope) = frame else {
+        return match frame {
+            WireFrame::Hello(_) => "wire hello".to_owned(),
+            WireFrame::Error(_) => "wire error".to_owned(),
+            WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
+            WireFrame::Channel(_) => "wire channel extent".to_owned(),
+            WireFrame::ChannelCredit(_) => "wire channel credit".to_owned(),
+            WireFrame::Message(_) => unreachable!("message handled above"),
+        };
+    };
+    match postcard::from_bytes::<SyncMessage>(&envelope.payload) {
+        Ok(message) => sync_message_name(&message).to_owned(),
+        Err(_) => "malformed SyncMessage".to_owned(),
+    }
+}
+
+fn sync_message_name(message: &SyncMessage) -> &'static str {
+    // This deliberately names only the protocol variant. Never format the
+    // message itself here: claims and row payloads must not escape through a
+    // transport diagnostic.
+    match message {
+        SyncMessage::Reserved12(retired) => match *retired {},
+        SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
+        SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
+        SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
+        SyncMessage::ChunkUploadNodes(_) => "ChunkUploadNodes",
+        SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
+        SyncMessage::SessionClaims { .. } => "SessionClaims",
+        SyncMessage::CommitUnit { .. } => "CommitUnit",
+        SyncMessage::Reserved30(retired) => match *retired {},
+        SyncMessage::FateUpdate { .. } => "FateUpdate",
+        SyncMessage::RegisterShape { .. } => "RegisterShape",
+        SyncMessage::Subscribe(_) => "Subscribe",
+        SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",
+        SyncMessage::Unsubscribe { .. } => "Unsubscribe",
+        SyncMessage::PublishSchema { .. } => "PublishSchema",
+        SyncMessage::PublishSchemaWithLens { .. } => "PublishSchemaWithLens",
+        SyncMessage::PublishLens { .. } => "PublishLens",
+        SyncMessage::CatalogueAck(_) => "CatalogueAck",
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
+        SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
+        SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
+        SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
+        SyncMessage::CurrentRowsRequest(_) => "CurrentRowsRequest",
+        SyncMessage::CurrentRowsReceipt(_) => "CurrentRowsReceipt",
+        SyncMessage::CurrentRowsCancel { .. } => "CurrentRowsCancel",
+        SyncMessage::PermissionAdviceRequest { .. } => "PermissionAdviceRequest",
+        SyncMessage::PermissionAdviceResponse { .. } => "PermissionAdviceResponse",
+        SyncMessage::AuthorizationScopeSubscribe { .. } => "AuthorizationScopeSubscribe",
+        SyncMessage::AuthorizationScopeReceipt { .. } => "AuthorizationScopeReceipt",
+        SyncMessage::AuthorizationScopeIntent { .. } => "AuthorizationScopeIntent",
+        SyncMessage::AuthorizationScopeView { .. } => "AuthorizationScopeView",
+        SyncMessage::AuthorizationScopeAggregateReceipt { .. } => {
+            "AuthorizationScopeAggregateReceipt"
+        }
+        SyncMessage::AuthorizationScopeUnavailable { .. } => "AuthorizationScopeUnavailable",
+        SyncMessage::AuthorizationScopeDecision { .. } => "AuthorizationScopeDecision",
+    }
+}
+
+fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
+    activity_tx.send_modify(|version| {
+        *version = version.wrapping_add(1);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::WireTransportAdapter;
+    use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
+    use crate::query::{BindingId, Query, ShapeId};
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+    use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+    use futures::FutureExt;
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    /// A host-facing wire queue whose canonical input can be withheld until
+    /// after the shell has consumed an earlier, empty activity tick.
+    #[derive(Default)]
+    struct QueuedWireTransport {
+        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        outbound: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl QueuedWireTransport {
+        fn push_inbound(&self, frame: Vec<u8>) {
+            self.inbound.lock().unwrap().push_back(frame);
+        }
+    }
+
+    impl WireTransport for QueuedWireTransport {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            self.outbound.lock().unwrap().push(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.inbound.lock().unwrap().pop_front()
+        }
+    }
+
+    #[derive(Default)]
+    struct FirstSendBackpressureState {
+        rejected: bool,
+        sent: Vec<Vec<u8>>,
+    }
+
+    struct FirstSendBackpressureWire {
+        state: Arc<Mutex<FirstSendBackpressureState>>,
+    }
+
+    impl WireTransport for FirstSendBackpressureWire {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            let mut state = self.state.lock().unwrap();
+            if !state.rejected {
+                state.rejected = true;
+                return Err(crate::wire::TransportError::Backpressure);
+            }
+            state.sent.push(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    fn encode_message(message: SyncMessage) -> Vec<u8> {
+        let payload = encode_sync_message(&message).unwrap();
+        encode_frame(&WireFrame::Message(WireEnvelope::new(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            payload,
+        )))
+        .unwrap()
+    }
+
+    // This internal test is necessary because the terminal reason crosses the
+    // shell's thread-affine local executor; no public API exposes that channel.
+    #[test]
+    fn upstream_connection_returns_the_driver_terminal_reason() {
+        let (terminal_tx, terminal) = oneshot::channel();
+        let (cancel, _cancelled) = oneshot::channel();
+        let connection = ServerUpstreamConnection {
+            terminal: Some(terminal),
+            cancel: Some(cancel),
+        };
+        terminal_tx
+            .send(ServerUpstreamTerminalReason::TransportFailed(
+                "socket closed".to_owned(),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            futures::executor::block_on(connection.terminal()),
+            ServerUpstreamTerminalReason::TransportFailed("socket closed".to_owned())
+        );
+    }
+
+    // This internal test is necessary because cancellation owns a local wire
+    // pump rather than an application-facing session.
+    #[test]
+    fn dropping_upstream_connection_cancels_its_wire_driver() {
+        let (_terminal_tx, terminal) = oneshot::channel();
+        let (cancel, cancelled) = oneshot::channel();
+        let connection = ServerUpstreamConnection {
+            terminal: Some(terminal),
+            cancel: Some(cancel),
+        };
+
+        drop(connection);
+
+        assert!(futures::executor::block_on(cancelled).is_ok());
+    }
+
+    // This internal receipt is necessary because retrying the native
+    // binding-owned wire driver is below the public server API. It proves a
+    // full bounded queue retains its canonical frame and retries that same
+    // live transport rather than reconnecting and losing the obligation.
+    #[test]
+    fn semantic_backpressure_retries_the_same_queued_frame_once() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x75; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, _pending_jobs) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        let expected = encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x75; 16]),
+            claims: BTreeMap::new(),
+        });
+        io.transport
+            .queues
+            .borrow_mut()
+            .outbound
+            .push_back(expected.clone());
+
+        let state = Arc::new(Mutex::new(FirstSendBackpressureState::default()));
+        let wire = FirstSendBackpressureWire {
+            state: Arc::clone(&state),
+        };
+        let (wake_tx, wake_rx) = mpsc::unbounded();
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(async move {
+                let _ = drive_upstream_wire(
+                    Box::new(wire),
+                    Box::pin(futures::future::pending()),
+                    io,
+                    wake_rx,
+                    scheduler,
+                    cancel_rx,
+                )
+                .await;
+            })
+            .unwrap();
+
+        executor.run_until_stalled();
+        assert!(state.lock().unwrap().sent.is_empty());
+        let connection_id = *shell
+            .wire_upstream_connections
+            .keys()
+            .next()
+            .expect("the original upstream owner remains attached");
+        assert_eq!(
+            shell.wire_upstream_connections.len(),
+            1,
+            "backpressure does not replace the live semantic connection"
+        );
+
+        wake_tx.unbounded_send(()).unwrap();
+        executor.run_until_stalled();
+        assert_eq!(
+            state.lock().unwrap().sent,
+            vec![expected],
+            "the front-of-queue semantic frame is delivered exactly once after retry"
+        );
+        assert!(
+            shell.wire_upstream_connections.contains_key(&connection_id),
+            "the retry uses the original live transport owner"
+        );
+    }
+
+    #[test]
+    fn inbound_frame_phase_labels_semantic_transport_work() {
+        let encoded = encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([7; 16]),
+            claims: BTreeMap::new(),
+        });
+
+        assert_eq!(inbound_frame_phase(&encoded), "SessionClaims");
+        let shape_id = ShapeId(uuid::Uuid::from_bytes([3; 16]));
+        let subscribe = encode_message(SyncMessage::Subscribe(Subscribe {
+            shape_id,
+            subscription: SubscriptionKey {
+                shape_id,
+                binding_id: BindingId(uuid::Uuid::from_bytes([4; 16])),
+                read_view: ReadViewKey::default(),
+            },
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: None,
+        }));
+        assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
+        assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
+    }
+
+    // This internal receipt is necessary because the public shell API exposes
+    // tick effects but not the owner command queue or dirty-generation bridge.
+    // It proves a storage wake crosses the owner boundary once, marks the
+    // subscriber state, and queues the follow-up tick without an explicit host
+    // tick.
+    #[test]
+    fn query_runtime_wake_marks_subscribers_and_queues_one_owner_tick() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey::default(),
+        };
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x76; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let session = shell
+            .accept_subscriber_session(AuthorSubject::for_test_bytes([0x77; 16]))
+            .unwrap();
+        let wire = QueuedWireTransport::default();
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            })
+            .unwrap();
+        client
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }))
+            .unwrap();
+        shell
+            .receive_frames(session, std::mem::take(&mut *outbound.lock().unwrap()))
+            .unwrap();
+        shell.tick().unwrap();
+        assert_eq!(
+            shell.maintained_subscription_rehydrate_attempts_for_test(),
+            1,
+            "the server registers and rehydrates the subscription once"
+        );
+        assert!(
+            !shell.take_frames(session).unwrap().is_empty(),
+            "the initial server subscription publishes one wire update"
+        );
+
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+        let wake = shell
+            .query_runtime_waker_for_test()
+            .expect("server shell always supplies a query-runtime waker");
+
+        wake.wake_by_ref();
+        wake.wake_by_ref();
+        let Some(ServerShellCommand::Run(mark_dirty_and_tick)) =
+            receiver.next().now_or_never().flatten()
+        else {
+            panic!("the first storage wake queues an owner command");
+        };
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "coalesced storage wakes queue one owner command"
+        );
+
+        let epoch_before = shell.subscriber_dirty_epoch_for_test();
+        mark_dirty_and_tick(&mut shell);
+        assert_eq!(
+            shell.subscriber_dirty_epoch_for_test(),
+            epoch_before.wrapping_add(1),
+            "the owner command marks subscriber state before ticking"
+        );
+        let Some(ServerShellCommand::RunAsync(tick)) = receiver.next().now_or_never().flatten()
+        else {
+            panic!("the owner command queues the follow-up shell tick");
+        };
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "one storage wake produces one follow-up shell tick"
+        );
+
+        assert_eq!(shell.metrics_snapshot().ticks, 1);
+        futures::executor::block_on(tick(&mut shell));
+        assert_eq!(shell.metrics_snapshot().ticks, 2);
+        assert_eq!(
+            shell.maintained_subscription_rehydrate_attempts_for_test(),
+            1,
+            "an unrelated query-runtime wake does not re-register or rehydrate"
+        );
+        assert!(
+            shell.take_frames(session).unwrap().is_empty(),
+            "an unrelated wake does not grow the network queue"
+        );
+    }
+
+    // This internal receipt is necessary because the timer threads' command
+    // queue and atomic coalescing are not observable through the public shell
+    // API. Controlled gates advance each timer explicitly; wall-clock sleeps
+    // would make the ordering assertion race with thread scheduling.
+    #[test]
+    fn deferred_tick_is_coalesced_and_admission_timer_remains_independent() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers,
+            state: Arc::clone(&state),
+        };
+        let (deferred_entered_tx, deferred_entered_rx) = std_mpsc::channel();
+        let (deferred_release_tx, deferred_release_rx) = std_mpsc::channel();
+        let (delayed_entered_tx, delayed_entered_rx) = std_mpsc::channel();
+        let (delayed_release_tx, delayed_release_rx) = std_mpsc::channel();
+        install_test_timer_gate(
+            &state.deferred_timer_gate,
+            ServerShellTimerGate {
+                entered: deferred_entered_tx,
+                release: deferred_release_rx,
+            },
+        );
+        install_test_timer_gate(
+            &state.delayed_timer_gate,
+            ServerShellTimerGate {
+                entered: delayed_entered_tx,
+                release: delayed_release_rx,
+            },
+        );
+
+        scheduler.schedule_tick_after(100);
+        delayed_entered_rx
+            .recv()
+            .expect("admission timer reaches its controlled gate");
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "an admission deadline must not enqueue an early shell tick"
+        );
+
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        deferred_entered_rx
+            .recv()
+            .expect("deferred timer reaches its controlled gate");
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "deferred work must not re-enter the owner synchronously"
+        );
+
+        deferred_release_tx
+            .send(())
+            .expect("release coalesced deferred owner turn");
+        assert!(matches!(
+            futures::executor::block_on(receiver.next()),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "coalesced deferred work queues one owner turn"
+        );
+        state.queued.store(false, Ordering::Release);
+
+        delayed_release_tx
+            .send(())
+            .expect("release independent admission owner turn");
+        assert!(matches!(
+            futures::executor::block_on(receiver.next()),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+    }
+
+    #[test]
+    fn native_wire_input_rearms_after_an_earlier_empty_activity_tick() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x73; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, mut pending_ticks) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+
+        // Connecting the upstream may have queued setup work. Service all of
+        // it first: the only outstanding turn below is the host activity tick
+        // whose queue we deliberately make empty.
+        while let Some(ServerShellCommand::RunAsync(setup_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        {
+            futures::executor::block_on(setup_tick(&mut shell));
+        }
+
+        // A host activity notification can run before the local wire pump has
+        // translated bytes into canonical input. Consume that tick while the
+        // upstream queue is still empty.
+        scheduler.schedule_tick(TickUrgency::Immediate);
+        let Some(ServerShellCommand::RunAsync(empty_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        else {
+            panic!("the pre-stage activity wake queues one shell tick");
+        };
+        futures::executor::block_on(empty_tick(&mut shell));
+
+        let wire = QueuedWireTransport::default();
+        wire.push_inbound(encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x74; 16]),
+            claims: BTreeMap::new(),
+        }));
+        let (_wake_tx, wake_rx) = mpsc::unbounded();
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(async move {
+                let _ = drive_upstream_wire(
+                    Box::new(wire),
+                    Box::pin(futures::future::pending()),
+                    io,
+                    wake_rx,
+                    scheduler,
+                    cancel_rx,
+                )
+                .await;
+            })
+            .unwrap();
+        executor.run_until_stalled();
+
+        assert!(
+            matches!(
+                pending_ticks.next().now_or_never().flatten(),
+                Some(ServerShellCommand::RunAsync(_))
+            ),
+            "canonical input staged after an empty activity tick must queue a post-stage shell tick"
+        );
+    }
+
+    // Holding the owner borrow is an internal scheduling fault-injection seam;
+    // real authenticated sessions and channel bytes exercise the ingress path.
+    #[tokio::test]
+    async fn auxiliary_ingress_serves_two_sessions_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let mut sessions = Vec::new();
+        for byte in [91, 92] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        features,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        for (index, session) in sessions.iter().copied().enumerate() {
+            let mut stream = runtime.open_wire_stream(session).unwrap();
+            let mut client =
+                crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                    crate::wire::WIRE_PROTOCOL_VERSION,
+                    features,
+                    None,
+                ))
+                .unwrap();
+            client
+                .enqueue(SyncMessage::ChunkRequestBatch(
+                    crate::protocol::ChunkRequestBatch {
+                        requests: vec![crate::protocol::ChunkRequestEntry {
+                            request_id: index as u64,
+                            locator: groove::large_values::Locator::random(),
+                            expected_hash: [37; 32],
+                            remaining_hops: 0,
+                        }],
+                    },
+                ))
+                .unwrap();
+            let frame = client.peek_outbound().unwrap().unwrap();
+            client.accept_outbound().unwrap();
+            runtime.receive_wire_frames(session, vec![frame]).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for bytes in stream.recv().await.unwrap().unwrap() {
+                        match crate::wire::decode_frame(&bytes).unwrap() {
+                            WireFrame::ChannelCredit(grant) => client
+                                .channel_credits()
+                                .lock()
+                                .unwrap()
+                                .receive_credit(grant)
+                                .unwrap(),
+                            WireFrame::Channel(envelope) => {
+                                if let Some(message) =
+                                    client.receive(envelope, bytes.len()).unwrap()
+                                {
+                                    return message;
+                                }
+                            }
+                            _ => panic!("only channel traffic expected"),
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("auxiliary response must not wait for the suspended semantic owner");
+            assert!(matches!(response, SyncMessage::ChunkResponseBatch(batch)
+                if batch.responses.len() == 1 && batch.responses[0].request_id == index as u64
+                && batch.responses[0].result == crate::protocol::ChunkResponse::Unavailable));
+            assert!(
+                !held.is_finished(),
+                "serving chunks did not resume the held semantic job"
+            );
+            runtime.close(session);
+            let mut retired = runtime.receive_tick_stream(session, vec![]).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                error.is_err(),
+                "retired session cannot regain auxiliary authority"
+            );
+        }
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    // Exercise the actual timer and persistent output stream: no inbound frame
+    // or explicit tick is allowed to rescue an expired canonical receiver.
+    #[tokio::test]
+    async fn canonical_expiry_closes_only_failed_session_and_healthy_query_progresses() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey::default(),
+        };
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let mut sessions = Vec::new();
+        for byte in [94, 95] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        crate::wire::FEATURE_NONE,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let failed = sessions[0];
+        let healthy = sessions[1];
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let state = shell.sessions[failed.transport].as_ref().unwrap();
+                    match &state.connection {
+                        super::super::ShellPeerConnection::Memory(connection)
+                        | super::super::ShellPeerConnection::Durable(connection) => {
+                            connection
+                                .lock()
+                                .await
+                                .set_incomplete_receive_timeout_for_test(20);
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut failed_stream = runtime.open_wire_stream(failed).unwrap();
+        let mut activity = runtime.subscribe_activity();
+        let partial = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+            protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+            features: crate::wire::FEATURE_NONE,
+            session: None,
+            extent: crate::wire::channels::ChannelFrame {
+                channel: 1,
+                generation: 0,
+                sequence: 0,
+                class: crate::wire::channels::ChannelClass::Requests,
+                first: true,
+                last: false,
+                message_len: 2,
+                decoded_len: 1,
+                payload: vec![0],
+            },
+        }))
+        .unwrap();
+        runtime.receive_wire_frames(failed, vec![partial]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let result = tokio::select! {
+                    result = failed_stream.recv() => result,
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(failed).unwrap();
+                        continue;
+                    }
+                };
+                match result {
+                    Some(Err(_)) | None => break,
+                    Some(Ok(frames)) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_) | WireFrame::Channel(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("timer alone must retire the failed persistent output stream");
+        let mut healthy_stream = runtime.open_wire_stream(healthy).unwrap();
+        let wire = QueuedWireTransport::default();
+        let inbound = Arc::clone(&wire.inbound);
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        for message in [
+            SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            },
+            SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }),
+        ] {
+            client.send(message).unwrap();
+        }
+        runtime
+            .receive_wire_frames(healthy, std::mem::take(&mut *outbound.lock().unwrap()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frames = tokio::select! {
+                    result = healthy_stream.recv() => result.expect("healthy stream remains open").unwrap(),
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(healthy).unwrap();
+                        continue;
+                    }
+                };
+                inbound.lock().unwrap().extend(frames);
+                while let Some(message) = client.try_recv_strict().unwrap() {
+                    if let SyncMessage::ViewUpdate(update) = message {
+                        assert_eq!(update.subscription, subscription);
+                        return;
+                    }
+                }
+                let credits = std::mem::take(&mut *outbound.lock().unwrap());
+                if !credits.is_empty() {
+                    runtime.receive_wire_frames(healthy, credits).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("unrelated session query must publish after peer expiry");
+        runtime.shutdown().await.unwrap();
+    }
+
+    // The owner suspension is an internal scheduling seam: real admitted
+    // session bytes must expire without another frame or a semantic tick.
+    #[tokio::test]
+    async fn partial_auxiliary_receive_expires_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let session = runtime
+            .open_with_session_context(
+                AuthorSubject::for_test_bytes([93; 16]),
+                BTreeMap::new(),
+                CommitUnitTrust::TrustedAdmin,
+                features,
+                None,
+                crate::serving::ServerLinkAdmission::OrdinarySession,
+            )
+            .await
+            .unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump
+                        .clone();
+                    pump.set_incomplete_receive_timeout_for_test(20);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut peer =
+            crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                features,
+                None,
+            ))
+            .unwrap();
+        peer.enqueue(SyncMessage::ChunkResponseBatch(
+            crate::protocol::ChunkResponseBatch {
+                responses: vec![crate::protocol::ChunkResponseEntry {
+                    request_id: 1,
+                    result: crate::protocol::ChunkResponse::Found(
+                        vec![7; 3 * crate::wire::channels::CHANNEL_CHUNK_BYTES],
+                    ),
+                }],
+            },
+        ))
+        .unwrap();
+        let first = peer.peek_outbound().unwrap().unwrap();
+        peer.accept_outbound().unwrap();
+        assert!(
+            matches!(crate::wire::decode_frame(&first).unwrap(), WireFrame::Channel(frame) if frame.extent.first && !frame.extent.last)
+        );
+        runtime.receive_wire_frames(session, vec![first]).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match stream
+                    .recv()
+                    .await
+                    .expect("session emits a terminal expiry")
+                {
+                    Err(error) => return error,
+                    Ok(frames) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("idle partial must expire without traffic or explicit polling");
+        assert!(error.contains("expired"), "{error}");
+        assert!(
+            !held.is_finished(),
+            "expiry does not require the semantic owner"
+        );
+        let next = peer.peek_outbound().unwrap().unwrap();
+        let mut retired = runtime.receive_tick_stream(session, vec![next]).unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rejection.is_err(),
+            "retired decoder cannot resume after expiry"
+        );
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = &shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump;
+                    assert!(pump.is_disconnected());
+                    assert!(
+                        pump.incomplete_receive_timeout_ms().is_none(),
+                        "expiry frees partial codec state"
+                    );
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn earlier_server_deadline_replaces_pending_later_wake() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::clone(&state),
+        };
+        scheduler.schedule_tick_after(30_000);
+        scheduler.schedule_tick_after(5);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        state.queued.store(false, Ordering::Release);
+        // The tick services all peers; a still-partial peer rearms its remaining deadline.
+        scheduler.schedule_tick_after(10);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        assert!(state.delayed.lock().unwrap().is_none());
+    }
+
+    // Timer cancellation and deadline ordering are host resources, not visible
+    // through row APIs. Dropping one connection's wait must not retain its slot
+    // or prevent another connection's earlier deadline from waking.
+    #[test]
+    fn receive_timer_queue_cancels_and_reorders_without_retaining_waiters() {
+        let timers = ReceiveTimerQueue::new();
+        let long = timers.after(60_000);
+        let cancelled = timers.after(60_000);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 2);
+        drop(cancelled);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        futures::executor::block_on(timers.after(5));
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        drop(long);
+        assert!(timers.shared.0.lock().unwrap().deadlines.is_empty());
+        let weak = Arc::downgrade(&timers.shared);
+        drop(timers);
+        assert!(
+            weak.upgrade().is_none(),
+            "worker exits when its runtime timer owner drops"
+        );
+    }
+
+    // Queue credits are private ownership, so test their exact release at this
+    // seam rather than relying on allocation timing through a remote socket.
+    #[test]
+    fn session_frame_queue_caps_bytes_and_tiny_frame_count_and_releases_on_drop() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let frames = vec![vec![0]; 512];
+        let credit = FrameQueueCredit::reserve(&used, &frames).unwrap();
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        let held = Arc::clone(&credit);
+        drop(credit);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        drop(held);
+        assert_eq!(used.load(Ordering::Acquire), 0);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0; FRAME_QUEUE_BUDGET + 1]]).is_err());
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_suspended_local_shell_operation() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let suspended_runtime = runtime.clone();
+        let suspended = tokio::spawn(async move {
+            suspended_runtime
+                .run_async(|_| Box::pin(futures::future::pending::<Result<(), String>>()))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("shutdown must not wait for suspended Groove work")
+            .unwrap();
+        assert!(suspended.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_callers_wait_for_the_owner_thread() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let blocked_runtime = runtime.clone();
+        let blocked_entered = Arc::clone(&entered);
+        let blocked_release = Arc::clone(&release);
+        let blocked = tokio::spawn(async move {
+            blocked_runtime
+                .run(move |_| {
+                    blocked_entered.wait();
+                    blocked_release.wait();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        entered.wait();
+
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move { first_runtime.shutdown().await });
+        loop {
+            let jobs_retired = runtime.inner.jobs.lock().is_ok_and(|jobs| jobs.is_none());
+            if jobs_retired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let second_runtime = runtime.clone();
+        let (second_waiting_tx, second_waiting_rx) = oneshot::channel();
+        let second = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &second_runtime.inner,
+                perform_shutdown_blocking,
+                move || {
+                    let _ = second_waiting_tx.send(());
+                },
+            )
+        });
+        let second_reached_wait = tokio::time::timeout(Duration::from_secs(1), second_waiting_rx)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        let second_returned_early = second.is_finished();
+
+        release.wait();
+        blocked.await.unwrap().unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert!(
+            second_reached_wait,
+            "the concurrent shutdown caller must reach the wait path"
+        );
+        assert!(
+            !second_returned_early,
+            "a concurrent shutdown must not return before the owner thread exits"
+        );
+    }
+
+    // This state-machine test is intentionally internal: a panic in the
+    // shutdown implementation cannot be injected through the public API.
+    #[tokio::test]
+    async fn shutdown_panic_is_published_to_waiters_and_late_callers() {
+        let (activity_tx, _) = watch::channel(0_u64);
+        let inner = Arc::new(ServerShellInner {
+            jobs: Mutex::new(None),
+            join: Mutex::new(None),
+            shutdown: Mutex::new(ShutdownState::Running),
+            shutdown_changed: Condvar::new(),
+            ingress_bytes: Mutex::new(HashMap::new()),
+            wire_streams: Mutex::new(HashMap::new()),
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (perform_entered_tx, perform_entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let owner_inner = Arc::clone(&inner);
+        let owner = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &owner_inner,
+                move |_| {
+                    let _ = perform_entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    panic!("planted shutdown panic")
+                },
+                || {},
+            )
+        });
+        perform_entered_rx.await.unwrap();
+
+        let (waiter_entered_tx, waiter_entered_rx) = oneshot::channel();
+        let waiter_inner = Arc::clone(&inner);
+        let waiter = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(&waiter_inner, perform_shutdown_blocking, move || {
+                let _ = waiter_entered_tx.send(());
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(1), waiter_entered_rx)
+            .await
+            .expect("the waiter must enter shutdown")
+            .expect("the waiter must reach the wait path");
+
+        release_tx.send(()).unwrap();
+        let owner_result = owner.await.unwrap();
+        let waiter_result = waiter.await.unwrap();
+        assert_eq!(owner_result, waiter_result);
+        assert_eq!(
+            owner_result.unwrap_err(),
+            "server shell shutdown panicked: planted shutdown panic"
+        );
+        assert_eq!(shutdown_blocking(&inner), waiter_result);
+    }
+}

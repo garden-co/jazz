@@ -1,0 +1,148 @@
+import { localAccountConfig } from "./testing/account-fixtures.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { type Db, type QueryBuilder } from "./db.js";
+import { createDb } from "./default-create-db.js";
+import { createInspectorLocalQueryOptions } from "../internal/inspector-query.js";
+import type { WasmSchema } from "../drivers/types.js";
+
+const schema: WasmSchema = {
+  todos: {
+    columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+  },
+};
+
+function makeQuery(): QueryBuilder<{ id: string; title: string }> {
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: {} as { id: string; title: string },
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+      });
+    },
+  };
+}
+
+const dbs: Db[] = [];
+
+afterEach(async () => {
+  while (dbs.length > 0) {
+    const db = dbs.pop();
+    if (db) {
+      await db.shutdown();
+    }
+  }
+});
+
+async function makeDb(devMode?: boolean): Promise<Db> {
+  const db = await createDb({
+    ...(await localAccountConfig(
+      `dev-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )),
+    devMode,
+  });
+  dbs.push(db);
+  return db;
+}
+
+describe("Db devMode active query tracing", () => {
+  it("does not expose traces when devMode is disabled", async () => {
+    const db = await makeDb(false);
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined);
+
+    expect(db.getActiveQuerySubscriptions()).toEqual([]);
+
+    unsubscribe();
+  });
+
+  it("tracks visible subscriptions with default metadata and cleanup", async () => {
+    const db = await makeDb(true);
+    const observed: Array<ReturnType<Db["getActiveQuerySubscriptions"]>> = [];
+    const stop = db.onActiveQuerySubscriptionsChange((traces) => {
+      observed.push(traces.map((trace) => ({ ...trace })));
+    });
+
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined);
+    const [trace] = db.getActiveQuerySubscriptions();
+
+    expect(trace?.table).toBe("todos");
+    expect(trace?.branches).toEqual([]);
+    expect(trace?.tier).toBe("local");
+    expect(trace?.propagation).toBe("full");
+    expect(trace?.query).toContain('"table":"todos"');
+    expect(trace?.stack).toContain("Error");
+    expect(observed.at(-1)).toHaveLength(1);
+
+    unsubscribe();
+
+    expect(db.getActiveQuerySubscriptions()).toEqual([]);
+    expect(observed.at(-1)).toEqual([]);
+
+    stop();
+  });
+
+  it("does not report local-only subscriptions", async () => {
+    const db = await makeDb(true);
+
+    const unsubscribe = db.subscribe(
+      makeQuery(),
+      () => undefined,
+      createInspectorLocalQueryOptions(),
+    );
+
+    expect(db.getActiveQuerySubscriptions()).toEqual([]);
+
+    unsubscribe();
+  });
+
+  it("records explicit public tier overrides", async () => {
+    const db = await makeDb(true);
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
+      tier: "global",
+    });
+
+    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("global");
+    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("full");
+
+    unsubscribe();
+  });
+
+  it("reports unknown for trace payloads without parseable table metadata", async () => {
+    const db = await makeDb(true);
+    const parseTracePayload = (
+      db as unknown as {
+        parseRuntimeQueryTracePayload(queryJson: string): { table: string; branches: string[] };
+      }
+    ).parseRuntimeQueryTracePayload.bind(db);
+
+    expect(parseTracePayload(JSON.stringify({ branches: ["dev"] }))).toEqual({
+      table: "unknown",
+      branches: ["dev"],
+    });
+    expect(parseTracePayload("{not-json")).toEqual({
+      table: "unknown",
+      branches: [],
+    });
+  });
+
+  it("clears traces on shutdown", async () => {
+    const db = await makeDb(true);
+    const observed: Array<ReturnType<Db["getActiveQuerySubscriptions"]>> = [];
+    const stop = db.onActiveQuerySubscriptionsChange((traces) => {
+      observed.push(traces.map((trace) => ({ ...trace })));
+    });
+
+    db.subscribe(makeQuery(), () => undefined);
+    await db.shutdown();
+    dbs.splice(dbs.indexOf(db), 1);
+
+    expect(db.getActiveQuerySubscriptions()).toEqual([]);
+    expect(observed.at(-1)).toEqual([]);
+
+    stop();
+  });
+});

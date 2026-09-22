@@ -1,0 +1,909 @@
+import * as React from "react";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { userEvent } from "vitest/browser";
+import { createRoot, type Root } from "react-dom/client";
+import type { WasmSchema } from "../../src/drivers/types.js";
+import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/db.js";
+import {
+  createJazzClient as createPublicJazzClient,
+  type JazzClient,
+} from "../../src/react/create-jazz-client.js";
+import { acquireBrowserTestAccount } from "./account-fixtures.js";
+import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
+import { useAllSuspense } from "../../src/react-core/use-all.js";
+import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
+
+const schema: WasmSchema = {
+  orgs: {
+    relations: { teamsViaOrg: { kind: "reverse" as const, table: "teams", relation: "org" } },
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    relations: {
+      org: { kind: "forward" as const, table: "orgs", column: "org_id" },
+      parent: { kind: "forward" as const, table: "teams", column: "parent_id" },
+      teamsViaParent: { kind: "reverse" as const, table: "teams", relation: "parent" },
+      usersViaTeam: { kind: "reverse" as const, table: "users", relation: "team" },
+    },
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    relations: {
+      team: { kind: "forward" as const, table: "teams", column: "team_id" },
+      todosViaOwner: { kind: "reverse" as const, table: "todos", relation: "owner" },
+    },
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    relations: { owner: { kind: "forward" as const, table: "users", column: "owner_id" } },
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+    ],
+  },
+};
+
+type Org = { id: string; name: string };
+type Team = { id: string; name: string; org_id?: string; parent_id?: string };
+type User = { id: string; name: string; team_id?: string; todosViaOwner?: Todo[] };
+type Todo = {
+  id: string;
+  title: string;
+  done: boolean;
+  priority?: number;
+  owner_id?: string;
+  tags: string[];
+};
+
+const orgs: TableProxy<Org, Omit<Org, "id">> = {
+  _table: "orgs",
+  _schema: schema,
+  _rowType: {} as Org,
+  _initType: {} as Omit<Org, "id">,
+};
+
+const teams: TableProxy<Team, Omit<Team, "id">> = {
+  _table: "teams",
+  _schema: schema,
+  _rowType: {} as Team,
+  _initType: {} as Omit<Team, "id">,
+};
+
+const users: TableProxy<User, Omit<User, "id" | "todosViaOwner">> = {
+  _table: "users",
+  _schema: schema,
+  _rowType: {} as User,
+  _initType: {} as Omit<User, "id" | "todosViaOwner">,
+};
+
+const todos: TableProxy<Todo, Omit<Todo, "id">> = {
+  _table: "todos",
+  _schema: schema,
+  _rowType: {} as Todo,
+  _initType: {} as Omit<Todo, "id">,
+};
+
+const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000401";
+const CONDITION_TODO_ID = "00000000-0000-0000-0000-000000000402";
+
+function uniqueId(label: string): string {
+  return `use-all-suspense-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Exercise the public React client boundary with a manager-issued account. */
+async function createBrowserTestJazzClient(
+  config: Omit<Parameters<typeof createPublicJazzClient>[0], "account">,
+): Promise<JazzClient> {
+  return await createPublicJazzClient({
+    ...config,
+    account: await acquireBrowserTestAccount(config),
+  });
+}
+
+function makeQuery<T>(
+  table: string,
+  body: {
+    conditions?: Array<{ column: string; op: string; value?: unknown }>;
+    includes?: Record<string, boolean | object>;
+    orderBy?: Array<[string, "asc" | "desc"]>;
+    limit?: number;
+    offset?: number;
+    hops?: string[];
+    gather?: {
+      max_depth: number;
+      step_table: string;
+      step_current_column: string;
+      step_conditions: Array<{ column: string; op: string; value: unknown }>;
+      step_hops: string[];
+    };
+  },
+): QueryBuilder<T> {
+  return {
+    _table: table,
+    _schema: schema,
+    _rowType: {} as T,
+    _build() {
+      return JSON.stringify({
+        table,
+        conditions: body.conditions ?? [],
+        includes: body.includes ?? {},
+        orderBy: body.orderBy ?? [],
+        limit: body.limit,
+        offset: body.offset,
+        hops: body.hops,
+        gather: body.gather,
+      });
+    },
+  };
+}
+
+const clients: JazzClient[] = [];
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  // Unmount before closing clients: nested afterEach hooks run before outer
+  // hooks, which otherwise lets Suspense retry against a shutting-down Db.
+  if (root) {
+    root.unmount();
+    root = null;
+  }
+  if (container) {
+    container.remove();
+    container = null;
+  }
+  for (const client of clients.splice(0).reverse()) {
+    await client.shutdown();
+  }
+});
+
+function render(node: React.ReactNode): void {
+  if (!root) throw new Error("render called before root initialization");
+  root.render(node);
+}
+
+function renderSuspense(node: React.ReactNode): void {
+  render(
+    <React.Suspense fallback={<div data-testid="rows-fallback">pending</div>}>
+      {node}
+    </React.Suspense>,
+  );
+}
+
+function getText(testId: string): string {
+  if (!container) return "";
+  const node = container.querySelector(`[data-testid="${testId}"]`);
+  return node?.textContent ?? "";
+}
+
+function hasTestId(testId: string): boolean {
+  if (!container) return false;
+  return container.querySelector(`[data-testid="${testId}"]`) !== null;
+}
+
+async function waitForCondition(
+  check: () => boolean,
+  timeoutMs: number,
+  errorMessage: string,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (check()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(errorMessage);
+}
+
+function UseAllProbe<T extends { id: string }>({
+  query,
+  options,
+  pick,
+}: {
+  query?: QueryBuilder<T>;
+  options?: QueryOptions;
+  pick: (row: T) => string;
+}) {
+  const rows = useAllSuspense(query, options);
+  const text = rows.map(pick).join("|");
+  return <div data-testid="rows">{text}</div>;
+}
+
+describe("useAllSuspense browser integration", () => {
+  let conditionsClient: JazzClient;
+  const conditionCases: Array<{
+    name: string;
+    query: QueryBuilder<Todo>;
+    insert: Omit<Todo, "id">;
+    insertId?: string;
+    pick: string;
+  }> = [
+    {
+      name: "eq",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
+      }),
+      insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
+      pick: "eq-hit",
+    },
+    {
+      name: "ne",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "ne", value: "blocked" }],
+      }),
+      insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
+      pick: "ne-hit",
+    },
+    {
+      name: "gt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gt", value: 10 }],
+      }),
+      insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
+      pick: "gt-hit",
+    },
+    {
+      name: "gte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gte", value: 10 }],
+      }),
+      insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
+      pick: "gte-hit",
+    },
+    {
+      name: "lt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lt", value: 0 }],
+      }),
+      insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
+      pick: "lt-hit",
+    },
+    {
+      name: "lte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lte", value: 0 }],
+      }),
+      insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
+      pick: "lte-hit",
+    },
+    {
+      name: "isNull",
+      query: makeQuery<Todo>("todos", { conditions: [{ column: "priority", op: "isNull" }] }),
+      insert: {
+        title: "null-hit",
+        done: false,
+        priority: undefined,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "null-hit",
+    },
+    {
+      name: "contains-array",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "tags", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "contains-array-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["needle", "hay"],
+      },
+      pick: "contains-array-hit",
+    },
+    {
+      name: "contains-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "hay-needle-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "hay-needle-title",
+    },
+    {
+      name: "contains-text-empty",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "" }],
+      }),
+      insert: {
+        title: "any-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "any-title",
+    },
+    {
+      name: "in-id",
+      query: makeQuery<Todo>("todos", {
+        conditions: [
+          {
+            column: "id",
+            op: "in",
+            value: [CONDITION_TODO_ID, "00000000-0000-0000-0000-000000000499"],
+          },
+        ],
+      }),
+      insert: {
+        title: "in-id-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      insertId: CONDITION_TODO_ID,
+      pick: "in-id-hit",
+    },
+    {
+      name: "in-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "in", value: ["in-text-hit", "other"] }],
+      }),
+      insert: {
+        title: "in-text-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "in-text-hit",
+    },
+    {
+      name: "in-reference",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+      }),
+      insert: {
+        title: "in-reference-hit",
+        done: false,
+        priority: 1,
+        owner_id: CONDITION_OWNER_ID,
+        tags: ["x"],
+      },
+      pick: "in-reference-hit",
+    },
+  ];
+
+  function track(client: JazzClient): JazzClient {
+    clients.push(client);
+    return client;
+  }
+
+  beforeAll(async () => {
+    conditionsClient = await createBrowserTestJazzClient({
+      appId: uniqueId("operators"),
+      driver: { type: "persistent", dbName: uniqueId("operators") },
+    });
+  });
+
+  afterAll(async () => {
+    await conditionsClient.shutdown();
+  });
+
+  for (const testCase of conditionCases) {
+    it(`supports condition operator ${testCase.name}`, async () => {
+      const preloadBeforeRender =
+        testCase.name === "contains-text" || testCase.name === "contains-text-empty";
+      if (preloadBeforeRender) {
+        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
+      }
+
+      renderSuspense(
+        <JazzProvider client={conditionsClient} key={testCase.name}>
+          <UseAllProbe query={testCase.query} pick={(row) => row.title} />
+        </JazzProvider>,
+      );
+
+      await waitForCondition(
+        () => hasTestId("rows"),
+        5000,
+        `expected suspense rows mount for ${testCase.name}`,
+      );
+
+      if (!preloadBeforeRender) {
+        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
+      }
+
+      await waitForCondition(
+        () => getText("rows").split("|").includes(testCase.pick),
+        5000,
+        `expected useAll rows to include ${testCase.name}`,
+      );
+    });
+  }
+
+  it("unmounts the suspense consumer before shutting down its client", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("cleanup"),
+        driver: { type: "persistent", dbName: uniqueId("cleanup") },
+      }),
+    );
+    let mounted = false;
+    function CleanupProbe() {
+      React.useEffect(() => {
+        mounted = true;
+        return () => {
+          mounted = false;
+        };
+      }, []);
+      return <UseAllProbe query={makeQuery<Todo>("todos", {})} pick={(row) => row.title} />;
+    }
+    const shutdown = client.shutdown.bind(client);
+    vi.spyOn(client, "shutdown").mockImplementation(async (options) => {
+      // This assertion runs in fixture teardown, making ordering deterministic
+      // instead of depending on a pending React retry winning a timing race.
+      try {
+        expect(mounted, "consumer must unmount before client shutdown").toBe(false);
+      } finally {
+        await shutdown(options);
+      }
+    });
+    renderSuspense(
+      <JazzProvider client={client}>
+        <CleanupProbe />
+      </JazzProvider>,
+    );
+    await waitForCondition(() => mounted && hasTestId("rows"), 5000, "expected committed consumer");
+  });
+
+  it("supports orderBy + limit + offset", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("order"),
+        driver: { type: "persistent", dbName: uniqueId("order") },
+      }),
+    );
+
+    const query = makeQuery<Todo>("todos", {
+      orderBy: [["priority", "desc"]],
+      offset: 1,
+      limit: 1,
+    });
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe query={query} pick={(row) => row.title} />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for orderBy + limit + offset",
+    );
+
+    await client.db.insert(todos, {
+      title: "p1",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+    await client.db.insert(todos, {
+      title: "p2",
+      done: false,
+      priority: 2,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+    await client.db.insert(todos, {
+      title: "p3",
+      done: false,
+      priority: 3,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await waitForCondition(
+      () => getText("rows") === "p2",
+      5000,
+      "expected p2 in paginated useAllSuspense",
+    );
+  });
+
+  it("accepts core-supported QueryOptions for suspense subscriptions", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("options"),
+        driver: { type: "persistent", dbName: uniqueId("options") },
+      }),
+    );
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe
+          query={makeQuery<Todo>("todos", {})}
+          options={{ propagation: "full" }}
+          pick={(row) => row.title}
+        />
+      </JazzProvider>,
+    );
+
+    await client.db.insert(todos, {
+      title: "optioned-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await waitForCondition(
+      () => getText("rows").includes("optioned-task"),
+      5000,
+      "expected useAllSuspense with QueryOptions to receive rows",
+    );
+  });
+
+  it("supports the internal local-only read tier", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("local-only"),
+        driver: { type: "persistent", dbName: uniqueId("local-only") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "local-only-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["local"],
+    });
+
+    await expect(
+      client.db.all(makeQuery<Todo>("todos", {}), inspectorLocalQueryOptions()),
+    ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
+  });
+
+  it("does not include rows for non-matching text contains", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("contains-text-miss"),
+        driver: { type: "persistent", dbName: uniqueId("contains-text-miss") },
+      }),
+    );
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe
+          query={makeQuery<Todo>("todos", {
+            conditions: [{ column: "title", op: "contains", value: "needle" }],
+          })}
+          pick={(row) => row.title}
+        />
+      </JazzProvider>,
+    );
+
+    await client.db.insert(todos, {
+      title: "completely unrelated",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(getText("rows").includes("completely unrelated")).toBe(false);
+  });
+
+  it("supports include query execution path", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("include"),
+        driver: { type: "persistent", dbName: uniqueId("include") },
+      }),
+    );
+
+    const query = makeQuery<User>("users", {
+      includes: { todosViaOwner: true },
+    });
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe query={query} pick={(row) => row.name} />
+      </JazzProvider>,
+    );
+
+    const {
+      value: { id: userId },
+    } = await client.db.insert(users, { name: "Owner", team_id: undefined });
+    await client.db.insert(todos, {
+      title: "owned-todo",
+      done: false,
+      priority: 1,
+      owner_id: userId,
+      tags: ["x"],
+    });
+
+    await waitForCondition(
+      () => getText("rows").includes("Owner"),
+      5000,
+      "expected include useAllSuspense row",
+    );
+  });
+
+  it("supports hop queries", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("hops"),
+        driver: { type: "persistent", dbName: uniqueId("hops") },
+      }),
+    );
+
+    const query = makeQuery<Org>("users", {
+      hops: ["team", "org"],
+    });
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe query={query} pick={(row) => row.name} />
+      </JazzProvider>,
+    );
+
+    try {
+      await waitForCondition(
+        () => hasTestId("rows"),
+        5000,
+        "expected suspense rows mount for hop query",
+      );
+    } catch (error) {
+      // #2677: Inspect only after failure; do not open another read that could wake
+      // the subscription and hide the missing initial delivery.
+      const store = getSubscriptionStore(client);
+      const state = store.peekState<Org>(store.computeKey(query));
+      console.error("[hop suspense failure]", {
+        cacheStatus: state.status,
+        rowCount: state.status === "fulfilled" ? state.data.length : undefined,
+        rowsMounted: hasTestId("rows"),
+        fallbackMounted: hasTestId("rows-fallback"),
+        activeSubscriptions: client.db.getActiveQuerySubscriptions().map(({ table, tier }) => ({
+          table,
+          tier,
+        })),
+      });
+      throw error;
+    }
+
+    const {
+      value: { id: orgId },
+    } = await client.db.insert(orgs, { name: "Hop Org" });
+    const {
+      value: { id: teamId },
+    } = await client.db.insert(teams, {
+      name: "Hop Team",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    await client.db.insert(users, { name: "Hop User", team_id: teamId });
+
+    await waitForCondition(
+      () => getText("rows").includes("Hop Org"),
+      5000,
+      "expected hop useAllSuspense row",
+    );
+  });
+
+  it("supports gather queries", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("gather"),
+        driver: { type: "persistent", dbName: uniqueId("gather") },
+      }),
+    );
+
+    const query = makeQuery<Team>("teams", {
+      conditions: [{ column: "name", op: "eq", value: "leaf" }],
+      gather: {
+        max_depth: 10,
+        step_table: "teams",
+        step_current_column: "id",
+        step_conditions: [],
+        step_hops: ["parent"],
+      },
+    });
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe query={query} pick={(row) => row.name} />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for gather query",
+    );
+
+    const root = await client.db.insert(teams, {
+      name: "root",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const rootId = root.value.id;
+    const mid = await client.db.insert(teams, {
+      name: "mid",
+      org_id: undefined,
+      parent_id: rootId,
+    });
+    const midId = mid.value.id;
+    const leaf = await client.db.insert(teams, {
+      name: "leaf",
+      org_id: undefined,
+      parent_id: midId,
+    });
+
+    // A cold recursive gather may hydrate over several owner turns. Its work
+    // must never starve unrelated local writes or their receipts.
+    const waitForLocal = (label: string, wait: Promise<void>) =>
+      Promise.race([
+        wait,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${label} local acknowledgement timed out`)), 5_000),
+        ),
+      ]);
+    await waitForLocal("root", root.wait({ tier: "local" }));
+    await waitForLocal("mid", mid.wait({ tier: "local" }));
+    await waitForLocal("leaf", leaf.wait({ tier: "local" }));
+
+    await waitForCondition(
+      () => {
+        const values = getText("rows").split("|");
+        return values.includes("root") && values.includes("mid") && values.includes("leaf");
+      },
+      5000,
+      "expected gather useAllSuspense rows",
+    );
+  });
+
+  it("reacts to query changes", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("query-change"),
+        driver: { type: "persistent", dbName: uniqueId("query-change") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "open-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+    await client.db.insert(todos, {
+      title: "done-task",
+      done: true,
+      priority: 2,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    function QuerySwitchProbe() {
+      const [showDone, setShowDone] = React.useState(false);
+      const query = makeQuery<Todo>("todos", {
+        conditions: [{ column: "done", op: "eq", value: showDone }],
+      });
+      const rows = useAllSuspense(query);
+      return (
+        <>
+          <button data-testid="toggle-query" onClick={() => setShowDone((value) => !value)}>
+            toggle
+          </button>
+          <div data-testid="rows">{rows.map((row) => row.title).join("|")}</div>
+        </>
+      );
+    }
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <QuerySwitchProbe />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => getText("rows").includes("open-task") && !getText("rows").includes("done-task"),
+      5000,
+      "expected initial query to show only open task",
+    );
+
+    const toggleQuery = container?.querySelector('[data-testid="toggle-query"]');
+    expect(toggleQuery).toBeTruthy();
+    await userEvent.click(toggleQuery as HTMLElement);
+
+    await waitForCondition(
+      () => getText("rows").includes("done-task") && !getText("rows").includes("open-task"),
+      5000,
+      "expected updated query to show only done task",
+    );
+  });
+
+  it("stays suspended when query is missing and resumes once query is provided", async () => {
+    const client = track(
+      await createBrowserTestJazzClient({
+        appId: uniqueId("missing-query"),
+        driver: { type: "persistent", dbName: uniqueId("missing-query") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "late-query-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    function MissingThenSetSuspenseQueryProbe() {
+      const [useQuery, setUseQuery] = React.useState(false);
+      const query = useQuery ? makeQuery<Todo>("todos", {}) : undefined;
+
+      return (
+        <>
+          <button data-testid="set-query" onClick={() => setUseQuery(true)}>
+            set-query
+          </button>
+          <React.Suspense fallback={<div data-testid="rows-fallback">pending</div>}>
+            <UseAllProbe query={query} pick={(row: Todo) => row.title} />
+          </React.Suspense>
+        </>
+      );
+    }
+
+    render(
+      <JazzProvider client={client}>
+        <MissingThenSetSuspenseQueryProbe />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => hasTestId("rows-fallback") && !hasTestId("rows"),
+      5000,
+      "expected suspense fallback while query is missing",
+    );
+
+    const setQueryButton = container?.querySelector('[data-testid="set-query"]');
+    expect(setQueryButton).toBeTruthy();
+    await userEvent.click(setQueryButton as HTMLElement);
+
+    await waitForCondition(
+      () => hasTestId("rows") && getText("rows").includes("late-query-task"),
+      5000,
+      "expected suspense hook to resolve after query is provided",
+    );
+  });
+});

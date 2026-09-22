@@ -1,0 +1,346 @@
+const INTERNAL_REQUIRE_INCLUDES_KEY = "__jazz_requireIncludes";
+
+export interface BuiltCondition {
+  column: string;
+  op: string;
+  value: unknown;
+}
+
+export interface BuiltRelation {
+  table?: string;
+  conditions?: BuiltCondition[];
+  hops?: string[];
+  gather?: BuiltGather;
+  union?: {
+    inputs: BuiltUnionArm[];
+  };
+}
+
+export interface BuiltUnionArm {
+  label: string;
+  input: BuiltRelation;
+}
+
+export interface BuiltGather {
+  seed?: BuiltRelation;
+  max_depth: number;
+  step_table: string;
+  step_current_column: string;
+  step_conditions: BuiltCondition[];
+  step_hops: string[];
+}
+
+export interface NormalizedIncludeEntry {
+  table?: string;
+  conditions: BuiltCondition[];
+  includes: NormalizedIncludeSpec;
+  requireIncludes: boolean;
+  select: string[];
+  /** Retained to fail closed until partial projections compose through includes. */
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
+  orderBy: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
+  hops: string[];
+  gather?: BuiltGather;
+}
+
+export interface NormalizedIncludeSpec {
+  [relationName: string]: NormalizedIncludeEntry;
+}
+
+export interface NormalizedBuiltQuery {
+  table: string;
+  conditions: BuiltCondition[];
+  includes: NormalizedIncludeSpec;
+  requireIncludes: boolean;
+  select: string[];
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
+  orderBy: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
+  includeDeleted: boolean;
+  hops: string[];
+  gather?: BuiltGather;
+  union?: {
+    inputs: BuiltUnionArm[];
+  };
+}
+
+export type LargeValueSelectDescriptor =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
+
+type BuiltQueryShape = {
+  table?: unknown;
+  conditions?: unknown;
+  includes?: unknown;
+  __jazz_requireIncludes?: unknown;
+  select?: unknown;
+  orderBy?: unknown;
+  limit?: unknown;
+  offset?: unknown;
+  includeDeleted?: unknown;
+  hops?: unknown;
+  gather?: unknown;
+  union?: unknown;
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeConditions(value: unknown): BuiltCondition[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (condition): condition is BuiltCondition =>
+      isPlainObject(condition) &&
+      typeof condition.column === "string" &&
+      typeof condition.op === "string",
+  );
+}
+
+function normalizeOrderBy(value: unknown): Array<[string, "asc" | "desc"]> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (entry): entry is [string, "asc" | "desc"] =>
+      Array.isArray(entry) &&
+      entry.length === 2 &&
+      typeof entry[0] === "string" &&
+      (entry[1] === "asc" || entry[1] === "desc"),
+  );
+}
+
+function normalizeSelect(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((column): column is string => typeof column === "string");
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function normalizePartialSelect(value: unknown): Record<string, LargeValueSelectDescriptor> {
+  if (!isPlainObject(value)) return {};
+  const result: Record<string, LargeValueSelectDescriptor> = {};
+  for (const [column, descriptor] of Object.entries(value)) {
+    if (!column || !isPlainObject(descriptor)) {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+    const keys = Object.keys(descriptor);
+    if (typeof descriptor.at === "string" && keys.length === 1) {
+      result[column] = { at: descriptor.at };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.from) &&
+      isNonNegativeSafeInteger(descriptor.to) &&
+      keys.length === 2
+    ) {
+      result[column] = { from: descriptor.from, to: descriptor.to };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.fromUtf8) &&
+      isNonNegativeSafeInteger(descriptor.toUtf8) &&
+      keys.length === 2
+    ) {
+      result[column] = { fromUtf8: descriptor.fromUtf8, toUtf8: descriptor.toUtf8 };
+    } else {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+  }
+  return result;
+}
+
+function normalizeGather(value: unknown): BuiltGather | undefined {
+  const maxDepth =
+    isPlainObject(value) && typeof value.max_depth === "number" ? value.max_depth : NaN;
+  if (
+    !isPlainObject(value) ||
+    !Number.isInteger(maxDepth) ||
+    maxDepth < 0 ||
+    typeof value.step_table !== "string" ||
+    typeof value.step_current_column !== "string"
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(isPlainObject(value) && value.seed ? { seed: normalizeBuiltRelation(value.seed) } : {}),
+    max_depth: maxDepth,
+    step_table: value.step_table,
+    step_current_column: value.step_current_column,
+    step_conditions: normalizeConditions(value.step_conditions),
+    step_hops: Array.isArray(value.step_hops)
+      ? value.step_hops.filter((hop): hop is string => typeof hop === "string")
+      : [],
+  };
+}
+
+function normalizeBuiltRelation(value: unknown): BuiltRelation {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  const normalized: BuiltRelation = {
+    ...(typeof value.table === "string" && value.table.length > 0 ? { table: value.table } : {}),
+    conditions: normalizeConditions(value.conditions),
+    hops: Array.isArray(value.hops)
+      ? value.hops.filter((hop): hop is string => typeof hop === "string")
+      : [],
+    gather: normalizeGather(value.gather),
+  };
+
+  if (isPlainObject(value.union) && Array.isArray(value.union.inputs)) {
+    normalized.union = {
+      inputs: value.union.inputs.flatMap((input) => {
+        if (!isPlainObject(input) || typeof input.label !== "string") return [];
+        return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
+      }),
+    };
+  }
+
+  return normalized;
+}
+
+function createEmptyIncludeEntry(): NormalizedIncludeEntry {
+  return {
+    conditions: [],
+    includes: {},
+    requireIncludes: false,
+    select: [],
+    partialSelect: {},
+    orderBy: [],
+    hops: [],
+  };
+}
+
+function normalizeShorthandIncludeEntries(raw: Record<string, unknown>): NormalizedIncludeSpec {
+  const nested = { ...raw };
+  delete nested[INTERNAL_REQUIRE_INCLUDES_KEY];
+  return normalizeIncludeEntries(nested);
+}
+
+function isBuiltQueryShape(value: Record<string, unknown>): value is BuiltQueryShape {
+  return "table" in value && "conditions" in value && "includes" in value && "orderBy" in value;
+}
+
+function isNormalizedIncludeEntryShape(value: Record<string, unknown>): boolean {
+  return "conditions" in value && "includes" in value && "select" in value && "orderBy" in value;
+}
+
+function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
+  if (raw === true) {
+    return createEmptyIncludeEntry();
+  }
+
+  if (!isPlainObject(raw)) {
+    return null;
+  }
+
+  if (isBuiltQueryShape(raw)) {
+    const normalized = normalizeBuiltQuery(raw);
+    return {
+      table: normalized.table || undefined,
+      conditions: normalized.conditions,
+      includes: normalized.includes,
+      requireIncludes: normalized.requireIncludes,
+      select: normalized.select,
+      partialSelect: normalized.partialSelect,
+      orderBy: normalized.orderBy,
+      limit: normalized.limit,
+      offset: normalized.offset,
+      hops: normalized.hops,
+      gather: normalized.gather,
+    };
+  }
+
+  if (isNormalizedIncludeEntryShape(raw)) {
+    return {
+      table: typeof raw.table === "string" ? raw.table : undefined,
+      conditions: normalizeConditions(raw.conditions),
+      includes: normalizeIncludeEntries(raw.includes),
+      requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
+      select: normalizeSelect(raw.select),
+      partialSelect: normalizePartialSelect(raw.select),
+      orderBy: normalizeOrderBy(raw.orderBy),
+      limit: typeof raw.limit === "number" ? raw.limit : undefined,
+      offset: typeof raw.offset === "number" ? raw.offset : undefined,
+      hops: Array.isArray(raw.hops)
+        ? raw.hops.filter((hop): hop is string => typeof hop === "string")
+        : [],
+      gather: normalizeGather(raw.gather),
+    };
+  }
+
+  const entry = createEmptyIncludeEntry();
+  entry.requireIncludes = raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true;
+  entry.includes = normalizeShorthandIncludeEntries(raw);
+  return entry;
+}
+
+export function normalizeIncludeEntries(raw: unknown): NormalizedIncludeSpec {
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+
+  const includes: NormalizedIncludeSpec = {};
+  for (const [relationName, spec] of Object.entries(raw)) {
+    if (!spec) {
+      continue;
+    }
+    const normalized = normalizeIncludeEntry(spec);
+    if (normalized) {
+      includes[relationName] = normalized;
+    }
+  }
+
+  return includes;
+}
+
+export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
+  const value = isPlainObject(raw) ? raw : {};
+  if (typeof value.table !== "string" || value.table.length === 0) {
+    throw new Error("QueryBuilder._build() must include a non-empty table.");
+  }
+
+  const partialSelect = normalizePartialSelect(value.select);
+  return {
+    table: value.table,
+    conditions: normalizeConditions(value.conditions),
+    includes: normalizeIncludeEntries(value.includes),
+    requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
+    // The core's current row projection is column-oriented. Preserve the
+    // public partial projection as a separate descriptor while selecting its
+    // carrier columns so the binding can return a correct sliced primitive.
+    select: Array.isArray(value.select)
+      ? normalizeSelect(value.select)
+      : Object.keys(partialSelect),
+    partialSelect,
+    orderBy: normalizeOrderBy(value.orderBy),
+    limit: typeof value.limit === "number" ? value.limit : undefined,
+    offset: typeof value.offset === "number" ? value.offset : undefined,
+    includeDeleted: value.includeDeleted === true,
+    hops: Array.isArray(value.hops)
+      ? value.hops.filter((hop): hop is string => typeof hop === "string")
+      : [],
+    gather: normalizeGather(value.gather),
+    ...(isPlainObject(value.union) && Array.isArray(value.union.inputs)
+      ? {
+          union: {
+            inputs: value.union.inputs.flatMap((input) => {
+              if (!isPlainObject(input) || typeof input.label !== "string") return [];
+              return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
+            }),
+          },
+        }
+      : {}),
+  };
+}

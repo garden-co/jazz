@@ -1,0 +1,12 @@
+{
+  "id": "M",
+  "seed": 424242,
+  "users": 100,
+  "organizations": 20,
+  "projects": 500,
+  "tasks": 100000,
+  "comments": 400000,
+  "watchers_per_task": 2,
+  "activity_events": 250000,
+  "hot_project_fraction": 0.1
+}

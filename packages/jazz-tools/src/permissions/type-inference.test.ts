@@ -1,0 +1,393 @@
+import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+  createSessionContext,
+  definePermissions,
+  type PermissionExpression,
+  type PermissionExpressionInput,
+  type RowContext,
+  type RowRefValue,
+} from "./index.js";
+import type { PolicyExpr } from "../schema.js";
+
+interface Todo {
+  id: string;
+  ownerId: string;
+  done: boolean;
+  projectId?: string;
+}
+
+interface TodoWhere {
+  id?: string;
+  ownerId?: string;
+  done?: boolean;
+  projectId?: string;
+}
+
+interface Project {
+  id: string;
+  ownerId: string;
+}
+
+interface ProjectWhere {
+  id?: string;
+  ownerId?: string;
+}
+
+interface Team {
+  id: string;
+  kind: string;
+  identity_key?: string;
+}
+
+interface TeamWhere {
+  id?: string;
+  kind?: string;
+  identity_key?: string;
+}
+
+interface TeamEdge {
+  id: string;
+  child_team: string;
+  parent_team: string;
+}
+
+interface TeamEdgeWhere {
+  id?: string;
+  child_team?: string;
+  parent_team?: string;
+}
+
+interface ResourceGrant {
+  id: string;
+  team: string;
+  resource: string;
+  grant_role: string;
+}
+
+interface ResourceGrantWhere {
+  id?: string;
+  team?: string;
+  resource?: string;
+  grant_role?: string;
+}
+
+class TodoQueryBuilder {
+  declare readonly _rowType: Todo;
+  where(_input: TodoWhere): TodoQueryBuilder {
+    return this;
+  }
+}
+
+class ProjectQueryBuilder {
+  declare readonly _rowType: Project;
+  where(_input: ProjectWhere): ProjectQueryBuilder {
+    return this;
+  }
+}
+
+class TeamQueryBuilder {
+  declare readonly _rowType: Team;
+  where(_input: TeamWhere): TeamQueryBuilder {
+    return this;
+  }
+}
+
+class TeamEdgeQueryBuilder {
+  declare readonly _rowType: TeamEdge;
+  where(_input: TeamEdgeWhere): TeamEdgeQueryBuilder {
+    return this;
+  }
+}
+
+class ResourceGrantQueryBuilder {
+  declare readonly _rowType: ResourceGrant;
+  where(_input: ResourceGrantWhere): ResourceGrantQueryBuilder {
+    return this;
+  }
+}
+
+const app = {
+  todos: new TodoQueryBuilder(),
+  projects: new ProjectQueryBuilder(),
+  teams: new TeamQueryBuilder(),
+  team_team_edges: new TeamEdgeQueryBuilder(),
+  resource_access_edges: new ResourceGrantQueryBuilder(),
+  wasmSchema: {
+    todos: {
+      relations: {
+        project: { kind: "forward" as const, table: "projects", column: "projectId" },
+        resource_access_edgesViaResource: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "resourceRelation",
+        },
+      },
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      relations: {
+        todosViaProject: { kind: "reverse" as const, table: "todos", relation: "project" },
+      },
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    teams: {
+      relations: {
+        team_team_edgesViaChild_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "child_teamRelation",
+        },
+        team_team_edgesViaParent_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "parent_teamRelation",
+        },
+        resource_access_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "teamRelation",
+        },
+      },
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "kind", column_type: { type: "Text" }, nullable: false },
+        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    team_team_edges: {
+      relations: {
+        child_teamRelation: { kind: "forward" as const, table: "teams", column: "child_team" },
+        parent_teamRelation: { kind: "forward" as const, table: "teams", column: "parent_team" },
+      },
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "child_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "parent_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+      ],
+    },
+    resource_access_edges: {
+      relations: {
+        teamRelation: { kind: "forward" as const, table: "teams", column: "team" },
+        resourceRelation: { kind: "forward" as const, table: "todos", column: "resource" },
+      },
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "resource",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  },
+} as const;
+
+describe("permissions type inference", () => {
+  it("infers row callback and where key types", () => {
+    definePermissions(app, ({ policy, anyOf, allowedTo, raw, session, isCreator }) => {
+      expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.user.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
+      expectTypeOf(isCreator).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(anyOf([])).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(allowedTo.read("projectId")).toEqualTypeOf<PermissionExpressionInput>();
+
+      const manualExpression: PolicyExpr = { type: "True" };
+      expectTypeOf(raw(manualExpression)).toEqualTypeOf<PermissionExpression>();
+      if (false) {
+        // @ts-expect-error Raw policy IR must be explicitly branded with raw().
+        policy.todos.allowRead.where(manualExpression);
+      }
+      const reachableTeams = policy.teams.gather({
+        start: { kind: "individual", identity_key: session.claims["sub"] },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
+      });
+
+      function hasViewerGrant(resource: unknown) {
+        return policy.exists(
+          reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+            "resource_access_edges.resource": resource,
+            grant_role: "viewer",
+          }),
+        );
+      }
+
+      return [
+        policy.todos.allowRead.where((todo) =>
+          anyOf([
+            { done: false },
+            isCreator,
+            session.where({ "claims.role": "manager" }),
+            policy.projects.exists.where({
+              id: todo.projectId,
+              ownerId: session.claims["sub"],
+            }),
+            hasViewerGrant(todo.id),
+          ]),
+        ),
+        policy.todos.allowUpdate
+          .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
+          .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+        policy.teams.allowRead.where({
+          "resource_access_edges.grant_role": "viewer",
+        }),
+      ];
+    });
+  });
+
+  it("supports reusable helpers annotated with the public condition input type", () => {
+    definePermissions(app, ({ policy, allOf, anyOf, allowedTo, isCreator, raw, session }) => {
+      const policyAtom = (): PermissionExpressionInput => allowedTo.read("projectId");
+      const creatorAtom: PermissionExpressionInput = isCreator;
+
+      const legacyRawHelper = (): PolicyExpr => ({ type: "True" });
+      const rawAtom = (): PermissionExpression => raw(legacyRawHelper());
+
+      const compound = (): PermissionExpressionInput => allOf([{ done: false }, policyAtom()]);
+
+      const tableExists = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        policy.projects.exists.where({ id: todo.projectId });
+
+      const relationExists = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        policy.exists(policy.projects.where({ id: todo.projectId }));
+
+      const sessionPredicate = (): PermissionExpressionInput =>
+        session.where({ "claims.role": "manager" });
+
+      const conditionObject = (todo: RowContext<Todo>): { ownerId: RowRefValue } => ({
+        ownerId: todo.ownerId,
+      });
+
+      const reusableCondition = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        anyOf([
+          creatorAtom,
+          rawAtom(),
+          compound(),
+          tableExists(todo),
+          relationExists(todo),
+          sessionPredicate(),
+        ]);
+
+      if (false) {
+        // @ts-expect-error PolicyExpr-returning helpers must migrate through raw().
+        policy.todos.allowRead.where(legacyRawHelper());
+      }
+
+      return [policy.todos.allowRead.where(reusableCondition)];
+    });
+  });
+
+  it("exposes never() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.never(),
+      policy.todos.allowInsert.never(),
+      policy.todos.allowUpdate.never(),
+      policy.todos.allowDelete.never(),
+    ]);
+  });
+
+  it("exposes always() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+      policy.todos.allowDelete.always(),
+    ]);
+  });
+
+  it("rejects invalid table/column usage at compile time where possible", () => {
+    definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where({ done: true }),
+      policy.todos.allowRead.where(allowedTo.read("projectId")),
+    ]);
+
+    definePermissions(app, ({ policy }) => {
+      // Type-level negative checks only: keep unreachable in normal runs.
+      if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+        // @ts-expect-error unknown table key
+        policy.unknown.allowRead.where({});
+
+        // @ts-expect-error invalid where key for todos
+        policy.todos.allowRead.where({ missingColumn: true });
+
+        // @ts-expect-error invalid action name
+        policy.todos.allowPublish.where({ done: true });
+
+        // @ts-expect-error invalid exists where key for projects
+        policy.projects.exists.where({ missingColumn: true });
+
+        // @ts-expect-error policy expression discriminators are not row columns on projects
+        policy.projects.exists.where({ type: "True" });
+
+        // @ts-expect-error row callback should expose only known todo columns
+        policy.todos.allowRead.where((todo) => ({ ownerId: todo.missingColumn }));
+      }
+
+      return [];
+    });
+  });
+
+  it("exposes managedByCreator() on table builders", () => {
+    definePermissions(app, ({ policy }) => {
+      policy.todos.managedByCreator();
+      return [];
+    });
+  });
+});
+
+describe("SessionContext — typed authMode", () => {
+  it("authMode compiles as a leaf Session field", () => {
+    const session = createSessionContext();
+    const condition = session.where({ authMode: "local-first" });
+    expectTypeOf(condition).toEqualTypeOf<PermissionExpressionInput>();
+  });
+
+  it("authMode accepts union of the three modes", () => {
+    const session = createSessionContext();
+    session.where({ authMode: "external" });
+    session.where({ authMode: "anonymous" });
+    session.where({ authMode: { in: ["local-first", "external"] } });
+  });
+
+  it("session.authMode produces a leaf SessionRefValue with path ['authMode']", () => {
+    const session = createSessionContext();
+    const ref = session.authMode;
+    expect(ref).toMatchObject({
+      __jazzPermissionKind: "session-ref",
+      path: ["authMode"],
+    });
+  });
+});

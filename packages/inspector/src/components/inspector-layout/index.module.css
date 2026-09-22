@@ -1,0 +1,146 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--jz-bg);
+  color: var(--jz-ink);
+}
+
+.topBar {
+  height: 34px;
+  box-sizing: border-box;
+  flex: 0 0 34px;
+  border-bottom: 1px solid var(--jz-border);
+  background: var(--jz-bg);
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tabBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topBarActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.schemaSelectLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #9ca8b9;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.schemaSelect {
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
+  color: #9ca8b9;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  min-width: 220px;
+}
+
+.schemaSelect:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tabLink {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
+  color: var(--jz-faint);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  transition:
+    background-color 0.14s ease,
+    color 0.14s ease;
+}
+
+.tabLink:hover {
+  background: var(--jz-surface);
+  color: var(--jz-text);
+}
+
+.tabLink:focus-visible {
+  outline: 2px solid var(--jz-focus);
+  outline-offset: -2px;
+}
+
+/* Active tab reuses the app's selected-state fill (active table link / icon
+   button). After the :hover rule so an active+hovered tab keeps the fill. */
+.tabLinkActive,
+.tabLinkActive:hover {
+  background: var(--jz-selected);
+  color: var(--jz-ink-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabLink {
+    transition: none;
+  }
+}
+
+.resetButton {
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
+  color: #9ca8b9;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.resetButton:hover {
+  background: var(--jz-border);
+  color: #d4dae3;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
+  color: #9ca8b9;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.iconButton:hover {
+  background: var(--jz-border);
+  color: #d4dae3;
+}
+
+.iconButtonActive,
+.iconButtonActive:hover {
+  background: var(--jz-selected);
+  border-color: var(--jz-accent);
+  color: var(--jz-ink-strong);
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 0;
+}

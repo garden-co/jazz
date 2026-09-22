@@ -1,0 +1,311 @@
+import { createInspectorAttachmentClient } from "jazz-tools/_dev/inspector-client";
+import { Component, useEffect, useState, useRef, type ReactNode } from "react";
+import { MemoryRouter } from "react-router";
+import type { WasmSchema } from "jazz-tools";
+import { JazzClientProvider } from "jazz-tools/react";
+import { DevtoolsProvider } from "./contexts/devtools-context";
+import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
+import {
+  closeInspectorRuntimePort,
+  openInspectorRuntimeSession,
+  readInspectorHostConfig,
+  type InspectorRuntimeContext,
+  type InspectorRuntimeSession,
+} from "./contexts/host-link";
+import { InspectorRoutes } from "./routes";
+
+// How long to keep polling for the host handle before giving up and showing an
+// error instead of spinning on "Connecting…" forever (e.g. the host never
+// mounted the loader, or its schema getter keeps throwing).
+const HOST_POLL_INTERVAL_MS = 200;
+const HOST_POLL_TIMEOUT_MS = 15_000;
+const CONTEXT_REFRESH_INTERVAL_MS = 1_000;
+
+function waitForDelay(delay: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function schemaValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+
+  if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) {
+    return false;
+  }
+
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    return left.every((value, index) => schemaValuesEqual(value, right[index]));
+  }
+
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return leftKeys.every(
+    (key, index) =>
+      key === rightKeys[index] &&
+      schemaValuesEqual(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+      ),
+  );
+}
+
+function runtimeContextsEqual(
+  left: InspectorRuntimeContext[],
+  right: InspectorRuntimeContext[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((context, index) => {
+      const candidate = right[index];
+      return (
+        candidate?.key === context.key &&
+        candidate.appId === context.appId &&
+        candidate.dbName === context.dbName &&
+        schemaValuesEqual(candidate.schema, context.schema)
+      );
+    })
+  );
+}
+
+class InspectorConnectionErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+
+  render(): ReactNode {
+    if (this.state.error) {
+      return <p style={{ padding: 16 }}>Inspector connection failed: {this.state.error.message}</p>;
+    }
+    return this.props.children;
+  }
+}
+
+/**
+ * The dev-overlay inspector. Same-origin with the host page, it reads the
+ * connection config the loader published on `window.__jazzInspectorHost`, opens
+ * its own browser client over a peer port minted by the host's SharedWorker.
+ * Its main-thread Db remains in-memory while the BrowserConnectionManager
+ * joins the selected worker-owned context. Attachment transitions close the
+ * previous client before opening the next; the provider observes that client
+ * and the host subscription feed. No live Db crosses the iframe boundary.
+ */
+export function InspectorApp() {
+  const [session, setSession] = useState<InspectorRuntimeSession | null>(null);
+  const [contexts, setContexts] = useState<InspectorRuntimeContext[]>([]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const attachmentTransition = useRef<Promise<void>>(Promise.resolve());
+  const [connection, setConnection] = useState<{
+    client: Awaited<ReturnType<typeof createInspectorAttachmentClient>>;
+    schema: WasmSchema;
+  } | null>(null);
+  const [hostTimedOut, setHostTimedOut] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    let activeSession: InspectorRuntimeSession | null = null;
+    const deadline = Date.now() + HOST_POLL_TIMEOUT_MS;
+    const connect = async () => {
+      while (active && Date.now() < deadline) {
+        try {
+          const next = await openInspectorRuntimeSession({
+            signal: controller.signal,
+            deadline,
+          });
+          if (next && next.contexts.length > 0) {
+            if (!active) {
+              next.close();
+              return;
+            }
+            activeSession = next;
+            setSession(next);
+            setContexts(next.contexts);
+            setSelectedKey(defaultRuntimeContextKey(next.contexts, readInspectorHostConfig()));
+            return;
+          }
+          next?.close();
+        } catch {
+          if (!active) return;
+          // The host runtime may still be starting. Retry until the deadline.
+        }
+        if (!active) return;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await waitForDelay(Math.min(HOST_POLL_INTERVAL_MS, remaining), controller.signal);
+      }
+      if (active) setHostTimedOut(true);
+    };
+    void connect();
+    return () => {
+      active = false;
+      controller.abort();
+      activeSession?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const controller = new AbortController();
+    const refresh = async () => {
+      while (!controller.signal.aborted) {
+        await waitForDelay(CONTEXT_REFRESH_INTERVAL_MS, controller.signal);
+        if (controller.signal.aborted) return;
+        try {
+          const next = await session.listContexts();
+          if (controller.signal.aborted) return;
+          setContexts((current) => (runtimeContextsEqual(current, next) ? current : next));
+          setSelectedKey((current) =>
+            current && next.some((context) => context.key === current)
+              ? current
+              : defaultRuntimeContextKey(next, readInspectorHostConfig()),
+          );
+        } catch {
+          // A transient control-port failure should not create an unhandled
+          // rejection or stop future refreshes.
+        }
+      }
+    };
+    void refresh();
+    return () => controller.abort();
+  }, [session]);
+
+  useEffect(() => {
+    if (!session || !selectedKey) return;
+    const context = contexts.find((candidate) => candidate.key === selectedKey);
+    if (!context) return;
+    let hostConfig: ReturnType<typeof readInspectorHostConfig>;
+    let active = true;
+    let attachedClient: Awaited<ReturnType<typeof createInspectorAttachmentClient>> | undefined;
+    setConnection(null);
+    setError(null);
+    const opening = attachmentTransition.current
+      .then(() => {
+        if (!active) return;
+        hostConfig = readInspectorHostConfig(selectedKey);
+        if (!hostConfig) throw new Error("Inspector host is no longer available");
+        return session.attach(selectedKey);
+      })
+      .then(async (browserWorkerPort) => {
+        if (!browserWorkerPort) return;
+        if (!active) {
+          closeInspectorRuntimePort(browserWorkerPort);
+          return;
+        }
+        const client = await createInspectorAttachmentClient(
+          hostConfig!,
+          context.appId,
+          context.dbName,
+          browserWorkerPort,
+        );
+        if (!active) {
+          await client.shutdown();
+          return;
+        }
+        attachedClient = client;
+        setConnection({ client, schema: context.schema });
+      })
+      .catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      });
+    attachmentTransition.current = opening;
+    return () => {
+      active = false;
+      attachmentTransition.current = opening
+        .then(() => attachedClient?.shutdown())
+        .catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+        });
+    };
+  }, [contexts, selectedKey, session]);
+
+  if (error) return <p style={{ padding: 16 }}>Inspector connection failed: {error.message}</p>;
+  if (!connection) {
+    if (hostTimedOut) {
+      return (
+        <p style={{ padding: 16 }}>
+          Inspector: no host connection found. Is this page running under the Jazz dev plugin?
+        </p>
+      );
+    }
+    return <p style={{ padding: 16 }}>Connecting…</p>;
+  }
+
+  return (
+    <>
+      {contexts.length > 1 ? (
+        <label style={{ display: "block", padding: "8px 12px" }}>
+          Runtime context{" "}
+          <select
+            value={selectedKey ?? ""}
+            onChange={(event) => setSelectedKey(event.target.value)}
+          >
+            {contexts.map((context) => (
+              <option key={context.key} value={context.key}>
+                {context.appId} / {context.dbName}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <InspectorRuntime
+        key={selectedKey}
+        client={connection.client}
+        wasmSchema={connection.schema}
+      />
+    </>
+  );
+}
+
+function InspectorRuntime({
+  client,
+  wasmSchema,
+}: {
+  client: Awaited<ReturnType<typeof createInspectorAttachmentClient>>;
+  wasmSchema: WasmSchema;
+}) {
+  const initialRoute = new URLSearchParams(window.location.search).get("route") ?? "/";
+  return (
+    <InspectorConnectionErrorBoundary>
+      <JazzClientProvider client={client}>
+        <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
+          <MemoryRouter initialEntries={[initialRoute]}>
+            <InspectorRoutes />
+          </MemoryRouter>
+        </DevtoolsProvider>
+      </JazzClientProvider>
+    </InspectorConnectionErrorBoundary>
+  );
+}

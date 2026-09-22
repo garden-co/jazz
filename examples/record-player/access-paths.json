@@ -1,0 +1,5 @@
+{
+  "albums": ["title"],
+  "tracks": ["album_id", "ordinal"],
+  "playlist_entries": ["playlist_id", "position"]
+}

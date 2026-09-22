@@ -1,0 +1,41 @@
+.debugPanel {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: monospace;
+  font-size: 11px;
+  color: #00ffff;
+  background: rgba(10, 4, 20, 0.92);
+  border: 1px solid #ff00ff;
+  padding: 8px 14px;
+  z-index: 1000;
+  pointer-events: none;
+  min-width: 300px;
+  line-height: 1.7;
+}
+
+.debugHeader {
+  color: #ff00ff;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+.debugSection {
+  color: #ff66ff;
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+.debugSectionFirst {
+  composes: debugSection;
+  margin-top: 0;
+}
+
+.debugSpacer {
+  margin-top: 4px;
+}

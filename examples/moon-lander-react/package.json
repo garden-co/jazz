@@ -1,0 +1,32 @@
+{
+  "name": "moon-lander-react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run --config vitest.config.browser.ts",
+    "walkthrough": "npx @marp-team/marp-cli --html --theme walkthrough/theme-jazz.css walkthrough/jazz-moon-lander.md --preview",
+    "walkthrough:shots": "playwright test --config playwright.screenshots.config.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "^5.8.0",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

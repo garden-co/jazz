@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "jsx": "react-jsx",
+    "types": ["node"]
+  },
+  "include": [
+    "constants.ts",
+    "schema.ts",
+    "permissions.ts",
+    "src",
+    "tests",
+    "vite.config.ts",
+    "vitest.config.browser.ts"
+  ]
+}

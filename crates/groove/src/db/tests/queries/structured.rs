@@ -1,0 +1,900 @@
+//! Structured collectors and nested result-tree behavior.
+
+use super::*;
+use crate::ivm::TerminalOperation;
+
+#[futures_test::test]
+async fn singleton_root_hydration_preserves_snapshot_rank_and_later_edits() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [CollectByField::named("id"), CollectByField::named("title")],
+        [TopByOrder::desc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut batch = database.open_batch();
+    for id in [8, 2, 3] {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("row-{id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+    let expected = [2, 3, 8]
+        .map(|id| (vec![Value::U64(id), Value::String(format!("row-{id}"))], 1))
+        .to_vec();
+    assert_eq!(
+        database
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        expected
+    );
+
+    let mut subscriptions = Vec::new();
+    for _ in 0..2 {
+        let subscription = database.subscribe([("roots", graph.clone())]).unwrap();
+        let initial = database
+            .next_multisink_subscription(&subscription)
+            .await
+            .unwrap();
+        assert_eq!(initial.sinks["roots"].to_values().unwrap(), expected);
+        let mut inserted = Vec::new();
+        for operation in &initial.terminal_sinks["roots"].operations {
+            let TerminalEdit::Insert { index, value, .. } = &operation.edit else {
+                panic!("fresh root must insert: {operation:?}");
+            };
+            let values = crate::records::OwnedRecord::new(value.clone(), operation.root_descriptor)
+                .to_values()
+                .unwrap();
+            // A hydration may assemble the final sequence through several
+            // Insert-at-zero operations; indexes address the evolving list.
+            inserted.insert(*index, values[0].clone());
+        }
+        assert_eq!(inserted, vec![Value::U64(8), Value::U64(3), Value::U64(2)]);
+        subscriptions.push(subscription);
+    }
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![Value::U64(3), Value::String("edited".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        let operations = &update.terminal_sinks["roots"].operations;
+        assert_eq!(operations.len(), 1);
+        let TerminalEdit::Update { value, .. } = &operations[0].edit else {
+            panic!("expected one payload update: {operations:?}");
+        };
+        assert_eq!(
+            crate::records::OwnedRecord::new(value.clone(), operations[0].root_descriptor)
+                .to_values()
+                .unwrap(),
+            vec![Value::U64(3), Value::String("edited".into())]
+        );
+    }
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(8));
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        assert!(matches!(
+            update.terminal_sinks["roots"].operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+    }
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![
+            (vec![Value::U64(2), Value::String("row-2".into())], 1),
+            (vec![Value::U64(3), Value::String("edited".into())], 1),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_round_trips_ordered_explicit_child_ids() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(3))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    // Deliberately not in declared stamp order.
+    batch.insert("history", history_values(1, 30, 30, "third"));
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(
+            collect_parent(1, &[(10, "first"), (20, "second"), (30, "third")]),
+            1,
+        )]
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_expand_renders_selected_tuples_in_source_order() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 3))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    // Deliberately not in declared stamp order. The first two columns are the
+    // ordered root/child occurrence-source vector carried by the tuple.
+    batch.insert("history", history_values(1, 30, 30, "third"));
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(10),
+                    Value::String("first".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("second".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(30),
+                    Value::String("third".to_owned()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+#[futures_test::test]
+async fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(5),
+                    Value::String("front".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("second".to_owned()),
+                ],
+                -1,
+            ),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 30, 30, "outside"));
+    database.commit_batch(batch).await.unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[futures_test::test]
+async fn collect_by_expand_honors_order_tie_offset_and_limit() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(1, 2))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 10, 20, "tied-second"));
+    batch.insert("history", history_values(1, 20, 30, "third"));
+    batch.insert("history", history_values(1, 30, 40, "outside"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("tied-second".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(30),
+                    Value::String("third".to_owned()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 7, "first"));
+    batch.insert("history", history_values(1, 20, 7, "ambiguous"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 3))
+        .await
+        .unwrap();
+    let event = std::future::poll_fn(|cx| subscription.poll_next_event(cx)).await;
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Error(error)
+            if matches!(
+                error.source_error(),
+                Some(IvmRuntimeError::DuplicateCollectByOccurrenceId)
+            )
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_rejects_join_and_nested_collector_consumers() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let collector = history_collect_by(2);
+    let relational_consumers = [
+        GraphBuilder::join(
+            collector.clone(),
+            GraphBuilder::table("history"),
+            ["row"],
+            ["row"],
+        ),
+        GraphBuilder::collect_by(
+            collector,
+            ["row"],
+            [CollectByField::named("row")],
+            [CollectByField::named("row")],
+            "nested",
+            [TopByOrder::asc("row")],
+            ["row"],
+            0,
+            TopByLimit::Finite(1),
+        ),
+    ];
+    for graph in relational_consumers {
+        assert!(matches!(
+            database.subscribe_one_sink(graph).await,
+            Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+        ));
+    }
+}
+
+#[futures_test::test]
+async fn collect_by_rejects_filter_consumer() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_collect_by(2).filter(PredicateExpr::gt("row", Value::U64(0)));
+
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_rejects_project_consumer() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_collect_by(2).project(["row"]);
+
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(2))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 30, 30, "outside"));
+    database.commit_batch(batch).await.unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).await.unwrap();
+    let replacement = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(replacement.len(), 2);
+    assert_eq!(
+        replacement[0],
+        (collect_parent(1, &[(10, "first"), (20, "second")]), -1)
+    );
+    assert_eq!(
+        replacement[1],
+        (collect_parent(1, &[(5, "front"), (10, "first")]), 1)
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_multisink_emits_descendant_terminal_operations() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe([("rows", history_collect_by(2))])
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    assert!(initial.terminal_sinks.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+    let initial_rows = subscription.recv().unwrap();
+    assert!(matches!(
+        initial_rows.terminal_sinks["rows"].operations.as_slice(),
+        [crate::ivm::TerminalOperation {
+            path,
+            edit: TerminalEdit::Insert { .. },
+            ..
+        }] if path.is_empty()
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).await.unwrap();
+    let update = subscription.recv().unwrap();
+    let operations = &update.terminal_sinks["rows"].operations;
+    assert!(operations.iter().all(|operation| {
+        matches!(operation.path.as_slice(), [TerminalPathSegment::Collection(field)] if field == "children")
+    }));
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Insert { index: 0, .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, TerminalEdit::Update { .. }))
+    );
+}
+
+#[futures_test::test]
+async fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(collect_parent(1, &[(10, "first")]), 1)]
+    );
+
+    // One-shot queries collect their ephemeral graph immediately. That GC
+    // boundary must retain arrangements owned by an unrelated live terminal.
+    let snapshot = database
+        .query_graph(GraphBuilder::table("rows"))
+        .await
+        .unwrap();
+    assert!(snapshot.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (collect_parent(1, &[(10, "first")]), -1),
+            (collect_parent(1, &[(10, "first"), (20, "second")]), 1),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(collect_tree_graph())
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([3, 20, 10, 200, 10, 2, 2, 7, 7]),
+    );
+    database.commit_batch(batch).await.unwrap();
+    let initial = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(initial.len(), 1);
+    let root = &initial[0].0;
+    let Value::Array(children) = &root[1] else {
+        panic!("children must be an array")
+    };
+    assert_eq!(children.len(), 2);
+    let Value::Record(first_child) = &children[0] else {
+        panic!("child must be a record")
+    };
+    let Value::Record(second_child) = &children[1] else {
+        panic!("child must be a record")
+    };
+    assert_eq!(first_child.to_values().unwrap()[0], Value::U64(20));
+    let first_child_values = first_child.to_values().unwrap();
+    let Value::Array(first_grandchildren) = &first_child_values[1] else {
+        panic!("grandchildren must be an array")
+    };
+    assert_eq!(first_grandchildren.len(), 1);
+    assert_eq!(second_child.to_values().unwrap()[0], Value::U64(10));
+    let second_child_values = second_child.to_values().unwrap();
+    let Value::Array(second_grandchildren) = &second_child_values[1] else {
+        panic!("grandchildren must be an array")
+    };
+    assert_eq!(
+        second_grandchildren
+            .iter()
+            .map(|value| match value {
+                Value::Record(record) => record.to_values().unwrap()[0].clone(),
+                _ => panic!("grandchild must be a record"),
+            })
+            .collect::<Vec<_>>(),
+        [Value::U64(100), Value::U64(101)]
+    );
+    for (slot, expected) in [(&root[2], vec![1, 2]), (&root[3], vec![7])] {
+        let Value::Array(records) = slot else {
+            panic!("sibling slot must be an array")
+        };
+        assert_eq!(
+            records
+                .iter()
+                .map(|value| match value {
+                    Value::Record(record) => match record.to_values().unwrap()[0] {
+                        Value::U64(value) => value,
+                        _ => panic!("sibling value must be u64"),
+                    },
+                    _ => panic!("sibling value must be a record"),
+                })
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[futures_test::test]
+async fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
+    let storage = MemoryStorage::new(&["routed_tree"]).expect("valid memory storage families");
+    let mut database = Database::new(routed_collect_tree_schema(), storage)
+        .await
+        .unwrap();
+    let subscription = database
+        .subscribe_one_sink(routed_collect_tree_graph())
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    // Two bindings deliberately share rendered root and child identities. The
+    // route must still keep their grandchildren isolated, while staying out
+    // of every rendered record descriptor.
+    let mut batch = database.open_batch();
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(1),
+            Value::U64(10),
+            Value::U64(1),
+            Value::U64(20),
+            Value::U64(1),
+            Value::U64(100),
+            Value::U64(1),
+        ],
+    );
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(2),
+            Value::U64(10),
+            Value::U64(2),
+            Value::U64(20),
+            Value::U64(1),
+            Value::U64(200),
+            Value::U64(1),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let rows = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let grandchildren = rows
+        .iter()
+        .map(|(root, weight)| {
+            assert_eq!(*weight, 1);
+            assert_eq!(root.len(), 2, "route must not be a root output field");
+            let Value::Array(children) = &root[1] else {
+                panic!("children must be an array");
+            };
+            assert_eq!(children.len(), 1);
+            let Value::Record(child) = &children[0] else {
+                panic!("children must contain records");
+            };
+            let child = child.to_values().unwrap();
+            assert_eq!(child.len(), 2, "route must not be a child output field");
+            let Value::Array(grandchildren) = &child[1] else {
+                panic!("grandchildren must be an array");
+            };
+            let Value::Record(grandchild) = &grandchildren[0] else {
+                panic!("grandchildren must contain records");
+            };
+            assert_eq!(grandchild.to_values().unwrap().len(), 1);
+            grandchild.to_values().unwrap()[0].clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(grandchildren, vec![Value::U64(100), Value::U64(200)]);
+}
+
+#[futures_test::test]
+async fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
+    let graph = GraphBuilder::collect_by_tree(
+        GraphBuilder::table("routed_tree"),
+        ["root", "route"],
+        [CollectByField::named("root")],
+        [CollectBySlotBuilder::new(
+            ["root", "route"],
+            [CollectByField::named("child")],
+            "children",
+            [],
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Unbounded,
+        )
+        // A non-grouping raw input is not stable owner metadata and must not
+        // become an implicit hidden channel.
+        .with_owner_key_cols(["grandchild"])],
+    );
+    let storage = MemoryStorage::new(&["routed_tree"]).expect("valid memory storage families");
+    let mut database = Database::new(routed_collect_tree_schema(), storage)
+        .await
+        .unwrap();
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(message)))
+            if message == "a slot owner key must also be a grouping field"
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_unrendered_change()
+ {
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(collect_tree_graph())
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut batch = database.open_batch();
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    // Planted positive: this is inside the rendered grandchild window, so the
+    // parent must change. Its one -/+ pair proves delivery is whole-parent,
+    // not a child delta or one replacement at each descriptor level.
+    let mut batch = database.open_batch();
+    batch.insert("tree", collect_tree_values([3, 10, 20, 99, 0, 2, 2, 7, 7]));
+    database.commit_batch(batch).await.unwrap();
+    let replacement = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(replacement.len(), 2);
+    assert_eq!(replacement[0].1, -1);
+    assert_eq!(replacement[1].1, 1);
+    let Value::Array(old_children) = &replacement[0].0[1] else {
+        panic!()
+    };
+    let Value::Array(new_children) = &replacement[1].0[1] else {
+        panic!()
+    };
+    let Value::Record(old_child) = &old_children[0] else {
+        panic!()
+    };
+    let Value::Record(new_child) = &new_children[0] else {
+        panic!()
+    };
+    let Value::Array(old_grandchildren) = &old_child.to_values().unwrap()[1] else {
+        panic!()
+    };
+    let Value::Array(new_grandchildren) = &new_child.to_values().unwrap()[1] else {
+        panic!()
+    };
+    assert_eq!(old_grandchildren.len(), 2);
+    assert_eq!(new_grandchildren.len(), 2);
+    let Value::Record(new_first_grandchild) = &new_grandchildren[0] else {
+        panic!()
+    };
+    assert_eq!(new_first_grandchild.to_values().unwrap()[0], Value::U64(99));
+
+    // A third grandchild beyond this slot's selected window is byte-equal at
+    // the root, so the whole rendered tree must be suppressed.
+    let mut batch = database.open_batch();
+    batch.insert(
+        "tree",
+        collect_tree_values([4, 10, 20, 999, 999, 999, 999, 1, 1]),
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[futures_test::test]
+async fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
+    fn nested(depth: usize) -> CollectBySlotBuilder {
+        CollectBySlotBuilder::new(
+            ["child"],
+            [CollectByField::named("child")],
+            "children",
+            (depth > 0).then(|| nested(depth - 1)),
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Finite(1),
+        )
+    }
+    let graph = GraphBuilder::collect_by_tree(
+        GraphBuilder::table("tree"),
+        ["root"],
+        [CollectByField::named("root")],
+        [CollectBySlotBuilder::new(
+            ["root"],
+            [CollectByField::named("child")],
+            "children",
+            [nested(crate::ivm::MAX_COLLECT_BY_TREE_DEPTH)],
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Finite(1),
+        )],
+    );
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(_)))
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
+    async fn run(chain_len: u64) -> (usize, usize, Vec<(Vec<Value>, i64)>) {
+        let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+        let mut database = Database::new(edges_schema(), storage).await.unwrap();
+        database.set_tick_runtime_stats_enabled(true);
+        let subscription = database
+            .subscribe_one_sink(reachability_collect_by(1))
+            .await
+            .unwrap();
+        assert!(subscription.recv().unwrap().is_empty());
+        let mut batch = database.open_batch();
+        for edge in 1..chain_len {
+            insert_edge(&mut batch, edge, edge, edge + 1);
+        }
+        database.commit_batch(batch).await.unwrap();
+        let output = subscription.recv().unwrap().to_values().unwrap();
+        let stats = &database.last_commit_metrics().unwrap().tick.runtime_stats;
+        (
+            stats.recursive_accumulated_rows,
+            stats.arrangement_rows,
+            output,
+        )
+    }
+
+    let (small_recursive_rows, small_arrangement_rows, small_output) = run(4).await;
+    let (large_recursive_rows, large_arrangement_rows, large_output) = run(6).await;
+    assert!(
+        small_recursive_rows > 1,
+        "the collector limit must not cap closure state"
+    );
+    assert!(large_recursive_rows > small_recursive_rows);
+    assert!(large_arrangement_rows > small_arrangement_rows);
+    assert!(
+        small_output.iter().all(
+            |(parent, _)| matches!(parent[1], Value::Array(ref children) if children.len() == 1)
+        )
+    );
+    assert!(
+        large_output.iter().all(
+            |(parent, _)| matches!(parent[1], Value::Array(ref children) if children.len() == 1)
+        )
+    );
+}
+
+/// A completed root edit must survive while another sink resumes a recursive
+/// evaluation. The public multi-sink delivery must include both results.
+#[futures_test::test]
+async fn terminal_edits_survive_recursive_evaluation_continuations() {
+    let storage = MemoryStorage::new(&["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let roots = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("edges"),
+        ["id"],
+        [
+            CollectByField::named("id"),
+            CollectByField::named("src"),
+            CollectByField::named("dst"),
+        ],
+        [TopByOrder::asc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let subscription = database
+        .subscribe([("roots", roots), ("reachable", reachability_collect_by(1))])
+        .unwrap();
+    while subscription.try_recv().is_ok() {}
+    let mut batch = database.open_batch();
+    for edge in 1..24 {
+        insert_edge(&mut batch, edge, edge, edge + 1);
+    }
+    database.commit_batch(batch).await.unwrap();
+    let mut root_inserts = Vec::new();
+    let mut reachable_inserts = 0;
+    let mut root_rows = Vec::new();
+    while let Ok(update) = subscription.try_recv() {
+        for (name, sink) in update.terminal_sinks {
+            for operation in sink.operations {
+                if let TerminalEdit::Insert { index, value, .. } = operation.edit {
+                    if name == "roots" {
+                        root_rows.push((
+                            index,
+                            crate::records::OwnedRecord::new(value, operation.root_descriptor)
+                                .to_values()
+                                .unwrap(),
+                        ));
+                        root_inserts.push(index);
+                    } else {
+                        reachable_inserts += 1;
+                    }
+                }
+            }
+        }
+    }
+    root_inserts.sort_unstable();
+    assert_eq!(root_inserts, (0..23).collect::<Vec<_>>());
+    assert_eq!(reachable_inserts, 23);
+    root_rows.sort_by_key(|(index, _)| *index);
+    assert_eq!(
+        root_rows
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>(),
+        (1..24)
+            .map(|id| vec![Value::U64(id), Value::U64(id), Value::U64(id + 1)])
+            .collect::<Vec<_>>()
+    );
+}

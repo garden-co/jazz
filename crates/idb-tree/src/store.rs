@@ -1,0 +1,145 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+
+pub type PageId = u64;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metadata {
+    pub page_size: usize,
+    pub generation: u64,
+    pub root_page_id: Option<PageId>,
+    pub next_page_id: PageId,
+}
+
+impl Metadata {
+    pub fn empty(page_size: usize) -> Self {
+        Self {
+            page_size,
+            generation: 0,
+            root_page_id: None,
+            next_page_id: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Commit {
+    pub expected_generation: u64,
+    pub metadata: Metadata,
+    pub pages: Vec<(PageId, Vec<u8>)>,
+    pub deleted_page_ids: Vec<PageId>,
+}
+
+/// Keeps a store's single-tree admission alive until it is revoked or the
+/// last tree clone drops. Revocation fences even resident reads and writes.
+#[derive(Default)]
+pub struct TreeOwnership {
+    is_live: Option<Box<dyn Fn() -> bool>>,
+    release: Option<Box<dyn FnOnce()>>,
+}
+
+impl TreeOwnership {
+    pub fn new(release: impl FnOnce() + 'static) -> Self {
+        Self {
+            is_live: None,
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn revocable(
+        is_live: impl Fn() -> bool + 'static,
+        release: impl FnOnce() + 'static,
+    ) -> Self {
+        Self {
+            is_live: Some(Box::new(is_live)),
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.is_live.as_ref().is_none_or(|check| check())
+    }
+}
+
+impl Drop for TreeOwnership {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+pub trait PageStore {
+    /// Opt in only while this tree exclusively owns the store: no independent
+    /// handle may retain an older root. The store must also reject reclamation
+    /// commits after ownership expires, including already prepared commits.
+    /// Clones of one IdbTree share a root and are permitted. Independent trees
+    /// (including ones built from cloned stores) require this to remain false
+    /// for every writer sharing their store. Default-off does not make a reader
+    /// safe alongside another writer that violates this exclusivity contract.
+    fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        Ok(TreeOwnership::default())
+    }
+
+    fn can_reclaim_obsolete_pages(&self) -> bool {
+        false
+    }
+
+    fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
+    fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
+    fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;
+}
+
+/// Deterministic store used by the engine contract tests. Async/failure
+/// injection belongs here rather than in IDBTree so the same tree exercises
+/// resident and genuinely pending I/O.
+#[derive(Clone, Default)]
+pub struct MemoryPageStore {
+    inner: Rc<RefCell<MemoryPageStoreState>>,
+}
+
+#[derive(Default)]
+struct MemoryPageStoreState {
+    metadata: Option<Metadata>,
+    pages: BTreeMap<PageId, Vec<u8>>,
+}
+
+impl PageStore for MemoryPageStore {
+    fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+        Box::pin(async { Ok(self.inner.borrow().metadata.clone()) })
+    }
+
+    fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async move { Ok(self.inner.borrow().pages.get(&page_id).cloned()) })
+    }
+
+    fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+        Box::pin(async move {
+            let mut state = self.inner.borrow_mut();
+            let generation = state
+                .metadata
+                .as_ref()
+                .map_or(0, |metadata| metadata.generation);
+            if generation != commit.expected_generation {
+                return Err(format!(
+                    "generation changed: expected {}, found {generation}",
+                    commit.expected_generation
+                ));
+            }
+            for (page_id, page) in &commit.pages {
+                state.pages.insert(*page_id, page.clone());
+            }
+            for page_id in &commit.deleted_page_ids {
+                state.pages.remove(page_id);
+            }
+            let mut metadata = commit.metadata.clone();
+            metadata.generation = generation + 1;
+            state.metadata = Some(metadata.clone());
+            Ok(metadata)
+        })
+    }
+}

@@ -1,0 +1,241 @@
+---
+title: Writing Data
+description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
+reviewedAt: "b29b48d1a"
+---
+
+## Local-first writes
+
+Ordinary mutations execute against the local database first. `insert`, `restore`, `upsert`,
+`update`, and `delete` return a `MutationResult` immediately. Each result contains:
+
+- `value`&hairsp;—&hairsp;The local result. `insert` and `restore` return the row; `upsert`, `update`,
+  and `delete` return `undefined`.
+- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID. This is the durable identity
+  of this write; it does not mean the write has reached a server yet.
+- `wait(...)`&hairsp;—&hairsp;A method that waits for the mutation to reach a specific
+  [durability tier](#write-durability-tiers).
+
+The local `value` does not mean that the mutation has reached a server.
+
+Jazz also allows grouping writes together using [transactions](#transactions).
+Writes made through an open transaction are not individually waitable. Wait on the result returned
+by the transaction or its `commit()` call instead.
+
+## Getting a `Db` handle
+
+Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/GetDbExample.tsx#writing-get-db-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/GetDbExample.vue#writing-get-db-vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/GetDbExample.svelte#writing-get-db-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/GetDbExample.tsx
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/GetDbExample.ts#writing-get-db-ts
+    </include>
+  </Tab>
+</Tabs>
+
+## Insert, update, delete
+
+Mutations are methods on the database handle. All three take a table as their first argument.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Upsert with a known ID
+
+Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
+not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
+and returns a `MutationResult<void>` that can be awaited for durability.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
+</include>
+
+### Restore a deleted row
+
+Trying to insert, update or delete an already deleted row will fail. Use `restore(...)` to make a soft-deleted row visible again.
+`restore` requires providing new data for the restored row (missing fields will use schema defaults, if they exist).
+Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
+row before restoring it.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
+</include>
+
+### Partial updates and nullable fields
+
+`update(...)` only modifies the keys you pass.
+Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
+To clear a nullable column in TypeScript, pass `null`.
+Required fields cannot be set to `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Editing a page of a large value
+
+Use `update(...)` to replace complete primitives and, with its `applyDiffs`
+option, edit a selected page of a `bytes` or `string` column or set an existing
+JSON member. Replacements and diffs are one atomic update, but a column must
+appear in only one of them. Splice coordinates are relative to `within`, and
+multiple splices run in order against the result of the previous splice.
+
+```ts
+db.update(
+  app.documents,
+  documentId,
+  { title: "Revised document" },
+  {
+    applyDiffs: {
+      bytes: {
+        within: { from: 1_000_000, to: 2_000_000 },
+        splices: [{ at: 4, delete: 3, insert: new Uint8Array([1, 2]) }],
+      },
+      text: {
+        within: { from: 4, to: 124 }, // UTF-16 coordinates
+        splices: [{ at: 3, delete: 1, insert: "revised" }],
+      },
+      metadata: {
+        edits: [{ op: "set", at: "/chapters/0/title", value: "New title" }],
+      },
+    },
+  },
+);
+```
+
+For a diff-only update, pass an empty replacement object:
+
+```ts
+db.update(
+  app.documents,
+  documentId,
+  {},
+  {
+    applyDiffs: {
+      text: {
+        within: { from: 4, to: 124 },
+        splices: [{ at: 3, delete: 1, insert: "revised" }],
+      },
+    },
+  },
+);
+```
+
+For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
+`{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
+coordinates and text boundaries that split a code point or surrogate pair. This
+revision does not add a page-staleness/CAS check; keep page coordinates aligned
+with the value your application last read. `update(..., { applyDiffs })` is for
+existing rows only; inserts and full replacement continue to use the ordinary
+mutation methods.
+
+## Write durability tiers
+
+For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
+confirmation the caller waits for:
+
+| Tier     | Resolves when                           |
+| -------- | --------------------------------------- |
+| `local`  | Saved by the local persistence driver   |
+| `global` | Authorized and durably accepted by Core |
+
+<WriteTierDiagram />
+
+Offline, only `local` can resolve. A `global` wait stays pending until the device
+reconnects and Core accepts or rejects the queued write. Both choices apply the
+initial mutation locally and upload it when connected.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
+
+Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
+
+## Handling mutation errors
+
+A mutation can fail when you call it or while you wait:
+
+- If Jazz cannot apply the mutation locally, for example because the input is invalid, the mutation
+  call throws immediately.
+- If a server later rejects the mutation, an active `wait(...)` call rejects with
+  `PersistedWriteRejectedError`.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
+</include>
+
+Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
+This includes mutations you did not wait for and mutations whose wait finished before a later
+rejection arrived.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
+</include>
+
+`onMutationError` returns an unsubscribe function. Without a listener, Jazz logs the rejection and
+keeps it so that a listener registered later can receive it.
+
+## Transactions
+
+Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
+for normal local-first work. Use an exclusive transaction only when the authority must check the
+whole operation against one stable view of the data.
+
+See [Transactions](/docs/writing/transactions) for examples, error handling and the differences
+between commit and authority acceptance.

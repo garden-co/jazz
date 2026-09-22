@@ -1,0 +1,889 @@
+use std::env;
+use std::io::{self, Read, Write};
+use std::net::SocketAddr;
+use std::process::ExitCode;
+
+use jazz::account_registry::AccountId;
+use jazz::db::DbIdentity;
+use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::schema::JazzSchema;
+use jazz::serving::{
+    DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
+    StorageConfig, StorageKind,
+    auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
+};
+use jazz::tools::AppId;
+use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
+
+fn empty_runtime_schema() -> JazzSchema {
+    let source = jazz::tools::public_schema::SchemaBuilder::new().build();
+    jazz::schema::JazzSchema::new(&source).expect("the empty public schema is valid")
+}
+
+fn start_loopback_server(
+    config: LoopbackWebSocketServerConfig,
+) -> jazz_server::loopback::websocket::LoopbackWebSocketResult<LoopbackWebSocketServer> {
+    if matches!(config.storage, StorageConfig::RocksDb { .. }) {
+        #[cfg(feature = "rocksdb")]
+        {
+            return LoopbackWebSocketServer::start_with_config_and_storage_factory(
+                config,
+                std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            );
+        }
+    }
+    LoopbackWebSocketServer::start_with_config(config)
+}
+
+fn main() -> ExitCode {
+    let mut args = env::args();
+    let program = args.next().unwrap_or_else(|| "jazz-server".to_owned());
+
+    match args.next().as_deref() {
+        Some("dry-run") => run_dry_run(args.collect(), &program),
+        Some("server") => match args.next() {
+            Some(flag) if flag == "-h" || flag == "--help" => {
+                print_server_usage(&program);
+                ExitCode::SUCCESS
+            }
+            Some(app_id) => run_server_app(&app_id, args.collect(), &program),
+            None => {
+                eprintln!("error=missing_app_id");
+                print_server_usage_stderr(&program);
+                ExitCode::from(2)
+            }
+        },
+        Some(command @ ("serve" | "dev-server" | "serve-loopback-websocket-schema")) => {
+            match args.next() {
+                Some(flag) if flag == "-h" || flag == "--help" => {
+                    print_serve_usage(&program, command);
+                    ExitCode::SUCCESS
+                }
+                Some(schema_hex) => {
+                    run_loopback_websocket_schema(command, &schema_hex, args.collect(), &program)
+                }
+                None => {
+                    eprintln!("error=missing_schema");
+                    print_serve_usage_stderr(&program, command);
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("serve-loopback-websocket-schema-data-dir") => match (args.next(), args.next()) {
+            (Some(flag), None) if flag == "-h" || flag == "--help" => {
+                print_serve_data_dir_usage(&program);
+                ExitCode::SUCCESS
+            }
+            (Some(schema_hex), Some(data_dir)) => {
+                let mut rest: Vec<String> = args.collect();
+                rest.splice(0..0, ["--data-dir".to_owned(), data_dir]);
+                run_loopback_websocket_schema(
+                    "serve-loopback-websocket-schema-data-dir",
+                    &schema_hex,
+                    rest,
+                    &program,
+                )
+            }
+            (None, _) => {
+                eprintln!("error=missing_schema");
+                print_serve_data_dir_usage_stderr(&program);
+                ExitCode::from(2)
+            }
+            _ => {
+                eprintln!("error=missing_data_dir");
+                print_serve_data_dir_usage_stderr(&program);
+                ExitCode::from(2)
+            }
+        },
+        Some("-h" | "--help") | None => {
+            print_usage(&program);
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("error=unsupported_command");
+            print_usage_stderr(&program);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_dry_run(args: Vec<String>, program: &str) -> ExitCode {
+    let options = match CliOptions::parse(args, program) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error={error}");
+            print_usage_stderr(program);
+            return ExitCode::from(2);
+        }
+    };
+    let mut config = jazz::serving::ServerConfig::local("dev-core");
+    apply_shell_options(&mut config, &options);
+    let shell = match ServerShell::new(config) {
+        Ok(shell) => shell,
+        Err(error) => {
+            eprintln!("error={error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match shell.start_dry_run() {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error={error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    print_report(&report);
+    print_auth_report(&options.auth_admission);
+    ExitCode::SUCCESS
+}
+
+fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
+    let options = match CliOptions::parse_for_server_app(args, program, app_id) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error={error}");
+            print_server_usage_stderr(program);
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = options.reject_legacy_implicit_storage() {
+        eprintln!("error={error}");
+        return ExitCode::FAILURE;
+    }
+    let schema = empty_runtime_schema();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let storage = options.storage.clone();
+    let auth_admission = options.auth_admission.clone();
+    let mut config = match options.storage {
+        StorageConfig::InMemory => LoopbackWebSocketServerConfig::in_memory(schema, identity),
+        StorageConfig::RocksDb { path } => {
+            LoopbackWebSocketServerConfig::persistent_data_dir(schema, identity, path)
+        }
+        StorageConfig::SQLite { .. } => unreachable!("CLI does not expose sqlite storage"),
+    }
+    .with_row_id_seed(0x5e)
+    .with_auth_admission(options.auth_admission);
+    if let Some(account) = options.admitted_account {
+        config = config.with_admitted_account(account);
+    }
+    config.listener.bind_addr = options.listen;
+    config.listener.websocket_path = options.websocket_path;
+
+    let websocket_path = config.listener.websocket_path.clone();
+    let server = match start_loopback_server(config) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("error={error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("command=server");
+    println!("app_id={app_id}");
+    println!("websocket_path={websocket_path}");
+    print_storage_report(&storage);
+    print_auth_report(&auth_admission);
+    println!("schema_catalogue=empty");
+    println!("runtime_schema_loading=static_empty_schema");
+    println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
+    let _ = io::stdout().flush();
+
+    let mut stdin = String::new();
+    let _ = io::stdin().read_to_string(&mut stdin);
+    server.shutdown();
+    ExitCode::SUCCESS
+}
+
+fn run_loopback_websocket_schema(
+    command: &str,
+    schema_hex: &str,
+    args: Vec<String>,
+    program: &str,
+) -> ExitCode {
+    let options = match CliOptions::parse(args, program) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error={error}");
+            if command == "serve-loopback-websocket-schema-data-dir" {
+                print_serve_data_dir_usage_stderr(program);
+            } else {
+                print_serve_usage_stderr(program, command);
+            }
+            return ExitCode::from(2);
+        }
+    };
+    let schema_bytes = match decode_hex(schema_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("error={error}");
+            if command == "serve-loopback-websocket-schema-data-dir" {
+                print_serve_data_dir_usage_stderr(program);
+            } else {
+                print_serve_usage_stderr(program, command);
+            }
+            return ExitCode::from(2);
+        }
+    };
+    let schema = match jazz::tools::public_schema_convert::decode_public_schema_json(&schema_bytes)
+    {
+        Ok(schema) => schema,
+        Err(error) => {
+            eprintln!("error=decode_schema: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let mut config = match options.storage {
+        StorageConfig::InMemory => LoopbackWebSocketServerConfig::in_memory(schema, identity),
+        StorageConfig::RocksDb { path } => {
+            LoopbackWebSocketServerConfig::persistent_data_dir(schema, identity, path)
+        }
+        StorageConfig::SQLite { .. } => unreachable!("CLI does not expose sqlite storage"),
+    }
+    .with_row_id_seed(0x5e)
+    .with_auth_admission(options.auth_admission);
+    if let Some(account) = options.admitted_account {
+        config = config.with_admitted_account(account);
+    }
+    config.listener.bind_addr = options.listen;
+    config.listener.websocket_path = options.websocket_path;
+
+    let websocket_path = config.listener.websocket_path.clone();
+    let server = match start_loopback_server(config) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("error={error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
+    let _ = io::stdout().flush();
+
+    let mut stdin = String::new();
+    let _ = io::stdin().read_to_string(&mut stdin);
+    server.shutdown();
+    ExitCode::SUCCESS
+}
+
+fn print_usage(program: &str) {
+    println!(
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+    print_server_usage(program);
+    print_serve_usage(program, "serve");
+    println!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
+    print_serve_usage(program, "serve-loopback-websocket-schema");
+    print_serve_data_dir_usage(program);
+    println!(
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
+    );
+}
+
+fn print_usage_stderr(program: &str) {
+    eprintln!(
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+    print_server_usage_stderr(program);
+    print_serve_usage_stderr(program, "serve");
+    eprintln!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
+    print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
+    print_serve_data_dir_usage_stderr(program);
+    eprintln!(
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
+    );
+}
+
+const SERVER_STORAGE_HELP: &str = "storage_default=./data/apps/<canonical-app-uuid> (UUID APP_ID spellings are canonicalised; other names use a deterministic UUID). Explicit storage paths are unchanged. If ./data/CURRENT exists, the implicit default refuses to start: deliberately use --data-dir ./data or JAZZ_SERVER_DATA_DIR=./data to reopen that store, or migrate it manually. No legacy data is moved or adopted automatically.";
+
+fn print_server_usage(program: &str) {
+    println!(
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+    println!("{SERVER_STORAGE_HELP}");
+}
+
+fn print_server_usage_stderr(program: &str) {
+    eprintln!(
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+    eprintln!("{SERVER_STORAGE_HELP}");
+}
+
+fn print_serve_usage(program: &str, command: &str) {
+    println!(
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+}
+
+fn print_serve_usage_stderr(program: &str, command: &str) {
+    eprintln!(
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+}
+
+fn print_serve_data_dir_usage(program: &str) {
+    println!(
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+}
+
+fn print_serve_data_dir_usage_stderr(program: &str) {
+    eprintln!(
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
+    );
+}
+
+fn print_report(report: &DryRunReport) {
+    println!("command=dry-run");
+    println!("role={}", role_name(report.role));
+    println!("profile={}", profile_name(report.profile));
+    println!("listener={}", report.listener);
+    println!("storage={}", storage_name(&report.storage));
+    println!(
+        "runtime_plan.core_role={}",
+        role_name(report.runtime_plan.core_role)
+    );
+    println!(
+        "runtime_plan.profile={}",
+        profile_name(report.runtime_plan.profile)
+    );
+    println!(
+        "runtime_plan.storage_kind={}",
+        storage_kind_name(report.runtime_plan.storage_kind)
+    );
+    println!(
+        "runtime_plan.schema_column_family_count={}",
+        report.runtime_plan.schema_column_family_count
+    );
+    println!("health.status={}", health_status_name(report.health.status));
+    println!("health.role={}", role_name(report.health.role));
+    println!("health.profile={}", profile_name(report.health.profile));
+    println!(
+        "health.drain_state={}",
+        drain_state_name(report.health.drain_state)
+    );
+    println!("health.message={}", report.health.message);
+    println!("metrics.active_sessions={}", report.metrics.active_sessions);
+    println!("metrics.total_sessions={}", report.metrics.total_sessions);
+    println!(
+        "metrics.rejected_sessions={}",
+        report.metrics.rejected_sessions
+    );
+    println!("metrics.frames_received={}", report.metrics.frames_received);
+    println!("metrics.frames_sent={}", report.metrics.frames_sent);
+    println!("metrics.bytes_received={}", report.metrics.bytes_received);
+    println!("metrics.bytes_sent={}", report.metrics.bytes_sent);
+    println!("metrics.ticks={}", report.metrics.ticks);
+    println!("metrics.tick_inbound={}", report.metrics.tick_inbound);
+    println!("metrics.tick_outbound={}", report.metrics.tick_outbound);
+    println!(
+        "metrics.tick_subscription_wakes={}",
+        report.metrics.tick_subscription_wakes
+    );
+    println!(
+        "metrics.tick_write_wakes={}",
+        report.metrics.tick_write_wakes
+    );
+    println!(
+        "metrics.last_tick_inbound={}",
+        report.metrics.last_tick_inbound
+    );
+    println!(
+        "metrics.last_tick_outbound={}",
+        report.metrics.last_tick_outbound
+    );
+    println!(
+        "metrics.last_tick_subscription_wakes={}",
+        report.metrics.last_tick_subscription_wakes
+    );
+    println!(
+        "metrics.last_tick_write_wakes={}",
+        report.metrics.last_tick_write_wakes
+    );
+    println!(
+        "metrics.protocol_version_mismatches={}",
+        report.metrics.protocol_version_mismatches
+    );
+    println!(
+        "metrics.subscription_full_diff_fallbacks={}",
+        report.metrics.subscription_full_diff_fallbacks
+    );
+    println!(
+        "metrics.storage_migrations_applied={}",
+        report.metrics.storage_migrations_applied
+    );
+    println!("sockets_bound=false");
+    println!("storage_opened=false");
+    println!("runtime_started=false");
+}
+
+fn print_auth_report(auth_admission: &AuthAdmissionConfig) {
+    println!(
+        "auth.mode={}",
+        if auth_admission.static_bearer_token.is_some() {
+            "static-bearer"
+        } else if auth_admission.jwt_verifier.is_some() {
+            "jwt"
+        } else {
+            "anonymous"
+        }
+    );
+    println!(
+        "auth.allow_local_first_auth={}",
+        auth_admission.allow_local_first_auth
+    );
+    println!(
+        "auth.anonymous_subject={}",
+        auth_admission.anonymous_subject
+    );
+}
+
+fn print_storage_report(storage: &StorageConfig) {
+    println!("storage={}", storage_name(storage));
+    if let StorageConfig::RocksDb { path } = storage {
+        println!("data_dir={}", path.display());
+    }
+}
+
+fn role_name(role: NodeRole) -> &'static str {
+    match role {
+        NodeRole::Relay => "relay",
+        NodeRole::Core => "core",
+    }
+}
+
+fn profile_name(profile: DeploymentProfile) -> &'static str {
+    match profile {
+        DeploymentProfile::Local => "local",
+        DeploymentProfile::Test => "test",
+        DeploymentProfile::Production => "production",
+    }
+}
+
+fn storage_name(storage: &StorageConfig) -> &'static str {
+    match storage {
+        StorageConfig::InMemory => "in-memory",
+        StorageConfig::RocksDb { .. } => "rocksdb",
+        StorageConfig::SQLite { .. } => "sqlite",
+    }
+}
+
+fn storage_kind_name(storage_kind: StorageKind) -> &'static str {
+    match storage_kind {
+        StorageKind::InMemory => "in-memory",
+        StorageKind::RocksDb => "rocksdb",
+        StorageKind::SQLite => "sqlite",
+    }
+}
+
+fn health_status_name(status: HealthStatus) -> &'static str {
+    match status {
+        HealthStatus::Ready => "ready",
+        HealthStatus::Draining => "draining",
+        HealthStatus::Unhealthy => "unhealthy",
+    }
+}
+
+fn drain_state_name(drain_state: DrainState) -> &'static str {
+    match drain_state {
+        DrainState::Running => "running",
+        DrainState::ShutdownRequested => "shutdown-requested",
+        DrainState::Draining => "draining",
+        DrainState::Drained => "drained",
+        DrainState::Stopped => "stopped",
+    }
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("hex input has odd length".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks_exact(2) {
+        let high = hex_value(pair[0]).ok_or("hex input contains non-hex digit")?;
+        let low = hex_value(pair[1]).ok_or("hex input contains non-hex digit")?;
+        bytes.push(high << 4 | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CliOptions {
+    listen: SocketAddr,
+    websocket_path: String,
+    storage: StorageConfig,
+    implicit_app_storage: bool,
+    auth_admission: AuthAdmissionConfig,
+    admitted_account: Option<AccountId>,
+    upstream_url: Option<String>,
+}
+
+impl CliOptions {
+    fn parse(args: Vec<String>, program: &str) -> Result<Self, String> {
+        let mut options = Self::defaults(StorageConfig::InMemory, "/sync".to_owned());
+        Self::apply_env(&mut options)?;
+        Self::parse_into(&mut options, args, program)?;
+        options.reject_unsupported_upstream_url()?;
+        Ok(options)
+    }
+
+    fn parse_for_server_app(
+        args: Vec<String>,
+        program: &str,
+        app_id: &str,
+    ) -> Result<Self, String> {
+        if app_id.trim().is_empty() {
+            return Err("empty_app_id".to_owned());
+        }
+        let canonical_app_id =
+            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let mut options = Self::defaults(
+            StorageConfig::data_dir(format!("./data/apps/{canonical_app_id}")),
+            format!("/apps/{app_id}/ws"),
+        );
+        options.implicit_app_storage = true;
+        Self::apply_env(&mut options)?;
+        Self::parse_into(&mut options, args, program)?;
+        options.auth_admission.expected_audience = Some(app_id.to_owned());
+        options.reject_unsupported_upstream_url()?;
+        Ok(options)
+    }
+
+    fn parse_into(options: &mut Self, args: Vec<String>, program: &str) -> Result<(), String> {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--listen" | "--bind" => {
+                    options.listen = parse_socket_addr(&next_value(&mut args, &arg)?)?;
+                }
+                "--port" => {
+                    let port = next_value(&mut args, &arg)?
+                        .parse::<u16>()
+                        .map_err(|error| format!("invalid --port: {error}"))?;
+                    options.listen.set_port(port);
+                }
+                "--data-dir" | "--dataDir" => {
+                    options.select_storage(StorageConfig::data_dir(next_value(&mut args, &arg)?));
+                }
+                "--in-memory" | "--memory" => {
+                    options.select_storage(StorageConfig::InMemory);
+                }
+                "--websocket-path" | "--ws-path" => {
+                    options.websocket_path = next_value(&mut args, &arg)?;
+                }
+                "--auth-static-bearer" | "--static-bearer" => {
+                    options.auth_admission =
+                        AuthAdmissionConfig::static_bearer(next_value(&mut args, &arg)?);
+                }
+                "--loopback-admitted-account" => {
+                    options.admitted_account =
+                        Some(parse_admitted_account(&next_value(&mut args, &arg)?, &arg)?);
+                }
+                "--admin-secret" => {
+                    return Err(
+                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
+                            .to_owned(),
+                    );
+                }
+                "--auth-jwt-ed-public-key-pem" => {
+                    options.auth_admission.static_bearer_token = None;
+                    options.auth_admission.jwt_verifier = Some(
+                        JwtVerifierConfig::ed_public_key_pem(next_value(&mut args, &arg)?),
+                    );
+                }
+                "--jwt-issuer" => {
+                    options.auth_admission.expected_issuer = Some(next_value(&mut args, &arg)?);
+                }
+                "--jwt-audience" => {
+                    options.auth_admission.expected_audience = Some(next_value(&mut args, &arg)?);
+                }
+                "--allow-local-first-auth" => {
+                    options.auth_admission.allow_local_first_auth =
+                        parse_bool(&next_value(&mut args, &arg)?, &arg)?;
+                }
+                "--anonymous-subject" => {
+                    options.auth_admission.anonymous_subject = next_value(&mut args, &arg)?;
+                }
+                "--upstream-url" => {
+                    options.upstream_url = Some(next_value(&mut args, &arg)?);
+                }
+                "--help" | "-h" => return Err(format!("help_requested usage={program}")),
+                _ if arg.starts_with("--listen=") => {
+                    options.listen = parse_socket_addr(value_after_equals(&arg)?)?;
+                }
+                _ if arg.starts_with("--bind=") => {
+                    options.listen = parse_socket_addr(value_after_equals(&arg)?)?;
+                }
+                _ if arg.starts_with("--port=") => {
+                    let port = value_after_equals(&arg)?
+                        .parse::<u16>()
+                        .map_err(|error| format!("invalid --port: {error}"))?;
+                    options.listen.set_port(port);
+                }
+                _ if arg.starts_with("--data-dir=") || arg.starts_with("--dataDir=") => {
+                    options.select_storage(StorageConfig::data_dir(value_after_equals(&arg)?));
+                }
+                _ if arg.starts_with("--websocket-path=") || arg.starts_with("--ws-path=") => {
+                    options.websocket_path = value_after_equals(&arg)?.to_owned();
+                }
+                _ if arg.starts_with("--auth-static-bearer=")
+                    || arg.starts_with("--static-bearer=") =>
+                {
+                    options.auth_admission =
+                        AuthAdmissionConfig::static_bearer(value_after_equals(&arg)?);
+                }
+                _ if arg.starts_with("--loopback-admitted-account=") => {
+                    options.admitted_account = Some(parse_admitted_account(
+                        value_after_equals(&arg)?,
+                        "--loopback-admitted-account",
+                    )?);
+                }
+                _ if arg.starts_with("--admin-secret=") => {
+                    return Err(
+                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
+                            .to_owned(),
+                    );
+                }
+                _ if arg.starts_with("--auth-jwt-ed-public-key-pem=") => {
+                    options.auth_admission.static_bearer_token = None;
+                    options.auth_admission.jwt_verifier = Some(
+                        JwtVerifierConfig::ed_public_key_pem(value_after_equals(&arg)?),
+                    );
+                }
+                _ if arg.starts_with("--jwt-issuer=") => {
+                    options.auth_admission.expected_issuer =
+                        Some(value_after_equals(&arg)?.to_owned());
+                }
+                _ if arg.starts_with("--jwt-audience=") => {
+                    options.auth_admission.expected_audience =
+                        Some(value_after_equals(&arg)?.to_owned());
+                }
+                _ if arg.starts_with("--allow-local-first-auth=") => {
+                    options.auth_admission.allow_local_first_auth =
+                        parse_bool(value_after_equals(&arg)?, "--allow-local-first-auth")?;
+                }
+                _ if arg.starts_with("--anonymous-subject=") => {
+                    options.auth_admission.anonymous_subject = value_after_equals(&arg)?.to_owned();
+                }
+                _ if arg.starts_with("--upstream-url=") => {
+                    options.upstream_url = Some(value_after_equals(&arg)?.to_owned());
+                }
+                _ => return Err(format!("unsupported_option={arg}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn defaults(storage: StorageConfig, websocket_path: String) -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            websocket_path,
+            storage,
+            implicit_app_storage: false,
+            auth_admission: AuthAdmissionConfig::default(),
+            admitted_account: None,
+            upstream_url: None,
+        }
+    }
+
+    fn select_storage(&mut self, storage: StorageConfig) {
+        self.storage = storage;
+        self.implicit_app_storage = false;
+    }
+
+    fn reject_legacy_implicit_storage(&self) -> Result<(), String> {
+        if !self.implicit_app_storage {
+            return Ok(());
+        }
+        // Inspect the entry itself: even a dangling CURRENT link is legacy evidence.
+        // Do not create or open the app root until this read-only check succeeds.
+        match std::fs::symlink_metadata("./data/CURRENT") {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(format!(
+                "legacy_default_storage: ./data/CURRENT exists; {SERVER_STORAGE_HELP}"
+            )),
+            Err(error) => Err(format!(
+                "legacy_default_storage_probe_failed: cannot inspect ./data/CURRENT: {error}; resolve this filesystem error before using the implicit default. {SERVER_STORAGE_HELP}"
+            )),
+        }
+    }
+
+    fn apply_env(options: &mut Self) -> Result<(), String> {
+        options.upstream_url = env::var("JAZZ_UPSTREAM_URL").ok();
+        if let Ok(value) = env::var("JAZZ_SERVER_LISTEN") {
+            options.listen = parse_socket_addr(&value)?;
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_PORT") {
+            let port = value
+                .parse::<u16>()
+                .map_err(|error| format!("invalid JAZZ_SERVER_PORT: {error}"))?;
+            options.listen.set_port(port);
+        }
+        if env_truthy("JAZZ_SERVER_IN_MEMORY") {
+            options.select_storage(StorageConfig::InMemory);
+        } else if let Ok(value) = env::var("JAZZ_SERVER_DATA_DIR") {
+            options.select_storage(StorageConfig::data_dir(value));
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_WEBSOCKET_PATH") {
+            options.websocket_path = value;
+        }
+        for (name, replacement) in [
+            ("JAZZ_ADMIN_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+            ("JAZZ_BACKEND_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+        ] {
+            if env::var_os(name).is_some() {
+                return Err(format!(
+                    "{name} is not a jazz-server bearer credential; use {replacement} for explicit client bearer admission or jazz-tools server for privileged admin/backend access"
+                ));
+            }
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_STATIC_BEARER") {
+            options.auth_admission = AuthAdmissionConfig::static_bearer(value);
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM") {
+            options.auth_admission.static_bearer_token = None;
+            options.auth_admission.jwt_verifier = Some(JwtVerifierConfig::ed_public_key_pem(value));
+        }
+        if let Ok(value) = env::var("JAZZ_JWT_ISSUER") {
+            options.auth_admission.expected_issuer = Some(value);
+        }
+        if let Ok(value) = env::var("JAZZ_JWT_AUDIENCE") {
+            options.auth_admission.expected_audience = Some(value);
+        }
+        if let Ok(value) = env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH") {
+            options.auth_admission.allow_local_first_auth =
+                parse_bool(&value, "JAZZ_ALLOW_LOCAL_FIRST_AUTH")?;
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_ANONYMOUS_SUBJECT") {
+            options.auth_admission.anonymous_subject = value;
+        }
+        Ok(())
+    }
+
+    fn reject_unsupported_upstream_url(&self) -> Result<(), String> {
+        if self.upstream_url.is_some() {
+            return Err(
+                "unsupported_upstream_url: server edges are no longer supported; remove --upstream-url/JAZZ_UPSTREAM_URL and connect clients directly to Core".to_owned()
+            );
+        }
+        Ok(())
+    }
+}
+
+fn parse_admitted_account(value: &str, option: &str) -> Result<AccountId, String> {
+    let account = AccountId(
+        uuid::Uuid::parse_str(value).map_err(|error| format!("invalid {option}: {error}"))?,
+    );
+    if account.0.is_nil() {
+        return Err(format!("invalid {option}: system account is reserved"));
+    }
+    Ok(account)
+}
+
+fn apply_shell_options(config: &mut jazz::serving::ServerConfig, options: &CliOptions) {
+    config.listener.bind_addr = options.listen;
+    config.listener.websocket_path = options.websocket_path.clone();
+    config.storage = options.storage.clone();
+}
+
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("missing_value_for={flag}"))
+}
+
+fn value_after_equals(arg: &str) -> Result<&str, String> {
+    arg.split_once('=')
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing_value_for={arg}"))
+}
+
+fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
+    value
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid listen address {value:?}: {error}"))
+}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn parse_bool(value: &str, name: &str) -> Result<bool, String> {
+    match value {
+        "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON" => Ok(true),
+        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF" => Ok(false),
+        _ => Err(format!("invalid_bool {name}={value:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_app_parse_accepts_alpha_flags_and_in_memory_opt_out() {
+        let options = CliOptions::parse_for_server_app(
+            vec![
+                "--listen".to_owned(),
+                "127.0.0.1:9999".to_owned(),
+                "--in-memory".to_owned(),
+                "--auth-static-bearer".to_owned(),
+                "secret".to_owned(),
+                "--loopback-admitted-account".to_owned(),
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c".to_owned(),
+            ],
+            "jazz-server",
+            "demo",
+        )
+        .unwrap();
+
+        assert_eq!(options.listen, SocketAddr::from(([127, 0, 0, 1], 9999)));
+        assert_eq!(options.websocket_path, "/apps/demo/ws");
+        assert_eq!(options.storage, StorageConfig::InMemory);
+        assert!(options.auth_admission.static_bearer_token.is_some());
+        assert_eq!(
+            options.admitted_account,
+            Some(AccountId(
+                uuid::Uuid::parse_str("7c5fd0da-4bd1-4ba9-9203-41e1f0da142c").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn loopback_admitted_account_rejects_the_system_account() {
+        let error = CliOptions::parse(
+            vec![
+                "--loopback-admitted-account".to_owned(),
+                "00000000-0000-0000-0000-000000000000".to_owned(),
+            ],
+            "jazz-server",
+        )
+        .expect_err("system attribution account must not be a public session account");
+        assert!(error.contains("system account is reserved"));
+    }
+}

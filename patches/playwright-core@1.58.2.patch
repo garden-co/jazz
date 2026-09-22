@@ -1,0 +1,15 @@
+diff --git a/lib/server/chromium/crExecutionContext.js b/lib/server/chromium/crExecutionContext.js
+index 9a00bda5ab0536dc838561f2842155331ccc201e..ac674c0d74087412eaf5d9797e379698e793fd11 100644
+--- a/lib/server/chromium/crExecutionContext.js
++++ b/lib/server/chromium/crExecutionContext.js
+@@ -104,6 +104,10 @@ function rewriteError(error) {
+     throw new Error("Cannot serialize result: object reference chain is too long.");
+   if (error.message.includes("Object couldn't be returned by value"))
+     return { result: { type: "undefined" } };
++  // Backport of https://github.com/microsoft/playwright/pull/41868; preserve Chromium's
++  // collected-promise diagnosis instead of rewriting it as a navigation.
++  if (error.message.includes("Promise was collected"))
++    throw new Error("Resulting promise was garbage collected.");
+   if (error instanceof TypeError && error.message.startsWith("Converting circular structure to JSON"))
+     (0, import_stackTrace.rewriteErrorMessage)(error, error.message + " Are you passing a nested JSHandle?");
+   if (!js.isJavaScriptErrorInEvaluate(error) && !(0, import_protocolError.isSessionClosedError)(error))

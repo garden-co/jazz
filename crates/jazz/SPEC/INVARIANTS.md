@@ -1,0 +1,49 @@
+# Jazz invariant registry
+
+This is the human entry point for the out-of-band Jazz invariant registry.
+Numbered specification chapters remain normative; these records connect their
+stable `INV-<AREA>-<n>` anchors to implementation and test receipts.
+
+The authoritative records live in the one repository-wide
+[`crates/invariant-registry.jsonl`](../../invariant-registry.jsonl) file: one
+canonical JSON object per physical line, sorted by invariant ID then domain.
+Filter Jazz records with `rg '"domain":"jazz"' crates/invariant-registry.jsonl`,
+or find one directly with `rg '"id":"INV-API-1"' crates/invariant-registry.jsonl`.
+
+`dev/gates/invariant-registry.sh` validates the record shape, stable IDs,
+duplicate domain/IDs, cited Rust/TypeScript tests, and covered-without-test
+mistakes. The JSONL itself is the complete invariant data source; it carries
+no migration shadow registry or historical receipt.
+It reports `now` + `untested` as visible documented debt without failing.
+Groove-owned IDs live in
+[`../../groove/SPEC/INVARIANTS.md`](../../groove/SPEC/INVARIANTS.md).
+
+`Status` is a closed planning vocabulary validated by the gate. `Coverage` is
+deliberately free-form human receipt text, not an enum: only `✓` has a machine
+meaning (it requires a cited existing test). Implementation anchors are
+human-maintained pointers and are not mechanically validated because the
+existing corpus intentionally permits abbreviated files, multi-symbol anchors,
+and planned implementations; test citations are the validated contract.
+
+## Reserved ids
+
+Some ids and ranges were allocated during drafting but are not cited by any
+Jazz chapter and therefore have no record yet. A record is created only when a
+chapter cites the invariant; this avoids treating deliberate numbering gaps as
+dangling references.
+
+The IDs `INV-SYNC-18` and `INV-SYNC-22` are retired with server-edge admission.
+They must not be reused for unrelated behavior.
+
+The removed server-edge acceptance and topology contracts `INV-EDGE-8` and
+`INV-EDGE-12` are retired; their identifiers must not be reused. Core now
+authorizes every ordinary client write as specified in chapter 9.
+
+## Open Questions
+
+None.
+
+Retired with removal of server-edge admission: `INV-EDGE-4`, `INV-EDGE-5`,
+`INV-EDGE-9`, `INV-EDGE-10`, `INV-EDGE-17`, and `INV-EDGE-18`. Their IDs must
+not be reused. Core authorizes writes directly; there are no edge permission
+subscriptions, stale-scope acceptance, or deferred edge-fate gates.

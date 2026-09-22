@@ -1,0 +1,694 @@
+#!/usr/bin/env node
+/**
+ * Content-addressed provenance for the generated bindings.  This intentionally
+ * uses only Node and git: both are already required by the repository, unlike
+ * platform-specific stat/hash utilities.
+ */
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const here = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+const run = (root, command, args) => {
+  const result = spawnSync(command, args, { cwd: root, encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : "unavailable";
+};
+
+const toolEnvName = (name) => `JAZZ_ARTIFACT_TOOL_${name.toUpperCase().replaceAll("-", "_")}`;
+function toolVersion(root, name, args = ["--version"]) {
+  const injected = process.env[toolEnvName(name)];
+  if (injected) return injected;
+  const command = name === "napi" ? "pnpm" : name;
+  const commandArgs =
+    name === "napi" ? ["--dir", "crates/jazz-napi", "exec", "napi", ...args] : args;
+  const result = spawnSync(command, commandArgs, {
+    cwd: root,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  });
+  if (result.status === 0) return result.stdout.trim() || result.stderr.trim();
+  if (name === "wasm-pack")
+    return "unavailable: install wasm-pack (run pnpm ensure:rust-toolchain), then rebuild via pnpm --filter jazz-wasm build";
+  return `unavailable: ${name} is not on PATH`;
+}
+
+function wasmPackToolVersion(root, name) {
+  const direct = toolVersion(root, name);
+  if (!direct.startsWith("unavailable:")) return direct;
+  if (process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE === "1")
+    return `unavailable: ${name} is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build`;
+  const caches = [
+    process.env.XDG_CACHE_HOME,
+    join(homedir(), ".cache"),
+    join(homedir(), "Library", "Caches"),
+  ].filter(Boolean);
+  const candidates = [];
+  for (const cache of caches) {
+    const wasmPackCache = join(cache, ".wasm-pack");
+    if (!existsSync(wasmPackCache)) continue;
+    for (const entry of readdirSync(wasmPackCache)) {
+      if (!entry.startsWith(`${name}-`)) continue;
+      const executable =
+        name === "wasm-opt"
+          ? join(wasmPackCache, entry, "bin", name)
+          : join(wasmPackCache, entry, name);
+      if (existsSync(executable)) candidates.push(executable);
+    }
+  }
+  candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  if (!candidates.length)
+    return `unavailable: ${name} is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build`;
+  return toolVersion(root, candidates[0]);
+}
+
+// build.mjs temporarily renames the current target binding while napi-rs
+// produces its replacement.  The suffix intentionally does not end in
+// `.node`, so the ordinary generated-artifact exclusion below would otherwise
+// mistake it for a source input.  Keep this exact to the build wrapper's
+// ephemeral filename contract: real NAPI sources and any other generated
+// inputs remain provenance inputs.
+const isStagedNapiBinding = (repoPath) =>
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|linux-arm64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.node\.staged-\d+-\d+$/.test(
+    repoPath,
+  );
+
+// napi-rs writes the matching target manifest beside its loadable binding.
+// It is ignored, sealed after the producer build, and cannot be a producer
+// input without making the native fingerprint depend on lane-local output.
+const isNapiGeneratedTargetManifest = (repoPath) =>
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|linux-arm64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.manifest\.json$/.test(
+    repoPath,
+  );
+
+const isNapiGeneratedOutput = (repoPath) =>
+  repoPath === "crates/jazz-napi/index.js" ||
+  repoPath === "crates/jazz-napi/index.d.ts" ||
+  repoPath === "crates/jazz-napi/native-binding.pointer.cjs" ||
+  repoPath === "crates/jazz-napi/correctness-native-binding.pointer.cjs" ||
+  repoPath === "crates/jazz-napi/native-binding.d.ts" ||
+  repoPath === "crates/jazz-napi/native-loader.cjs" ||
+  repoPath === "crates/jazz-napi/native-artifact-fingerprint.cjs" ||
+  repoPath.startsWith("crates/jazz-napi/.napi-stage-") ||
+  repoPath.startsWith("crates/jazz-napi/.native-artifacts/");
+
+// Provenance roots are whole checkout roots.  A hermetic fixture may live
+// below another checkout's ignored target directory; Git would otherwise walk
+// upward, report that enclosing checkout, and return an empty tracked inventory
+// for the fixture.  Treat that case as the non-Git filesystem fallback.
+function isRepositoryRoot(root) {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.error)
+    throw new Error(`artifact provenance: could not inspect Git root: ${result.error.message}`);
+  if (result.status !== 0) {
+    if (result.stderr.includes("not a git repository")) return false;
+    throw new Error(
+      `artifact provenance: could not inspect Git root: ${result.stderr.trim() || "unknown error"}`,
+    );
+  }
+  return resolve(result.stdout.trim()) === realpathSync(root);
+}
+
+function files(root, paths) {
+  const found = [];
+  const visit = (path) => {
+    if (!existsSync(path)) return;
+    const stat = statSync(path);
+    if (stat.isDirectory())
+      for (const name of readdirSync(path).sort()) {
+        if (["pkg", "target", "node_modules", ".turbo"].includes(name) || name.startsWith(".pkg-"))
+          continue;
+        const child = join(path, name);
+        visit(child);
+      }
+    else if (stat.isFile()) {
+      const repoPath = relative(root, path).replaceAll("\\", "/");
+      if (
+        repoPath.endsWith(".node") ||
+        repoPath.endsWith(".jazz-artifact-manifest.json") ||
+        repoPath === "crates/jazz-wasm/.jazz-correctness-test-artifacts.json" ||
+        // These tracked files are generated from packageInputs below. Including
+        // them would make the artifact fingerprint self-referential.
+        isNapiGeneratedOutput(repoPath) ||
+        repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
+        repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
+        isStagedNapiBinding(repoPath) ||
+        isNapiGeneratedTargetManifest(repoPath)
+      )
+        return;
+      found.push(repoPath);
+    }
+  };
+  for (const path of paths) visit(join(root, path));
+  return found.sort();
+}
+
+// An ABI fingerprint is a source identity, not an inventory of whatever a
+// previous build happened to leave below a package directory.  In a checkout,
+// use git's tracked-file inventory as the boundary: ignored/untracked build
+// products (including nested package copies) must not alter a later native
+// fingerprint.  The recursive fallback deliberately exists only for the
+// hermetic non-git fixtures used by this module's unit tests.
+function trackedFiles(root, paths) {
+  if (!isRepositoryRoot(root)) return files(root, paths);
+  const result = spawnSync("git", ["ls-files", "-z", "--", ...paths], {
+    cwd: root,
+    encoding: "buffer",
+  });
+  if (result.status !== 0)
+    throw new Error(
+      `artifact provenance: could not list tracked inputs: ${result.stderr.toString("utf8").trim() || "unknown error"}`,
+    );
+
+  const found = [];
+  for (const rawPath of result.stdout.toString("utf8").split("\0")) {
+    if (!rawPath) continue;
+    const path = resolve(root, rawPath);
+    if (relative(root, path).startsWith("..") || !existsSync(path) || !statSync(path).isFile())
+      continue;
+    const repoPath = relative(root, path).replaceAll("\\", "/");
+    if (
+      repoPath.endsWith(".node") ||
+      repoPath.endsWith(".jazz-artifact-manifest.json") ||
+      repoPath === "crates/jazz-wasm/.jazz-correctness-test-artifacts.json" ||
+      isNapiGeneratedOutput(repoPath) ||
+      repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
+      repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
+      isStagedNapiBinding(repoPath) ||
+      isNapiGeneratedTargetManifest(repoPath)
+    )
+      continue;
+    found.push(repoPath);
+  }
+  return found.sort();
+}
+
+// Git's clean tracked blobs are the portable source identity. In particular,
+// a Windows checkout may smudge those blobs to CRLF while macOS and Linux keep
+// LF; hashing working-tree bytes would make the same committed source appear
+// to have a different ABI. Dirty files remain working-tree inputs so local
+// edits still invalidate the provenance they produced.
+function trackedInputContents(root, paths) {
+  if (!isRepositoryRoot(root))
+    return new Map(paths.map((path) => [path, readFileSync(join(root, path))]));
+  const autocrlf = spawnSync("git", ["config", "--bool", "core.autocrlf"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  const crlfSmudge = autocrlf.status === 0 && autocrlf.stdout.trim().toLowerCase() === "true";
+
+  const dirtyPaths = new Set();
+  for (const args of [
+    ["diff", "--name-only", "-z", "--cached", "HEAD", "--", ...paths],
+    ["diff", "--name-only", "-z", "--", ...paths],
+  ]) {
+    const dirty = spawnSync("git", args, { cwd: root, encoding: "buffer" });
+    if (dirty.status !== 0) throw new Error("artifact provenance: could not inspect dirty inputs");
+    for (const path of dirty.stdout.toString("utf8").split("\0")) if (path) dirtyPaths.add(path);
+  }
+  const cleanPaths = paths.filter(
+    (path) => !dirtyPaths.has(path) && !lstatSync(join(root, path)).isSymbolicLink(),
+  );
+  const contents = new Map();
+  const batchLimit = 256 * 1024;
+  for (let start = 0; start < cleanPaths.length; ) {
+    let bytes = 0;
+    let end = start;
+    while (end < cleanPaths.length) {
+      const size = lstatSync(join(root, cleanPaths[end])).size;
+      if (end > start && bytes + size > batchLimit) break;
+      bytes += size;
+      end += 1;
+    }
+    const batch = cleanPaths.slice(start, end);
+    const objects = spawnSync("git", ["cat-file", "--batch"], {
+      cwd: root,
+      input: Buffer.from(batch.map((path) => `:${path}\n`).join("")),
+      encoding: "buffer",
+      maxBuffer: bytes + batch.length * 128 + 1,
+    });
+    if (objects.status !== 0)
+      throw new Error(`artifact provenance: could not read ${batch.length} clean Git inputs`);
+    let offset = 0;
+    for (const path of batch) {
+      const headerEnd = objects.stdout.indexOf(0x0a, offset);
+      const header =
+        headerEnd === -1 ? "" : objects.stdout.subarray(offset, headerEnd).toString("utf8");
+      const match = /^[a-f0-9]+ blob (\d+)$/.exec(header);
+      if (!match) throw new Error(`artifact provenance: Git input is not a blob (${path})`);
+      const size = Number(match[1]);
+      offset = headerEnd + 1;
+      if (offset + size >= objects.stdout.length)
+        throw new Error(`artifact provenance: truncated Git input (${path})`);
+      const blob = objects.stdout.subarray(offset, offset + size);
+      const working = readFileSync(join(root, path));
+      const onlyExpectedLineEndings =
+        crlfSmudge &&
+        Buffer.from(working.toString("latin1").replaceAll("\r\n", "\n"), "latin1").equals(blob);
+      // A Git clean filter can hide bytes that the compiler will still read.
+      // The index blob is authoritative only when the worktree matches it, or
+      // when core.autocrlf accounts for the entire difference.
+      contents.set(path, working.equals(blob) || onlyExpectedLineEndings ? blob : working);
+      offset += size + 1;
+    }
+    if (offset !== objects.stdout.length)
+      throw new Error("artifact provenance: malformed Git input batch");
+    start = end;
+  }
+  for (const path of paths.filter((path) => !contents.has(path)))
+    contents.set(path, readFileSync(join(root, path)));
+  return contents;
+}
+
+const sharedInputs = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".cargo/config",
+  ".cargo/config.toml",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  // These build wrappers define how the native binding is produced and
+  // admitted, so changes are source-bound.  Keep this an explicit inventory:
+  // test scripts, producer/snapshot receipts, and generated expected
+  // fingerprint modules are deliberately not ABI inputs and must not cause
+  // self-referential fingerprint churn.
+  "dev/artifacts/build.mjs",
+  "dev/artifacts/provenance.mjs",
+  "dev/artifacts/stage-napi-loader.mjs",
+  "dev/artifacts/stage-native-fingerprints.mjs",
+  "dev/artifacts/stage-napi-manifests.mjs",
+  "dev/artifacts/linux-napi/Dockerfile",
+  "dev/artifacts/linux-napi/build.sh",
+];
+
+const artifactRoots = {
+  wasm: "crates/jazz-wasm/Cargo.toml",
+  napi: "crates/jazz-napi/Cargo.toml",
+};
+
+export function workspaceDependencyInputs(root, rootManifest) {
+  const result = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `artifact provenance: cargo metadata failed for ${rootManifest}: ${result.stderr.trim() || "unknown error"}`,
+    );
+  }
+  let metadata;
+  try {
+    metadata = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(
+      `artifact provenance: cargo metadata was invalid for ${rootManifest}: ${error.message}`,
+    );
+  }
+  const canonicalRoot = realpathSync(root);
+  const packagesByManifest = new Map(
+    metadata.packages.map((pkg) => [resolve(pkg.manifest_path), pkg]),
+  );
+  const rootManifestPath = resolve(canonicalRoot, rootManifest);
+  if (!packagesByManifest.has(rootManifestPath)) {
+    throw new Error(`artifact provenance: cargo metadata omitted ${rootManifest}`);
+  }
+  const packages = new Map(
+    metadata.packages.map((pkg) => [dirname(resolve(pkg.manifest_path)), pkg]),
+  );
+  const rootDirectory = dirname(rootManifestPath);
+  // This is deliberately the conservative declared closure: optional and
+  // target-conditional path dependencies invalidate artifacts even when a
+  // particular build does not enable them.
+  const pending = [rootDirectory];
+  const visited = new Set();
+  while (pending.length) {
+    const directory = pending.pop();
+    if (visited.has(directory)) continue;
+    const pkg = packages.get(directory);
+    if (!pkg) throw new Error(`artifact provenance: unresolved workspace dependency ${directory}`);
+    visited.add(directory);
+    for (const dependency of pkg.dependencies) {
+      if (!dependency.path || dependency.kind === "dev") continue;
+      const dependencyDirectory = resolve(dependency.path);
+      if (!packages.has(dependencyDirectory)) {
+        // Excluded vendored packages are intentionally outside the root
+        // workspace, so --no-deps omits them. Ask their own manifest for the
+        // same declared dependency metadata, without resolving registry crates.
+        const vendored = spawnSync(
+          "cargo",
+          [
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            join(dependencyDirectory, "Cargo.toml"),
+          ],
+          { cwd: root, encoding: "utf8" },
+        );
+        if (vendored.status !== 0) {
+          throw new Error(
+            `artifact provenance: cargo metadata failed for path dependency ${dependency.name}: ${vendored.stderr.trim()}`,
+          );
+        }
+        for (const nested of JSON.parse(vendored.stdout).packages) {
+          packages.set(dirname(resolve(nested.manifest_path)), nested);
+        }
+        if (!packages.has(dependencyDirectory)) {
+          throw new Error(
+            `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+          );
+        }
+      }
+      pending.push(dependencyDirectory);
+    }
+  }
+  return [...visited]
+    .map((directory) => {
+      const repositoryPath = relative(canonicalRoot, directory);
+      if (!repositoryPath) {
+        throw new Error(
+          `artifact provenance: workspace dependency has no repository-relative path: ${directory}`,
+        );
+      }
+      if (
+        repositoryPath === ".." ||
+        repositoryPath.startsWith(`..${sep}`) ||
+        isAbsolute(repositoryPath)
+      ) {
+        throw new Error(
+          `artifact provenance: workspace dependency escapes repository root: ${directory}`,
+        );
+      }
+      const normalizedPath = repositoryPath.split(sep).join("/");
+      if (normalizedPath.includes("\\")) {
+        throw new Error(
+          `artifact provenance: workspace dependency path is not representable: ${directory}`,
+        );
+      }
+      return normalizedPath;
+    })
+    .sort();
+}
+
+const inputsFor = {
+  wasm: [...sharedInputs],
+  napi: [...sharedInputs],
+};
+
+function artifactHashes(root, kind, options = {}) {
+  const paths =
+    kind === "wasm"
+      ? // Browser tests import the generated JS and declarations as well as the
+        // binary.  Hash the complete generated binding surface: a stale glue
+        // file can silently drop a new Rust argument while the `.wasm` itself is
+        // perfectly current.
+        [
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm_bg.wasm"),
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.js"),
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.d.ts"),
+          join(
+            options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"),
+            "jazz_wasm_bg.wasm.d.ts",
+          ),
+        ]
+      : (options.napiBindings ??
+        activeNapiBindings(root) ??
+        readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+          .map((entry) => join(root, "crates/jazz-napi", entry.name)));
+  return paths
+    .filter(existsSync)
+    .sort()
+    .map((path) => ({ file: basename(path), sha256: sha256(readFileSync(path)) }));
+}
+
+function activeNapiBindings(root) {
+  const packageDir = join(root, "crates", "jazz-napi");
+  const pointer = join(packageDir, "native-binding.pointer.cjs");
+  if (!existsSync(pointer)) return undefined;
+  const match = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
+    readFileSync(pointer, "utf8"),
+  );
+  if (!match) return undefined;
+  const generation = join(packageDir, ".native-artifacts", match[1]);
+  if (
+    !existsSync(generation) ||
+    !lstatSync(generation).isDirectory() ||
+    lstatSync(generation).isSymbolicLink()
+  )
+    return undefined;
+  return readdirSync(generation, { withFileTypes: true })
+    .filter((entry) => {
+      const path = join(generation, entry.name);
+      return (
+        entry.name.endsWith(".node") &&
+        lstatSync(path).isFile() &&
+        !lstatSync(path).isSymbolicLink()
+      );
+    })
+    .map((entry) => join(generation, entry.name));
+}
+
+function packageInputsFingerprint(root, kind) {
+  if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
+  const trackedInputs = trackedFiles(root, [
+    ...inputsFor[kind],
+    ...workspaceDependencyInputs(root, artifactRoots[kind]),
+  ]);
+  const contents = trackedInputContents(root, trackedInputs);
+  const inputHash = createHash("sha256");
+  for (const path of trackedInputs) {
+    inputHash.update(`${path}\0`).update(contents.get(path)).update("\0");
+  }
+  return inputHash.digest("hex");
+}
+
+export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+  const packageInputs = packageInputsFingerprint(root, kind);
+  const cargoLock = join(root, "Cargo.lock");
+  const toolchain = join(root, "rust-toolchain.toml");
+  const injectedGit =
+    process.env.JAZZ_ARTIFACT_GIT_HEAD &&
+    process.env.JAZZ_ARTIFACT_GIT_TREE &&
+    process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF;
+  const tools = {
+    rustc: toolVersion(root, "rustc", ["-Vv"]),
+    wasmPack: kind === "wasm" ? toolVersion(root, "wasm-pack") : "not-applicable",
+    wasmBindgen: kind === "wasm" ? wasmPackToolVersion(root, "wasm-bindgen") : "not-applicable",
+    wasmOpt: kind === "wasm" ? wasmPackToolVersion(root, "wasm-opt") : "not-applicable",
+    napi: kind === "napi" ? toolVersion(root, "napi") : "not-applicable",
+    ...(kind === "napi" && process.platform === "linux"
+      ? {
+          cc: toolVersion(root, process.env.CC || "cc"),
+          cxx: toolVersion(root, process.env.CXX || "c++"),
+          libc: toolVersion(root, "getconf", ["GNU_LIBC_VERSION"]),
+          sysroot: toolVersion(root, process.env.CXX || "c++", ["-print-sysroot"]),
+          baseline: process.env.JAZZ_NAPI_BUILD_BASELINE || "host-userspace",
+          image: process.env.JAZZ_NAPI_BUILD_IMAGE || "host-userspace",
+        }
+      : {}),
+  };
+  return {
+    schema: 1,
+    kind,
+    profile,
+    git: {
+      head: injectedGit
+        ? process.env.JAZZ_ARTIFACT_GIT_HEAD
+        : run(root, "git", ["rev-parse", "HEAD"]),
+      tree: injectedGit
+        ? process.env.JAZZ_ARTIFACT_GIT_TREE
+        : run(root, "git", ["rev-parse", "HEAD^{tree}"]),
+      // Include staged, unstaged and untracked changes. A dirty build is valid
+      // only for that exact dirty checkout, never merely for its HEAD commit.
+      dirtyDiff: injectedGit
+        ? process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF
+        : sha256(
+            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-wasm/.jazz-correctness-test-artifacts.json", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/correctness-native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-wasm/.jazz-correctness-test-artifacts.json", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/correctness-native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}`,
+          ),
+    },
+    cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",
+    rustToolchain: existsSync(toolchain) ? sha256(readFileSync(toolchain)) : "missing",
+    tools,
+    toolchainInputs: sha256(JSON.stringify(tools)),
+    target:
+      targetOverride ??
+      (kind === "wasm"
+        ? "wasm32-unknown-unknown"
+        : (toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown")),
+    features: artifactFeatures(kind),
+    packageInputs,
+    artifacts: artifactHashes(root, kind, options),
+  };
+}
+
+/**
+ * ABI identity for generated bindings. Unlike the transport protocol this
+ * covers the exact package inputs plus the tracked package wrappers. Generated
+ * napi-rs JS/declaration outputs are intentionally excluded from packageInputs:
+ * the producer writes those only inside a staged generation, and the Rust input
+ * closure already determines them. Including them would create a pre-build vs
+ * post-build circular fingerprint.
+ */
+export function artifactFeatures(kind) {
+  const enabled = process.env.JAZZ_RN_TEST_BRIDGE;
+  if (enabled !== undefined && enabled !== "0" && enabled !== "1")
+    throw new Error("JAZZ_RN_TEST_BRIDGE must be 0 or 1");
+  return kind === "napi" && enabled === "1" ? "default,rn-test-bridge" : "default";
+}
+
+export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
+  // Runtime compatibility is content-addressed by relevant producer inputs,
+  // never by commit identity or provenance receipts. In particular, do not
+  // derive this through `expectedManifest`: its git HEAD/tree fields must
+  // remain useful for local freshness without making the generated expected
+  // fingerprint self-referential when that expectation is committed.
+  const packageInputs = packageInputsFingerprint(root, kind);
+  const surface =
+    kind === "napi"
+      ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
+      : ["packages/jazz-tools/src/types/jazz-wasm.d.ts"];
+  const surfaceContents = trackedInputContents(
+    root,
+    surface.filter((path) => existsSync(join(root, path))),
+  );
+  const surfaceHash = createHash("sha256");
+  for (const path of surface) {
+    surfaceHash.update(`${path}\0`);
+    surfaceHash.update(surfaceContents.get(path) ?? "missing");
+    surfaceHash.update("\0");
+  }
+  return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}\0${artifactFeatures(kind)}`);
+}
+
+export const manifestPath = (root, kind) => {
+  if (kind === "wasm") return join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json");
+  const packageDir = join(root, "crates/jazz-napi");
+  const pointer = join(packageDir, "native-binding.pointer.cjs");
+  if (existsSync(pointer)) {
+    const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
+      readFileSync(pointer, "utf8"),
+    )?.[1];
+    if (generation)
+      return join(packageDir, ".native-artifacts", generation, ".jazz-artifact-manifest.json");
+  }
+  return join(packageDir, ".jazz-artifact-manifest.json");
+};
+
+export function writeManifest(root, kind, profile, targetOverride, options = {}) {
+  const path =
+    options.wasmPackageDir || options.napiManifestDir
+      ? join(options.wasmPackageDir ?? options.napiManifestDir, ".jazz-artifact-manifest.json")
+      : manifestPath(root, kind);
+  const manifest = expectedManifest(root, kind, profile, targetOverride, options);
+  manifest.nativeArtifactFingerprint = nativeArtifactFingerprint(
+    root,
+    kind,
+    profile,
+    targetOverride,
+  );
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+export function verifyManifest(root, kind, profile, targetOverride) {
+  const path = manifestPath(root, kind);
+  if (!existsSync(path)) return `manifest is missing (${path})`;
+  let actual;
+  try {
+    actual = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return `manifest is invalid (${path})`;
+  }
+  const expected = expectedManifest(root, kind, profile, targetOverride);
+  expected.nativeArtifactFingerprint = nativeArtifactFingerprint(
+    root,
+    kind,
+    profile,
+    targetOverride,
+  );
+  for (const key of [
+    "schema",
+    "kind",
+    "profile",
+    "cargoLock",
+    "rustToolchain",
+    "toolchainInputs",
+    "target",
+    "features",
+    "packageInputs",
+    "artifacts",
+    "nativeArtifactFingerprint",
+  ]) {
+    if (JSON.stringify(actual[key]) !== JSON.stringify(expected[key]))
+      return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;
+  }
+  for (const key of Object.keys(expected.tools)) {
+    if (actual.tools?.[key] !== expected.tools[key])
+      return `tools.${key} differs (built ${JSON.stringify(actual.tools?.[key])}, expected ${JSON.stringify(expected.tools[key])})`;
+  }
+  for (const key of ["head", "tree", "dirtyDiff"])
+    if (actual.git?.[key] !== expected.git[key]) return `git.${key} differs`;
+  return null;
+}
+
+export function verifyPublishedNapiManifest(manifest, target, nodePath) {
+  if (manifest.kind !== "napi" || manifest.profile !== "release" || manifest.target !== target)
+    return `manifest is for ${manifest.kind}/${manifest.profile}/${manifest.target}, expected napi/release/${target}`;
+  if (!existsSync(nodePath)) return `native binding is missing (${nodePath})`;
+  const expected = { file: basename(nodePath), sha256: sha256(readFileSync(nodePath)) };
+  return manifest.artifacts?.some(
+    (artifact) => artifact.file === expected.file && artifact.sha256 === expected.sha256,
+  )
+    ? null
+    : `manifest does not match ${expected.file}`;
+}
+
+function main(args) {
+  const [command, kind, profile] = args;
+  const rootFlag = args.indexOf("--root");
+  const root = rootFlag === -1 ? here : resolve(args[rootFlag + 1]);
+  const targetFlag = args.indexOf("--target");
+  const target = targetFlag === -1 ? undefined : args[targetFlag + 1];
+  if (!command || !kind || !profile || !["wasm", "napi"].includes(kind))
+    throw new Error("usage: provenance.mjs <write|verify> <wasm|napi> <profile> [--root path]");
+  if (command === "write") {
+    writeManifest(root, kind, profile, target);
+    return;
+  }
+  if (command === "verify") {
+    const problem = verifyManifest(root, kind, profile, target);
+    if (problem) {
+      console.error(`STALE ${kind} ${profile}: ${problem}`);
+      process.exitCode = 1;
+    } else console.log(`FRESH ${kind} ${profile}`);
+    return;
+  }
+  throw new Error(`unknown command: ${command}`);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    main(process.argv.slice(2));
+  } catch (error) {
+    console.error(`artifact provenance: ${error.message}`);
+    process.exitCode = 2;
+  }
+}

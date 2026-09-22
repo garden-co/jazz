@@ -1,0 +1,1340 @@
+use std::time::Duration;
+
+use jazz::query::Query;
+
+use super::support::{
+    collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
+    has_added_id, has_removed, has_updated, wait_for_query, wait_for_query_results, wait_for_rows,
+    wait_for_subscription_update,
+};
+use super::{pe, permissions};
+use jazz::tools::PolicyExpr;
+use jazz::tools::public_schema::RelPredicateExpr as PredicateExpr;
+use jazz::tools::{
+    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
+    TableSchema, TableSchemaBuilder, Value,
+};
+use jazz_server::JazzServer;
+use serde_json::json;
+
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
+
+fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)> {
+    pairs
+        .into_iter()
+        .map(|(column, value)| (column.to_string(), value))
+        .collect()
+}
+
+fn title_document_values(title: &str) -> Vec<Value> {
+    vec![title.into()]
+}
+
+fn chat_values(name: &str, created_by: &str, is_public: bool) -> Vec<Value> {
+    vec![name.into(), created_by.into(), is_public.into()]
+}
+
+fn complex_document_values(
+    team_slug: &str,
+    published: bool,
+    title: &str,
+    folder_id: Option<ObjectId>,
+) -> Vec<Value> {
+    vec![
+        team_slug.into(),
+        published.into(),
+        title.into(),
+        folder_id.into(),
+    ]
+}
+
+fn make_title_documents_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
+    TableSchema::builder(table_name)
+        .column("title", ColumnType::Text)
+        .policies(policies)
+}
+
+fn make_complex_documents_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
+    TableSchema::builder(table_name)
+        .column("team_slug", ColumnType::Text)
+        .column("published", ColumnType::Boolean)
+        .column("title", ColumnType::Text)
+        .nullable_fk_column("folder_id", "folders")
+        .policies(policies)
+}
+
+fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
+    TableSchema::builder(table_name)
+        .column("owner_id", ColumnType::Text)
+        .column("name", ColumnType::Text)
+        .policies(policies)
+}
+
+fn shared_document_select_policy() -> PolicyExpr {
+    pe::exists(pe::table("document_shares").where_(pe::rel::all_of([
+        pe::rel::eq_outer("document_id", "id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+    ])))
+}
+
+fn editor_document_update_policy() -> PolicyExpr {
+    pe::exists(pe::table("document_editors").where_(pe::rel::all_of([
+        pe::rel::eq_outer("document_id", "id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+    ])))
+}
+
+fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
+    pe::exists(pe::table("chats").where_(pe::rel::all_of([
+        pe::rel::eq_outer("id", "id"),
+        pe::rel::eq_outer("created_by", "created_by"),
+        pe::rel::eq_outer("is_public", "is_public"),
+    ])))
+}
+
+fn join_membership_select_policy(member_filter: PredicateExpr) -> PolicyExpr {
+    pe::exists(
+        pe::table("document_grants")
+            .alias("grants")
+            .join(
+                pe::table("group_memberships").alias("memberships"),
+                pe::rel::column("grants", "group_slug"),
+                pe::rel::column("memberships", "group_slug"),
+            )
+            .where_(pe::rel::all_of([
+                pe::rel::eq_outer(pe::rel::column("grants", "document_id"), "id"),
+                member_filter,
+            ])),
+    )
+}
+
+fn hop_membership_select_policy() -> PolicyExpr {
+    pe::exists(
+        pe::table("group_memberships")
+            .alias("memberships")
+            .where_(pe::rel::eq_session(
+                pe::rel::column("memberships", "user_id"),
+                "claims.sub",
+            ))
+            .join(
+                pe::table("document_grants").alias("grants"),
+                pe::rel::column("memberships", "group_slug"),
+                pe::rel::column("grants", "group_slug"),
+            )
+            .where_(pe::rel::eq_outer(
+                pe::rel::column("grants", "document_id"),
+                "id",
+            ))
+            .select([("document_id", pe::rel::column("grants", "document_id"))]),
+    )
+}
+
+fn mixed_complex_select_policy() -> PolicyExpr {
+    pe::all_of([
+        pe::eq("published", true),
+        pe::in_session("team_slug", "claims.team_slugs"),
+        pe::all_of([
+            pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
+                pe::rel::eq_outer("document_id", "id"),
+                pe::rel::eq_literal("flag", "allow"),
+            ]))),
+            pe::all_of([
+                pe::is_not_null("folder_id"),
+                pe::allowed_to_read("folder_id"),
+            ]),
+        ]),
+    ])
+}
+
+fn exists_share_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_read().where_(shared_document_select_policy());
+            }),
+        ))
+        .table(
+            TableSchema::builder("document_shares")
+                .fk_column("document_id", "documents")
+                .column("user_id", ColumnType::Text),
+        )
+        .build()
+}
+
+fn exists_join_policy_schema(select_policy: PolicyExpr) -> Schema {
+    SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(select_policy);
+            }),
+        ))
+        .table(
+            TableSchema::builder("document_grants")
+                .fk_column("document_id", "documents")
+                .column("group_slug", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("group_memberships")
+                .column("user_id", ColumnType::Text)
+                .column("group_slug", ColumnType::Text),
+        )
+        .build()
+}
+
+fn joined_table_select_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("join_users")
+                .column("name", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                })),
+        )
+        .table(
+            TableSchema::builder("join_posts")
+                .column("owner_name", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(pe::eq("owner_name", pe::session(vec!["claims", "sub"])));
+                })),
+        )
+        .build()
+}
+
+fn exists_hop_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(hop_membership_select_policy());
+            }),
+        ))
+        .table(
+            TableSchema::builder("document_grants")
+                .fk_column("document_id", "documents")
+                .column("group_slug", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("group_memberships")
+                .column("user_id", ColumnType::Text)
+                .column("group_slug", ColumnType::Text),
+        )
+        .build()
+}
+
+fn mixed_complex_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(make_folders_schema(
+            "folders",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
+            }),
+        ))
+        .table(make_complex_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(mixed_complex_select_policy());
+            }),
+        ))
+        .table(
+            TableSchema::builder("document_flags")
+                .fk_column("document_id", "documents")
+                .column("flag", ColumnType::Text),
+        )
+        .build()
+}
+
+fn exists_update_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().always();
+                p.allow_update()
+                    .where_old(editor_document_update_policy())
+                    .where_new(pe::always());
+            }),
+        ))
+        .table(
+            TableSchema::builder("document_editors")
+                .fk_column("document_id", "documents")
+                .column("user_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("chats")
+                .column("name", ColumnType::Text)
+                .column("created_by", ColumnType::Text)
+                .column("is_public", ColumnType::Boolean)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                    p.allow_update()
+                        .where_old(pe::always())
+                        .where_new(immutable_chat_metadata_update_check_policy());
+                })),
+        )
+        .build()
+}
+
+async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
+    client
+        .insert("documents", jazz::row_input!("title" => title.to_string()))
+        .expect("create title document")
+        .0
+}
+
+async fn create_chat(
+    client: &JazzClient,
+    name: &str,
+    created_by: &str,
+    is_public: bool,
+) -> ObjectId {
+    client
+        .insert(
+            "chats",
+            jazz::row_input!(
+                "name" => name.to_string(),
+                "created_by" => created_by.to_string(),
+                "is_public" => is_public,
+            ),
+        )
+        .expect("create chat")
+        .0
+}
+
+async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group_slug: &str) {
+    client
+        .insert(
+            "document_grants",
+            jazz::row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
+        )
+        .expect("create document grant");
+}
+
+async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug: &str) {
+    client
+        .insert(
+            "group_memberships",
+            jazz::row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
+        )
+        .expect("create group membership");
+}
+
+async fn create_join_policy_user(client: &JazzClient, name: &str) -> ObjectId {
+    client
+        .insert("join_users", jazz::row_input!("name" => name.to_string()))
+        .expect("create join policy user")
+        .0
+}
+
+async fn create_join_policy_post(client: &JazzClient, owner_name: &str, title: &str) -> ObjectId {
+    client
+        .insert(
+            "join_posts",
+            jazz::row_input!("owner_name" => owner_name.to_string(), "title" => title.to_string()),
+        )
+        .expect("create join policy post")
+        .0
+}
+
+/// Verifies that correlated `EXISTS` policies bind outer-row references
+/// correctly and keep subscription visibility in sync as the related row is
+/// inserted, updated, and deleted.
+///
+/// Actors: bob and dave are the competing readers, and admin creates plus
+/// retargets the share rows.
+///
+/// ```text
+/// admin ──insert share(bob)──► server ──► bob stream (add)
+/// admin ──retarget share─────► server ──► bob stream (remove), dave stream (add)
+/// admin ──delete share───────► server ──► dave stream (remove)
+/// ```
+#[tokio::test]
+async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner())
+        .await;
+}
+
+async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner() {
+    let schema = exists_share_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+
+    let query = Query::from("documents");
+    let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
+    let mut dave_stream = dave.subscribe(query.clone()).await.expect("subscribe dave");
+    let mut bob_log = Vec::new();
+    let mut dave_log = Vec::new();
+
+    let doc_id = create_title_document(&admin, "Shared Through EXISTS").await;
+    let initial_bob = wait_for_query(
+        &bob,
+        query.clone(),
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "bob initially sees no shared documents",
+        Some,
+    )
+    .await;
+    let initial_dave = wait_for_query(
+        &dave,
+        query.clone(),
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "dave initially sees no shared documents",
+        Some,
+    )
+    .await;
+    assert!(initial_bob.is_empty());
+    assert!(initial_dave.is_empty());
+
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    collect_stream_deltas(&mut dave_stream, &mut dave_log, NO_DELTA_WINDOW).await;
+    bob_log.clear();
+    dave_log.clear();
+
+    let share_id = admin
+        .insert(
+            "document_shares",
+            jazz::row_input!("document_id" => doc_id, "user_id" => super::BOB_ID),
+        )
+        .expect("create document share")
+        .0;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob receives add when share row is inserted",
+        |log| has_added_id(log, doc_id),
+    )
+    .await;
+    let bob_rows = wait_for_rows(&bob, query.clone(), "bob sees shared document", |rows| {
+        let visible = rows.iter().any(|(id, values)| {
+            *id == doc_id && *values == title_document_values("Shared Through EXISTS")
+        });
+        visible.then_some(rows)
+    })
+    .await;
+    assert_eq!(bob_rows.len(), 1);
+
+    admin
+        .update(
+            "document_shares",
+            share_id,
+            row_changes([("user_id", super::DAVE_ID.into())]),
+        )
+        .expect("update document share user");
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob receives remove when share retargets away",
+        |log| has_removed(log, doc_id),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut dave_stream,
+        &mut dave_log,
+        QUERY_TIMEOUT,
+        "dave receives add when share retargets to him",
+        |log| has_added_id(log, doc_id),
+    )
+    .await;
+
+    admin
+        .delete("document_shares", share_id)
+        .expect("delete share row");
+    wait_for_subscription_update(
+        &mut dave_stream,
+        &mut dave_log,
+        QUERY_TIMEOUT,
+        "dave receives remove when share row is deleted",
+        |log| has_removed(log, doc_id),
+    )
+    .await;
+
+    let final_bob = wait_for_query(
+        &bob,
+        query.clone(),
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "bob ends with no shared documents",
+        Some,
+    )
+    .await;
+    let final_dave = wait_for_query(
+        &dave,
+        query,
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "dave ends with no shared documents",
+        Some,
+    )
+    .await;
+    assert!(final_bob.is_empty());
+    assert!(final_dave.is_empty());
+
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Verifies that `policy.exists(relation.join(...))` grants access only when
+/// the joined relation produces a row for the current session.
+///
+/// Actors: bob has the matching group membership, dave has a non-matching
+/// membership, and admin seeds the document plus grant rows.
+///
+/// ```text
+/// admin ──grant doc→eng────────► server
+/// bob ───membership eng───────► query sees row
+/// dave ──membership sales─────► query sees nothing
+/// ```
+#[tokio::test]
+async fn exists_rel_join_grants_and_denies_correctly() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ))
+        .await;
+}
+
+/// A post-join OR belongs to the membership source as a whole. Splitting it
+/// into independent filters would deny Bob; losing its scope can overgrant Dave.
+#[tokio::test]
+async fn exists_rel_join_preserves_same_source_or() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::any_of([
+                pe::rel::eq_literal(pe::rel::column("memberships", "user_id"), "absent-user"),
+                pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+            ]),
+        ))
+        .await;
+}
+
+/// A misspelled alias must fail validation instead of binding to a same-named
+/// column on the root source.
+#[tokio::test]
+async fn exists_rel_join_rejects_unknown_filter_scope() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::eq_literal(
+            pe::rel::column("missing", "group_slug"),
+            "eng",
+        )),
+        "unknown scope 'missing'",
+    )
+    .await;
+}
+
+/// An OR across sources cannot be pushed into separate existence joins.
+#[tokio::test]
+async fn exists_rel_join_rejects_cross_source_or() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::any_of([
+            pe::rel::eq_literal(pe::rel::column("grants", "group_slug"), "eng"),
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ])),
+        "Boolean filters spanning multiple sources are not supported",
+    )
+    .await;
+}
+
+async fn assert_join_policy_rejected(policy: PolicyExpr, expected: &str) {
+    match JazzServer::start_with_schema(exists_join_policy_schema(policy)).await {
+        Err(error) => assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error}"
+        ),
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("invalid scoped policy must be rejected: {expected}");
+        }
+    }
+}
+
+async fn exists_rel_join_grants_and_denies_correctly_inner(member_filter: PredicateExpr) {
+    let schema = exists_join_policy_schema(join_membership_select_policy(member_filter));
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+
+    let doc_id = create_title_document(&admin, "Join Visible").await;
+    create_group_membership(&admin, super::BOB_ID, "eng").await;
+    create_group_membership(&admin, super::DAVE_ID, "sales").await;
+    create_document_grant(&admin, doc_id, "eng").await;
+
+    let query = Query::from("documents");
+    let bob_rows = wait_for_rows(&bob, query.clone(), "bob sees joined grant", |rows| {
+        let visible = rows
+            .iter()
+            .any(|(id, values)| *id == doc_id && *values == title_document_values("Join Visible"));
+        visible.then_some(rows)
+    })
+    .await;
+    assert_eq!(bob_rows.len(), 1);
+
+    let dave_rows = wait_for_query(
+        &dave,
+        query,
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "dave does not see joined grant without matching membership",
+        Some,
+    )
+    .await;
+    assert!(dave_rows.is_empty());
+
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// A chained equality must read B.code, not the same-named A.code.
+/// Bob matches B and may read; Dave matches only A and must remain denied.
+#[tokio::test]
+async fn exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            true,
+        ))
+        .await;
+}
+
+/// The same source routing must work without an outer-row correlation.
+#[tokio::test]
+async fn uncorrelated_exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            false,
+        ))
+        .await;
+}
+
+async fn exists_rel_chained_join_preserves_operand_sources_inner(correlated: bool) {
+    let relation = pe::table("grants")
+        .alias("a")
+        .join(
+            pe::table("links").alias("b"),
+            pe::rel::column("a", "group_slug"),
+            pe::rel::column("b", "group_slug"),
+        )
+        .join(
+            pe::table("members").alias("c"),
+            pe::rel::column("b", "code"),
+            pe::rel::column("c", "code"),
+        )
+        .where_(pe::rel::eq_session(
+            pe::rel::column("c", "user_id"),
+            "claims.sub",
+        ));
+    let relation = if correlated {
+        relation.where_(pe::rel::eq_outer(pe::rel::column("a", "document_id"), "id"))
+    } else {
+        relation
+    };
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_read().where_(pe::exists(relation));
+                p.allow_insert().always();
+            }),
+        ))
+        .table(
+            TableSchema::builder("grants")
+                .fk_column("document_id", "documents")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("links")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("members")
+                .column("code", ColumnType::Text)
+                .column("user_id", ColumnType::Text),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let doc = create_title_document(&admin, "Scoped chain").await;
+    admin
+        .insert(
+            "grants",
+            jazz::row_input!("document_id" => doc, "group_slug" => "eng", "code" => "wrong"),
+        )
+        .expect("insert grant");
+    admin
+        .insert(
+            "links",
+            jazz::row_input!("group_slug" => "eng", "code" => "correct"),
+        )
+        .expect("insert link");
+    admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "correct", "user_id" => super::BOB_ID),
+        )
+        .expect("insert bob");
+    let (_, _, tx) = admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "wrong", "user_id" => super::DAVE_ID),
+        )
+        .expect("insert dave");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx.expect("committed insert")]).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+    let rows = wait_for_rows(
+        &bob,
+        Query::from("documents"),
+        "Bob matches the joined source",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == doc
+                && rows[0].1 == title_document_values("Scoped chain"))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    let rows = wait_for_query(
+        &dave,
+        Query::from("documents"),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "matching only the root code must not grant access",
+        Some,
+    )
+    .await;
+    assert!(rows.is_empty());
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Invalid join scopes must be rejected before executing authorization queries.
+#[tokio::test]
+async fn exists_rel_join_rejects_invalid_operand_scopes() {
+    for (left, right, expected) in [
+        ("missing", "memberships", "unknown scope 'missing'"),
+        ("grants", "missing", "unknown scope 'missing'"),
+    ] {
+        assert_join_policy_rejected(
+            pe::exists(
+                pe::table("document_grants")
+                    .alias("grants")
+                    .join(
+                        pe::table("group_memberships").alias("memberships"),
+                        pe::rel::column(left, "group_slug"),
+                        pe::rel::column(right, "group_slug"),
+                    )
+                    .where_(pe::rel::eq_outer(
+                        pe::rel::column("grants", "document_id"),
+                        "id",
+                    )),
+            ),
+            expected,
+        )
+        .await;
+    }
+    assert_join_policy_rejected(
+        pe::exists(pe::table("document_grants").alias("grants").join(
+            pe::table("group_memberships").alias("first").join(
+                pe::table("group_memberships").alias("second"),
+                pe::rel::column("first", "group_slug"),
+                pe::rel::column("second", "group_slug"),
+            ),
+            pe::rel::column("grants", "group_slug"),
+            pe::rel::column("second", "group_slug"),
+        )),
+        "join target must be the right relation's root source",
+    )
+    .await;
+    assert_join_policy_rejected(
+        pe::exists(
+            pe::table("document_grants")
+                .alias("same")
+                .join(
+                    pe::table("group_memberships").alias("same"),
+                    "group_slug",
+                    "group_slug",
+                )
+                .join(
+                    pe::table("group_memberships").alias("third"),
+                    pe::rel::column("same", "group_slug"),
+                    pe::rel::column("third", "group_slug"),
+                ),
+        ),
+        "scope 'same' is ambiguous",
+    )
+    .await;
+}
+
+/// Verifies that join queries apply `SELECT` policies to rows from joined
+/// tables, not only to the base table.
+#[tokio::test]
+async fn join_query_applies_policy_filter_on_joined_table() {
+    tokio::task::LocalSet::new()
+        .run_until(join_query_applies_policy_filter_on_joined_table_inner())
+        .await;
+}
+
+async fn join_query_applies_policy_filter_on_joined_table_inner() {
+    let schema = joined_table_select_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "join_users", READY_TIMEOUT).await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "join_users",
+        READY_TIMEOUT,
+    )
+    .await;
+    let bob =
+        connect_ready_user(&server, &schema, super::BOB_ID, "join_users", READY_TIMEOUT).await;
+
+    create_join_policy_user(&admin, super::ALICE_ID).await;
+    create_join_policy_user(&admin, super::BOB_ID).await;
+    create_join_policy_post(&admin, super::ALICE_ID, "Alice post").await;
+    create_join_policy_post(&admin, super::BOB_ID, "Bob post").await;
+
+    let query = Query::from("join_users").flat_join(
+        "join_posts",
+        "join_users.name",
+        "join_posts.owner_name",
+    );
+
+    for (client, owner, title) in [
+        (&alice, super::ALICE_ID, "Alice post"),
+        (&bob, super::BOB_ID, "Bob post"),
+    ] {
+        let rows = wait_for_query_results(
+            client,
+            query.clone(),
+            jazz::tools::ReadTier::Remote,
+            QUERY_TIMEOUT,
+            "reader sees only the joined row allowed by the posts policy",
+            |rows| (rows.len() == 1).then_some(rows),
+        )
+        .await;
+        assert_eq!(
+            rows[0].get("join_users.name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.owner_name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.title"),
+            Some(&Value::Text(title.into()))
+        );
+    }
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that the canonical hop-shaped `policy.exists(relation)` relation
+/// works end to end for reads.
+///
+/// Actors: bob has the matching group membership, dave has a non-matching
+/// membership, and admin seeds the document plus grant rows.
+///
+/// ```text
+/// admin ──grant doc→eng────────► server
+/// bob ───hop via membership────► query sees row
+/// dave ──hop via sales─────────► query sees nothing
+/// ```
+#[tokio::test]
+async fn exists_rel_hop_grants_and_denies_correctly() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_hop_grants_and_denies_correctly_inner())
+        .await;
+}
+
+async fn exists_rel_hop_grants_and_denies_correctly_inner() {
+    let schema = exists_hop_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+
+    let doc_id = create_title_document(&admin, "Hop Visible").await;
+    // A membership in the granted group must not expose unrelated documents.
+    create_title_document(&admin, "No Grant").await;
+    create_group_membership(&admin, super::BOB_ID, "eng").await;
+    create_group_membership(&admin, super::DAVE_ID, "sales").await;
+    create_document_grant(&admin, doc_id, "eng").await;
+
+    let query = Query::from("documents");
+    let bob_rows = wait_for_rows(&bob, query.clone(), "bob sees hop grant", |rows| {
+        let visible = rows
+            .iter()
+            .any(|(id, values)| *id == doc_id && *values == title_document_values("Hop Visible"));
+        visible.then_some(rows)
+    })
+    .await;
+    assert_eq!(bob_rows.len(), 1);
+
+    let dave_rows = wait_for_query(
+        &dave,
+        query,
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "dave does not see hop grant without matching membership",
+        Some,
+    )
+    .await;
+    assert!(dave_rows.is_empty());
+
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Verifies that mixed row predicates, claims, `EXISTS`, and `INHERITS` compose
+/// as a true conjunction rather than accidentally widening to allow-all.
+///
+/// Actors: alice reads with two different claim sets, bob owns the hidden
+/// folder, and admin seeds rows that each fail exactly one clause.
+///
+/// ```text
+/// admin ──seed visible + near-miss rows──────────────► server
+/// alice(claims=eng) ─────────────────────────────────► sees only fully authorized row
+/// alice(claims=sales) ───────────────────────────────► sees only sales-matching row
+/// ```
+#[tokio::test]
+async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
+    tokio::task::LocalSet::new()
+        .run_until(mixed_predicates_claims_exists_and_inherits_fail_closed_inner())
+        .await;
+}
+
+async fn mixed_predicates_claims_exists_and_inherits_fail_closed_inner() {
+    async fn create_folder(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
+        client
+            .insert(
+                "folders",
+                jazz::row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
+            )
+            .expect("create folder")
+            .0
+    }
+
+    async fn create_complex_document(
+        client: &JazzClient,
+        team_slug: &str,
+        published: bool,
+        title: &str,
+        folder_id: Option<ObjectId>,
+    ) -> ObjectId {
+        client
+            .insert(
+                "documents",
+                jazz::row_input!(
+                    "team_slug" => team_slug.to_string(),
+                    "published" => published,
+                    "title" => title.to_string(),
+                    "folder_id" => folder_id,
+                ),
+            )
+            .expect("create complex document")
+            .0
+    }
+
+    async fn create_document_flag(client: &JazzClient, document_id: ObjectId, flag: &str) {
+        client
+            .insert(
+                "document_flags",
+                jazz::row_input!("document_id" => document_id, "flag" => flag.to_string()),
+            )
+            .expect("create document flag");
+    }
+
+    let schema = mixed_complex_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice_eng = connect_ready_claims(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        json!({ "team_slugs": ["eng"] }),
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
+    let alice_sales = connect_ready_claims(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        json!({ "team_slugs": ["sales"] }),
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
+
+    let alice_folder = create_folder(&admin, super::ALICE_ID, "Alice Folder").await;
+    let bob_folder = create_folder(&admin, super::BOB_ID, "Bob Folder").await;
+
+    let visible = create_complex_document(&admin, "eng", true, "Visible", Some(alice_folder)).await;
+    create_document_flag(&admin, visible, "allow").await;
+
+    let wrong_team =
+        create_complex_document(&admin, "sales", true, "Wrong Team", Some(alice_folder)).await;
+    create_document_flag(&admin, wrong_team, "allow").await;
+
+    let unpublished =
+        create_complex_document(&admin, "eng", false, "Unpublished", Some(alice_folder)).await;
+    create_document_flag(&admin, unpublished, "allow").await;
+
+    let wrong_folder =
+        create_complex_document(&admin, "eng", true, "Wrong Folder", Some(bob_folder)).await;
+    create_document_flag(&admin, wrong_folder, "allow").await;
+
+    let missing_flag =
+        create_complex_document(&admin, "eng", true, "Missing Flag", Some(alice_folder)).await;
+
+    let query = Query::from("documents");
+    let eng_rows = wait_for_rows(
+        &alice_eng,
+        query.clone(),
+        "eng claim sees only fully authorized row",
+        |rows| {
+            let matches_visible = rows.iter().any(|(id, values)| {
+                *id == visible
+                    && *values
+                        == complex_document_values("eng", true, "Visible", Some(alice_folder))
+            });
+            matches_visible.then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(
+        eng_rows.len(),
+        1,
+        "eng claim should see only the fully authorized document"
+    );
+    assert!(eng_rows.iter().all(|(id, _)| {
+        *id != wrong_team && *id != unpublished && *id != wrong_folder && *id != missing_flag
+    }));
+
+    let sales_rows = wait_for_rows(
+        &alice_sales,
+        query,
+        "sales claim sees the sales-scoped row only",
+        |rows| {
+            let matches_sales = rows.iter().any(|(id, values)| {
+                *id == wrong_team
+                    && *values
+                        == complex_document_values("sales", true, "Wrong Team", Some(alice_folder))
+            });
+            matches_sales.then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(
+        sales_rows.len(),
+        1,
+        "sales claim should see only the sales document"
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice_eng.shutdown().await.expect("shutdown alice eng");
+    alice_sales.shutdown().await.expect("shutdown alice sales");
+    server.shutdown().await;
+}
+
+/// Verifies an update's `WITH CHECK` permission evaluates `EXISTS` policies
+/// before writing the update, thus allowing to implement per-field update policies.
+///
+/// Actors: admin creates the chat, alice submits the allowed and rejected
+/// updates, and observer reads the server-authoritative state.
+///
+/// ```text
+/// admin ──create chat(created_by=alice,is_public=false)──► server
+/// alice ──update name────────────────────────────────────► server ──✓ stored metadata still matches
+/// alice ──update is_public=true──────────────────────────► server ──✗ no stored row matches new metadata
+/// observer ──GlobalServer query────────────────────────────► sees renamed chat, protected fields unchanged
+/// ```
+#[tokio::test]
+async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
+    tokio::task::LocalSet::new().run_until(update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes_inner()).await;
+}
+
+async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes_inner()
+ {
+    let schema = exists_update_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "chats", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "chats", READY_TIMEOUT).await;
+    let observer =
+        connect_ready_user(&server, &schema, super::OBSERVER_ID, "chats", READY_TIMEOUT).await;
+
+    let query = Query::from("chats");
+    let chat_id = create_chat(&admin, "General", super::ALICE_ID, false).await;
+
+    wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees the chat before updating it",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("General", super::ALICE_ID, false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "observer sees the initial chat",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("General", super::ALICE_ID, false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    let transaction_id = alice
+        .update(
+            "chats",
+            chat_id,
+            row_changes([("name", "Project Room".into())]),
+        )
+        .expect("chat name update should satisfy same-table EXISTS with_check")
+        .expect("chat name update should commit immediately");
+    jazz_testkit::wait_for_edge_txs(&alice, &[transaction_id]).await;
+
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "observer sees the accepted chat name update",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("Project Room", super::ALICE_ID, false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    let transaction_id = alice.update("chats", chat_id, row_changes([("is_public", true.into())]));
+    let protected_update = match transaction_id {
+        Ok(Some(transaction_id)) => {
+            alice
+                .wait_for_transaction(transaction_id, DurabilityTier::GlobalServer)
+                .await
+        }
+        Ok(None) => panic!("chat update should commit immediately"),
+        Err(err) => Err(err),
+    };
+    assert!(
+        protected_update.is_err(),
+        "is_public change should be rejected by same-table EXISTS with_check"
+    );
+
+    let rows_after_rejection = wait_for_query(
+        &observer,
+        query,
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(3),
+        "observer sees unchanged protected fields after rejected update",
+        |rows| {
+            let protected_fields_unchanged = rows.iter().any(|(id, values)| {
+                *id == chat_id && *values == chat_values("Project Room", super::ALICE_ID, false)
+            });
+            let rejected_values_absent = rows.iter().all(|(id, values)| {
+                *id != chat_id || *values != chat_values("Project Room", super::ALICE_ID, true)
+            });
+
+            (protected_fields_unchanged && rejected_values_absent).then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows_after_rejection.len(), 1);
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that a write rejected by a correlated `EXISTS` update policy
+/// reconciles back to the server-accepted state and emits no subscriber update.
+///
+/// Actors: alice is the allowed editor, bob attempts the rejected update,
+/// observer holds the subscription, and admin seeds the editor row.
+///
+/// ```text
+/// admin ──grant edit to alice──► server
+/// bob ──update title───────────► server ──✗ reject
+/// observer ──GlobalServer query──► sees original row, no update delta
+/// ```
+#[tokio::test]
+async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_state() {
+    tokio::task::LocalSet::new()
+        .run_until(
+            rejected_optimistic_exists_updates_reconcile_to_server_authoritative_state_inner(),
+        )
+        .await;
+}
+
+async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_state_inner() {
+    let schema = exists_update_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let observer = connect_ready_user(
+        &server,
+        &schema,
+        super::OBSERVER_ID,
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
+
+    let query = Query::from("documents");
+    let mut observer_stream = observer
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe observer");
+    let mut observer_log = Vec::new();
+
+    let doc_id = create_title_document(&admin, "Original").await;
+    admin
+        .insert(
+            "document_editors",
+            jazz::row_input!("document_id" => doc_id, "user_id" => super::ALICE_ID),
+        )
+        .expect("create document editor");
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees initial document",
+        |log| has_added_id(log, doc_id),
+    )
+    .await;
+
+    wait_for_rows(
+        &bob,
+        query.clone(),
+        "bob sees readable document before rejected update",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| *id == doc_id && *values == title_document_values("Original"))
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    bob.update(
+        "documents",
+        doc_id,
+        row_changes([("title", "Hacked".into())]),
+    )
+    .expect("optimistic local exists update");
+
+    let rows_after_update = observer
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("GlobalServer query after rejected exists update");
+    assert!(
+        rows_after_update
+            .iter()
+            .any(|(id, values)| *id == doc_id && *values == title_document_values("Original")),
+        "rejected EXISTS update must not persist at GlobalServer: rows={rows_after_update:?}"
+    );
+
+    collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_updated(&observer_log, doc_id),
+        "rejected EXISTS update must not be broadcast: log={observer_log:?}"
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}

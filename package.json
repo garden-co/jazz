@@ -1,0 +1,53 @@
+{
+  "license": "MIT",
+  "scripts": {
+    "changeset": "changeset",
+    "format": "oxfmt --ignore-path .oxfmtignore .",
+    "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
+    "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
+    "test:tooling": "sh dev/scripts/clippy-staged.test.sh && bash dev/scripts/publish-crates-alpha.test.sh",
+    "test:focused-rust": "bash dev/gates/test/dev-t.test.sh",
+    "test:stack-preflight": "bash dev/gates/test/require-clean-worktree.test.sh",
+    "test:vercel-preview-skip": "node --test dev/scripts/skip-new-core-vercel-preview.test.mjs",
+    "test:turbo-cache-inputs": "node dev/gates/test/turbo-cache-inputs.test.mjs",
+    "test:tooling:real": "sh dev/scripts/clippy-staged.real.test.sh",
+    "test:ci-workflow": "node --test dev/gates/test/run-canonical.test.mjs dev/scripts/inspector-provenance.test.mjs dev/scripts/inspector-prebuilt.test.mjs dev/artifacts/release-branch-policy.test.mjs dev/gates/test/invariant-registry.test.mjs dev/scripts/resolve-inspector-deployment.test.mjs dev/gates/test/test-wasm-delivery.test.mjs dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ensure-correctness-artifacts.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/rn-packages.test.mjs dev/artifacts/verify-rn-pack-size.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "ensure:rust-toolchain": "rustup target add wasm32-unknown-unknown && (wasm-pack --version >/dev/null 2>&1 || cargo install wasm-pack@0.13.1 --locked)",
+    "build:vercel-docs": "pnpm --filter docs build",
+    "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
+    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --only && node dev/artifacts/stage-native-fingerprints.mjs --workspace && turbo run build --filter=!jazz-wasm --filter=!jazz-napi --only",
+    "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm --only && turbo run build --filter=jazz-napi --only && node dev/artifacts/stage-native-fingerprints.mjs --workspace && turbo run build --filter=./packages/** --only && node dev/artifacts/verify-starter-e2e-artifacts.mjs",
+    "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --only && node dev/artifacts/stage-native-fingerprints.mjs --workspace && turbo run build --filter=jazz-tools --only",
+    "build:correctness-artifacts": "node dev/gates/build-test-artifacts.mjs",
+    "test:typescript-consumers": "node dev/gates/run-ts-consumers.mjs",
+    "artifacts:unlock": "node dev/gates/build-test-artifacts.mjs unlock",
+    "build:all": "pnpm build",
+    "release:version": "changeset version",
+    "release:version:alpha": "changeset version --snapshot alpha",
+    "release:publish": "changeset publish",
+    "release:publish:alpha": "changeset publish --tag alpha",
+    "test": "turbo run test --only",
+    "bench:realistic:update-history": "node dev/benchmarks/realistic/update_history.mjs",
+    "bench:realistic:build-site": "node dev/benchmarks/realistic/build_site.mjs",
+    "bench:realistic:render": "node dev/benchmarks/realistic/render_deltas.mjs",
+    "bench:realistic:export-criterion": "node dev/benchmarks/realistic/export_criterion.mjs",
+    "bench:realistic:profile-browser": "node dev/benchmarks/realistic/profile_browser.mjs",
+    "postinstall": "lefthook install"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.8",
+    "lefthook": "^2.0.15",
+    "next": "catalog:default",
+    "oxfmt": "^0.27.0",
+    "oxlint": "^1.42.0",
+    "pkg-pr-new": "^0.0.75",
+    "playwright": "^1.58.2",
+    "turbo": "^2.0.0",
+    "typescript": "catalog:default",
+    "yaml": "2.8.2"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@10.14.0"
+}

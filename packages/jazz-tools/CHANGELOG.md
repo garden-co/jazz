@@ -1,0 +1,1028 @@
+# jazz-tools
+
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- 194df87: Fix live synchronization of deleted rows protected by account-based ownership permissions, so other clients remove the deleted row without requiring a reload.
+- 5245e76: Preserve the source ordering and duplicate references when hydrating forward array foreign keys, instead of deduplicating and sorting the referenced rows by ID. Support reverse UUID-array correlations in array subqueries.
+
+  [PR #2865](https://github.com/garden-co/jazz/pull/2865).
+
+- c76144e: Persist declared-index updates with their base publication even while a subscription waits for missing content.
+- 3c228b4: Avoid copying the complete previous supporting-fact set when receiving a subscription snapshot; only changed peer facts are cloned into the local delta.
+- e897992: Build complete subscription supporting-row manifests from borrowed maintained facts without constructing an intermediate owned fact set.
+- bf942bf: Reduce validation overhead when reading inline scalar values without changing their storage encoding.
+- 9c6c465: Propagate browser worker auth-update failures to readiness and recover them on an explicit reconnect.
+- 72fad2f: Avoid full-table reads when staging browser transaction updates, and prevent failed write-merge reads from leaving patches staged for a later commit.
+- b082ff8: Reclaim obsolete IndexedDB pages during writes under exclusive ownership, and safely retire browser runtime storage handles during schema changes and reconnects. Existing unused pages are not automatically collected.
+- 9d69a5b: Fix browser startup freezing when restoring pending uploads requires a cold IndexedDB read. Recovery now yields to asynchronous storage instead of blocking its callbacks.
+- 69e26c2: Reduce browser storage lookup overhead by copying only the requested row value instead of unrelated values in the same page.
+- dd491a8: Avoid opening a competing browser worker generation when runtime startup is slow; preserve a bounded initialization deadline and explicit worker handoff.
+- f8ace50: Reject intentional WebSocket closes before server hello.
+- 2cdb74e: Reject browser reconnect readiness waiters after terminal worker failure.
+- 06314ba: Keep native transport credentials mode-exclusive across live auth transitions.
+- fa458a8: Serialize native transport retirement before admitting replacements.
+- 6fcf012: Reduce CPU work and allocations when validating nested records during local query delivery, without changing storage encoding or accepted values.
+- 0ad46d9: Keep catalogue publications equivalent across table declaration order, so persistent clients can reopen after multi-table migrations against a running authority.
+- 5245e76: Move subscription result buffering into the Rust core and remove redundant TypeScript query preparation and row caches. Preserve scoped relation reads and wait for complete recursive query results before publishing them. Direct binding consumers must adapt to removal of the Rust–TypeScript `prepareQuery` API.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- 80fe6b1: Add regression coverage for allowed and denied inserts governed by correlated relationship policies, including server validation of optimistic writes.
+- 3833c7c: Handle comparisons with null correctly inside correlated relationship policies, and cover allowed and denied deletes under those policies.
+- 178a4b8: Add regression coverage for correlated relationship policies on updates and reverse-relationship reads, including allowed and denied operations.
+- cc77ea3: Automatically rebuild declared indexes once when opening older local databases, repairing missing or stale entries while preserving primary records and pending unsynced writes.
+- a73288a: Stop deferred subscription work from rearming server ticks after activity has ended.
+- 05eea99: Fix browser subscriptions remaining stale after a transaction commits with deferred local persistence.
+- fe80d90: Reduce the work needed to recover deletion and restore witnesses when delivering locally cached rows to a subscriber, using the existing current-row indexes directly.
+- 5245e76: Register mutation waits with the Rust runtime before the upstream connection is ready, so writes made during connection startup can still settle correctly.
+
+  [Implementation](https://github.com/garden-co/jazz/commit/d084613778f01f213490a4b6f1826d8ad0cad118).
+
+- 5b64a9d: Avoid scanning every sibling version in a large transaction when validating an existing exact parent row. Preserve branch, layer, identity and incomplete-parent checks.
+- bf79ef4: Keep averages of large finite numbers finite when their intermediate sum overflows, while preserving cancellation, subscription updates and retractions.
+- b8a8d0d: Fix updates that could fail to settle after concurrent local writes by stopping redundant merges once only one underlying edit remains.
+- 82dd0e6: Fix migration stub generation for bare UUID columns, including nullable UUIDs in newly added tables.
+- 42eb629: Keep overlapping subscription hydration pending until earlier shared-node snapshots are installed, avoiding internal subscription failures while those dependencies resolve.
+- 5245e76: Copy immutable version-row wire bytes in bulk instead of rebuilding their fields during synchronization, preserving the existing encoded values.
+
+  [PR #2923](https://github.com/garden-co/jazz/pull/2923).
+
+- f93c6e0: Reduce subscription publication work for small changes by tracking changed source facts across drains and retries.
+- 5245e76: Keep standalone Node, browser, and React Native subscriptions loading until the first complete local result is ready, avoiding a premature empty snapshot when matching rows are already stored. Browser and React Native foreground databases wait for their persistent worker or relay to supply the initial inputs. Genuinely empty results still finish loading without waiting for server sync, and initialized subscriptions do not return to loading on disconnect. Preserve joined-row identities when resetting subscription inputs.
+
+  [PR #2986](https://github.com/garden-co/jazz/pull/2986).
+
+- b3d67b8: Keep Inspector admin secrets out of persisted connection state, generated configuration, and URL fragments.
+- 0afb098: Keep other clients responsive when a loopback WebSocket client is backpressured, while preserving message delivery order.
+- 5245e76: Reduce work for maintained query updates by deriving unbounded-window membership from changed records and constructing root-position maps only for outputs that use them. Reuse proven equivalent witness payloads across maintained roles while keeping incompatible executions isolated.
+
+  [PR #2921](https://github.com/garden-co/jazz/pull/2921), [PR #2922](https://github.com/garden-co/jazz/pull/2922), [Witness reuse implementation](https://github.com/garden-co/jazz/commit/611b30c4a8b9d0788a0d39d514b8002da529c48a).
+
+- a54c7e6: Preserve authored transaction identity when a persistent owner relays reads across schema migrations. Old and new schema reads retain original row bytes and authored metadata, and renamed-table witnesses retain their exact branch.
+- 020bd39: Support nested correlated relationship checks inside permission policies. Private dependency rows can authorize an operation without becoming readable to the caller.
+- d064481: Fix deployment of policies with correlated `exists` clauses nested in boolean branches.
+- 22d04ef: Allow persistent clients that missed a published migration while offline to reopen and fetch the new schema catalogue without an application-managed old-schema bootstrap. Preserve cached rows and pending edits, and keep unpublished schemas unavailable.
+- 5825187: Recover permissions publication when a schema migration is already durable but missing from the running server. Reject missing or ambiguous lineage before advancing the permissions head, so publication can be retried safely.
+- 5f5d279: Improve first sync and sequential writes by maintaining physical supporting rows directly and sending an initial snapshot followed by changes to that set.
+
+  **Sync protocol upgrade:** this release uses wire protocol v2 and cannot sync with v1 peers. Upgrade clients, native runtimes, and self-hosted Edge/Core servers together; hosted clients need a compatible server deployment.
+
+  Subscription membership and resume cursors are now kept in memory. After a process restart, remote reads obtain a fresh supporting snapshot; local-first reads can still use eligible persisted data. Existing subscription caches and cursors are discarded automatically on upgrade, while application rows, transaction history, pending local writes, and the catalogue are preserved. No manual local-storage reset is required.
+
+  Keep pending reads progressing across in-process catalogue rebuilds and cache eviction without reusing invalidated subscription answers. Local-first foreground reads continue to accept a fresh answer from their local owner while offline.
+
+  Fix native foreground reads that could stall when a refreshed subscription needed to fetch a missing row version. Host-admitted native relays now install their session scope and request the matching authenticated upstream link, preserving isolation between sessions and support for reopening existing account databases.
+
+  Bind native permission advice to the admitted foreground identity and claims. Claims changes cancel outdated advice, and server receipt revisions are no longer confused with local claims counters.
+
+- 64a449b: Avoid synchronous transaction preflight reads that can block the host while queued database work holds the owner lock.
+- e4460da: Reject null defaults for required columns during schema validation, before publishing the schema.
+- 5245e76: Require all non-nullable insert fields, including array fields that previously defaulted to `[]`. Report upsert input validation failures through `onMutationError` and the write handle’s `wait()`; transaction failures are available through `commit().wait()`. Missing upsert fields are validated asynchronously because they may be valid for an update but invalid for a new row.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- b5692a6: Preserve nullable parent correlation keys when required nested includes filter rows, avoiding collector descriptor mismatches without changing required-match eligibility.
+- 5245e76: Reject explicit table-level `id` columns in schema definitions, including at TypeScript type-check time. Every table uses its automatically generated UUID `id` as its row identity; remove authored `id` declarations before upgrading.
+
+  [PR #2873](https://github.com/garden-co/jazz/pull/2873).
+
+- b6eda5a: Reuse the complete supporting-row set during subscription publication bookkeeping instead of reconstructing it again.
+- 5ebd45f: Reuse vacant server session slots while rejecting stale handles from previous identities.
+- 409289a: Deliver local React Native writes to foreground subscriptions immediately and refresh policy-dependent subscriptions when membership data changes.
+- 681f5c9: Rebuild catalogue runtimes safely while query hydration or auxiliary chunk reads are pending, and defer catalogue ingress until in-flight publications settle.
+- 3026901: Keep replacement subscriptions live across catalogue rebuilds by scoping Groove subscription handles to their creating runtime.
+- 2359534: Avoid repeatedly reading transaction status for writes already acknowledged locally while waiting for server confirmation, improving offline bulk-write performance.
+- 13e96f8: Compare incoming supporting snapshots as sorted vectors without building temporary fact trees.
+- a26a596: Reduce cold-load and large-transaction overhead by avoiding repeated ancestry scans, record conversions, and unused query payloads. Preserve complete subscription results when recursive evaluation or data hydration resumes across runtime turns.
+
+  Check subscription completeness against its typed schema view, including views registered on an initially empty owner.
+
+  Keep provisional enum registries coherent when adopting the authority catalogue, preserving offline enum values and preventing provenance failures on subsequent reopen.
+
+- 678c2ed: Reduce transaction-status polling cost by reading fate and durability fields without decoding unrelated transaction payloads. Preserve pending-persistence and rejection checks.
+- 5245e76: Support permission policies with `EXISTS` checks that do not reference the outer row, such as checking whether the current user has an admin grant. Empty grant sets deny access, multiple matching grants do not duplicate results, and removing the last grant revokes existing subscriptions.
+
+  [PR #2880](https://github.com/garden-co/jazz/pull/2880).
+
+- Updated dependencies [5245e76]
+- Updated dependencies [060083d]
+  - jazz-wasm@2.0.0-alpha.55
+  - jazz-rn@2.0.0-alpha.55
+
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- bc70549: Jazz now runs on Groove, a new low-level database engine built around incremental view maintenance. It shares work between similar query subscriptions and provides a foundation for improving correctness and performance. This release remains an alpha: please report anything that breaks or feels slow.
+
+  ### Breaking storage change
+
+  Alpha.54 changes the storage format without automatic migration from alpha.53. If you have existing production data, contact us for migration help before upgrading. For a fresh start, create a new Jazz Cloud app, or use the alpha.54 CLI with fresh server storage when self-hosting. Future storage-format changes will include automatic migration.
+
+  ### Four major changes
+
+  **Simpler read tiers.** Choose `local-first` for immediate local results with background sync; `remote-if-possible` for remotely confirmed state when online, local fallback when offline, and immediate local writes; or `remote` for remotely confirmed state only, including confirmation of local writes before they appear.
+
+  **Clearer account lifecycle.** Configure your account and client once with `createJazzSession`. The session manages auth transitions, graceful shutdown and client replacement. Framework adapters expose that state without app-owned lifecycle plumbing. External authentication can use `loginOrRegisterJWT`; explicit linking remains available for attaching a fresh external identity to an existing account. Backends use the same session API with `initial: { backendSecret }` or `becomeBackend({ backendSecret })`.
+
+  **Build-your-own branching.** Define branched table views with `branchBy` columns and explicit head/base view options. Branch identifiers can be strings or references to your own branch table, letting your app define branch metadata, workflows and row-level permissions.
+
+  **Large values are ordinary columns.** Store files and streams in `s.bytes()`, large JSON documents in `s.json()`, and text in `s.string()`. Read complete values or stream supported ranges and JSON subpaths; update them with byte patches, appends, JSON edits or string splices. Content-based chunking in a Prolly Tree makes these operations efficient while retaining ordinary column permissions and query semantics. JSON and rich-text merge strategies are planned for a later release.
+
+  ### API migration checklist
+  - Replace `Db.subscribeAll` with `Db.subscribe` for complete current results.
+  - React and React Native `useAll` now return `{ data, isLoading, error }`; `useAllSuspense` still returns rows.
+  - Replace `localUpdates` and `propagation` options with read-tier selection.
+  - Move account/client lifecycle handling to `createJazzSession` and the framework adapters. Linking happens outside contexts; the session gracefully shuts down the old client and syncs pending writes before replacing it.
+  - `$createdBy` and `$updatedBy` are non-null `{ account, identity: { issuer, subject } }` values. Use `.account` for ownership comparisons. SYSTEM authorship uses a reserved account and issuer, with the originating node as subject.
+  - Direct `jazz-wasm` consumers must await `acceptSubscriber` and `acceptSubscriberWithSelfSignedProof`.
+
+  ### Reliability improvements
+
+  This release also improves browser and React Native persistence, offline recovery and reconnect behavior; query correctness across relations, aggregates, branches and permissions; and authentication and framework lifecycles. It includes fixes for large JSON relation values, native runtime packaging and generated starter apps.
+
+- Updated dependencies [bc70549]
+  - jazz-wasm@2.0.0-alpha.54
+  - jazz-rn@2.0.0-alpha.54
+
+## 2.0.0-alpha.53
+
+### Major Changes
+
+- 891b264: BREAKING CHANGE: make `jazz-tools/dev` and `jazz-tools/testing` catalogue deploy helpers accept schema, permissions, and migrations JavaScript objects directly instead of project file paths.
+
+### Patch Changes
+
+- f072cb0: feat: the localStorage key used by React's `useLocalFirstAuth` helper is now configurable, to support multiple Jazz apps on the same origin
+- 397f84d: Add `Db.disconnect()` and `Db.reconnect()` for temporarily pausing and resuming sync without shutting down local storage.
+- 9bee23f: The postMessage "devtools protocol" bridge and the separate browser-extension/devtools build are deleted now that the inspector overlay talks to the data layer through its own worker connection: `attachDevTools`, `createExtensionJazzClient`, `createEmbeddedJazzClient`, and the `DevToolsAttachment` type are no longer exported.
+- 27f9ced: Add an in-app inspector overlay to the Jazz dev plugins. During development the Vite, SvelteKit, and Next plugins now mount a floating toggle (or press `Alt+Shift+J`) that opens the embedded Jazz inspector docked at the bottom of your app — no separate window or setup. It's on by default whenever the dev plugin is in use and is dropped entirely from production builds. `jazz-inspector` now ships as a dependency of `jazz-tools`, so it no longer needs to be installed separately.
+- 2d5f287: The embedded inspector overlay now connects to the data layer through its **own worker connection** instead of the postMessage "devtools protocol" bridge. The overlay reads the host app's connection config from a same-origin `window.__jazzInspectorHost` handle and **joins the host's local store** — it reuses the host's IndexedDB namespace, broker SharedWorker URL, and identity, so it sees the host's actual local data (including unsynced local-only rows) and works offline; no `serverUrl` is required. It receives the host's active subscriptions via a one-way push for Live Query.
+- bc74a87: Avoid firing a duplicate immediate tick for auto-committed direct writes. Insert, update, upsert, delete, and restore ticked both inside `commit_batch` and unconditionally afterwards; the follow-up tick now only fires when the write does not auto-seal, halving scheduler pressure during bursts of bare writes.
+- 42e77fd: Allow `createDb({ driver: { type: "memory" } })` to create a standalone in-memory database without connecting to a sync server.
+- Updated dependencies [bc74a87]
+  - jazz-rn@2.0.0-alpha.53
+  - jazz-wasm@2.0.0-alpha.53
+
+## 2.0.0-alpha.52
+
+### Patch Changes
+
+- 6284805: The browser broker SharedWorker is now shipped as self-contained, bundled ESM. It was previously unbundled with bare `../runtime/*.js` imports, and because its `new SharedWorker(...)` call is indirected past bundler worker-detection, Turbopack, webpack and Vite copied it verbatim and its imports 404'd on load — crashing every Jazz app under `next dev` / `next build` and `vite build` with "Browser broker SharedWorker failed to start". (`vite dev` masked it.) Fixing it in the package build covers all frameworks.
+  </content>
+- 97751b0: Make `db.one(...)` execute with a root query limit of one instead of fetching every matching row and discarding all but the first.
+- a9c0cf4: Fix `deleteClientStorage()` hanging forever when called on a persistent browser Db before any table or query has been used.
+- 57d2eb6: Add a `merge("g-set")` strategy for non-nullable array columns. Concurrent writes converge to the grow-only union of every replica's elements, deduplicated and sorted into a canonical, byte-identical order, so an element written by one replica is never dropped by a concurrent write that never saw it.
+- fc12a85: Removed `TestingServer` and `pushSchemaCatalogue` from `jazz-tools/testing` exports and consolidated `startLocalJazzServer` and `deploy` as the canonical way of starting a Jazz sync server and publishing schema changes.
+- a454f75: Add a `jazz.server.active_websockets` OpenTelemetry gauge reporting the server's current inbound WebSocket connection count. It is exported over OTLP only when the crate is built with the `otel` feature and `OTEL_EXPORTER_OTLP_ENDPOINT` is set; builds without the feature are unaffected.
+- 03dcdbb: Add a `jazz-tools/shared` entry point exposing the framework-agnostic utilities the React, Svelte and Vue bindings use to turn a live query into a reactive, in-place-updated result set: `applyDelta`, `reconcileArray`, `RowChangeKind`, and the supporting types (`SubscriptionDelta`, `RowDelta`, `QueryBuilder`, `QueryOptions`, and the orchestrator's `SubscriptionsOrchestrator` / `CacheEntryHandle` / `UseAllState` shapes). The in-repo bindings now consume this shared surface so an external author can build their own binding (e.g. a signals-based `useAllSignal`) on the same utilities.
+
+  This is an advanced, use-at-your-own-risk surface — the internals our framework bindings are built on, surfaced for reuse. It is not covered by semver; the orchestrator/cache-entry/delta shapes may change between releases, so pin a version if you depend on it.
+
+- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one IndexedDB-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
+
+  **Breaking change — browser support:** persistent browser mode now requires `SharedWorker`, `MessageChannel`, and Web Locks support. Browsers or embedded webviews missing those capabilities will reject `createDb()`/`createJazzClient()` startup for persistent storage instead of using the previous BroadcastChannel tab-election path. Use a supported browser runtime for persistent local storage, or switch to the memory driver with a `serverUrl` in unsupported environments.
+
+- f958471: Add first-class Solid support in `jazz-tools`, including `createSolidJazzClient`, `JazzProvider`, `useAll`, and `useLocalFirstAuth`, plus Solid-specific build/test configuration and lifecycle/auth/query coverage.
+- Updated dependencies [ec543e3]
+- Updated dependencies [6c17100]
+  - jazz-wasm@2.0.0-alpha.52
+  - jazz-rn@2.0.0-alpha.52
+
+## 2.0.0-alpha.51
+
+### Minor Changes
+
+- 4a10478: Expose programmatic catalogue publication helpers from `jazz-tools/dev`.
+
+  `jazz-tools/dev` now exports `pushSchema`, `pushPermissions`, `pushMigration`, and `deploy` so tools can publish schema, permissions, migrations, and full deployments without going through the CLI. The existing `pushSchemaCatalogue` compatibility path remains available.
+
+### Patch Changes
+
+- 4831e63: Avoid cloning the entire per-object sent-batch set when syncing. The forwarding walk and the server and client queue paths cloned the whole `sent_batch_ids` set just to test membership of a single batch. Since that set grows with a row's history, forwarding a frequently-updated ("hot") row did work proportional to its accumulated history on every update. Membership is now checked by borrow, so forwarding is independent of how much history has already been sent.
+- 1670073: Fix a `batched_tick` deadlock that left React Native apps spinning at 100% CPU when a server-side query subscription was deferred waiting for its catalogue/schema.
+  - `jazz-tools`: `RuntimeCore::batched_tick` now drains parked sync messages before deciding whether to reschedule, so a `CatalogueEntryUpdated` that arrives while a subscription is parked actually unblocks it instead of sitting in the parked queue forever. Progressless ticks no longer re-arm the scheduler, breaking the reschedule hot loop.
+  - `jazz-rn`: `request_batched_tick` is now deferred off the JS thread (mirroring `schedule_mutation_error_delivery` and `NapiScheduler`) so the JS callback can't synchronously re-enter `batched_tick` and starve `setInterval` / rendering.
+
+- b11d29b: Reject an oversized LZ4 frame on the pre-authentication WebSocket handshake before decompressing it, closing an unauthenticated decompression-bomb that could exhaust server memory. The inbound WebSocket message-size limit is also pinned explicitly.
+- 7c8b790: Deduplicate Jazz clients per config so a single page runs one runtime per identity. Previously the Svelte and Vue bindings created an independent runtime for every `createJazzClient` call, so mounting several components for the same identity in one page produced coexisting runtimes in the shared WASM heap; abruptly tearing one down during active sync could corrupt the others' heap and surface as a `memory access out of bounds` trap. Client lifecycle now goes through a shared, refcounted, `Map`-keyed registry used by the React, Svelte, and Vue bindings (replacing the React binding's single-slot cache, which could not hold two distinct configs at once). Clients with the same config share one runtime; distinct identities (e.g. two principals on one screen) keep their own.
+- 6c97d33: Fix a permissions race where a permissions head arriving before its bundle would flip the client into Enforcing mode without an authorization schema, causing local writes against every table to fail with `policy denied` until the bundle arrived. The mode now only flips when the bundle is applied.
+- baa6494: Support `in` filters for id, enum, string, and reference columns, including empty `in` lists returning no rows.
+- 7568ce7: Export `RowRefValue` and `SessionRefValue` types so user-defined helpers inside `definePermissions(...)` callbacks can be typed against row and session references.
+- 76693c8: Export `resolveRequestSession` from `jazz-tools/backend` so RPC handlers can derive Jazz sessions from request bearer JWTs without manual decoding.
+- 7d5ab71: Fix a crash when syncing a row with a long edit history. Forwarding a row's parent batches to a server walked the history recursively, so a row with a deep history chain (a few hundred edits is enough on a browser worker's stack) could overflow the stack — surfacing as "memory access out of bounds" on the client and out-of-memory on the server. The walk is now iterative and visits each parent batch at most once.
+- 8421937: Fix update permission policies that compare `id` inside `EXISTS` checks.
+- 88168eb: Add `includeDeleted()` to TS query builders for reading soft-deleted rows.
+- 8cf401c: The inspector link logged on server startup no longer embeds the admin secret in the URL. If an admin secret is configured, a follow-up log line prompts you to enter it manually in the inspector.
+- aea994f: The server now logs a prominent warning when local-first auth is silently auto-enabled because `NODE_ENV` is not set to `"production"`. Deployments that forget to set `NODE_ENV=production` will see the warning rather than running wide open with no indication.
+- feea722: `withJazz` no longer adds `jazz-tools` to Next.js `serverExternalPackages`. Externalising it caused the SSR worker and the user's "use client" components to load separate React instances, so the SSR dispatcher was missing on jazz-tools' copy and `useSyncExternalStore` failed with `Cannot read properties of null` when prerendering pages like `/_not-found`. `jazz-napi` stays external (native binary); jazz-tools is now bundled.
+- 6f7a83f: Fix an owner `db.update` of a backend-created row hard-deleting the row instead of updating it on persistent-storage clients. A client write can no longer downgrade a batch the server has already accepted, so the row survives and the update applies.
+- daec2e2: `getSession()` (Svelte) and `useSession()` (Vue) now return reactive handles that track auth changes without destroying the provider.
+  - **Svelte**: `getSession()` returns `{ current: Session | null }` — read `.current` in templates, `$derived`, or `$effect` and it updates automatically on login/logout.
+  - **Vue**: `useSession()` returns `ComputedRef<Session | null>` — bind `.value` in templates or computed properties and it stays in sync via `triggerRef`.
+
+- 56f7539: Bound the reconnect-storm amplification on the server's WebSocket path: enforce a per-`client_id` connection cap (4) with evict-oldest semantics so a single client_id cannot pin unbounded fan-out memory, and time out pre-handshake sockets after 10s so an unauthenticated peer cannot park resources without sending the `AuthHandshake` frame. Evicted clients receive a `RateLimited` error frame followed by a policy close.
+- d0b2440: Rename the public Db callback scope types from `DbTransactionScope` / `DbBatchScope` to `TransactionScope` / `BatchScope`.
+- 5c76bfc: Add soft-deleted row restoration with `db.restore(...)`.
+- 7ab5830: jazz-tools server now has built-in support for OTEL
+- 791e5e2: Stop the inert "memory access out of bounds" WASM trap from surfacing as an uncaught error when a page is reloaded or closed while two or more Jazz clients share the tab. Each client's WebSocket transport is abandoned mid-navigation and the dying page's WASM heap traps; the runtime now swallows that one specific trap inside the `pagehide` teardown window (on both the main thread and the worker), so it no longer reaches the console or the app's error handlers. A genuine out-of-bounds error during normal operation still surfaces.
+- 5c76bfc: `db.update(...)` now fails when trying to update deleted rows, similarly to insert and delete.
+- 03a71b2: Fix a cluster of `useAll` / `QuerySubscription` correctness and parity bugs across the React, Svelte and Vue bindings and the shared subscriptions orchestrator.
+  - **Orchestrator:** New render-safe `computeKey()` / `peekState()` reads back the React rewrite. Subscription-setup failures no longer surface as unhandled promise rejections for callback-only consumers. On a session change, a settled entry is reset to `pending` and its listeners are told to clear, so a previous session's rows are dropped on logout/login rather than served until the new subscription's first delta.
+  - **React:** `useAll` is rewritten on `useSyncExternalStore` with a `getServerSnapshot` path. Reads are render-safe (no subscription opened during render), an inline `app.todos.where(...)` no longer does render-phase work, SSR reads a seeded snapshot synchronously without a layout-effect warning, and a pending suspense query now suspends on its real entry promise (opened during render) instead of one a suspended effect could never resolve, while a not-yet-supplied query still suspends so the boundary shows its fallback. The JWT refresh is now deduped at the client level, so a second provider or a remount cannot double-fire it, and the refresh latch times out so a hung `onJWTExpired` can no longer wedge auth and silently drop every later expiry.
+  - **Svelte:** `QuerySubscription` returns its unsubscribe directly from the effect (no shared mutable field to drop), drops `onDestroy` so it works inside `$effect.root` / `.svelte.ts`, always starts `current` as `undefined`.
+  - **Vue (BREAKING):** `useAll` now returns `{ data, error, loading }` refs instead of a bare `Ref<T[] | undefined>`, so a failed query is distinguishable from loading or empty. Adds a Suspense-compatible `useAllSuspense`. Migrate `const todos = useAll(...)` to `const { data: todos } = useAll(...)`.
+  - **Docs:** the `subscribeAll` JSDoc example uses `change.item` and the now-exported `RowChangeKind.Added` (the old `change.row` / `change.kind === 0` yielded `undefined`), and `SubscriptionDelta.all`'s freshly-allocated-per-delta contract is documented with a pointer to `applyDelta` / `reconcileArray`.
+
+- Updated dependencies [1670073]
+- Updated dependencies [6f7a83f]
+- Updated dependencies [5c76bfc]
+- Updated dependencies [791e5e2]
+- Updated dependencies [5c76bfc]
+  - jazz-rn@2.0.0-alpha.51
+  - jazz-wasm@2.0.0-alpha.51
+
+## 2.0.0-alpha.50
+
+### Patch Changes
+
+- 4fe985d: Fix the `jazz-tools` CLI silently exiting 0 without running any command when `dist/cli.js` is invoked through a pnpm symlink. `isMainModule()` now compares the realpaths of both `process.argv[1]` and `import.meta.url`, so the symlinked package path resolves and the CLI dispatches as expected.
+- f463ae9: Drop Node.js 20 support. Minimum is now Node.js 22.12 (Jod LTS). `engines.node` is set to `>=22.12` on `jazz-tools` and `create-jazz`; consumers on Node 20 will see an `EBADENGINE` warning (npm/pnpm) or a hard install failure (Yarn).
+- e00b73c: `Query.hopTo("relation")` now infers the destination table's row type instead of carrying the source table's type through. Consumers extracting the row type via `s.RowOf<>` (or any other consumer of the query builder's row type) now see the destination shape.
+- c599e10: Fix the MCP server crashing with `ERR_UNKNOWN_BUILTIN_MODULE` on Node.js < 22 (and non-Node runtimes). The text-search fallback used when `node:sqlite` is unavailable no longer transitively imports `node:sqlite`: the pure MDX parsing helpers now live in a sqlite-free module, so the fallback loads and serves docs instead of failing. The fallback also emits a loud deprecation warning, since Node.js < 22 is no longer supported.
+- e49cf4c: Moves write error propagation fully into the Rust runtime
+- 5c0ef8f: Export `tracing` events as OpenTelemetry logs over OTLP, correlated with traces via the active span's `trace_id`/`span_id`. The CLI now keys both trace and log export off `OTEL_EXPORTER_OTLP_ENDPOINT`; the `JAZZ_OTEL=1` opt-in and the stdout span-exporter fallback are removed. Stdout continues to emit human-readable text logs.
+- 8546306: Added reactive local-first auth helpers for Svelte and Vue, matching `useLocalFirstAuth` in `jazz-tools/react`:
+  - **Svelte:** new `LocalFirstAuth` reactive class in `jazz-tools/svelte`. Exposes `secret`, `isLoading`, `login`, and `signOut`; the secret store is read inside `$effect`, so SvelteKit server renders never touch `localStorage`.
+  - **Vue:** new `useLocalFirstAuth()` composable in `jazz-tools/vue`. Returns `Ref<string | null>` and `Ref<boolean>` for the secret/loading state plus async `login`/`signOut`; gated on `typeof window` so SSR setup never touches `localStorage`.
+
+  In both frameworks `login`/`signOut` notify every live instance backed by the same store, and a `console.warn` surfaces secret-store failures that previously fell through silently. `BrowserAuthSecretStore` now also throws a clearer error when used outside a browser environment, with `localStorage` resolved lazily so server-side imports of the module-level singleton don't break.
+
+  Note for anyone copying the documented Svelte backup/restore snippets: their signatures changed to take a `LocalFirstAuth` instance (e.g. `createRecoveryPhraseRestore(auth)` returning a callback) so they can call `auth.login()` directly instead of `BrowserAuthSecretStore.saveSecret()` + `location.reload()`.
+
+- c5722fb: `jazzSvelteKit` now starts the managed Jazz dev server and populates `PUBLIC_JAZZ_APP_ID` / `PUBLIC_JAZZ_SERVER_URL` from an `enforce: "pre"` Vite `config` hook, before SvelteKit's `vite-plugin-sveltekit-setup` captures env into `$env/dynamic/public`. The previous approach set these in `configureServer` — after SvelteKit had already frozen its env — and recovered by triggering a fire-and-forget dev-server restart. On a freshly scaffolded starter the first paint reliably rendered with `PUBLIC_JAZZ_SERVER_URL` undefined, and recovery was race-dependent. The restart is removed entirely; the dynamically allocated server URL is now correct on the first request for both cold and warm starts, matching how the Next.js plugin awaits `runtime.initialize()` during config resolution. Plugin order in `vite.config.ts` is no longer load-bearing.
+- d86c537: Fix: reject stale transactional writes when the authority sees that a sealed transaction's staged row parents no longer match the current visible row frontier.
+- Updated dependencies [e49cf4c]
+  - jazz-wasm@2.0.0-alpha.50
+  - jazz-rn@2.0.0-alpha.50
+
+## 2.0.0-alpha.49
+
+### Patch Changes
+
+- 24607e1: Disable cold-start replay of persisted rejected batch fates so runtimes no longer surface stale mutation errors or retract visible rows from stored rejection records on startup.
+  - jazz-wasm@2.0.0-alpha.49
+  - jazz-rn@2.0.0-alpha.49
+
+## 2.0.0-alpha.48
+
+### Patch Changes
+
+- b0a7b14: Fix current runtimes reading stored data written by alpha.46 when tables use the default index configuration.
+  - jazz-wasm@2.0.0-alpha.48
+  - jazz-rn@2.0.0-alpha.48
+
+## 2.0.0-alpha.47
+
+### Minor Changes
+
+- 3d7e00f: Add edge upstream sync support for self-hosted Jazz servers.
+
+  `jazz-tools server` can now run as an edge when configured with an upstream core URL and peer secret, and the DevServer/testing APIs expose matching upstream and peer-secret options for integration coverage.
+
+### Patch Changes
+
+- 2156a27: Replace replayable batch settlements with whole-batch `BatchFate` sync semantics and remove visible-member manifests from the client-facing fate shape. Successful fate now applies by batch id to locally known rows, avoiding repeated per-row member decoding during subscription settlement.
+- 7f7b5da: Add rollback and scoped read support to explicit batches. `DirectBatch`/`DbDirectBatch` now expose `rollback()`, and batch handles can read their own local writes before commit through `DirectBatch.query(...)` and `DbDirectBatch.all(...)`/`one(...)`.
+- 6352c68: Make sync batch settlements the durability source of truth, including batch-level rejection fate, settlement-based visibility, transport batching, and more reliable offline replay after reconnect.
+- 411d0a0: Updated BetterAuth adapter query-support rules: timestamp columns now support `ne`, `null` filters are only allowed for nullable columns, and `ne null` remains rejected for references and `id`.
+- fa3b607: Fix loss of reactivity for query subscriptions with deeply-nested includes. Subscriptions built from depth-2+ `via` include chains (`org.include({ todoViaOrg: { user_checkViaTodo: true } })`) now correctly receive deltas when a row at the bottom of the chain is inserted, updated, or deleted. Previously only the immediate child table was tracked as a dependency of the outer subscription, so mutations further down the chain were silently missed.
+- 729effd: Add opt-in development telemetry export for Jazz runtimes and local dev servers. WASM runtimes now buffer spans and logs in Rust only when telemetry is enabled, notify JavaScript through a coalesced drain subscription, and lazy-load client-side OpenTelemetry exporters only after a collector URL is configured.
+- 9942d24: Drop the `fetch` polyfill from `jazz-tools/expo`.
+
+  Nothing in jazz-tools consumes a streaming `response.body`, sync runs over WebSocket, and every fetch call site uses buffered methods like `.json()`/`.text()`. The `expo/fetch` swap (and its accompanying `fetchSpecCompliant` URL/Request coercion) was working around `expo/fetch`'s string-only native bridge, but with `expo/fetch` gone, RN's default fetch — which is `whatwg-fetch` under the hood — already accepts URL and Request inputs natively. Better-auth's URL-input path therefore works without the wrapper.
+
+  The `ReadableStream` polyfill stays — it's still consumed by `runtime/file-storage.ts` for the chunked-file API, which Hermes can't service without it.
+
+- 22e5263: Drop no-op `Headers`/`Request`/`Response` polyfills from `jazz-tools/expo`.
+
+  These were imported from `react-native/Libraries/Network/fetch`, which just re-exports `global.*` — so each polyfill collapsed to `globalThis.X = globalThis.X` at best, and to `globalThis.X = undefined` if the polyfill module evaluated before RN installed its networking globals. The latter case broke any consumer that touched `Headers.prototype` (e.g. Clerk's `new Headers(...)` in `fapiClient`), which surfaced as `TypeError: Cannot read property 'prototype' of undefined`. The `fetch` and `ReadableStream` polyfills, which do real work, are kept.
+
+- 37299e9: Keep transaction and direct-batch writes isolated from ordinary indexed queries until commit, while still letting batch-scoped reads see their own staged inserts, updates, and deletes.
+- c392b08: Persist authoritative direct batch fate when a server accepts sealed client-originated direct batches, preventing reconnect replays from being answered as missing.
+- 30b55f4: Fix IndexedDB-backed storage reads so coalesced disk reads stop at the current file length instead of reading past EOF after uncheckpointed growth.
+- 2ea35d5: Fix query subscription sync by preserving local-first auth mode through binary payloads.
+- 8962e44: Fix query planning so multiple conditions on the same column are combined correctly, preserving accurate results for same-column where clauses.
+- bf27d80: Fix reverse and nested relation includes that selected provenance magic columns such as `$createdAt` and `$updatedAt`.
+
+  Included relation rows now remain present when those magic timestamp columns are selected, instead of resolving as missing, null, or empty because subquery row descriptors dropped non-physical magic columns.
+
+- 5427303: Fix queries with reverse relations that select permission magic columns such as `$canRead`, `$canEdit`, and `$canDelete`.
+
+  Included rows now preserve those permission values for reverse, nested, and recursive relation results instead of dropping the subquery table dependency needed to compute them.
+
+- cd6c2b9: `jazzSvelteKit` from `jazz-tools/dev/sveltekit` now accepts the full Vite `ssr.external` shape (`true | string[]`). Previously the inline parameter type only allowed `string[]`, so `defineConfig({ plugins: [jazzSvelteKit()] })` failed to typecheck under `strict: true`. The `true` sentinel is preserved verbatim to keep externalise-everything semantics.
+- 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
+- e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
+- 576531d: `ManagedDevRuntime` no longer throws when a prior in-process run leaves `*_JAZZ_SERVER_URL` set in `process.env`. The env var on its own is now treated as our own persisted value and ignored in favour of spinning up a fresh local server. The plugin still takes the "connect to an external server" path when the caller explicitly supplies an `adminSecret` option or sets `JAZZ_ADMIN_SECRET`. This makes Vite HMR restarts and repeated test runs work without stale-state errors.
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
+- 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
+  `withJazz` writes the live schema hash into a generated module that the
+  React provider depends on, so Turbopack and Webpack reload the page
+  whenever the schema is pushed — no consumer-side wiring required.
+- e5c83ea: Keep dev plugins running when the initial schema auto-push cannot reach a configured remote Jazz server. The plugins now warn and continue with the configured app and server URL, while still failing on schema, auth, or server rejections.
+- 670f797: fix: prevent null field updates from getting lost on sync
+- 1d1bdc7: Skip catalogue replay from clients that are not authenticated with catalogue publish authority, avoiding harmless `CatalogueWriteDenied` sync errors.
+- 5b1d352: Stop server row replay from sending local durability acknowledgements back upstream, and ignore client-sent durability acknowledgements as authoritative server state.
+- 5752bde: Add React Native anonymous auth support. `jazz-tools` now mints anonymous JWTs through the React Native runtime module when no auth credentials are provided, and `jazz-rn` exposes the matching native `mintAnonymousToken` binding.
+- 15b347d: `jazz-rn`: `query` is now `async` and no longer blocks the React Native JS thread on one-shot reads.
+
+  The native uniffi export used `block_on` on the JS thread, so any `db.all(...)` that needed a later `batched_tick` to settle (e.g. queries that wait on server-sourced data or parked sync messages) could deadlock — the JS thread was blocked, so the `batched_tick` callback could never fire to fulfil the query future. The export is now `async fn` and uniffi-bindgen-react-native generates a Promise-returning JSI call, polled off the JS thread. `JazzRnRuntimeAdapter.query` now `await`s the binding before parsing.
+
+- fe0c43a: Move the dedicated-worker bridge orchestration (init handshake, peer routing, lifecycle hints, shutdown handshake, outbox routing, server-payload forwarding) out of TypeScript and into Rust (`crates/jazz-wasm`). `JsSyncSender` and the `onSyncMessageToSend` WASM API are gone; the runtime now posts directly to the worker via `worker.postMessage`. The TypeScript `WorkerBridge` is a thin adapter over the Rust-owned `WasmWorkerBridge`; `jazz-worker.ts` is reduced to a WASM-bootstrap shim. Public `Db` API and the on-the-wire structured-clone protocol shape are unchanged.
+- 181a66f: Modifies `createPolicyTestApp` to receive an app and permission objects instead of the schema's dir.
+- 92fbdf9: Persist sealed batch manifests and batch fates instead of replayable local batch records. Batch waits and mutation-error replay now read `BatchFate` directly, and sync no longer rebuilds local batch membership one row at a time.
+- e336d8d: Modify the permission tests API to make `expectAllowed`/`expectDenied` side-effect free.
+- 57a21cd: Fix `s.timestamp()` row output inference so timestamp columns are typed as `Date` instead of `Date | number`.
+
+  Numeric timestamp defaults remain accepted, but inserted and queried rows now match the runtime shape and infer timestamp values as JavaScript `Date` objects.
+
+- a523693: Add `rollback()` to transaction handles. Calling rollback closes the transaction without committing it, so later writes, reads, commits, or rollbacks on the same transaction fail.
+- Updated dependencies [2156a27]
+- Updated dependencies [6352c68]
+- Updated dependencies [fa3b607]
+- Updated dependencies [729effd]
+- Updated dependencies [e9bb115]
+- Updated dependencies [5752bde]
+- Updated dependencies [15b347d]
+- Updated dependencies [92fbdf9]
+  - jazz-wasm@2.0.0-alpha.47
+  - jazz-rn@2.0.0-alpha.47
+
+## 2.0.0-alpha.46
+
+### Patch Changes
+
+- f528f1a: Send direct-batch durability confirmations once per sealed batch instead of once per row.
+- 76a3b89: Filter replayed batch settlement members to each receiving client's scope.
+  - jazz-wasm@2.0.0-alpha.46
+  - jazz-rn@2.0.0-alpha.46
+
+## 2.0.0-alpha.45
+
+### Patch Changes
+
+- 38cfc0e: Improve local write performance by skipping idle subscription recompilation, reducing local batch member sorting, and reusing prepared schema insert alignment.
+- 8fd0db9: Gate tiered browser subscriptions so the first callback is held until the worker bridge has replayed the settled server snapshot instead of exposing an empty transient snapshot.
+- 2ee98be: Add sync protocol version checks to the WebSocket handshake so incompatible clients and servers fail with an explicit update prompt.
+- 7b01f3f: Improve local insert performance by reusing prepared write context through row-history application and caching catalogue row descriptors for repeated same-schema writes.
+- 3a6251b: Avoid duplicate server subscription authorization checks when computing authorized sync scope.
+
+  Thanks, Tobi!
+
+- a065e63: Skip settling clean query subscriptions when no graph, visibility, or local-update state changed.
+
+  Thanks, Tobi!
+
+- 75aa36b: Add `window.__jazz.shutdown(namespace?)` for awaiting Jazz client teardown (worker termination + IndexedDB lock release). Useful in browser tests that mount and unmount apps between cases. `Db.shutdown()` is now idempotent — concurrent or repeated calls share the same in-flight promise — so the new API plays cleanly alongside framework-driven cleanup (e.g. JazzProvider unmount).
+- Updated dependencies [8fd0db9]
+- Updated dependencies [2ee98be]
+  - jazz-wasm@2.0.0-alpha.45
+  - jazz-rn@2.0.0-alpha.45
+
+## 2.0.0-alpha.44
+
+### Patch Changes
+
+- e5c9441: Memoize runtime schema cache keys by schema object identity so repeated writes do not reserialize the full schema on every `Db.getClient` lookup.
+- 53a4d4c: Optimize paginated query settling while preserving authorized sync scope for offset/limit queries.
+  - jazz-wasm@2.0.0-alpha.44
+  - jazz-rn@2.0.0-alpha.44
+
+## 2.0.0-alpha.43
+
+### Patch Changes
+
+- bca70a5: - Transactions and batches no longer require a table when being created. The schema is determined by the first CRUD operation performed inside the transaction.
+  - Add new `Db.transaction` and `Db.batch` methods. These methods receive a callback as parameter and commit automatically once the callback finishes running. They are preferred over their `beginTransaction`/`beginBatch` counterparts.
+- 51cbb09: Fix `jazz-tools/expo` fetch polyfill rejecting URL and Request inputs.
+
+  `expo/fetch`'s native bridge only accepts a string for the first argument, so calling `fetch(new URL(...))` or `fetch(new Request(...))` — both valid per the WHATWG spec, and the form better-auth's client uses — failed with "The 2nd argument cannot be cast to type URL". The polyfill now normalises URL and Request inputs to a string URL plus a merged init (including the request body) before delegating to `expo/fetch`.
+
+- b092cec: The `jazz-tools` CLI now loads `.env` from the working directory at startup, so `deploy` and other commands pick up `JAZZ_ADMIN_SECRET`, `JAZZ_SERVER_URL` (and framework-prefixed equivalents) from the same dotenv file your app uses. Pass `--env-file <path>` (repeatable) to load from a specific file — useful for staging/production splits like `--env-file .env.staging`. Real environment variables still take precedence.
+- e71f3f0: Fix `jazzPlugin()` (`jazz-tools/dev/vite`) so its return type matches Vite's `Plugin`. The `config` hook's parameter previously typed `ssr.external` as `string[] | undefined`, but Vite's `UserConfig` allows `true | string[] | undefined` (`true` = externalize everything), causing `TS2769` in consumer `vite.config.ts` files. Widen the param and preserve `external: true` when the user already opts into it.
+- bb60ab4: Fix MaterializeNode passing an empty table name to the row loader, which caused old-branch rows to be silently dropped after a schema migration on storage backends that resolve rows by locator. Apps with persistent local data from a previous schema would see all their old rows disappear from query results until a fresh sync.
+- c1c873f: Speed up per-row history lookups in `MemoryStorage` by nesting the history map by `row_id`, so reads scale with the row's own history rather than the table size.
+- 3a9726e: Trigger a Vite full-reload from the Jazz Vite and SvelteKit dev plugins
+  whenever the schema watcher successfully pushes an updated schema, so the
+  browser picks up the new schema without a manual refresh.
+- 31c9562: Remove the unused `insertDurable` / `insertDurableWithSession` / `updateDurable` / `updateDurableWithSession` / `deleteDurable` / `deleteDurableWithSession` methods from the `Runtime` interface and from the jazz-napi, jazz-wasm, and React Native runtime adapters. These were superseded by the `insert(...).wait({ tier })` / `update(...).wait({ tier })` / `delete(...).wait({ tier })` API and had no remaining callers.
+- 826d1bc: Fix `getLocalFirstIdentityProof` on React Native by minting the proof token through `jazz-rn` instead of the (unavailable) WASM module, restoring the local-first → upgrade-to-account sign-up flow on RN.
+- 3e2564a: Queue unsent parent row batches before child row batches when syncing to servers. This keeps server-side permission checks from evaluating updates before their prior row content has arrived.
+- fafdd2c: Align batch and transaction writes with the simple write API by supporting custom insert ids and upserts.
+  - jazz-wasm@2.0.0-alpha.43
+  - jazz-rn@2.0.0-alpha.43
+
+## 2.0.0-alpha.42
+
+### Patch Changes
+
+- 3ebf45c: Deduplicate permissions bundle publishes when content is unchanged.
+
+  `publish_permissions_bundle` now short-circuits when the proposed `schema_hash` and `permissions` are identical to the current head, mirroring the content-addressed dedup that schemas already enjoy. Repeated identical publishes no longer bump the version, allocate a new bundle object id, or rewrite the catalogue entry. Optimistic concurrency via `expected_parent_bundle_object_id` still rejects stale parents.
+
+- 02b0f64: Allow cookie-backed WebSocket auth between loopback hosts on different ports.
+  This keeps cookie auth same-origin by default, but treats `localhost`,
+  `*.localhost`, `127.0.0.1`, and `::1` as trusted local development peers.
+  - jazz-wasm@2.0.0-alpha.42
+  - jazz-rn@2.0.0-alpha.42
+
+## 2.0.0-alpha.41
+
+### Patch Changes
+
+- 7ed02fc: Add `schema.defineSliceableApp(schema).slice(...)` for deriving smaller typed app surfaces backed by one complete runtime schema.
+- 6585b53: Add transformed columns to the TypeScript schema DSL.
+
+  Column definers like `s.string()`, `s.boolean()`, and `s.int()` now support `.transform({ from, to })`, allowing apps to expose a transformed TypeScript value while storing the underlying column's normal SQL type. Transforms apply on rows returned from reads and subscriptions, and in reverse before inserts and updates.
+  - jazz-wasm@2.0.0-alpha.41
+  - jazz-rn@2.0.0-alpha.41
+
+## 2.0.0-alpha.40
+
+### Patch Changes
+
+- bca35a7: Use output schema from JSON standard schema for the stored schema of `json` columns
+- 3e9780a: `jazz-tools` CLI now accepts framework-prefixed env vars (`PUBLIC_`, `VITE_`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`) as fallbacks for `JAZZ_SERVER_URL` and `JAZZ_APP_ID`, matching the names the SvelteKit, Vite, Next.js and Expo plugins already write. `JAZZ_ADMIN_SECRET` remains unprefixed.
+- 72e8727: Docs/example: document the correct Expo setup for `jazz-tools`.
+
+  `jazz-tools` emits `import.meta.url` from its runtime, so Expo apps must enable `unstable_transformImportMeta` in `babel-preset-expo` or Hermes fails to parse the bundle. `@expo/metro-config` only auto-detects `.babelrc`, `.babelrc.js`, and `babel.config.js` — `.cjs`/`.mjs` variants are silently ignored, and `config.transformer.extendsBabelConfigPath` is a no-op on Expo's pipeline. The Expo install docs and the `todo-client-localfirst-expo` example now use a plain CJS `babel.config.js` with `unstable_transformImportMeta: true`, drop the stray `.babelrc` shim, and stop declaring `"type": "module"`. `metro.config.mjs` stays ESM so it can top-level `await withJazz(...)`.
+
+- 4f017af: Honor the root `adminSecret` option in `ManagedDevRuntime` (used by the `vite`, `next`, `sveltekit`, and `expo` dev plugins). The managed local-server branch previously read only `server.adminSecret` and silently fell back to a random `jazz-dev-XXXXXXXX` when the root option was set; it now falls through to root `adminSecret`, mirroring the precedence already used for `appId`. The startup banner also surfaces the resolved admin secret, and the Expo plugin now logs the inspector link the same way `vite` and `next` do.
+- c882c89: Fix `$createdAt` and `$updatedAt` provenance magic columns in `jazz-tools` so they round-trip as real JavaScript dates instead of far-future timestamps.
+
+  Queries now convert JS millisecond `Date` and numeric filter values to the internal provenance timestamp format consistently, so selecting and filtering on those magic columns uses the same time scale.
+
+- 19ab5c4: Fix JazzProvider re-initialising when an inline config object is passed on every render. The useEffect dep array previously included `config` (the object reference); it now uses `configKey` (the JSON-stringified value) so that structurally identical config objects no longer trigger a cleanup→reacquire cycle.
+- c5f0807: Wrap React `use` inside `JazzClientProvider` so it remains compatible with React 18 while preserving behavior on newer React versions.
+- 0103d1c: Fix the SvelteKit dev plugin so the first-ever cold start no longer needs a manual restart. The plugin now triggers a Vite restart immediately after allocating a fresh app ID, so SvelteKit's `$env/*` capture re-reads the now-populated `.env` on the second pass. Plugin order in `vite.config.ts` is no longer load-bearing.
+- 9329dbe: `jazzPlugin` now adds `jazz-napi` to `ssr.external` so that SSR builds on Vite-based frameworks (e.g. SvelteKit) don't attempt to bundle the native add-on. Also tightens error handling in `persistAppIdToEnv` to only swallow `ENOENT`; other I/O errors now propagate correctly.
+- 3ea24ed: Fixed the flood of ws messages by stop forwarding client-origin `RowBatchStateChanged` acknowledgements to other subscribers. This keeps per-client row-batch durability bookkeeping local to the server/client pair and avoids leaking `BatchSettlement` echoes to unrelated WebSocket clients.
+- ff2eb8a: Preserve column defaults and counter merge strategies when loading typed-app schemas through the CLI schema loader, keeping the AST and wasm schema round-trip lossless for fields both representations support.
+- acc7d89: Fix native WebSocket TLS handshakes failing on mobile (Expo/React Native) when the OS root certificate store is empty or unavailable, by falling back to bundled `webpki` roots only when no native roots are loaded.
+- f0260e0: Prevent TokioScheduler task pileup under contention.
+
+  `schedule_batched_tick` used to clear the debounce flag at the start of the spawned task, before acquiring the core lock. When the lock was held, every caller arriving during that window saw `scheduled=false` and spawned another task, piling up behind the same mutex. The flag is now cleared after the lock is acquired, immediately before `batched_tick` runs, capping the pending queue at one tick while preserving the lost-wakeup fix.
+
+- bee22ff: `QuerySubscription` in the Svelte bindings now accepts a getter for both the query and the options, e.g. `new QuerySubscription(() => filter ? app.todos.where({ title: { contains: filter } }) : undefined)`. Reactive reads inside the getter are tracked, so the subscription re-runs when its dependencies change. The bare-value forms continue to work unchanged.
+- 402d104: `jazzPlugin` and `jazzSvelteKit` now alias `jazz-wasm` to an absolute path resolved from `jazz-tools`'s own install location. This removes the need for Vite/SvelteKit consumers on pnpm to add `jazz-wasm` as a direct dependency just to work around pnpm's strict-isolation layout.
+  - jazz-wasm@2.0.0-alpha.40
+  - jazz-rn@2.0.0-alpha.40
+
+## 2.0.0-alpha.39
+
+### Patch Changes
+
+- 94bd2b8: Update Jazz server URL in generated starter apps to https://v2.sync.jazz.tools/.
+- 2a3545c: Stop replaying upstream-confirmed rows to the server on reconnect. The client's full-storage sync now skips rows whose `confirmed_tier` is already above the node's own tier, so a user-role client no longer re-pushes subscription-delivered rows it never authored. Previously these replays were rejected by row-level update policies (e.g. "Update denied by USING policy — cannot see old row") on every reconnect.
+  - jazz-wasm@2.0.0-alpha.39
+  - jazz-rn@2.0.0-alpha.39
+
+## 2.0.0-alpha.38
+
+### Patch Changes
+
+- a4453e0: `jazzPlugin` and `jazzSvelteKit` now inject `worker.format: "es"` and `optimizeDeps.exclude: ["jazz-wasm"]` via a Vite `config` hook. Consumers no longer need to set these manually in their `vite.config.ts`.
+  - jazz-wasm@2.0.0-alpha.38
+  - jazz-rn@2.0.0-alpha.38
+
+## 2.0.0-alpha.37
+
+### Patch Changes
+
+- c825970: Re-apply stored Rejected batch settlements on runtime startup so that a crash between persisting a rejection and deleting its visible row no longer causes the lingering row to flash into queries on reload before being retracted.
+- a4b83ea: `jazz-tools deploy` now warns about tables that have no explicit permission policy, matching the behaviour of `jazz-tools validate`.
+- f8981c6: Fix `jazz-tools deploy` so apps without a `permissions.ts` file still publish their structural schema. The CLI now skips the permissions publish step instead of failing when no current permissions are defined.
+- 751eff9: Fall back to ephemeral in-memory storage when IndexedDB is blocked by a SecurityError (Firefox private browsing, Safari private mode). Jazz now initialises successfully without persistence instead of failing to load entirely.
+- 961361c: Treat reconnect row-history replay as idempotent only when the incoming row exactly matches the stored history member. This avoids spuriously reclassifying replayed inserts as updates on insert-only tables while still allowing same-batch corrections to propagate their final payload.
+- 0fc5388: Add `jazz-tools schema hash` command to print the short hash of the current `schema.ts` without hitting the server or writing a local snapshot.
+- efa67bf: Admin-secret clients now bypass local row-policy enforcement so writes still reach the sync server, where permissions are actually checked.
+- fd3bd95: `Transaction.commit()` now returns a write handle, which allows waiting for ack from a given durability tier
+  - jazz-wasm@2.0.0-alpha.37
+  - jazz-rn@2.0.0-alpha.37
+
+## 2.0.0-alpha.36
+
+### Patch Changes
+
+- Cache runtime schema lookups across query paths and surface unhandled rejected mutations through targeted batch-id queues instead of rescanning every retained local batch record. This also brings the React Native runtime onto the same rejected-batch helper surface as WASM and N-API.
+- 8bb9fbc: Allow caller-supplied row ids to use any valid UUID and rely on explicit row metadata for created-at semantics.
+- 3578b10: Stop persisting and rehydrating a bogus empty schema on dynamic-schema servers.
+
+  `SchemaManager::new_server` leaves the context uninitialized with a sentinel hash. Runtime construction then called `ensure_current_schema_persisted`, writing a placeholder `catalogue_schema` row whose content hashed to the empty-schema digest. On rehydrate that hash surfaced as an "unreachable schema hash" in every connection diagnostics call. The persist path now no-ops while uninitialized, and `process_catalogue_update` ignores empty schemas for forward-compatibility with sqlite files written by the pre-fix server.
+
+- 34e9ca4: Add a browser `window.__jazz.clearStorage()` helper for framework clients, and move the FAQ to a top-level docs page with updated storage-reset guidance.
+- Updated dependencies
+- Updated dependencies [8bb9fbc]
+  - jazz-wasm@2.0.0-alpha.36
+  - jazz-rn@2.0.0-alpha.36
+
+## 2.0.0-alpha.35
+
+### Minor Changes
+
+- 9067b0c: Add static external JWT verification alongside JWKS-based verification in `jazz-tools`.
+
+  The Rust server CLI now accepts `--jwt-public-key` / `JAZZ_JWT_PUBLIC_KEY`, and the TypeScript backend `createJazzContext(...)` path now accepts `jwtPublicKey`. Both server entrypoints reject configs that set both `jwksUrl` and the new static-key option at the same time.
+
+### Patch Changes
+
+- 4d67804: Promote `authMode` to a first-class typed field, add anonymous auth, and overhaul the React provider.
+  - **`Session.authMode`** is now `"external" | "local-first" | "anonymous"`, derived from the JWT `iss` claim instead of an opaque string in `claims`. The permissions DSL exposes `session.authMode` and supports `session.where({ authMode })`.
+  - **Anonymous auth**: when `DbConfig` has neither `secret` nor `jwtToken`, the client mints an ephemeral token. Anonymous sessions can read but are structurally denied writes (checked before policy evaluation); failures surface as `AnonymousWriteDeniedError` on the client.
+  - **`DbConfig` flattened**: `auth: { localFirstSecret }` → `secret`.
+  - **`AuthState` flattened**: `{ authMode, session, error? }` — no more `status` / `transport` union.
+  - **React provider**: `JazzProvider` uses Suspense + `React.use()`; new `onJWTExpired` prop serializes refresh calls and replaces custom sync-wrapper components. New `useAuthState()` and `useLocalFirstAuth()` hooks. Context carries only `{ client }`.
+  - **Identity module**: `mint_local_first_token` / `verify_local_first_identity_proof` → `mint_jazz_self_signed_token` / `verify_jazz_self_signed_proof`, taking an explicit issuer.
+
+- 75756a6: Standardize BatchId JSON values on hex strings across Jazz write-context bindings.
+
+  Batch write contexts now accept the TypeScript wire shape used by current clients, including lowercase `batch_mode` values and string `batch_id` values, and reject the old array-style BatchId JSON representation.
+
+- e5a3189: Add schema-level per-column merge strategies to `jazz-tools`.
+
+  Columns now default to MRCA-relative per-column LWW, and non-nullable integer columns can opt into `merge("counter")` to merge concurrent snapshots by summing their MRCA-relative deltas. Merge strategy is schema metadata, so different schema versions can resolve the same conflicting history differently without rewriting stored rows.
+
+- 772ce14: Require a published permissions head before session-scoped writes can rely on backend authority. Persisted writes against enforcing backends without a current permissions head now reject explicitly with `permissions_head_missing`, and synced-query tests now publish permissions before expecting backend-visible rows or cross-schema authorization results. Session-scoped queries still withhold authoritative remote scope before a permissions head exists, but explicit query/subscription rejection is deferred for now.
+- 947f362: Simplify external JWT identity: `session.user_id` is now the JWT `sub` claim verbatim. The `jazz_principal_id` claim, the `external_identities` server mapping, and the hashed `external:…` fallback are removed. External providers must emit the desired Jazz user id as `sub` directly (e.g. via `getSubject: ({ user }) => user.id`). Also fixes `authMode` resolution in the policy evaluator and preserves `AnonymousWriteDeniedError` through the runtime write path.
+- caad318: Modify write APIs to return a `WriteHandle`, which allows callers to wait for a given durability tier to acknowledge the write or reject it. Also introduces a global `onMutationError` handler to receive errors that aren't explicitly handled with `WriteHandle.wait`.
+- 45be93a: `jazz-tools` now routes its sync, schema, permissions, migration, and introspection requests under app-scoped server paths like `/apps/<appId>/...` instead of relying on a configurable `serverPathPrefix`. Server-backed CLI commands now take `<appId>` when resolving those endpoints.
+- Updated dependencies [4d67804]
+- Updated dependencies [75756a6]
+- Updated dependencies [947f362]
+- Updated dependencies [caad318]
+  - jazz-wasm@2.0.0-alpha.35
+  - jazz-rn@2.0.0-alpha.35
+
+## 2.0.0-alpha.34
+
+### Patch Changes
+
+- 0585935: Fix IndexedDB B-tree page splitting for large index keys by choosing split points based on encoded page size instead of entry count. This prevents synced inserts with many near-threshold JSON index values from failing with leaf or internal split fit errors.
+- 213288a: Bind qualified `where(...)` filters on hopped permission relations to the relation's actual joined scope so correlated `exists(...)` closures over gathered team grants evaluate correctly at runtime.
+- 66dc47a: Direct write conflicts now resolve with MRCA-based per-column LWW for visible merge previews and merge-on-write rebases, including accepted transactional rows.
+
+  Visible rows also persist compact winner provenance ordinals so tier-aware reads can reuse merged previews without re-walking row history when tiers have already converged.
+  - jazz-wasm@2.0.0-alpha.34
+  - jazz-rn@2.0.0-alpha.34
+
+## 2.0.0-alpha.33
+
+### Patch Changes
+
+- jazz-wasm@2.0.0-alpha.33
+- jazz-rn@2.0.0-alpha.33
+
+## 2.0.0-alpha.32
+
+### Patch Changes
+
+- 2d10b2e: Include the failing index column in synced insert index-update error logs so IndexedDB-backed index failures are easier to diagnose.
+  - jazz-wasm@2.0.0-alpha.32
+  - jazz-rn@2.0.0-alpha.32
+
+## 2.0.0-alpha.31
+
+### Patch Changes
+
+- ea68566: Isolate browser-local Jazz persistence by default across users and app scopes.
+
+  `createDb()` now derives the default browser persistent namespace from both `appId` and the resolved authenticated principal when no explicit `dbName` is provided, preventing one user from reopening another user's IndexedDB-backed local cache. `BrowserAuthSecretStore` also now accepts scope hints like `appId`, `userId`, and `sessionId` so browser apps can avoid sharing one global local-first identity secret across unrelated sessions.
+
+- 44b90c0: Fix misleading schema-mismatch recovery guidance during client/server handshakes.
+
+  The transport handshake now sends the client's declared structural schema hash separately from the catalogue-state digest, so server-side connection diagnostics only suggest migrations for real schema hashes that the CLI can resolve.
+
+- 50e46c0: Add HttpOnly cookie auth support to `jazz-tools` with a mirrored browser
+  `cookieSession` for local permission evaluation. Servers can now accept JWT auth
+  from a configured auth cookie, and cookie-backed websocket handshakes are
+  restricted to same-origin requests.
+- fd98d6e: Add coordinated browser logout and storage wipe support so follower tabs can trigger an IndexedDB reset through the elected leader, stale fallback namespaces are removed, and `db.logout({ wipeData: true })` clears browser state before the next session starts.
+- 09e16b4: Support recursive gather seeds built from composed same-table relations, including hop-based and unioned permission closures.
+- 2e8e918: Cap oversized secondary index keys to a 5 KiB budget so large text values still use the truncate-and-hash encoding without producing IndexedDB index entries that can overflow B-tree page splits.
+- 05649ae: Add a new `deploy` CLI command to upload the current schema and permissions to the server. Replaces the existing `permissions push` command.
+- 80a0360: Add `updatedAt` overrides to `insert`, `update`, and `upsert` mutation options in `jazz-tools`.
+
+  The same override is available on the durable variants, so callers can stamp `$updatedAt` explicitly on a per-write basis without changing attribution or session scoping.
+
+- 11921e6: Use static `new URL(...)` import for worker when no explicit runtime sources are configured, allowing bundlers (Turbopack, webpack, Vite) to detect and co-bundle the worker script and its WASM dependency automatically.
+
+  Also passes a computed `fallbackWasmUrl` in the worker init message so non-bundled (static HTML) deployments still receive an explicit WASM path as a last resort if `wasmModule.default()` fails.
+
+- Updated dependencies [09e16b4]
+  - jazz-wasm@2.0.0-alpha.31
+  - jazz-rn@2.0.0-alpha.31
+
+## 2.0.0-alpha.30
+
+### Patch Changes
+
+- 848e94d: Replace HTTP `/sync` + SSE `/events` with a single Rust-owned WebSocket `/ws` transport, and wire JWT rotation and server-side auth rejection end-to-end across all bindings.
+
+  **Transport rewrite**
+  - New `TransportManager` in `jazz-tools` owns the WebSocket connection, framing (4-byte big-endian length + JSON), reconnect with exponential backoff, periodic heartbeat, and a `TransportControl` channel that observes `Shutdown` / `UpdateAuth` in every phase (connect, backoff, handshake, connected). Dropped `TransportHandle` triggers an implicit shutdown.
+  - New `install_transport` helper on `RuntimeCore` centralises the boilerplate (create manager → seed catalogue state hash → register handle → spawn) so all four bindings converge on one code path.
+  - `NativeWsStream` (tokio-tungstenite + rustls) and `WasmWsStream` (ws_stream_wasm) implement the shared `StreamAdapter` trait.
+
+  **Auth refresh**
+  - `JazzClient.updateAuthToken(jwt)` now pushes the refreshed credentials into the live transport via `runtime.updateAuth`, which routes through `TransportControl::UpdateAuth` and triggers a reconnect with the new auth. Previously the call only mutated local context.
+  - `ConnectSyncRuntimeOptions.onAuthFailure` is now wired to `runtime.onAuthFailure` and fires whenever the server rejects the WS handshake with `Unauthorized`. NAPI exposes a `ThreadsafeFunction`-based callback; React Native exposes a UniFFI `callback_interface`; WASM keeps its existing `Function` callback.
+  - The worker posts `auth-failed` back to the main thread when `runtime.updateAuth` throws, and supports `update-auth` / `disconnect-upstream` / `reconnect-upstream` messages from the bridge.
+
+  **Bindings**
+  - WASM, NAPI, and React Native all now expose `connect`, `disconnect`, `update_auth`, `on_auth_failure`.
+  - React Native: `JazzRnRuntimeAdapter` forwards `updateAuth` and `onAuthFailure` to the UniFFI binding (previously missing — auth refresh was a silent no-op on RN).
+  - `JazzClient.updateAuthToken` carries `admin_secret` and `backend_secret` forward from context (previously the serialised payload only included `jwt_token`, silently erasing privileged credentials on every refresh).
+
+  **Breaking changes**
+  - `POST /sync` and `GET /events` HTTP routes are deleted; external callers receive 404. Use the WebSocket `/ws` route via `runtime.connect(url, authJson)`.
+  - `RuntimeCore<S, Sch, Sy>` is now `RuntimeCore<S, Sch>` — the `SyncSender` generic parameter has been removed.
+  - `NapiSyncSender` and `RnSyncSender` are removed; bindings use `runtime.connect` instead.
+  - `TokioRuntime::new` no longer takes the trailing `SyncSender` argument.
+  - Cargo features `transport` and `transport-http` are removed; transport types are default-on, and `transport-websocket` enables the WS implementation.
+
+  **Tests**
+  - Inline `TransportManager` tests cover shutdown and `update_auth` in every phase (connect / backoff / handshake / connected).
+  - Re-enabled two previously-`#[ignore]`d sync-reliability tests after fixing a debounce-flag race in `TokioScheduler::schedule_batched_tick`.
+  - Integration tests migrated from `/events` to `/ws`.
+  - New TS coverage: `client.test.ts` (onAuthFailure wiring + secret preservation), `napi.auth-failure.test.ts` (E2E against real NAPI + server), `db.transport.test.ts`, `url.test.ts`, `db.auth-refresh.worker.test.ts` (browser worker round-trip), RN adapter tests for `updateAuth` / `onAuthFailure`.
+
+- e346057: Fix React Native cold-start on offline and unblock initial subscriptions when the transport can't reach the server.
+  - `jazz-rn` now regenerates its UniFFI bindings for the `insert` / `insert_with_session` signatures introduced with the caller-supplied UUIDv7 APIs, so the native library and JS adapter agree at startup and Jazz initializes in the app.
+  - `jazz-rn` now calls `rehydrate_schema_manager_from_catalogue` after opening SQLite, matching the WASM runtime, so offline cold-starts can decode previously-persisted rows against their original schema/permissions history.
+  - `jazz-tools` bounds the "hold remote query frontier while transport connects" wait so a never-completing transport no longer stalls first subscription delivery forever. Pending servers now clear on a new `TransportInbound::ConnectFailed` event (fired from the connect/handshake error paths in both tokio and wasm run loops), with a 2s safety-net timeout for hung connects. The frontier hold also re-evaluates live at settle time so offline or hung first-connect cases release immediately once pending clears.
+
+  No public-API break. RowPolicyMode selection, persisted-row wire format, and transport handshake semantics are unchanged.
+
+- b8581ad: The standalone inspector now shows each table's currently published sync-server permissions alongside its stored schema, making it easier to verify the rules your server is actively enforcing.
+- Updated dependencies [5c80e4d]
+- Updated dependencies [848e94d]
+- Updated dependencies [e346057]
+  - jazz-wasm@2.0.0-alpha.30
+  - jazz-rn@2.0.0-alpha.30
+
+## 2.0.0-alpha.29
+
+### Patch Changes
+
+- 58ace62: Add external UUIDv7 create APIs and id-based upsert APIs across the Rust and TypeScript client surfaces.
+- Updated dependencies [58ace62]
+  - jazz-wasm@2.0.0-alpha.29
+  - jazz-rn@2.0.0-alpha.29
+
+## 2.0.0-alpha.28
+
+### Minor Changes
+
+- f6d18f8: Add BIP39 recovery phrase for local-first identity, exposed at the new `jazz-tools/passphrase` subpath. `RecoveryPhrase.fromSecret` / `RecoveryPhrase.toSecret` encode and decode the 32-byte local-first auth secret as a 24-word English mnemonic, with structured `RecoveryPhraseError` codes and forgiving whitespace/case normalization. Also fixes a latent cache bug in `BrowserAuthSecretStore` and `ExpoAuthSecretStore` where `saveSecret` did not invalidate `cachedPromise`, so a restore after `getOrCreateSecret` would silently keep the pre-restore secret.
+
+### Patch Changes
+
+- 6b2ceff: Reduce migration workflow churn for schema changes that do not require row transforms.
+
+  `jazz-tools migrations create` and `jazz-tools migrations push` now treat default-only and column-order-only schema hash changes as compatible transitions that do not need a reviewed migration file, while still requiring reviewed migrations for incompatible changes like nullability or reference updates. The CLI also now accepts reviewed migration modules that load through CommonJS-style nested `default` exports.
+
+- 6afc27e: Fix row-level policies that reference a row's own `id`, including claim checks like `id IN @session.claims.editable_doc_ids`, so write permissions evaluate against the row `ObjectId` even when the table has no explicit `id` column.
+- 9b45ec5: Adopt the new row-permission strategy across client and server runtimes. Local clients that only have a structural schema stay permissive for offline reads and writes, while runtimes with current permissions and sync servers enforce deny-by-default row access for session-scoped reads, inserts, updates, and deletes.
+- 234b138: Added `jazzSvelteKit()` Vite plugin (`jazz-tools/dev/sveltekit`) for SvelteKit and Vite+Svelte projects. Starts an embedded Jazz dev server, publishes and watches the schema, and injects `PUBLIC_JAZZ_APP_ID`/`PUBLIC_JAZZ_SERVER_URL` into the Vite env. Supports three modes: embedded local server (default), connect to an explicit URL via `server: "https://…"`, or connect to a server already described in `PUBLIC_JAZZ_SERVER_URL`. Defaults `schemaDir` to `src/lib/` to match SvelteKit conventions.
+- e752ae2: Remove demo auth, anonymous auth, and synthetic users. The only valid auth modes are now local-first (Ed25519 JWT) and external (JWKS JWT). Add Expo support for local-first auth secret generation via expo-crypto.
+- 4792880: Verify bearer JWTs inside backend `createJazzContext(...).forRequest()` / `withAttributionForRequest()`, add backend `jwksUrl` and `allowSelfSigned` config, and share JWT-to-session mapping with the runtime session helpers. These request-scoped backend helpers are now async so callers can await self-signed or JWKS-backed verification.
+- Updated dependencies [9b45ec5]
+  - jazz-wasm@2.0.0-alpha.28
+  - jazz-rn@2.0.0-alpha.28
+
+## 2.0.0-alpha.27
+
+### Patch Changes
+
+- d872a4d: `allowedTo` now accepts bare relation names (e.g. `"project"`) in addition to full FK column names (`"projectId"`).
+- cfaed19: Fix enum literals in nested policies
+
+  Nested relation-backed permission filters now serialize enum literals as tagged runtime values instead of raw strings, so publishing permissions and loading them into `createJazzContext(...)` works for cases like `grant_role: "viewer"`.
+
+- 1fb1395: Add `From<T>` impls on `Value` for common types and a `row_input!` macro for ergonomic `HashMap<String, Value>` construction.
+- 463098a: Ship the new unified row-history storage engine across Jazz runtimes.
+
+  Relational rows, query visibility, and sync replay now go through the same storage-backed path instead of mixing durable state with older in-memory cache layers. In practice this makes local persistence and sync behavior more consistent across browser, Node, and native runtimes, especially around cold start, reconnect, and large local datasets.
+
+- Updated dependencies [463098a]
+  - jazz-wasm@2.0.0-alpha.27
+  - jazz-rn@2.0.0-alpha.27
+
+## 2.0.0-alpha.26
+
+### Patch Changes
+
+- 15ce77e: Fix large global query and subscription snapshots dropping rows by sequencing sync delivery and delaying `QuerySettled` tier unlocks until earlier sync updates have been applied.
+- 5a2adfd: Fix `state_referenced_locally` compiler warnings in Svelte components by moving prop reads into reactive contexts.
+- 8be5761: Add `AddTable`, `RemoveTable` and `RenameTable` migrations
+- 75b30a9: feat: enhance inspector with inline editings, resizeable panels and a shiny new grid
+- 75b30a9: Fix the inspector data grid freezing the browser tab when paging or sorting, and improve diagnostics around pending query transitions.
+- 9968d2f: Fix `createPolicyTestApp(...)` so policy test helpers no longer hard-code Vitest's `expect`.
+
+  Callers now pass the `expect` function explicitly, which keeps `jazz-tools/testing` policy assertions working when the test harness provides its own assertion context.
+
+- 6bb5d9f: Add a `runtimeSources` client config API for explicit Wasm and worker bootstrap across browser and edge-style runtimes, including `baseUrl`, `wasmUrl`, `workerUrl`, `wasmSource`, and `wasmModule` overrides exported from the runtime and framework entrypoints.
+- d302911: Allow `QuerySubscription` (Svelte) and `useAll` (Vue) to accept `undefined` queries, matching the React `useAll` behaviour. When `undefined` is passed, the subscription returns `undefined` without subscribing.
+- 4d57125: Fix schema comparison in `permissions push` CLI command
+- Updated dependencies [a1cb9d5]
+  - jazz-rn@2.0.0-alpha.26
+  - jazz-wasm@2.0.0-alpha.26
+
+## 2.0.0-alpha.25
+
+### Patch Changes
+
+- 30df2b4: Fix browser worker reconnect after network loss when offline `local`-tier writes were queued locally.
+
+  The worker now aborts its stale upstream events stream before scheduling reconnect after sync POST failures, which lets later writes promote normally once network access returns. This also adds browser regression coverage for the split-context reconnect case where one client stays online while another writes offline and reconnects.
+  - jazz-wasm@2.0.0-alpha.25
+  - jazz-rn@2.0.0-alpha.25
+
+## 2.0.0-alpha.24
+
+### Patch Changes
+
+- 08f10b9: CLI schema resolution now accepts apps that keep `schema.ts` and `permissions.ts` in `src/` as well as the app root.
+
+  The legacy `--schema-dir ./schema` shim is no longer supported. Point CLI commands at the app root instead, where Jazz will resolve `schema.ts` from either the root or `src/`.
+  - jazz-wasm@2.0.0-alpha.24
+  - jazz-rn@2.0.0-alpha.24
+
+## 2.0.0-alpha.23
+
+### Patch Changes
+
+- d1d19a5: Allow development-mode clients to auto-publish the current structural schema from `schema.ts` without an admin secret, while keeping non-schema catalogue writes admin-only. Improve `jazz-tools --help` and the docs so the CLI and publishing workflow more clearly explain when schema auto-push is enough versus when to run `permissions push` or `migrations push`.
+- a41135e: Self-hosted servers now clean up disconnected client state after a configurable TTL, while deferring cleanup for clients that still have unprocessed inbox entries.
+- 8b16d59: Replace Fjall with RocksDB as the default persistent storage engine for server, Node.js client, and CLI.
+
+  **BREAKING:** Server data stored with Fjall is not compatible — existing servers must start from a clean data directory.
+
+- b5193ad: Add World Tour Vue 3 example app demonstrating schema, permissions, live queries, file handling, and co-located component data access.
+  - jazz-wasm@2.0.0-alpha.23
+  - jazz-rn@2.0.0-alpha.23
+
+## 2.0.0-alpha.22
+
+### Patch Changes
+
+- dedab8f: Add authorship-based edit metadata for row writes across the runtime and bindings.
+
+  Rows now expose `$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt` magic columns in queries and permissions, and backend contexts can override stamped authorship with `withAttribution(...)`, `withAttributionForSession(...)`, and `withAttributionForRequest(...)`.
+
+- 568aa27: Add reconcileArray for granular Svelte and Vue reactivity in onDelta callbacks
+- 6aca383: Fix a sync-server permission bypass where replicated soft deletes could skip `DELETE` policy evaluation.
+
+  User writes received as `ObjectUpdated` payloads now inspect delete metadata before the sync permission check is queued. Soft-delete commits are classified as `DELETE` operations instead of `UPDATE`, so replicated row deletions correctly use delete policies and are rejected when the client lacks delete access.
+
+- 4d53497: Self-hosted server now supports JWKS key rotation without a restart. Keys are cached with a configurable TTL (5 minutes by default, override with `JAZZ_JWKS_CACHE_TTL_SECS`) and automatically refetched when a JWT arrives with an unknown key ID or a signature mismatch. A 10-second cooldown prevents forced refreshes from being abused as a DoS vector. If the JWKS endpoint goes down, the server continues validating against the stale cached keyset.
+- fd7ecd0: Schema authoring no longer has a build/codegen step. Apps now define their schema directly in TypeScript with the namespaced API (`import { schema as s } from "jazz-tools"`), and `jazz-tools validate` is just an optional local preflight check.
+
+  Current `permissions.ts` is now separate from the structural schema and migration lifecycle, instead of being versioned as part of schema identity.
+
+  Runtime permission enforcement now follows the latest published permissions head independently of client schema hashes, with learned schemas, migration lenses, and permissions rehydrated from the local catalogue on restart.
+
+- 3bd07c5: Improve React Native runtime error reporting by normalizing UniFFI bridge failures into standard `Error` objects with stable `name`, `message`, `cause`, and `tag` metadata.
+
+  Thanks [Schniz](https://github.com/Schniz)!
+
+- 195db76: Add rune-based Svelte test infrastructure with real $state/$effect verification
+- 113a73d: `jazz-tools server` now logs a ready-to-open inspector URL on startup using `https://jazz2-inspector.vercel.app/` with `url`, `appId`, and `adminSecret` encoded in the hash fragment.
+- Updated dependencies [dedab8f]
+- Updated dependencies [fd7ecd0]
+  - jazz-wasm@2.0.0-alpha.22
+  - jazz-rn@2.0.0-alpha.22
+
+## 2.0.0-alpha.21
+
+### Patch Changes
+
+- 52b737b: Fix server-side row insert permission evaluation
+- 65adab0: Add utils to simplify testing permissions
+- eb31a76: Fix mixed `select("*", "$canDelete")` projections so permission introspection columns can be combined with wildcard row selection, including nested include projections, and document the supported query shape.
+- 51094d9: Fix catalogue sync so clients receive shared catalogue updates correctly, and skip resending the catalogue on reconnect when the client and server are already aligned.
+- 695862b: Allow TypeScript `update(...)` and `updateDurable(...)` calls to clear nullable fields with `null`.
+
+  Passing `undefined` still leaves a field unchanged, and required fields still reject `null`.
+
+- 47a9aae: Align the Vue and Svelte bindings more closely with React: Vue `useAll` now accepts `QueryOptions` and re-exports `DurabilityTier`/`QueryOptions`, while Svelte query subscriptions now use the shared subscription orchestrator, surface async subscription errors, and export `createExtensionJazzClient` and `attachDevTools` for extension tooling.
+- 62406d3: Use separate fields for foreign key columns and resolved references
+- Updated dependencies [477c43c]
+  - jazz-rn@2.0.0-alpha.21
+  - jazz-wasm@2.0.0-alpha.21
+
+## 2.0.0-alpha.20
+
+### Patch Changes
+
+- 9f4d4d9: Bound oversized index keys by keeping as much real value prefix as fits in the durable key and appending a length plus hash overflow trailer.
+
+  This keeps large indexed string and JSON equality lookups working without exceeding storage key limits, while preserving prefix-based ordering instead of collapsing oversized values to a pure hash ordering. Large `array(ref(...))` values also continue to support exact array equality and per-member reference indexing.
+
+- Updated dependencies [9f4d4d9]
+  - jazz-wasm@2.0.0-alpha.20
+  - jazz-rn@2.0.0-alpha.20
+
+## 2.0.0-alpha.19
+
+### Patch Changes
+
+- f2c10a1: Simplify `jazz-tools/backend` to expose only the high-level `Db` and `createJazzContext` APIs. `JazzContext` no longer exposes a low-level `client()` escape hatch, and the backend entrypoint no longer re-exports low-level runtime client and transport internals.
+- 4015614: Add `.requireIncludes()` option to query builders to avoid loading rows if any of their included references are missing
+- ecb2db8: Add high-level `Db` helpers for chunked browser file storage:
+  `createFileFromBlob(...)`, `createFileFromStream(...)`, `loadFileAsBlob(...)`,
+  and `loadFileAsStream(...)`.
+
+  Document the conventional `files` / `file_parts` schema, permission setup, and
+  blob/stream usage on the new Files & Blobs docs page.
+  - jazz-wasm@2.0.0-alpha.19
+  - jazz-rn@2.0.0-alpha.19
+
+## 2.0.0-alpha.18
+
+### Patch Changes
+
+- ca2b0b0: Fix generated `schema/app.ts` query builder class fields for Expo compatibility by replacing `declare readonly` phantom fields with `readonly ...!:`.
+
+  Expo's Babel pipeline rejects `declare` class fields without Flow-specific options, causing generated schemas to fail compilation in React Native apps. This change keeps the same type inference intent and does not change runtime behavior.
+
+- 33bc53f: Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.
+
+  Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
+
+- d9261b7: Move Jazz client creation into the default React and React Native `JazzProvider` so Strict Mode remounts do not trigger extra startup delays, while still exposing `JazzClientProvider` for apps that need to supply their own client instance.
+
+  Existing IndexedDB stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
+
+- Updated dependencies [33bc53f]
+- Updated dependencies [83f4f5d]
+  - jazz-wasm@2.0.0-alpha.18
+  - jazz-rn@2.0.0-alpha.18
+
+## 2.0.0-alpha.17
+
+### Patch Changes
+
+- 9002dde: Fix `jazz build` not regenerating `app.ts` on subsequent builds.
+
+  The bin entry point was treating the TypeScript schema build as a one-time bootstrap step, skipping it whenever `current.sql` already existed. Removed the guard so `app.ts` and `current.sql` are always regenerated when `current.ts` is present.
+
+- 6672f98: Remove local write-time foreign-key existence checks so inserts and updates no longer fail just because a referenced row has not been synced into the active query set yet.
+- bb10f1c: Add a shared `jazz-tools/expo/polyfills` entrypoint for Expo apps and ensure published `jazz-rn` packages include the generated C++ bindings required for native builds.
+  - jazz-wasm@2.0.0-alpha.17
+
+## 2.0.0-alpha.16
+
+### Patch Changes
+
+- f81ecab: Fix backend N-API timestamp writes when `Timestamp` values arrive from TypeScript as JS numbers.
+
+  `createJazzContext(...)` and other backend N-API mutation paths now accept integral epoch-millisecond timestamp payloads produced by the TS value converter, instead of rejecting modern dates as floating-point values during Rust deserialization.
+
+- 30d2f08: Batch server-bound `/sync` payloads created in the same microtask into a single ordered request.
+  - jazz-wasm@2.0.0-alpha.16
+
+## 2.0.0-alpha.15
+
+### Patch Changes
+
+- 5684a18: Normalize schema manager table columns before hashing sorting by name.
+
+  This makes logically equivalent schemas produce the same schema hash even when their column declarations are ordered differently.
+
+- 6664ee5: Use the derived local anonymous/demo session for `JazzClient` query and subscription permission checks when no JWT is configured.
+- 8877b8b: Fix runtime schema-order compatibility after sorted table columns.
+
+  `Db` mutations and query transforms now tolerate runtime schemas returned as `Map`s, and low-level `JazzClient` create/query/subscribe APIs preserve the declared schema column order expected by generated bindings and app code.
+
+- ac3a73e: Fix Rust schema-order compatibility when runtime table columns are sorted differently from the declared app schema, including `JazzClient` create/query flows and `SchemaManager` inserts.
+- f9812d7: Fix lens SQL parsing for `TIMESTAMP` defaults so numeric defaults like `DEFAULT 0` are coerced to timestamp values instead of integers.
+
+  This resolves type mismatches when applying migrations that add timestamp columns with numeric defaults, and adds regression coverage for `TIMESTAMP DEFAULT 0`.
+
+- 4871b02: Switch the native persistent storage engine from SurrealKV to Fjall for the CLI, NAPI bindings, and React Native bindings.
+
+  Native local data now lives in Fjall-backed stores and uses `.fjall` database paths by default.
+
+- 4fff7e9: Improve type inference for `include` and `select` in TS queries
+- e32e6a9: Fix backend N-API sync regression where outbound messages were dropped before they reached the server.
+
+  `createJazzContext(...).asBackend()` now accepts the real nested N-API sync callback shape used by published alpha builds, so backend query subscriptions and other upstream sync traffic can leave the local runtime again.
+
+- 971f8cf: Add `$canRead`, `$canEdit`, and `$canDelete` permission introspection magic columns to queries, and reserve the `$` column prefix for system magic fields.
+- bb39e15: Modify inserts to return the inserted row instead of just the id
+- 8571fdb: Make query optional in `useAll` to support conditionally running queries when inputs are missing
+- 9accce0: `QuerySubscription` in the Svelte bindings now accepts an options object as its second argument (e.g. `{ tier: 'edge' }`), matching the React `useAll` API. The previous bare-string form is removed.
+- 78e074f: Split the local-first insert APIs in `jazz-tools`.
+  - `db.insert(...)` now applies the write immediately and returns the inserted row synchronously.
+  - `db.insertDurable(...)` waits for the requested durability tier before resolving.
+
+- 4fd041c: Split the local-first update/delete APIs in `jazz-tools`.
+  - `db.update(...)` and `db.delete(...)` now apply immediately and return `void`.
+  - `db.updateDurable(...)` and `db.deleteDurable(...)` wait for the requested durability tier before resolving.
+  - `db.deleteFrom(...)` has been renamed to `db.delete(...)`.
+
+- Add Vue bindings and a `jazz-tools/vue` entrypoint, with matching docs and example coverage.
+- Updated dependencies [bb39e15]
+  - jazz-wasm@2.0.0-alpha.15
+
+## 2.0.0-alpha.14
+
+### Patch Changes
+
+- ad29f43: fix query sync provenance for paginated, nested subquery, and recursive subscriptions
+- a4da52d: Wait for the initial server event stream handshake before returning from `JazzClient::connect`, preventing `EdgeServer` settled queries from racing the connection after server restart.
+- 78092d3: Add support for `EXISTS (SELECT FROM <table> WHERE <expr>)` in SQL policy expressions.
+- 78092d3: Fix `@session.__jazz_outer_row.id` not resolving inside EXISTS subquery policies. Previously the outer row's UUID was silently treated as an unresolvable column, causing all EXISTS policy checks to evaluate to false on the server.
+- dc25263: Fix: sync server now falls back to the server-established session when a `QuerySubscription` payload omits one.
+
+  Demo and anonymous auth clients sent `session: None` in subscription payloads, causing all their queries to return empty results after the payload-session change in #147. The server now prefers the session it validated from auth headers during the SSE handshake, falling back to the payload only for fully unauthenticated clients. Payload sessions that differ from the server-established session are ignored and a warning is logged.
+
+- 2943587: Fix a race condition in `subscribe_internal` where the callback could be called before it was registered.
+- a952d98: Fix missing `id` fields on rows returned from included array subqueries, including nested relation results.
+- ec0ff2d: Add a built-in MCP server (`npx jazz-tools mcp`) that exposes Jazz documentation as tools for AI assistants. Supports full-text search via SQLite FTS5 (Node 22.13+) with a plain-text fallback for older runtimes.
+- 2f5ccba: Add an in-memory storage driver across the Jazz JS, WASM, NAPI, and React Native runtimes.
+
+  Backend contexts can now opt into memory-backed runtimes without local persistence, and runtime driver-mode coverage was expanded to exercise the new in-memory path.
+
+- 49307fa: Quote keyword and non-bare identifiers when emitting frozen schema and lens SQL from Rust so round-tripping generated SQL continues to parse.
+- Updated dependencies [2f5ccba]
+  - jazz-wasm@2.0.0-alpha.14
+
+## 2.0.0-alpha.13
+
+### Patch Changes
+
+- ff4ccb3: Support quoted SQL identifiers in `jazz-tools` schema parsing/generation, including reserved keyword column names like `"table"`.
+  - jazz-wasm@2.0.0-alpha.13
+
+## 2.0.0-alpha.12
+
+### Patch Changes
+
+- 8bcde79: Harden runtime sync outbox handling across WASM/RN and NAPI callback contracts by typing both callback shapes, routing both through a shared normalizer, and adding conformance tests that assert identical `/sync` behavior.
+  - jazz-wasm@2.0.0-alpha.12
+
+## 2.0.0-alpha.11
+
+### Patch Changes
+
+- 969a139: Overhauled durability APIs to use a single `DurabilityTier` model across reads and writes.
+  - Reads now take `{ tier, localUpdates }`, where `localUpdates` defaults to `"immediate"` so local writes are reflected right away even when waiting for a more remote durability tier.
+  - Writes now use the base methods with optional `{ tier }` and environment-aware defaults (`"worker"` for clients, `"edge"` for backend contexts).
+  - Renamed the top tier from `"core"` to `"global"` for clearer semantics.
+  - Added multi-tier node identity support so single-node deployments (like CLI and cloud-server today) can acknowledge both `"edge"` and `"global"`.
+
+- 98ba0f9: Fixed array subquery incremental updates so parent row fields stay correct. Previously, when related rows changed after subscribing, update payloads could return corrupted parent values (for example, garbled `id` or `name`).
+- 48053ac: fix(codegen): generate DROP COLUMN statements for all affected tables in multi-table migrations
+- debd2c3: Add `asBackend()` for server-side Jazz clients using backend-secret auth, and enforce backend-role limits so backend sync can write row data but cannot write schema/permissions catalogue entries.
+- a955504: Allow backend `JazzClient` and `SessionClient` query/subscribe calls to consume generated query builders directly. Query-builder payloads with `_schema` are now translated automatically to runtime query JSON (`relation_ir`), so backend code can call `context.forRequest(...).query(app.todos.where(...))` without manual `translateQuery(...)`.
+  - jazz-wasm@2.0.0-alpha.11
+
+## 2.0.0-alpha.10
+
+### Patch Changes
+
+- b058893: fix `jazz-tools build` bootstrap behavior by routing through the TypeScript schema CLI when `schema/current.ts` exists and `schema/current.sql` is missing
+- ddf7756: Tighten generated query helper and include types for stronger inference and stricter contracts.
+
+  This preserves include-aware returned row types by keeping `QueryBuilder<...WithIncludes<I>>` / `_rowType` aligned with selected includes, narrows generated `*Include` relation flags to `true` (instead of `boolean`), tightens `gather(...)` step callback typing, avoids optional-include selector collapse to `never` in nested array includes, and removes unnecessary `unknown` casts in generated include helpers.
+  - jazz-wasm@2.0.0-alpha.10
+
+## 2.0.0-alpha.9
+
+### Patch Changes
+
+- eef9942: Fix WebAssembly fetch behavior in Next.js runtimes.
+  - jazz-wasm@2.0.0-alpha.9
+
+## 2.0.0-alpha.8
+
+### Patch Changes
+
+- 401db01: fix cold load of object history
+- d1f17a9: fix: ensure query subgraphs share branch and schema context of parent graph
+- 4775a79: Add a high-level server-side `createJazzContext` API in `jazz-tools/backend` with lazy runtime setup from generated app DSL objects, plus request/session-scoped helpers (`forRequest`, `forSession`) and lifecycle helpers (`flush`, `shutdown`).
+  - jazz-wasm@2.0.0-alpha.8
+
+## 2.0.0-alpha.7
+
+### Patch Changes
+
+- Add Expo support.
+- 6b19ea3: Add support for JSON columns.
+- 47dbdba: Added Svelte support.
+  - jazz-wasm@2.0.0-alpha.7

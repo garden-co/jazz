@@ -1,0 +1,3968 @@
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createServer, type Server } from "node:http";
+import { constants, mkdtempSync } from "node:fs";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, assert, describe, expect, it, vi } from "vitest";
+import { structuralSchemaHash } from "./dev/schema-utils.js";
+import {
+  createMigration as createCatalogueMigration,
+  pushMigration as rawPushMigration,
+} from "./dev/catalogue-project.js";
+import {
+  APP_ID_ENV_VARS,
+  SERVER_URL_ENV_VARS,
+  createMigration as rawCreateMigration,
+  deploy as rawDeploy,
+  exportSchema as rawExportSchema,
+  loadDotEnv,
+  loadEnvFile,
+  readEnvFiles,
+  permissionsStatus as rawPermissionsStatus,
+  resolveEnvVar,
+  schemaHash as rawSchemaHash,
+  validate,
+} from "./cli.js";
+
+const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
+const indexPath = fileURLToPath(new URL("./index.ts", import.meta.url));
+const distIndexPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+const distCliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
+const bootstrapVerifierPath = fileURLToPath(
+  new URL("../scripts/verify-packed-runtime-bootstrap.mjs", import.meta.url),
+);
+
+const packageRoot = dirname(fileURLToPath(import.meta.url));
+const tmpBase = mkdtempSync(join(tmpdir(), "jazz-tools-cli-tests-"));
+afterAll(() => rm(tmpBase, { recursive: true, force: true }));
+const tempRoots: string[] = [];
+const APP_ID = "test-app";
+
+function withAppId<T extends { appId?: string }>(options: T): T & { appId: string } {
+  return { appId: APP_ID, ...options };
+}
+
+const exportSchema = (options: Parameters<typeof rawExportSchema>[0]) =>
+  rawExportSchema(withAppId(options));
+const schemaHash = (options: Parameters<typeof rawSchemaHash>[0]) => rawSchemaHash(options);
+const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
+  rawCreateMigration(withAppId(options));
+const pushMigration = (
+  options: Omit<Parameters<typeof rawPushMigration>[0], "appId"> & { appId?: string },
+) => rawPushMigration(withAppId(options));
+const permissionsStatus = (
+  options: Omit<Parameters<typeof rawPermissionsStatus>[0], "appId"> & { appId?: string },
+) => rawPermissionsStatus(withAppId(options));
+const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
+  rawDeploy(withAppId(options));
+
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function createWorkspace(): Promise<{ root: string; schemaDir: string }> {
+  await mkdir(tmpBase, { recursive: true });
+  const root = await mkdtemp(join(tmpBase, "jazz-tools-cli-test-"));
+  tempRoots.push(root);
+  const schemaDir = join(root, "schema");
+  await mkdir(schemaDir, { recursive: true });
+  await writeFile(join(root, "package.json"), '{ "type": "module" }\n');
+  return { root, schemaDir };
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function spawnMigrationCreate(
+  root: string,
+  migrationsDir: string,
+  pauseAt: "lock-held" | "lock-quarantined" | "between-publications" | "journaled",
+  marker: string,
+  releaseMarker?: string,
+) {
+  return spawn(
+    process.execPath,
+    [distCliPath, "migrations", "create", "--schema-dir", root, "--migrations-dir", migrationsDir],
+    {
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        JAZZ_TEST_MIGRATION_PAUSE_AT: pauseAt,
+        JAZZ_TEST_MIGRATION_PAUSE_MARKER: marker,
+        ...(releaseMarker ? { JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER: releaseMarker } : {}),
+      },
+      stdio: "ignore",
+    },
+  );
+}
+
+async function typecheckGeneratedMigration(migrationPath: string): Promise<void> {
+  const tsconfigPath = join(dirname(dirname(migrationPath)), "generated-migration.tsconfig.json");
+  await writeFile(
+    tsconfigPath,
+    JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        skipLibCheck: true,
+        ignoreDeprecations: "6.0",
+        baseUrl: dirname(packageRoot),
+        paths: { "jazz-tools": ["src/index.ts"] },
+        // This config lives under /tmp, outside node_modules ancestry. Give
+        // the real compiler the Node host types installed by this fixture;
+        // changing cwd alone does not change TypeScript's type-root lookup.
+        typeRoots: [join(dirname(packageRoot), "node_modules", "@types")],
+      },
+      files: [migrationPath],
+    }),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(dirname(packageRoot), "node_modules", "typescript", "bin", "tsc"),
+      "--noEmit",
+      "--project",
+      tsconfigPath,
+    ],
+    // This intentionally invokes a real TypeScript compiler to validate the
+    // generated public API.  Bound the child separately so a compiler hang is
+    // reported as such instead of relying only on Vitest's worker timeout.
+    { cwd: dirname(packageRoot), encoding: "utf8", timeout: 20_000 },
+  );
+  if (result.error) {
+    throw new Error(
+      `Generated migration typecheck could not run: ${result.error.message}\n${result.stdout}\n${result.stderr}`,
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(`Generated migration failed to typecheck:\n${result.stdout}\n${result.stderr}`);
+  }
+}
+
+async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await fileExists(marker))) {
+    if (child.exitCode !== null) {
+      throw new Error(`migration child exited before reaching ${marker}`);
+    }
+    if (Date.now() >= deadline) throw new Error(`migration child did not reach ${marker}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForMarkers(markers: readonly string[]): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await Promise.all(markers.map(fileExists))).every(Boolean)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `migration children did not all reach lock contention: ${markers.join(", ")}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function killChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.kill("SIGKILL");
+  await closed;
+}
+
+async function captureConsoleLogs<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; logs: string[] }> {
+  const logs: string[] = [];
+  const ansiEscape = String.fromCodePoint(27);
+  const ansiSgrPattern = new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g");
+  const stripAnsi = (line: string): string => line.replace(ansiSgrPattern, "");
+  const logSpy = vi
+    .spyOn(console, "log")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      logs.push(stripAnsi([message, ...rest].map((value) => String(value ?? "")).join(" ")));
+    });
+  const warnSpy = vi
+    .spyOn(console, "warn")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      logs.push(stripAnsi([message, ...rest].map((value) => String(value ?? "")).join(" ")));
+    });
+
+  try {
+    const result = await run();
+    return { result, logs };
+  } finally {
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
+  }
+}
+
+async function computeTestSchemaHash(schema: object): Promise<string> {
+  return structuralSchemaHash(schema as Parameters<typeof structuralSchemaHash>[0]);
+}
+
+function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }, {  }),
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }, {  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithBooleanTodo(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }, {  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithConventionalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+const schema = { todos: s.table({ title: s.string(), createdAt: s.timestamp() }, {  }) };
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithExternalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+const schema = { imports: s.table({
+  sourceCreatedAt: s.timestamp(),
+  createdAt: s.allowExternalProvenanceName(s.timestamp()),
+  publishedAt: s.timestamp(),
+  assignedBy: s.string(),
+}, {  }) };
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rawRootSchemaWithExternalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+export const schema = { imports: s.table({
+  createdAt: s.allowExternalProvenanceName(s.timestamp()),
+}, {  }) };
+`;
+}
+
+function rootSchemaWithIndexedTodo(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }, {  }).indexOnly(["ownerId"]),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithTodoNotes(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }, {  }),
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+    notes: s.string().optional(),
+  }, {  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithInlinePermissions(dslImportPath: string = dslPath): string {
+  return `
+import { table, col } from ${JSON.stringify(dslImportPath)};
+
+table("todos", {
+  title: col.string(),
+}, {
+  permissions: {
+    select: { type: "True" },
+  },
+});
+`;
+}
+
+function rootPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ ownerId: session.user }),
+]);
+`;
+}
+
+function rootAllExplicitPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.never(),
+  policy.todos.allowUpdate.never(),
+  policy.todos.allowDelete.never(),
+]);
+`;
+}
+
+function rootTodoOwnerSchema(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }, {  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootReadOnlyPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+]);
+`;
+}
+
+function rootUpdateWithoutDeletePermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ ownerId: session.user }),
+  policy.todos.allowInsert.where({ ownerId: session.user }),
+  policy.todos.allowUpdate
+    .whereOld({ ownerId: session.user })
+    .whereNew({ ownerId: session.user }),
+]);
+`;
+}
+
+function permissionsSchemaMissingExport(): string {
+  return `
+export const nope = 42;
+`;
+}
+
+function permissionsSchemaUnknownTable(): string {
+  return `
+export default {
+  ghosts: {
+    select: {
+      using: { type: "True" },
+    },
+  },
+};
+`;
+}
+
+function permissionsSchemaNamedExport(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export const permissions = s.definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ ownerId: session.user }),
+]);
+`;
+}
+
+function permissionsSchemaInvalidShape(): string {
+  return `
+export default {
+  todos: 123,
+};
+`;
+}
+
+function storedRootSchema() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedRootSchemaBeforeOwnerRename() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedUsersEmailSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedUsersEmailAddressSchema(columnName: "email_address" | "emailAddress") {
+  return {
+    users: {
+      columns: [{ name: columnName, column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedPeopleEmailAddressSchema() {
+  return {
+    people: {
+      columns: [{ name: "email_address", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedUsersWithLegacyProfilesSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+    legacy_profiles: {
+      columns: [{ name: "bio", column_type: { type: "Text" }, nullable: true }],
+    },
+  };
+}
+
+function storedUsersWithProfilesSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+    profiles: {
+      columns: [{ name: "bio", column_type: { type: "Text" }, nullable: true }],
+    },
+  };
+}
+
+function storedBooleanTodoSchema() {
+  return {
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedBooleanTodoSchemaWithDefaultFalse() {
+  return {
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "done",
+          column_type: { type: "Boolean" },
+          nullable: false,
+          default: { type: "Boolean", value: false },
+        },
+      ],
+    },
+  };
+}
+
+function storedRootSchemaWithReorderedColumns() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedCounterSchema() {
+  return {
+    counters: {
+      columns: [
+        {
+          name: "value",
+          column_type: { type: "Integer" },
+          nullable: false,
+          merge_strategy: "Counter",
+        },
+      ],
+    },
+  };
+}
+
+function storedSchemaResponse(
+  schema: object,
+  publishedAt: number | null = null,
+  status: number = 200,
+) {
+  return new Response(
+    JSON.stringify({
+      schema: { tables: schema },
+      publishedAt,
+    }),
+    { status },
+  );
+}
+
+describe("loadDotEnv", () => {
+  it("merges values from .env into the supplied env object", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      ["JAZZ_SERVER_URL=http://from-dotenv", "JAZZ_ADMIN_SECRET=secret-123", ""].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-dotenv");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("secret-123");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not override values already set in the environment", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "JAZZ_SERVER_URL=http://from-dotenv\n");
+    const env: Record<string, string | undefined> = {
+      JAZZ_SERVER_URL: "http://from-real-env",
+    };
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-real-env");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("is a no-op when no .env file exists", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const env: Record<string, string | undefined> = { PRE_EXISTING: "kept" };
+    loadDotEnv(dir, env);
+    expect(env).toEqual({ PRE_EXISTING: "kept" });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("ignores comments and blank lines and strips surrounding quotes", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      [
+        "# leading comment",
+        "",
+        'JAZZ_SERVER_URL="http://quoted"',
+        "JAZZ_ADMIN_SECRET='single-quoted'",
+        "JAZZ_APP_ID=plain",
+      ].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://quoted");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("single-quoted");
+    expect(env.JAZZ_APP_ID).toBe("plain");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile loads from an explicit absolute path", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const filePath = join(dir, ".env.staging");
+    await writeFile(filePath, "JAZZ_SERVER_URL=http://staging\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(filePath, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://staging");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile keeps real env precedence when called repeatedly — first file wins per key", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, "a.env"), "JAZZ_SERVER_URL=from-a\nA_ONLY=a\n");
+    await writeFile(join(dir, "b.env"), "JAZZ_SERVER_URL=from-b\nB_ONLY=b\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(join(dir, "a.env"), env);
+    loadEnvFile(join(dir, "b.env"), env);
+    expect(env.JAZZ_SERVER_URL).toBe("from-a");
+    expect(env.A_ONLY).toBe("a");
+    expect(env.B_ONLY).toBe("b");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("readEnvFiles collects --env-file=PATH and --env-file PATH in order", () => {
+    expect(
+      readEnvFiles([
+        "--env-file=.env.staging",
+        "deploy",
+        "myAppId",
+        "--env-file",
+        ".env",
+        "--admin-secret=xyz",
+      ]),
+    ).toEqual([".env.staging", ".env"]);
+  });
+
+  it("readEnvFiles returns an empty array when no flag is present", () => {
+    expect(readEnvFiles(["deploy", "myAppId", "--admin-secret=xyz"])).toEqual([]);
+  });
+
+  it("loadEnvFile is a no-op for a missing path", async () => {
+    const env: Record<string, string | undefined> = { KEPT: "yes" };
+    loadEnvFile(join(tmpBase, "no-such-file.env"), env);
+    expect(env).toEqual({ KEPT: "yes" });
+  });
+
+  it("flows through resolveEnvVar so deploy-style lookups pick up the .env value", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "VITE_JAZZ_SERVER_URL=http://vite-from-dotenv\n");
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://vite-from-dotenv");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("resolveEnvVar", () => {
+  it("returns the first name that has a defined value", () => {
+    const env = { VITE_JAZZ_SERVER_URL: "http://from-vite" };
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://from-vite");
+  });
+
+  it("prefers the unprefixed JAZZ_ name over framework prefixes", () => {
+    const env = {
+      JAZZ_SERVER_URL: "http://canonical",
+      VITE_JAZZ_SERVER_URL: "http://from-vite",
+      NEXT_PUBLIC_JAZZ_SERVER_URL: "http://from-next",
+      PUBLIC_JAZZ_SERVER_URL: "http://from-sveltekit",
+      EXPO_PUBLIC_JAZZ_SERVER_URL: "http://from-expo",
+    };
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://canonical");
+  });
+
+  it("falls through each known framework prefix", () => {
+    for (const name of [
+      "PUBLIC_JAZZ_APP_ID",
+      "VITE_JAZZ_APP_ID",
+      "NEXT_PUBLIC_JAZZ_APP_ID",
+      "EXPO_PUBLIC_JAZZ_APP_ID",
+    ]) {
+      expect(resolveEnvVar(APP_ID_ENV_VARS, { [name]: "app-123" })).toBe("app-123");
+    }
+  });
+
+  it("ignores empty strings", () => {
+    const env = { JAZZ_SERVER_URL: "", VITE_JAZZ_SERVER_URL: "http://from-vite" };
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://from-vite");
+  });
+
+  it("returns undefined when nothing matches", () => {
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, {})).toBeUndefined();
+  });
+});
+
+describe("cli validate", () => {
+  it("warns with an exact Jazz provenance replacement", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(logs.filter((line) => line.includes("built-in $createdAt"))).toEqual([
+      expect.stringContaining("s.allowExternalProvenanceName(...)"),
+    ]);
+  });
+
+  it("promotes conventional provenance guidance to an error in strict mode", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    await expect(validate({ schemaDir: root, strictProvenance: true })).rejects.toThrow(
+      /forbidden by --strict-provenance[\s\S]*\$createdAt/i,
+    );
+  });
+
+  it("allows explicitly marked external provenance without false positives", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithExternalProvenance());
+    const { logs } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root, strictProvenance: true }),
+    );
+    expect(logs.filter((line) => line.includes("built-in $"))).toEqual([]);
+  });
+
+  it("preserves external provenance allowances from raw schema exports", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rawRootSchemaWithExternalProvenance());
+    const { logs } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root, strictProvenance: true }),
+    );
+    expect(logs.filter((line) => line.includes("built-in $"))).toEqual([]);
+  });
+
+  it("validates root schema.ts without generating SQL or app artifacts", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await validate({ schemaDir: root });
+
+    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
+    expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
+    expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
+  });
+
+  it("fails when pointed at the legacy ./schema shim directory", async () => {
+    const { root, schemaDir } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await expect(validate({ schemaDir })).rejects.toThrow(/schema file not found/i);
+  });
+
+  it("loads root permissions.ts that imports ./schema.ts", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
+    expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
+    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
+    expect(logs).toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
+  });
+
+  it("loads src/schema.ts and src/permissions.ts when schemaDir points at the app root", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
+  });
+
+  it("accepts named permissions exports for transitional ergonomics", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), permissionsSchemaNamedExport());
+
+    await validate({ schemaDir: root });
+  });
+
+  it("reports each denied table when permissions.ts is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes("no policy declarations"));
+    expect(warnings).toHaveLength(2);
+    expect(warnings).toContain(
+      'Warning: table "projects" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
+    );
+    expect(warnings).toContain(
+      'Warning: table "todos" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
+    );
+  });
+
+  it("warns only for missing operations in partial permissions", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootReadOnlyPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes('table "todos"'));
+    expect(warnings).toEqual([
+      'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
+      'Warning: table "todos" has a policy set but no explicit update policy in permissions.ts; updates will be denied.',
+      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
+    ]);
+  });
+
+  it("treats always and never as explicit policies", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootAllExplicitPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    expect(logs.filter((line) => line.includes("has no explicit"))).toEqual([]);
+  });
+
+  it("still warns when delete is omitted but update is explicit", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootTodoOwnerSchema());
+    await writeFile(join(root, "permissions.ts"), rootUpdateWithoutDeletePermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes("policy set but no explicit"));
+    expect(warnings).toEqual([
+      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
+    ]);
+  });
+
+  it("fails when schema.ts uses inline table permissions", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithInlinePermissions());
+
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      /inline table permissions are no longer supported/i,
+    );
+  });
+
+  it("fails when permissions.ts has no default or named permissions export", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), permissionsSchemaMissingExport());
+
+    await expect(validate({ schemaDir: root })).rejects.toThrow(/missing permissions export/i);
+  });
+
+  it("fails when permissions.ts references unknown tables", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), permissionsSchemaUnknownTable());
+
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      /permissions\.ts defines permissions for unknown table\(s\): ghosts/i,
+    );
+  });
+
+  it("fails when permissions.ts export shape is invalid", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), permissionsSchemaInvalidShape());
+
+    await expect(validate({ schemaDir: root })).rejects.toThrow(/invalid permissions export/i);
+  });
+});
+
+describe("cli schema export", () => {
+  it("prints the compiled schema representation as JSON and writes a snapshot", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const exported = JSON.parse(writes.join(""));
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(".json"),
+    );
+    expect(exported.projects.columns[0].name).toBe("name");
+    expect(exported.todos.columns.map((column: { name: string }) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
+    expect(exported.todos.policies).toBeUndefined();
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
+  });
+
+  it("does not write a duplicate snapshot when exporting the current schema twice", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((() => {
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root });
+      await exportSchema({ schemaDir: root });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(".json"),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+  });
+
+  it("prints the compiled schema representation from src/schema.ts", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const exported = JSON.parse(writes.join(""));
+    expect(exported.projects.columns[0].name).toBe("name");
+    expect(exported.todos.columns.map((column: { name: string }) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
+  });
+});
+
+describe("cli schema hash", () => {
+  it("prints the short hash of the current schema.ts without writing a snapshot", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const { logs } = await captureConsoleLogs(() => schemaHash({ schemaDir: root }));
+
+    expect(logs.some((line) => /[0-9a-f]{12}/i.test(line))).toBe(true);
+    expect(await fileExists(join(root, "migrations", "snapshots"))).toBe(false);
+  });
+});
+
+describe("cli migrations", () => {
+  it("serializes simultaneous migration generation against one directory", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(migrationsDir, { recursive: true });
+    const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
+    await mkdir(externalLock);
+    await writeFile(
+      join(externalLock, "owner.json"),
+      `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000001" })}\n`,
+    );
+
+    const contentionMarkers = Array.from({ length: 4 }, (_, index) =>
+      join(root, `migration-contention-${index}.marker`),
+    );
+    const resultsPromise = Promise.all(
+      Array.from(
+        { length: contentionMarkers.length },
+        (_, index) =>
+          new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+            const child = spawn(
+              process.execPath,
+              [
+                distCliPath,
+                "migrations",
+                "create",
+                "--schema-dir",
+                root,
+                "--migrations-dir",
+                migrationsDir,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  NODE_ENV: "test",
+                  JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER: contentionMarkers[index],
+                },
+              },
+            );
+            let stdout = "";
+            let stderr = "";
+            child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+            child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+            child.on("close", (code) => resolve({ code, stdout, stderr }));
+          }),
+      ),
+    );
+
+    // The lock is a filesystem boundary, not an in-process mutex: independently
+    // launched CLI processes must all observe the external owner before it is released.
+    await waitForMarkers(contentionMarkers);
+    await expect(access(join(migrationsDir, "snapshots"))).rejects.toThrow();
+    await rm(externalLock, { recursive: true });
+    const results = await resultsPromise;
+
+    expect(
+      results.map((result) => result.code),
+      JSON.stringify(results, null, 2),
+    ).toEqual([0, 0, 0, 0]);
+    expect(
+      results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.stdout.includes("No structural schema changes")),
+    ).toHaveLength(3);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers a lock whose same-host owner was killed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "lock-held.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-held", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    const results = await Promise.all([
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([
+      "initial-snapshot",
+      "unchanged",
+    ]);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers when a stale lock quarantiner is killed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    const marker = join(root, "lock-quarantined.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, "owner.json"),
+      `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000002" })}\n`,
+    );
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-quarantined", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(result.status).toBe("initial-snapshot");
+    expect(await fileExists(lockDir)).toBe(false);
+  });
+
+  it.each([false, true])(
+    "fails closed for an unknown lock owner (nonempty=%s)",
+    async (nonempty) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(lockDir, { recursive: true });
+      if (nonempty) await writeFile(join(lockDir, "unknown"), "unknown\n");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "owner metadata is missing, invalid, or unsafe",
+      );
+      expect(await fileExists(lockDir)).toBe(true);
+      expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+    },
+  );
+
+  it("fails closed for malformed dead-owner metadata", async () => {
+    const deadPid = 2_147_483_647;
+    const validToken = "00000000-0000-4000-8000-000000000003";
+    const malformedOwners = [
+      { version: 1, pid: deadPid, hostname: hostname(), token: null },
+      { version: 1, pid: deadPid, hostname: hostname(), token: "not-a-uuid" },
+      { version: 1, pid: deadPid, hostname: hostname() },
+      { version: 1, pid: deadPid, hostname: hostname(), token: validToken, extra: true },
+      { version: 1, pid: "2147483647", hostname: hostname(), token: validToken },
+      { version: 1, pid: deadPid, hostname: "", token: validToken },
+      { version: 2, pid: deadPid, hostname: hostname(), token: validToken },
+    ];
+
+    await Promise.all(
+      malformedOwners.map(async (malformedOwner) => {
+        const { root } = await createWorkspace();
+        const migrationsDir = join(root, "migrations");
+        const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+        const ownerText = `${JSON.stringify(malformedOwner)}\n`;
+        await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+        await mkdir(lockDir, { recursive: true });
+        await writeFile(join(lockDir, "owner.json"), ownerText);
+
+        await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+          "owner metadata is missing, invalid, or unsafe",
+        );
+        expect(await readFile(join(lockDir, "owner.json"), "utf8")).toBe(ownerText);
+        expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+      }),
+    );
+  });
+
+  it("recovers a killed migration between publishing its paired outputs", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "between-publications.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(true);
+
+    const retry = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(retry.status).toBe("unchanged");
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(2);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+      false,
+    );
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration-stage"))).toBe(false);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.lock"))).toBe(false);
+  });
+
+  it.each(["contents", "symlink"])(
+    "rejects a %s-tampered published prefix even when its staged copy is gone",
+    async (tamperKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const marker = join(root, "between-publications.marker");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+      const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+      await waitForCrashMarker(marker, child);
+      await killChild(child);
+      const migration = (await readdir(migrationsDir)).find((name) => name.endsWith(".ts"));
+      expect(migration).toBeDefined();
+      const migrationPath = join(migrationsDir, migration!);
+      if (tamperKind === "contents") {
+        await writeFile(migrationPath, "tampered\n");
+      } else {
+        const outside = join(root, "outside-migration.ts");
+        await writeFile(outside, "tampered\n");
+        await rm(migrationPath);
+        await symlink(outside, migrationPath, "file");
+      }
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        tamperKind === "contents"
+          ? "does not match its journal"
+          : "must not contain a symlink or junction",
+      );
+      expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["snapshots", ".jazz-create-migration-stage"])(
+    "rejects a symlinked migration publication path: %s",
+    async (linkedName) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const outside = join(root, "outside");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(migrationsDir);
+      await mkdir(outside);
+      await symlink(outside, join(migrationsDir, linkedName), "dir");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "must not contain a symlink or junction",
+      );
+      expect(await readdir(outside)).toEqual([]);
+    },
+  );
+
+  it("does not overwrite a destination created after publication is journaled", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "journaled.marker");
+    const releaseMarker = join(root, "journaled.release");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "journaled", marker, releaseMarker);
+    await waitForCrashMarker(marker, child);
+    const journal = JSON.parse(
+      await readFile(join(migrationsDir, ".jazz-create-migration.journal.json"), "utf8"),
+    ) as { files: Array<{ finalRelativePath: string }> };
+    const destination = join(migrationsDir, journal.files[0]!.finalRelativePath);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, "concurrent writer\n");
+    await writeFile(releaseMarker, "release\n");
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+
+    expect(code).not.toBe(0);
+    expect(await readFile(destination, "utf8")).toBe("concurrent writer\n");
+  });
+
+  it.each(["outside", "in-tree"])(
+    "rejects a %s symlinked committed snapshot baseline in the CLI process",
+    async (targetKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const snapshotsDir = join(migrationsDir, "snapshots");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
+      expect(snapshot).toBeDefined();
+      const snapshotPath = join(snapshotsDir, snapshot!);
+      const target =
+        targetKind === "outside"
+          ? join(root, "outside-snapshot.json")
+          : join(migrationsDir, "in-tree-snapshot.json");
+      await copyFile(snapshotPath, target);
+      await rm(snapshotPath);
+      await symlink(target, snapshotPath, "file");
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          distCliPath,
+          "migrations",
+          "create",
+          "--schema-dir",
+          root,
+          "--migrations-dir",
+          migrationsDir,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "Migration path must not contain a symlink or junction",
+      );
+    },
+  );
+
+  it("writes an initial committed snapshot on first run", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+      }),
+    );
+
+    expect(result).toBeNull();
+    const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect(logs.some((line) => line.startsWith("Wrote initial schema snapshot:"))).toBe(true);
+    expect(logs).toContain(
+      "No migration created because there was no previous local schema baseline.",
+    );
+  });
+
+  it("creates a migration from the latest committed snapshot and then no-ops when rerun", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-25T06:00:00.000Z"));
+    try {
+      await createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+      });
+
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+      const { result: filePath, logs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(filePath).not.toBeNull();
+      if (!filePath) {
+        throw new Error("Expected createMigration() to return a migration file path.");
+      }
+      const generated = await readFile(filePath, "utf8");
+      expect(generated).toContain('"notes": s.add.string({ default: null }),');
+      const snapshotFiles = (await readdir(snapshotsDir))
+        .filter((name) => name.endsWith(".json"))
+        .sort();
+      expect(snapshotFiles).toEqual([
+        expect.stringMatching(/^20260825T060000-[0-9a-f]{12}\.json$/i),
+        expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
+      ]);
+      expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+
+      const filesBeforeNoop = await readdir(snapshotsDir);
+      const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(noopResult).toBeNull();
+      expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
+      expect(noopLogs).toContain("No structural schema changes detected.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips creating a migration file when hashes differ but no row transforms are required", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    const fromHash = "7070707070707070707070707070707070707070707070707070707070707070";
+    const toHash = "7171717171717171717171717171717171717171717171717171717171717171";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "done", column_type: { type: "Boolean" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(2);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+    expect(logs.some((line) => line.includes("Run npx jazz-tools@"))).toBe(true);
+  });
+
+  it("skips creating a migration file for reordered columns across explicit schema hashes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "1010101010101010101010101010101010101010101010101010101010101010";
+    const toHash = "2020202020202020202020202020202020202020202020202020202020202020";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+  });
+
+  it("skips creating a migration file for merge-strategy-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "2121212121212121212121212121212121212121212121212121212121212121";
+    const toHash = "3131313131313131313131313131313131313131313131313131313131313131";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [{ name: "value", column_type: { type: "Integer" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedCounterSchema());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+  });
+
+  // The assertion intentionally launches `tsc`. On a contended CI worker the
+  // compiler startup can exceed Vitest's normal 5s unit-test budget, while the
+  // child process itself remains bounded above.
+  it("renders a type-valid BIGINT counter migration", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
+    const toHash = "5151515151515151515151515151515151515151515151515151515151515151";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [
+              {
+                name: "value",
+                column_type: { type: "BigInt" },
+                nullable: false,
+                merge_strategy: "Counter",
+              },
+              { name: "removedValue", column_type: { type: "BigInt" }, nullable: true },
+              { name: "label", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [
+              {
+                name: "value",
+                column_type: { type: "BigInt" },
+                nullable: false,
+                merge_strategy: "Counter",
+              },
+              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              { name: "label", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result: filePath } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(filePath).not.toBeNull();
+    if (!filePath) {
+      throw new Error("Expected createMigration() to return a migration file path.");
+    }
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
+    expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
+    expect(generated).toContain('"value": s.bigint().merge("counter"),');
+    await typecheckGeneratedMigration(filePath);
+  }, 30_000);
+
+  it("still creates a migration file for nullability-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "3030303030303030303030303030303030303030303030303030303030303030";
+    const toHash = "4040404040404040404040404040404040404040404040404040404040404040";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: true }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+  });
+
+  it("uses --name to generate a named migration file and skips the rename reminder", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+    });
+
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const { result: filePath, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        name: "Add Todo Notes",
+      }),
+    );
+
+    expect(filePath).not.toBeNull();
+    assert(filePath, "Expected createMigration() to return a migration file path.");
+
+    expect(filePath).toContain("-add-todo-notes-");
+    expect(filePath).not.toContain("-unnamed-");
+    expect(logs).not.toContain("2. Rename the file by replacing 'unnamed'.");
+  });
+
+  it("generates a typed migration stub from an explicit historical fromHash to the current schema", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const fromShortHash = fromHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result: filePath, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromShortHash,
+      }),
+    );
+
+    if (!filePath) {
+      throw new Error("Expected createMigration() to return a migration file path.");
+    }
+    const generated = await readFile(filePath, "utf8");
+    expect(filePath).toContain(`-unnamed-${fromShortHash}-`);
+    expect(generated).toContain("s.defineMigration");
+    expect(generated).toContain(`fromHash: "${fromShortHash}"`);
+    expect(generated).toContain("migrate: {");
+    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
+    expect(snapshotFiles).toHaveLength(2);
+    expect(
+      snapshotFiles.some(
+        (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
+      ),
+    ).toBe(true);
+    expect(logs).toContain("Migration stubs are only for structural schema changes.");
+    expect(logs).toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
+  });
+
+  it("renders createTables and dropTables when inferring table add/drop steps", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "abababababababababababababababababababababababababababababababab";
+    const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+          },
+          legacy_users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "notes", column_type: { type: "Text" }, nullable: true },
+            ],
+          },
+          users: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    if (!filePath) {
+      throw new Error("Expected createMigration() to return a migration file path.");
+    }
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain('"todos": {');
+    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(generated).toContain("createTables: {");
+    expect(generated).toContain('"users": true,');
+    expect(generated).toContain("dropTables: {");
+    expect(generated).toContain('"legacy_users": true,');
+  });
+
+  it("suggests renameTables for a single exact table rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+    const toHash = "1212121212121212121212121212121212121212121212121212121212121212";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+    assert(filePath);
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain("from: {");
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain("to: {");
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
+  it("suggests renameTables for multiple exact unambiguous table renames", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "3434343434343434343434343434343434343434343434343434343434343434";
+    const toHash = "5656565656565656565656565656565656565656565656565656565656565656";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+          orgs: {
+            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          companies: {
+            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+          },
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+    assert(filePath);
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('companies: s.renameTableFrom("orgs"),');
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).not.toContain("createTables: {");
+    expect(generated).not.toContain("dropTables: {");
+    expect(generated).toContain('"orgs": s.table({');
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain('"companies": s.table({');
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
+  it("keeps duplicate-shape table changes as add/drop instead of guessing a rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "7878787878787878787878787878787878787878787878787878787878787878";
+    const toHash = "9090909090909090909090909090909090909090909090909090909090909090";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          archived_users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+    assert(filePath);
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).not.toContain("renameTables: {");
+    expect(generated).toContain("createTables: {");
+    expect(generated).toContain('"people": true,');
+    expect(generated).toContain("dropTables: {");
+    expect(generated).toContain('"archived_users": true,');
+    expect(generated).toContain('"users": true,');
+  });
+
+  it("pushes a reviewed migration via the admin migrations endpoint", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedUsersEmailAddressSchema("email_address"));
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }, {  }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersEmailAddressSchema("email_address"));
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pushes a reviewed migration from a CommonJS-compiled TypeScript module", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    await writeFile(join(root, "package.json"), '{ "type": "commonjs" }\n');
+    await writeFile(
+      join(root, "tsconfig.json"),
+      JSON.stringify(
+        {
+          compilerOptions: {
+            module: "commonjs",
+            target: "es2020",
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedUsersEmailAddressSchema("email_address"));
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }, {  }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersEmailAddressSchema("email_address"));
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pushes an empty no-op migration from a CommonJS-compiled TypeScript module", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(join(root, "package.json"), '{ "type": "commonjs" }\n');
+    await writeFile(
+      join(root, "tsconfig.json"),
+      JSON.stringify(
+        {
+          compilerOptions: {
+            module: "commonjs",
+            target: "es2020",
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const fromHash = await computeTestSchemaHash(storedBooleanTodoSchema());
+    const toHash = await computeTestSchemaHash(storedBooleanTodoSchemaWithDefaultFalse());
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-unnamed-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      join(snapshotsDir, `20260411T212509-${fromShortHash}.json`),
+      JSON.stringify(storedBooleanTodoSchema()) + "\n",
+    );
+    await writeFile(
+      join(snapshotsDir, `20260411T212510-${toShortHash}.json`),
+      JSON.stringify(storedBooleanTodoSchemaWithDefaultFalse()) + "\n",
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {},
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+    }, {  }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean().default(false),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedBooleanTodoSchema());
+      }
+
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pushes an inferred empty migration when hashes differ but no reviewed file is needed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+
+    const fromHash = "9292929292929292929292929292929292929292929292929292929292929292";
+    const toHash = "9393939393939393939393939393939393939393939393939393939393939393";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    await writeFile(
+      join(snapshotsDir, `20260411T212509-${fromShortHash}.json`),
+      JSON.stringify(storedRootSchema(), null, 2) + "\n",
+    );
+    await writeFile(
+      join(snapshotsDir, `20260411T212510-${toShortHash}.json`),
+      JSON.stringify(storedRootSchemaWithReorderedColumns(), null, 2) + "\n",
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not infer an empty migration for reference-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "9494949494949494949494949494949494949494949494949494949494949494";
+    const toHash = "9595959595959595959595959595959595959595959595959595959595959595";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          memberships: {
+            relations: { owner: { kind: "forward" as const, table: "users", column: "ownerId" } },
+            columns: [
+              {
+                name: "ownerId",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "users",
+              },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          memberships: {
+            relations: { owner: { kind: "forward" as const, table: "people", column: "ownerId" } },
+            columns: [
+              {
+                name: "ownerId",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "people",
+              },
+            ],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      pushMigration({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromShortHash,
+        toHash: toShortHash,
+      }),
+    ).rejects.toThrow(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
+  });
+
+  it("pushes explicit table renames via renamedFrom on the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedPeopleEmailAddressSchema());
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-rename-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  renameTables: {
+    people: s.renameTableFrom("users"),
+  },
+  migrate: {
+    people: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }, {  }),
+  },
+  to: {
+    people: s.table({
+      email_address: s.string(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedPeopleEmailAddressSchema());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "people",
+          renamedFrom: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pushes explicit createTables and dropTables via the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = await computeTestSchemaHash(storedUsersWithLegacyProfilesSchema());
+    const toHash = await computeTestSchemaHash(storedUsersWithProfilesSchema());
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-add-drop-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  createTables: {
+    profiles: true,
+  },
+  dropTables: {
+    legacy_profiles: true,
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }, {  }),
+    legacy_profiles: s.table({
+      bio: s.string().optional(),
+    }, {  }),
+  },
+  to: {
+    users: s.table({
+      email: s.string(),
+    }, {  }),
+    profiles: s.table({
+      bio: s.string().optional(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersWithLegacyProfilesSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersWithProfilesSchema());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "profiles",
+          added: true,
+          operations: [],
+        },
+        {
+          table: "legacy_profiles",
+          removed: true,
+          operations: [],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("cli permissions", () => {
+  it("reports the current permissions head against the matching stored structural schema", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 3,
+              parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+              bundleObjectId: "22222222-2222-2222-2222-222222222222",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
+    expect(logs).toContain(
+      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
+    );
+    expect(logs).toContain(`Server permissions head is v3 on ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain(
+      "Next deploy will require parent bundle 22222222-2222-2222-2222-222222222222.",
+    );
+  });
+
+  it("loads src/permissions.ts when reporting the current permissions head", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
+  });
+
+  it("matches stored schemas even when server column order differs", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "ababeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(
+      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
+    );
+  });
+});
+
+describe("cli deploy", () => {
+  it("rejects missing permissions before publication", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    ).rejects.toThrow("Create a permissions.ts file");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("publishes the structural schema and permissions when the server has neither", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    let schemaPublishBody: any;
+    let permissionsPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        schemaPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            hash: schemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        permissionsPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.permissions).toBeUndefined();
+    expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
+    expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
+    expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
+  });
+
+  it("publishes permissions even when the current schema already matches the server head", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "5678567856785678567856785678567856785678567856785678567856785678";
+    const currentHead = {
+      schemaHash,
+      version: 2,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+    let permissionsPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        permissionsPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 3,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "33333333-3333-3333-3333-333333333333",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        throw new Error("deploy() should not publish an unchanged structural schema.");
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
+    expect(permissionsPublishBody.expectedParentBundleObjectId).toBe(currentHead.bundleObjectId);
+  });
+
+  it("publishes a new structural schema when only indexed columns changed", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithIndexedTodo());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let schemaPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          todos: storedRootSchema().todos,
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        schemaPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            hash: nextSchemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(schemaPublishBody.schema.tables.todos.indexed_columns).toEqual(["ownerId"]);
+  });
+
+  it("suggests a working migration command when the target schema has not been published", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = await computeTestSchemaHash(storedRootSchema());
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+        const url = new URL(input);
+        expect(url.searchParams.get("fromHash")).toBe(previousSchemaHash);
+        expect(url.searchParams.get("toHash")).toBe(nextSchemaHash);
+        return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    ).rejects.toThrow(
+      `The new schema ${nextSchemaHash.slice(0, 12)} is not connected to the previous schema aaaaaaaaaaaa on the server. Run \`jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa\` to create a migration and then re-run this command.`,
+    );
+    const filePath = await createMigration({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+      fromHash: previousSchemaHash.slice(0, 12),
+    });
+    expect(filePath).toContain(`-aaaaaaaaaaaa-${nextSchemaHash.slice(0, 12)}.ts`);
+  });
+
+  it("pushes a local migration before publishing permissions when the server reports disconnected schemas", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = await computeTestSchemaHash(storedRootSchemaBeforeOwnerRename());
+    const nextSchemaHash = await computeTestSchemaHash(storedRootSchema());
+    const previousShortHash = previousSchemaHash.slice(0, 12);
+    const nextShortHash = nextSchemaHash.slice(0, 12);
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    await writeFile(
+      join(migrationsDir, `20260318-rename-${previousShortHash}-${nextShortHash}.ts`),
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    todos: {
+      ownerId: s.renameFrom("owner_id"),
+    },
+  },
+  fromHash: ${JSON.stringify(previousShortHash)},
+  toHash: ${JSON.stringify(nextShortHash)},
+  from: {
+    projects: s.table({
+      name: s.string(),
+    }, {  }),
+    todos: s.table({
+      title: s.string(),
+      owner_id: s.string(),
+    }, {  }),
+  },
+  to: {
+    projects: s.table({
+      name: s.string(),
+    }, {  }),
+    todos: s.table({
+      title: s.string(),
+      ownerId: s.string(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchemaBeforeOwnerRename());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+        return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.fromHash).toBe(previousSchemaHash);
+        expect(body.toHash).toBe(nextSchemaHash);
+        expect(body.forward).toEqual([
+          {
+            table: "todos",
+            operations: [
+              {
+                type: "rename",
+                column: "owner_id",
+                value: "ownerId",
+              },
+            ],
+          },
+        ]);
+        return new Response(
+          JSON.stringify({
+            objectId: "33333333-3333-3333-3333-333333333333",
+            fromHash: previousSchemaHash,
+            toHash: nextSchemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "44444444-4444-4444-4444-444444444444",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+
+    expect(logs.some((line) => line.includes("Pushed migration"))).toBe(true);
+    expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
+  });
+
+  it("replays a chain of local migrations when no direct file connects the head to the release schema", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(root, "schema.ts"),
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    owner: s.string(),
+  }, {  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`,
+    );
+    await writeFile(join(root, "permissions.ts"), rootAllExplicitPermissionsSchema());
+
+    const headSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const middleSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const releaseSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "owner", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const headHash = await computeTestSchemaHash(headSchema);
+    const middleHash = await computeTestSchemaHash(middleSchema);
+    const releaseHash = await computeTestSchemaHash(releaseSchema);
+    const short = (hash: string) => hash.slice(0, 12);
+    const currentHead = {
+      schemaHash: headHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    // Only the middle schema needs a snapshot: the head is stored on the
+    // server and the release schema is the project's own.
+    await writeFile(
+      join(snapshotsDir, `20260318T000000-${short(middleHash)}.json`),
+      JSON.stringify(middleSchema),
+    );
+    const renameMigration = (
+      fromHash: string,
+      toHash: string,
+      fromColumn: string,
+      toColumn: string,
+      reverseWitnessColumns = false,
+    ) => {
+      const fromFields = reverseWitnessColumns
+        ? `${fromColumn}: s.string(),\n      title: s.string(),`
+        : `title: s.string(),\n      ${fromColumn}: s.string(),`;
+      const toFields = reverseWitnessColumns
+        ? `${toColumn}: s.string(),\n      title: s.string(),`
+        : `title: s.string(),\n      ${toColumn}: s.string(),`;
+      return `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    todos: {
+      ${toColumn}: s.renameFrom(${JSON.stringify(fromColumn)}),
+    },
+  },
+  fromHash: ${JSON.stringify(fromHash)},
+  toHash: ${JSON.stringify(toHash)},
+  from: {
+    todos: s.table({
+      ${fromFields}
+    }, {}),
+  },
+  to: {
+    todos: s.table({
+      ${toFields}
+    }, {}),
+  },
+});
+`;
+    };
+    await writeFile(
+      join(migrationsDir, `20260318-first-${short(headHash)}-${short(middleHash)}.ts`),
+      renameMigration(short(headHash), short(middleHash), "owner_id", "ownerId"),
+    );
+    await writeFile(
+      join(migrationsDir, `20260319-second-${short(middleHash)}-${short(releaseHash)}.ts`),
+      // Witness ordering is intentionally different from the stored schemas;
+      // canonical witness comparison is insensitive to declaration order.
+      renameMigration(short(middleHash), short(releaseHash), "ownerId", "owner", true),
+    );
+
+    const stored = new Map<string, object>([[headHash, headSchema]]);
+    const pushedMigrations: Array<{ fromHash: string; toHash: string; forward: unknown }> = [];
+    const connectedEdges = new Set<string>();
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [...stored.keys()] }), { status: 200 });
+      }
+
+      for (const [hash, schema] of stored) {
+        if (input.endsWith(`/apps/${APP_ID}/schema/${hash}`)) {
+          return storedSchemaResponse(schema);
+        }
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        const body = JSON.parse(String(init?.body));
+        const hash = await computeTestSchemaHash(body.schema.tables);
+        stored.set(hash, body.schema.tables);
+        return new Response(JSON.stringify({ objectId: `object-${short(hash)}`, hash }), {
+          status: 201,
+        });
+      }
+
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+        const url = new URL(input);
+        const connected = connectedEdges.has(
+          `${url.searchParams.get("fromHash")}->${url.searchParams.get("toHash")}`,
+        );
+        return new Response(JSON.stringify({ connected }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+        const body = JSON.parse(String(init?.body));
+        pushedMigrations.push(body);
+        connectedEdges.add(`${body.fromHash}->${body.toHash}`);
+        return new Response(
+          JSON.stringify({
+            objectId: `migration-${pushedMigrations.length}`,
+            fromHash: body.fromHash,
+            toHash: body.toHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.schemaHash).toBe(releaseHash);
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: releaseHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "44444444-4444-4444-4444-444444444444",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+
+    expect(pushedMigrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
+      [headHash, middleHash],
+      [middleHash, releaseHash],
+    ]);
+    expect(pushedMigrations.map(({ forward }) => forward)).toEqual([
+      [{ table: "todos", operations: [{ type: "rename", column: "owner_id", value: "ownerId" }] }],
+      [{ table: "todos", operations: [{ type: "rename", column: "ownerId", value: "owner" }] }],
+    ]);
+    expect([...stored.keys()]).toEqual([headHash, middleHash, releaseHash]);
+    expect(logs.filter((line) => line.includes("Pushed migration"))).toHaveLength(2);
+    expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
+    expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
+
+    // A replay is idempotent: already-connected edges are not published twice.
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir,
+    });
+    expect(pushedMigrations).toHaveLength(2);
+  });
+
+  it("rejects the removed noVerify bypass before publication", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: "/unused",
+        migrationsDir: "/unused",
+        // @ts-expect-error Old JavaScript callers must not silently bypass migration checks.
+        noVerify: true,
+      }),
+    ).rejects.toThrow("noVerify is no longer supported");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("warns about tables with no explicit permission policy", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        return new Response(
+          JSON.stringify({ objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", hash: schemaHash }),
+          { status: 201 },
+        );
+      }
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+      }
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    );
+
+    const warnings = logs.filter((line) => line.includes("Warning: table"));
+    expect(warnings.length).toBeGreaterThan(0);
+  });
+});
+
+function runBin(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, ["--no-warnings", binPath, ...args], {
+    encoding: "utf8",
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+  });
+}
+
+async function runCli(
+  args: readonly string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
+  const child = spawn(process.execPath, ["--no-warnings", distCliPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
+async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
+  const server = createServer((request, response) => {
+    response.statusCode = 400;
+    response.end(
+      `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
+    );
+  });
+  let resolveListening!: () => void;
+  let rejectListening!: (reason?: unknown) => void;
+  const listening = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveListening = resolvePromise;
+    rejectListening = rejectPromise;
+  });
+  server.once("error", rejectListening);
+  server.listen(0, "127.0.0.1", resolveListening);
+  await listening;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected deploy test server to have a TCP address.");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
+function hostNativeBinaryName(): string | null {
+  switch (`${process.platform}-${process.arch}`) {
+    case "darwin-arm64":
+      return "jazz-tools-darwin-arm64";
+    case "darwin-x64":
+      return "jazz-tools-darwin-x64";
+    case "linux-arm64":
+      return "jazz-tools-linux-arm64";
+    case "linux-x64":
+      return "jazz-tools-linux-x64";
+    default:
+      return null;
+  }
+}
+
+describe("bin integration", () => {
+  it.each([
+    ["migrations", "push", "app", "old", "new"],
+    ["deploy", "app", "--no-verify"],
+  ])("rejects removed publication command or bypass: %j", (...args) => {
+    const result = runBin(args);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("deploy");
+  });
+
+  it.each([
+    ["before command", ["--env-file", ".env.staging", "deploy", "explicit-cli-app"]],
+    ["after command", ["deploy", "--env-file", ".env.staging", "explicit-cli-app"]],
+    ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-cli-app"]],
+  ] as const)("loads an explicit env file and dispatches deploy (%s)", async (_label, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+    const { server, url } = await listenForDeployRequest();
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const close = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
+    });
+
+    await writeFile(
+      join(root, ".env.staging"),
+      [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
+    );
+    const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+    for (const name of [...APP_ID_ENV_VARS, ...SERVER_URL_ENV_VARS]) {
+      delete env[name];
+    }
+
+    try {
+      const result = await runCli(args, { cwd: root, env });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
+      expect(result.stderr).toContain("request=/apps/explicit-cli-app/schemas");
+      expect(result.stderr).toContain("secret=real-secret");
+      expect(result.stderr).not.toContain("Missing app ID");
+      expect(result.stdout).not.toContain("Usage:");
+    } finally {
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      await close;
+    }
+  });
+  it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
+    expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
+  });
+  it.each([
+    ["validate --schema-dir", ["validate", "--schema-dir"]],
+    [
+      "validate --schema-dir followed by another flag",
+      ["validate", "--schema-dir", "--strict-provenance"],
+    ],
+    ["validate --schema-dir with an empty value", ["validate", "--schema-dir", ""]],
+  ])("rejects %s with a deterministic missing-value error", async (_description, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    // A valid cwd schema proves the parser does not silently fall back to cwd
+    // when a recognized value flag is missing.
+    const result = runBin(args, { cwd: root });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Missing value for --schema-dir.");
+  });
+  it("rejects a malformed later value after a valid occurrence", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["validate", "--schema-dir", root, "--schema-dir"], { cwd: root });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Missing value for --schema-dir.");
+  });
+
+  it("loads root permissions.ts through the validate command", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
+  });
+
+  it("loads src/schema.ts and src/permissions.ts through the validate command", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(srcDir, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(result.stdout).toContain(
+      `Loaded current permissions from ${join(srcDir, "permissions.ts")}.`,
+    );
+  });
+
+  it("fails when validate is pointed at the legacy ./schema shim directory", async () => {
+    const { root, schemaDir } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["validate", "--schema-dir", schemaDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Schema file not found");
+  });
+
+  it("fails when no root schema.ts can be found", async () => {
+    const { root } = await createWorkspace();
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Schema file not found");
+  });
+
+  it("fails when multiple schema.ts candidate locations are present", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+    await mkdir(join(root, "src", "lib"), { recursive: true });
+    await writeFile(
+      join(root, "src", "lib", "schema.ts"),
+      rootSchemaWithoutInlinePermissions(distIndexPath),
+    );
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Ambiguous schema location");
+  });
+
+  it("rejects the removed build alias with a validate hint", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["build", "--schema-dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("renamed to `jazz-tools validate`");
+  });
+
+  it("routes schema hash through the TypeScript CLI", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["schema", "hash", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toMatch(/[0-9a-f]{12}/i);
+    expect(await fileExists(join(root, "migrations", "snapshots"))).toBe(false);
+  });
+
+  it("routes schema export through the TypeScript CLI", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+
+    const result = runBin(["schema", "export", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    const exported = JSON.parse(String(result.stdout));
+    expect(
+      exported.todos.columns.some((column: { name: string }) => column.name === "ownerId"),
+    ).toBe(true);
+  });
+
+  it("rejects schema export when both --schema-dir and --schema-hash are provided", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(
+      ["schema", "export", "--schema-dir", root, "--schema-hash", "a".repeat(64)],
+      { cwd: root },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mutually exclusive");
+  });
+
+  it("loads schema export --schema-hash from a local snapshot without hitting the server", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const snapshotsDir = join(root, "migrations", "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `20260406T120000-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(["schema", "export", APP_ID, "--schema-hash", schemaHash], {
+      cwd: root,
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
+  it("loads schema export --schema-hash from a legacy malformed local snapshot filename", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const snapshotsDir = join(root, "migrations", "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `582761109T032422-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(["schema", "export", APP_ID, "--schema-hash", schemaHash], {
+      cwd: root,
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
+  it("loads schema export --schema-hash from a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `20260406T120000-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(
+      ["schema", "export", "--schema-hash", schemaHash, "--migrations-dir", migrationsDir],
+      { cwd: root },
+    );
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
+  it("fetches schema export --schema-hash from the server and persists the snapshot on miss", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAt = Date.UTC(2026, 3, 6, 12, 0, 0);
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(input).toContain(`/apps/${APP_ID}/schema/${schemaHash}`);
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
+      return storedSchemaResponse(schema, publishedAt);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const shortSchemaHash = schemaHash.slice(0, 12);
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(`-${shortSchemaHash}.json`),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toBe(`20260406T120000-${shortSchemaHash}.json`);
+    expect(
+      JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
+    ).toEqual(schema);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses millisecond publishedAt values when persisting fetched snapshots", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAtMs = Date.UTC(2026, 3, 6, 12, 0, 0);
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const fetchMock = vi.fn(async () => storedSchemaResponse(schema, publishedAtMs));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const shortSchemaHash = schemaHash.slice(0, 12);
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(`-${shortSchemaHash}.json`),
+    );
+    expect(snapshotFiles).toEqual([`20260406T120000-${shortSchemaHash}.json`]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists schema export --schema-hash into a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAt = Date.UTC(2026, 3, 6, 12, 0, 0);
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const exportFetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(input).toContain(`/apps/${APP_ID}/schema/${schemaHash}`);
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
+      return storedSchemaResponse(schema, publishedAt);
+    });
+    vi.stubGlobal("fetch", exportFetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        migrationsDir,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const snapshotFiles = (await readdir(join(migrationsDir, "snapshots"))).filter((name) =>
+      name.endsWith(`-${schemaHash.slice(0, 12)}.json`),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+    expect(
+      JSON.parse(await readFile(join(migrationsDir, "snapshots", snapshotFiles[0]!), "utf8")),
+    ).toEqual(schema);
+    expect(exportFetchMock).toHaveBeenCalledTimes(1);
+
+    // Later migrations use the exported local snapshot
+    const migrationFetchMock = vi.fn(async () => {
+      throw new Error("Expected createMigration() to use the exported local snapshot.");
+    });
+    vi.stubGlobal("fetch", migrationFetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      migrationsDir,
+      fromHash: schemaHash.slice(0, 12),
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+    });
+
+    expect(filePath).not.toBeNull();
+    expect(migrationFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("verifies packed runtime bootstrap with a native-only help probe", async () => {
+    const hostBinaryName = hostNativeBinaryName();
+
+    if (!hostBinaryName) {
+      return;
+    }
+
+    const { root } = await createWorkspace();
+    const packageRoot = join(root, "package");
+    const nativeDir = join(packageRoot, "bin", "native");
+    const argsPath = join(root, "captured-args.txt");
+    const binaryPath = join(nativeDir, hostBinaryName);
+
+    await mkdir(nativeDir, { recursive: true });
+    await copyFile(binPath, join(packageRoot, "bin", "jazz-tools.js"));
+    await writeFile(
+      binaryPath,
+      `#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(argsPath)}
+exit 0
+`,
+      "utf8",
+    );
+    await chmod(binaryPath, 0o644);
+
+    const result = spawnSync(process.execPath, [bootstrapVerifierPath, packageRoot], {
+      encoding: "utf8",
+      env: process.env,
+    });
+
+    expect(result.status).toBe(0);
+    expect(await readFile(argsPath, "utf8")).toBe("create\n--help\n");
+    await expect(access(binaryPath, constants.X_OK)).resolves.toBeUndefined();
+  });
+
+  it("shows the wrapper command surface in --help output", () => {
+    const result = runBin(["--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("validate");
+    expect(result.stdout).toContain("schema export");
+    expect(result.stdout).toContain("deploy");
+    expect(result.stdout).not.toContain("migrations push");
+    expect(result.stdout).toContain("deploy");
+    expect(result.stdout).toContain("server");
+    expect(result.stdout).toContain("create");
+  });
+});
+
+describe("dist/cli.js entrypoint under a pnpm symlink", () => {
+  it("dispatches when invoked through a symlinked package directory", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const root = await mkdtemp(join(tmpBase, "jazz-tools-pnpm-symlink-"));
+    tempRoots.push(root);
+
+    // pnpm symlinks node_modules/jazz-tools to node_modules/.pnpm/.../jazz-tools.
+    // Running dist/cli.js through that symlink must still run the CLI body
+    // instead of silently exiting 0.
+    const realPackageDir = dirname(dirname(distCliPath));
+    const linkedPackageDir = join(root, "jazz-tools");
+    await symlink(realPackageDir, linkedPackageDir, "dir");
+
+    const result = spawnSync(process.execPath, [join(linkedPackageDir, "dist", "cli.js")], {
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]",
+    );
+  });
+});

@@ -1,0 +1,1166 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParentCoordinateValidation {
+    Exact,
+    Inconclusive,
+}
+
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// All constraint inserts/updates pass here so the conservative absence
+    /// proof includes staged rows before any later read or suspension.
+    pub(super) fn stage_pending_parent_constraint(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        child: (NodeAlias, TxId),
+        parent: (NodeAlias, TxId),
+        coordinate: &ParentCoordinate,
+        replace: bool,
+    ) -> Result<(), Error> {
+        let values = pending_edge_values(child.0, child.1, parent.0, parent.1, coordinate)?;
+        self.rejections.pending_parent_time_bound.observe(parent.1.time);
+        if replace {
+            batch.update("jazz_pending_edges", values);
+        } else {
+            batch.insert("jazz_pending_edges", values);
+        }
+        Ok(())
+    }
+
+    /// Validate a TxId parent in the only coordinate where it has row-version
+    /// meaning. A missing transaction remains a constrained pending edge; a
+    /// known transaction without this exact version is malformed, never a
+    /// substitute from a sibling row, branch, or deletion layer.
+    pub(super) async fn validate_known_parent_coordinate(
+        &mut self,
+        parent: TxId,
+        coordinate: &ParentCoordinate,
+    ) -> Result<ParentCoordinateValidation, Error> {
+        let Some(parent_tx) = self.query_transaction(parent).await? else {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        };
+        // Retain the resident cache's all-branch/all-layer lookup. On a cold
+        // cache, a valid parent needs one exact history read rather than every
+        // sibling row in its transaction. A miss still uses the completeness
+        // and wrong-coordinate rules below without changing their semantics.
+        if !self.query.tx_versions_cache.contains_key(&parent)
+            && let Some(candidate) = self
+                .query_exact_parent_version(parent, parent_tx.node_alias, coordinate)
+                .await?
+        {
+            if self.version_tx_id(&candidate)? != parent
+                || !self.version_row_matches_parent_coordinate(&candidate, coordinate)?
+            {
+                return Err(Error::InvalidStoredValue("parent history key does not match stored coordinate"));
+            }
+            return Ok(ParentCoordinateValidation::Exact);
+        }
+        // A missing exact witness in a partial transaction cannot establish
+        // an invalid parent. Other retained rows provide no evidence about
+        // this coordinate. Avoid loading that fragment for every missing
+        // parent; retain the pending coordinate constraint instead.
+        if parent_tx.view_scoped_cardinality
+            && !self.query.tx_versions_cache.contains_key(&parent)
+        {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
+        let coordinate_versions = self
+            .query_versions_for_tx_physical_coordinate(
+                parent,
+                coordinate.physical_table_id,
+                coordinate.row_uuid,
+            )
+            .await?;
+        for candidate in &coordinate_versions {
+            if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
+                return Ok(ParentCoordinateValidation::Exact);
+            }
+        }
+        if parent_tx.view_scoped_cardinality {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
+        let parent_versions = self.query_versions_for_tx(parent).await?;
+        if parent_versions.is_empty() {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
+        let parent_is_complete = !parent_tx.view_scoped_cardinality
+            && usize::try_from(parent_tx.tx.n_total_writes)
+                .is_ok_and(|expected| parent_versions.len() >= expected);
+        if !parent_is_complete {
+            // A view-scoped transaction may contain only another row so far.
+            // Retain the durable constraint until the requested parent
+            // coordinate arrives or an authority sees the complete unit.
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer",
+        ))
+    }
+
+    fn version_row_matches_parent_coordinate(
+        &self,
+        version: &VersionRow,
+        coordinate: &ParentCoordinate,
+    ) -> Result<bool, Error> {
+        Ok(version.row_uuid() == coordinate.row_uuid
+            && version.branch_key() == &coordinate.branch_key
+            && version.layer() == coordinate.layer
+            && self.physical_table_id_for_version(version)? == coordinate.physical_table_id)
+    }
+
+    fn version_record_matches_parent_coordinate(
+        &self,
+        version: &VersionRecord,
+        coordinate: &ParentCoordinate,
+    ) -> Result<bool, Error> {
+        Ok(version.row_uuid() == coordinate.row_uuid
+            && version.branch_key() == &coordinate.branch_key
+            && VersionLayer::for_record(version) == coordinate.layer
+            && self.physical_table_id_for_schema(version.schema_version(), version.table())?
+                == coordinate.physical_table_id)
+    }
+
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
+    async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
+        &mut self,
+        tx: &Transaction,
+        incoming: &[V],
+    ) -> Result<Option<Vec<VersionRecord>>, Error> {
+        let mut assembled = BTreeMap::new();
+        if self.query_transaction(tx.tx_id).await?.is_some() {
+            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+                let version = self.version_record_from_row(&stored)?;
+                assembled.insert(view_version_key_for_ingest(&version), version);
+            }
+        }
+        for version in incoming {
+            let version = version.borrow();
+            match assembled.get(&view_version_key_for_ingest(version)) {
+                Some(existing) if existing != version => {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                Some(_) => {}
+                None => {
+                    assembled.insert(view_version_key_for_ingest(version), version.clone());
+                }
+            }
+        }
+        if usize::try_from(tx.n_total_writes).ok() != Some(assembled.len()) {
+            return Ok(None);
+        }
+        Ok(Some(assembled.into_values().collect()))
+    }
+
+    /// Validate durable constraints owned by already-accepted partial children
+    /// before a complete parent can become durable. Pending children retain
+    /// their edge so ordinary post-ingest fate propagation can accept or
+    /// reject them; an accepted child is immutable, so a contradictory parent
+    /// is a typed protocol conflict rather than a retroactive fate rewrite.
+    pub(super) async fn preflight_complete_parent_constraints(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        parent: TxId,
+        complete_versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        if self.rejections.pending_parent_time_bound.excludes(parent.time) {
+            self.database.ensure_usable()?;
+            return Ok(());
+        }
+        let raw_constraints = self
+            .database
+            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        self.preflight_complete_parent_records(batch, parent, complete_versions, raw_constraints)
+            .await
+    }
+
+    async fn preflight_complete_parent_records(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        parent: TxId,
+        complete_versions: &[VersionRecord],
+        raw_constraints: Vec<OwnedRecord>,
+    ) -> Result<(), Error> {
+        let mut constraints = Vec::with_capacity(raw_constraints.len());
+        for raw in raw_constraints {
+            let record = raw.borrowed();
+            let parent_alias = NodeAlias(
+                record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
+            );
+            let stored_parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if stored_parent != parent {
+                continue;
+            }
+            let child_alias = NodeAlias(
+                record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?,
+            );
+            let child = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge child alias must exist",
+                ))?,
+            );
+            constraints.push((
+                child_alias,
+                child,
+                parent_alias,
+                pending_edge_coordinate_from_record(record)?,
+            ));
+        }
+        for (child_alias, child, parent_alias, coordinate) in constraints {
+            let Some(child_tx) = self.query_transaction(child).await? else {
+                return Err(Error::InvalidStoredValue(
+                    "pending parent constraint child transaction is missing",
+                ));
+            };
+            if !matches!(child_tx.fate, Fate::Accepted) {
+                continue;
+            }
+            let mut exact = false;
+            for version in complete_versions {
+                if self.version_record_matches_parent_coordinate(version, &coordinate)? {
+                    exact = true;
+                    break;
+                }
+            }
+            if !exact {
+                return Err(Error::ConflictingCommitUnit(parent));
+            }
+            batch.delete(
+                "jazz_pending_edges",
+                pending_edge_primary_key(
+                    child_alias,
+                    child,
+                    parent_alias,
+                    parent,
+                    &coordinate,
+                )?,
+            );
+        }
+        Ok(())
+    }
+
+    /// One atomic preflight boundary for every bulk path. All accepted-child
+    /// constraints are validated, and their matching deletes are staged,
+    /// before the caller may add or persist any parent rows in the batch.
+    pub(super) async fn preflight_complete_parent_batch(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        complete_parents: &[(TxId, Vec<VersionRecord>)],
+    ) -> Result<(), Error> {
+        if complete_parents.is_empty() {
+            return Ok(());
+        }
+        let raw_constraints = self
+            .database
+            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
+            .await?;
+        if raw_constraints.is_empty() {
+            return Ok(());
+        }
+        let parents = complete_parents.iter().map(|(parent, _)| *parent).collect::<BTreeSet<_>>();
+        let mut by_parent = BTreeMap::<TxId, Vec<OwnedRecord>>::new();
+        for raw in raw_constraints {
+            let record = raw.record();
+            let alias = NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if parents.contains(&parent) {
+                by_parent.entry(parent).or_default().push(raw.owned_record());
+            }
+        }
+        // This boundary only reads constraints and stages matching deletes;
+        // no parent/child transaction or new constraint is published between
+        // groups. Retain the caller's parent order and defer child/coordinate
+        // decoding until that parent's turn. A repeated parent has no new work:
+        // its Accepted constraints were deleted, and Pending children were left
+        // unchanged for post-persistence settlement.
+        for (parent, versions) in complete_parents {
+            if let Some(records) = by_parent.remove(parent) {
+                self.preflight_complete_parent_records(batch, *parent, versions, records)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Complete the other half of bulk parent ingestion after atomic
+    /// persistence. Exact Pending edges remain available to the child's later
+    /// fate update; mismatches reject and cascade exactly as on the ordinary
+    /// one-transaction ingest path.
+    pub(super) async fn settle_completed_parent_batch(
+        &mut self,
+        complete_parents: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        for parent in complete_parents {
+            self.invalidate_tx_version_tables_cache(*parent);
+        }
+        self.reject_mismatched_pending_children_for_parents(complete_parents)
+            .await
+    }
+
+    /// Resolve durable constraints left by children that referenced a parent
+    /// before this node received it. A parent transaction can carry many row
+    /// versions, so transaction existence alone is never sufficient.
+    pub(super) async fn reject_mismatched_pending_children_for_parent(
+        &mut self,
+        parent: TxId,
+    ) -> Result<(), Error> {
+        self.reject_mismatched_pending_children_for_parents(&BTreeSet::from([parent]))
+            .await
+    }
+
+    async fn reject_mismatched_pending_children_for_parents(
+        &mut self,
+        parents: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        if parents.is_empty() {
+            return Ok(());
+        }
+        if parents.iter().all(|parent| {
+            self.rejections.pending_parent_time_bound.excludes(parent.time)
+        }) {
+            self.database.ensure_usable()?;
+            return Ok(());
+        }
+        // Discover the constraints once for the entire admitted batch. Most
+        // downloaded transactions have no waiting children; loading their
+        // history first would probe every history table for no useful work.
+        let mut constraints = BTreeMap::<TxId, Vec<(TxId, ParentCoordinate)>>::new();
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .await?
+        {
+            let record = raw.record();
+            let parent_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(parent_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge parent alias must exist",
+                    ))?,
+            );
+            if !parents.contains(&parent) {
+                continue;
+            }
+            let child_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
+            let child = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                self.node_for_alias(child_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge child alias must exist",
+                    ))?,
+            );
+            constraints
+                .entry(parent)
+                .or_default()
+                .push((child, pending_edge_coordinate_from_record(record)?));
+        }
+
+        for (parent, children) in constraints {
+            let mut invalid_children = BTreeSet::new();
+            let Some(parent_tx) = self.query_transaction(parent).await? else {
+                continue;
+            };
+            if matches!(parent_tx.fate, Fate::Rejected(_)) {
+                continue;
+            }
+            let parent_versions = self.query_versions_for_tx(parent).await?;
+            let parent_is_complete = !parent_tx.view_scoped_cardinality
+                && !parent_versions.is_empty()
+                && usize::try_from(parent_tx.tx.n_total_writes)
+                    .is_ok_and(|expected| parent_versions.len() >= expected);
+            if !parent_is_complete {
+                continue;
+            }
+            for (child, coordinate) in children {
+                let mut exact = false;
+                for candidate in &parent_versions {
+                    if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
+                        exact = true;
+                        break;
+                    }
+                }
+                if !exact {
+                    invalid_children.insert(child);
+                }
+            }
+
+            for child in invalid_children {
+                if self
+                    .query_transaction(child)
+                    .await?
+                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
+                {
+                    Box::pin(self.apply_fate_update(
+                        child,
+                        Fate::Rejected(RejectionReason::CausalityViolation),
+                        None,
+                        None,
+                    ))
+                    .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ingest_transaction_and_versions(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_time, durability, true, false,
+        )
+        .await
+    }
+
+    pub(super) async fn ingest_transaction_fragment_without_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_time, durability, false, true,
+        )
+        .await
+    }
+
+    pub(super) async fn ingest_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_time, durability, true, true,
+        )
+        .await
+    }
+
+    pub(super) async fn stage_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
+    ) -> Result<(), Error> {
+        let (staged_versions, fate, global_time) = self
+            .stage_transaction_and_versions_with_current_indexes(
+                batch,
+                tx,
+                versions,
+                fate.clone(),
+                global_time,
+                durability,
+                true,
+                true,
+                Some(staged_content_versions),
+            )
+            .await?;
+        self.finalize_staged_transaction_ingest(
+            batch,
+            fate,
+            global_time,
+            staged_global_times,
+            &staged_versions,
+        )
+        .await
+    }
+
+    pub(super) async fn publish_pending_transaction_and_versions(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        durability: DurabilityTier,
+    ) -> Result<PublishedTransaction, Error> {
+        let tx_id = tx.tx_id;
+        let mut batch = self.database.open_batch();
+        let _ = self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            Fate::Pending,
+            None,
+            durability,
+            true,
+            false,
+            None,
+        )
+        .await?;
+        let persistence = self.database.apply_batch(batch).await?;
+        self.invalidate_tx_version_table_names_cache(tx_id);
+        self.pending_persistence.insert(tx_id);
+        Ok(PublishedTransaction { tx_id, persistence })
+    }
+
+    async fn prepare_exact_history_version(
+        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
+    ) -> Result<VersionRow, Error> {
+        let author_schema = version.schema_version();
+        let table = self.table_in_schema(version.table(), author_schema)?;
+        let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
+        let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
+        VersionRow::from_wire_with_schema_version(
+            &table, version, authored, tx_node_alias, schema_alias, tx_time,
+            (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
+        )
+    }
+
+    async fn ingest_transaction_and_versions_with_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+    ) -> Result<(), Error> {
+        let batch = self.database.open_batch();
+        self.ingest_transaction_and_versions_with_current_indexes_in_batch(
+            batch, tx, versions, fate, global_time, durability, update_current_indexes,
+            view_scoped_cardinality,
+        ).await
+    }
+
+    async fn ingest_transaction_and_versions_with_current_indexes_in_batch(
+        &mut self,
+        mut batch: DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+    ) -> Result<(), Error> {
+        let tx_id = tx.tx_id;
+        let complete_parent_versions = if view_scoped_cardinality {
+            None
+        } else {
+            self.complete_parent_versions(&tx, &versions).await?
+        };
+        if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
+            self.preflight_complete_parent_constraints(
+                &mut batch,
+                tx_id,
+                complete_parent_versions,
+            )
+            .await?;
+        }
+        // Staging owns the decoded records and derived-index working set. Keep
+        // it behind an async allocation boundary so admission does not retain
+        // that state on the caller's poll stack.
+        let (staged_versions, fate, global_time) = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            fate.clone(),
+            global_time,
+            durability,
+            update_current_indexes,
+            view_scoped_cardinality,
+            None,
+        ))
+        .await?;
+        let mut staged_global_times = Vec::new();
+        self.finalize_staged_transaction_ingest(
+            &mut batch,
+            fate,
+            global_time,
+            &mut staged_global_times,
+            &staged_versions,
+        )
+        .await?;
+        batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
+        // A later complete payload may have appended to a transaction first
+        // seen through a view-scoped fragment. The staging cache contains only
+        // this call's new versions, so discard it before any constraint or
+        // caller re-query observes the assembled transaction.
+        self.invalidate_tx_version_tables_cache(tx_id);
+        self.reject_mismatched_pending_children_for_parent(tx_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn stage_transaction_and_versions_with_current_indexes(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+        staged_content_versions: Option<&mut Vec<VersionRow>>,
+    ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>), Error> {
+        // Provenance operation identities participate in merge deduplication.
+        // Admit them before accepting staged values or writing any derived
+        // transaction/current state, on every local, remote, and view ingress.
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
+        let large_value_descriptors = version_indirect_descriptors(&versions);
+        for staged_id in self
+            .current_staged_ids_for_descriptors(&large_value_descriptors, false)
+            .await?
+        {
+            batch.accept_large_value(staged_id);
+        }
+        self.merge_tx_time(tx.tx_id.time);
+        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let parent_nodes = versions
+            .iter()
+            .flat_map(|version| version.parents().into_iter().map(|parent| parent.node))
+            .collect::<BTreeSet<_>>();
+        for parent_node in parent_nodes {
+            self.ensure_node_alias(parent_node).await?;
+        }
+        for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+            self.ensure_schema_version_alias(schema).await?;
+        }
+        let stored_tx = self.query_transaction(tx.tx_id).await?;
+        // A discarded Pending view may have preserved only its transaction
+        // identity. Every extension of a view-scoped fragment must retain
+        // settlement learned in the meantime, including after restart and
+        // earlier partial extensions, before indexing new bodies.
+        let (fate, global_time, durability) = if let Some(stored) = stored_tx.as_ref()
+            && stored.view_scoped_cardinality
+        {
+            if let (Some(current), Some(next)) = (stored.global_time, global_time)
+                && next < current
+            {
+                return Err(Error::NonMonotoneState("global seq cannot move backwards"));
+            }
+            (
+                next_fate(&stored.fate, fate)?,
+                global_time.or(stored.global_time),
+                durability.max(stored.durability),
+            )
+        } else {
+            (fate, global_time, durability)
+        };
+        let tx_already_known = stored_tx.is_some();
+        let preserve_authoritative_cardinality = view_scoped_cardinality
+            && stored_tx
+                .as_ref()
+                .is_some_and(|stored| !stored.view_scoped_cardinality);
+        let storage_tx = if preserve_authoritative_cardinality {
+            &stored_tx.as_ref().expect("checked above").tx
+        } else {
+            &tx
+        };
+        let contribution_merge = if std::ptr::eq(storage_tx, &tx) {
+            contribution_merge
+        } else {
+            self.admit_contribution_merge_for_storage(storage_tx)?
+        };
+        let tx_values = transaction_values_with_cardinality_scope(
+            tx_node_alias,
+            storage_tx,
+            fate.clone(),
+            global_time,
+            durability,
+            view_scoped_cardinality && !preserve_authoritative_cardinality,
+            contribution_merge,
+        )?;
+        if tx_already_known {
+            batch.update("jazz_transactions", tx_values);
+        } else {
+            batch.insert("jazz_transactions", tx_values);
+        }
+
+        let mut parent_edges = BTreeSet::new();
+        let mut pending_parent_constraints = Vec::new();
+        let mut pending_global_updates =
+            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
+        let mut content_versions = Vec::new();
+        let mut stored_versions = Vec::new();
+        for version in versions {
+            let author_schema = version.schema_version();
+            let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
+            let table_schema = source_table_schema;
+            let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+            let authored_column_ids = self.authored_column_ids_for_names(
+                author_schema,
+                version.table(),
+                version.authored_columns(),
+            )?;
+            let stored = VersionRow::from_wire_with_schema_version(
+                &table_schema,
+                &version,
+                authored_column_ids,
+                tx_node_alias,
+                schema_version_alias,
+                tx.tx_id.time,
+                (author_schema != self.catalogue.local_schema_version_id)
+                    .then_some(author_schema),
+            )?;
+            let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
+            let layer = VersionLayer::for_record(&version);
+            let parent_coordinate = ParentCoordinate {
+                physical_table_id: table_id,
+                branch_key: stored.branch_key().clone(),
+                row_uuid: stored.row_uuid(),
+                layer,
+            };
+            for parent in stored.parents() {
+                let parent_validation = self
+                    .validate_known_parent_coordinate(parent, &parent_coordinate)
+                    .await?;
+                parent_edges.insert(parent);
+                if matches!(fate, Fate::Pending)
+                    || matches!(fate, Fate::Accepted)
+                        && view_scoped_cardinality
+                        && parent_validation == ParentCoordinateValidation::Inconclusive
+                {
+                    pending_parent_constraints.push((parent, parent_coordinate.clone()));
+                }
+            }
+            let previous_current = self.query_local_layer_winner_in_branch(
+                &table_schema.name,
+                stored.branch_key(),
+                version.row_uuid(),
+                layer,
+            ).await?;
+            let previous_winner = if let Some(previous) = previous_current.as_ref() {
+                let previous_tx_id = self.version_tx_id(previous)?;
+                let previous_made_at = if previous_tx_id == tx.tx_id {
+                    tx.tx_id.time
+                } else {
+                    self.version_made_at(previous).await?
+                };
+                Some((previous, previous_tx_id, previous_made_at))
+            } else {
+                None
+            };
+            let new_is_current =
+                version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, previous_winner);
+            debug_assert!(
+                new_is_current || previous_current.is_some(),
+                "clock condition violated: local winner after insert must be the previous winner or inserted version"
+            );
+            let _ = (new_is_current, previous_current);
+            if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
+                content_versions.push(stored.clone());
+            }
+            stored_versions.push(stored.clone());
+            if update_current_indexes && matches!(fate, Fate::Accepted) {
+                if global_time.is_some() {
+                    let previous_global_current = self.query_global_layer_winner_in_batch(
+                        batch,
+                        author_schema,
+                        &table_schema.name,
+                        stored.branch_key(),
+                        stored.row_uuid(),
+                        stored.layer(),
+                    ).await?;
+                    let previous_global_winner =
+                        if let Some(previous) = previous_global_current.as_ref() {
+                            Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
+                        } else {
+                            None
+                        };
+                    let new_is_global_current = version_wins_over_open_winner(
+                        &stored,
+                        tx.tx_id,
+                        tx.tx_id.time,
+                        previous_global_winner,
+                    );
+                    debug_assert!(
+                        new_is_global_current || previous_global_current.is_some(),
+                        "clock condition violated: global winner after insert must be the previous winner or inserted version"
+                    );
+                    if new_is_global_current {
+                        pending_global_updates.insert(
+                            (
+                                stored.table().to_owned(),
+                                stored.branch_key().clone(),
+                                stored.row_uuid(),
+                                stored.layer(),
+                            ),
+                            stored.clone(),
+                        );
+                    }
+                }
+            }
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let storage_key = self.version_storage_primary_key(&stored)?;
+            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+                == groove::db::EnsureExactOutcome::Conflict
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
+            {
+                self.write_ahead_current_insert(batch, &stored)?;
+            }
+        }
+        if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
+            if let Some(staged) = staged_content_versions {
+                staged.extend(content_versions.iter().cloned());
+            } else {
+                for stored in &content_versions {
+                    self.update_merge_heads_for_content_version_in_batch(batch, stored)
+                        .await?;
+                }
+            }
+        }
+        if update_current_indexes && matches!(fate, Fate::Accepted) {
+            if let Some(global_time) = global_time {
+                for stored in pending_global_updates.values() {
+                    self.write_global_current_update(batch, stored, global_time)?;
+                }
+            }
+        }
+        for (parent, coordinate) in &pending_parent_constraints {
+            let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
+                Error::InvalidStoredValue("pending edge parent alias must exist"),
+            )?;
+            self.stage_pending_parent_constraint(
+                batch,
+                (tx_node_alias, tx.tx_id),
+                (parent_alias, *parent),
+                coordinate,
+                tx_already_known,
+            )?;
+        }
+        if matches!(fate, Fate::Accepted) {
+            self.rejections.child_txs_by_parent.remove(&tx.tx_id);
+            self.prune_child_edges(tx.tx_id);
+        } else if matches!(fate, Fate::Pending) {
+            self.record_child_edges(tx.tx_id, parent_edges).await;
+        }
+        self.cache_tx_versions(tx.tx_id, stored_versions.clone());
+        Ok((stored_versions, fate, global_time))
+    }
+
+    async fn finalize_staged_transaction_ingest(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        staged_global_times: &mut Vec<GlobalTime>,
+        staged_versions: &[VersionRow],
+    ) -> Result<(), Error> {
+        if matches!(fate, Fate::Accepted)
+            && let Some(global_time) = global_time
+        {
+            staged_global_times.push(global_time);
+            let advanced_global_times = self.record_applied_global_time(global_time);
+            self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
+            if !advanced_global_times.is_empty() {
+                for advanced in advanced_global_times
+                    .into_iter()
+                    .filter(|advanced| *advanced != global_time)
+                {
+                    self.prune_ahead_current_for_global_time(batch, advanced)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn translate_cells_to_current_write_schema(
+        &mut self,
+        source: SchemaVersionId,
+        table: &str,
+        cells: &mut BTreeMap<String, Value>,
+    ) -> Result<(SchemaVersionId, String), Error> {
+        let target = self.catalogue.active_schema.schema;
+        if source == target {
+            return Ok((source, table.to_owned()));
+        }
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            return Ok((target, apply_compiled_lens_path(&path, cells)));
+        }
+        Ok((source, table.to_owned()))
+    }
+
+    /// A wire row version is a complete row under the schema id it declares.
+    /// An unknown schema cannot be checked until its catalogue value arrives,
+    /// but a known schema must never accept a descriptor borrowed from another
+    /// version: that would make the omitted trailing columns indistinguishable
+    /// from an authored value and reintroduce partial-row sync semantics.
+    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(&self, versions: &[V]) -> Option<String> {
+        for version in versions {
+            let version = version.borrow();
+            for (field, physical_ms) in [
+                ("created_at_ms", version.created_at_ms()),
+                ("updated_at_ms", version.updated_at_ms()),
+            ] {
+                if crate::time::TxTime::from_physical_ms(physical_ms).is_err() {
+                    return Some(format!(
+                        "row version for table '{}' has {field} outside the packed HLC physical-millisecond range",
+                        version.table()
+                    ));
+                }
+            }
+            if let Err(Error::InvalidMergeableCommit(reason)) =
+                validate_canonical_version_parts(version.branch_key(), &version.parents())
+            {
+                return Some(reason.to_owned());
+            }
+            let Some(schema) = self
+                .catalogue
+                .catalogue_schemas
+                .get(&version.schema_version())
+            else {
+                continue;
+            };
+            let Some(table) = schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+            else {
+                return Some(format!(
+                    "row version table '{}' is absent from its authored schema",
+                    version.table()
+                ));
+            };
+            if version.record().descriptor() != &prepared_wire_record_descriptor(table) {
+                return Some(format!(
+                    "row version for table '{}' does not carry the complete descriptor of its authored schema",
+                    version.table()
+                ));
+            }
+            if let Some(reason) = Self::malformed_authored_branch_key_reason(
+                &schema.schema,
+                table,
+                version,
+            ) {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    fn malformed_authored_branch_key_reason(
+        schema: &JazzSchema,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Option<String> {
+        let branch_cells = match schema.validate_authored_branch_key(table, version.branch_key()) {
+            Ok(cells) => cells,
+            Err(reason) => {
+                return Some(format!(
+                    "row version for table '{}' has an invalid branch key: {reason}",
+                    version.table()
+                ));
+            }
+        };
+        if version.deletion().is_none() {
+            for (column, branch_value) in branch_cells {
+                let Some(position) = table
+                    .columns
+                    .iter()
+                    .position(|candidate| candidate.name == column)
+                else {
+                    return Some(format!(
+                        "row version for table '{}' binds a missing branch column '{column}'",
+                        version.table()
+                    ));
+                };
+                if version.cell_at(position) != Some(branch_value) {
+                    return Some(format!(
+                        "row version for table '{}' has branch key content that disagrees with column '{column}'",
+                        version.table()
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate row versions carried by a view or repair payload before that
+    /// payload may advance local receiver state. View payloads cannot park for
+    /// a missing catalogue entry: unlike an authored commit unit, they have no
+    /// protocol disposition that can defer a partial application of the frame.
+    pub(super) fn validate_view_payload_versions(
+        &self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        self.validate_view_payload_versions_prepared(versions, &mut BTreeMap::new())
+    }
+
+    pub(super) fn validate_view_payload_versions_prepared<'a>(
+        &self,
+        versions: &'a [VersionRecord],
+        descriptors: &mut BTreeMap<(SchemaVersionId, &'a str), groove::records::RecordDescriptor>,
+    ) -> Result<(), Error> {
+        // View/repair bodies come from an admitted authority encoder. Check
+        // semantic catalogue compatibility below, not their byte representation.
+        // Catalogue state cannot change during this shared-borrow preflight.
+        for version in versions {
+            let schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&version.schema_version())
+                .ok_or(Error::MalformedViewUpdate(
+                    "row version names an unknown authored schema",
+                ))?;
+            let table = schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+                .ok_or(Error::MalformedViewUpdate(
+                    "row version table is absent from its authored schema",
+                ))?;
+            let descriptor = descriptors
+                .entry((version.schema_version(), version.table()))
+                .or_insert_with(|| table.wire_record_descriptor());
+            if version.record().descriptor() != descriptor {
+                return Err(Error::MalformedViewUpdate(
+                    "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
+                ));
+            }
+            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
+                return Err(Error::MalformedViewUpdate(
+                    "row version does not carry a valid authored branch key",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reject_malformed_commit(
+        &mut self,
+        tx: Transaction,
+        reason: String,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+        // Malformed provenance cannot be encoded safely. Retain the terminal
+        // outcome, but never make an invalid payload durable merely to report
+        // it; recovery continues to reject any independently corrupted stored
+        // record at decode time.
+        let storage_tx = Transaction {
+            contribution_merge: None,
+            ..tx.clone()
+        };
+        self.ingest_rejected_transaction(storage_tx, fate.clone())
+            .await?;
+        let mut updates = vec![SyncMessage::FateUpdate {
+            tx_id: tx.tx_id,
+            fate,
+            global_time: None,
+            durability: None,
+        }];
+        updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
+        Ok(updates)
+    }
+
+    /// Ensure every known authored schema named by an arriving commit has a
+    /// local alias and registered shared-storage variant. Unknown schemas stay
+    /// parked until their catalogue lineage arrives and re-enters this path.
+    async fn prepare_authored_schema_variants_for_commit<V: std::borrow::Borrow<VersionRecord>>(
+        &mut self,
+        versions: &[V],
+    ) -> Result<(), Error> {
+        if self.malformed_authored_version_reason(versions).is_some() {
+            return Err(Error::InvalidStoredValue(
+                "wire version record does not match authored schema",
+            ));
+        }
+        if versions.iter().any(|version| {
+            let version = version.borrow();
+            !self
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&version.schema_version())
+        }) {
+            return Ok(());
+        }
+
+        let authored_variants = versions
+            .iter()
+            .map(|version| { let version = version.borrow(); (version.table().to_owned(), version.schema_version()) })
+            .collect::<BTreeSet<_>>();
+        let mut registered_mapping = false;
+        for (table, schema_version) in authored_variants {
+            self.table_in_schema_ref(&table, schema_version)?;
+            registered_mapping |= !self
+                .catalogue
+                .schema_version_aliases
+                .contains_key(&schema_version)
+                || !self
+                    .catalogue
+                    .physical_mappings
+                    .contains_key(&schema_version);
+            self.ensure_schema_version_alias(schema_version).await?;
+        }
+        if registered_mapping {
+            self.synchronize_physical_version_tables().await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ingest_rejected_transaction(
+        &mut self,
+        tx: Transaction,
+        fate: Fate,
+    ) -> Result<(), Error> {
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
+        if self.query_transaction(tx.tx_id).await?.is_some() {
+            return self.apply_fate_update(tx.tx_id, fate, None, None).await;
+        }
+        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let mut batch = self.database.open_batch();
+        batch.insert(
+            "jazz_transactions",
+            transaction_values(
+                tx_node_alias,
+                &tx,
+                fate.clone(),
+                None,
+                DurabilityTier::Local,
+                contribution_merge,
+            )?,
+        );
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
+        Ok(())
+    }
+}

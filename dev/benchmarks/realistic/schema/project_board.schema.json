@@ -1,0 +1,126 @@
+{
+  "tables": {
+    "users": {
+      "columns": [
+        { "name": "display_name", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "email", "column_type": { "type": "Text" }, "nullable": false }
+      ]
+    },
+    "organizations": {
+      "columns": [
+        { "name": "name", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "created_at", "column_type": { "type": "Timestamp" }, "nullable": false }
+      ]
+    },
+    "memberships": {
+      "columns": [
+        {
+          "name": "organization_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "organizations"
+        },
+        {
+          "name": "user_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "users"
+        },
+        { "name": "role", "column_type": { "type": "Text" }, "nullable": false }
+      ]
+    },
+    "projects": {
+      "columns": [
+        {
+          "name": "organization_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "organizations"
+        },
+        { "name": "name", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "archived", "column_type": { "type": "Boolean" }, "nullable": false },
+        { "name": "updated_at", "column_type": { "type": "Timestamp" }, "nullable": false }
+      ]
+    },
+    "tasks": {
+      "columns": [
+        {
+          "name": "project_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "projects"
+        },
+        { "name": "title", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "status", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "priority", "column_type": { "type": "Integer" }, "nullable": false },
+        {
+          "name": "assignee_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "users"
+        },
+        { "name": "updated_at", "column_type": { "type": "Timestamp" }, "nullable": false },
+        { "name": "due_at", "column_type": { "type": "Timestamp" }, "nullable": true }
+      ]
+    },
+    "task_comments": {
+      "columns": [
+        {
+          "name": "task_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "tasks"
+        },
+        {
+          "name": "author_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "users"
+        },
+        { "name": "body", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "created_at", "column_type": { "type": "Timestamp" }, "nullable": false }
+      ]
+    },
+    "task_watchers": {
+      "columns": [
+        {
+          "name": "task_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "tasks"
+        },
+        {
+          "name": "user_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "users"
+        }
+      ]
+    },
+    "activity_events": {
+      "columns": [
+        {
+          "name": "project_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "projects"
+        },
+        {
+          "name": "task_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": true,
+          "references": "tasks"
+        },
+        {
+          "name": "actor_id",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "references": "users"
+        },
+        { "name": "kind", "column_type": { "type": "Text" }, "nullable": false },
+        { "name": "created_at", "column_type": { "type": "Timestamp" }, "nullable": false },
+        { "name": "payload", "column_type": { "type": "Text" }, "nullable": false }
+      ]
+    }
+  }
+}

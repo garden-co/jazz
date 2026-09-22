@@ -1,0 +1,48 @@
+name: iOS WebKit IndexedDB receipt
+
+# This is intentionally an on-demand compatibility receipt, not ordinary PR
+# CI. Playwright WebKit exercises the production IndexedDB adapter in a fresh
+# ephemeral browser context on macOS, but it cannot place Mobile Safari itself
+# into Private Browsing mode. A passing run therefore proves our WebKit-facing
+# IndexedDB open/reopen contract, while a real iOS private-tab check remains
+# the final acceptance step for #2430.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to exercise (normally the release candidate)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # setup-build uses this to bind rust-cache and sticky-disk keys to this
+  # repository. This receipt is dispatch-only, so it must never inherit a
+  # caller-controlled fork identifier.
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+
+jobs:
+  indexeddb-webkit:
+    name: WebKit IndexedDB physical receipt
+    # macOS is the closest hosted WebKit environment available to us. Keep the
+    # heavier WebKit setup on this explicit Blacksmith receipt, not routine CI.
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+      - name: Install the Playwright WebKit browser
+        run: pnpm exec playwright install webkit
+      - name: Build sealed correctness artifacts for this exact checkout
+        run: pnpm build:correctness-artifacts
+      - name: Exercise production IndexedDB open, commit, and reopen in WebKit
+        run: >-
+          JAZZ_BROWSER=webkit pnpm --filter jazz-tools test:browser --
+          tests/browser/indexeddb-physical-epoch.test.ts

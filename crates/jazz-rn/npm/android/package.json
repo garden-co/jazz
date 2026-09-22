@@ -1,0 +1,23 @@
+{
+  "name": "jazz-rn-android",
+  "version": "2.0.0-alpha.55",
+  "description": "Jazz React Native android native relay payload",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/garden-co/jazz.git"
+  },
+  "files": [
+    "android",
+    "ios",
+    "JazzNativeRelay.xcframework",
+    "native"
+  ],
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  }
+}
