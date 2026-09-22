@@ -14,3 +14,5 @@ For applications using the old durability options:
 - Remove server upstream/edge configuration. A server now runs Core; a connection gateway may still route traffic without running a Jazz database.
 
 Existing globally confirmed data keeps its storage encoding. Legacy edge durability is interpreted as local persistence. Locally authored edits accepted only by an old edge remain eligible for normal resubmission to Core, with their original authorship and transaction identity; that old acceptance does not bypass current write permissions. Do not clear local databases to migrate.
+
+For a historical semantic-edge store, an edit can remain pending if Core lacks a parent created by another author or by the old edge. That parent must arrive through an authorized recovery path; reconnecting as the child’s author does not grant authority to upload someone else’s work. Keep the local store intact. Recovery for such shared-edge histories is tracked in [#3242](https://github.com/garden-co/jazz/issues/3242).
