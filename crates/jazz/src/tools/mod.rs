@@ -6,8 +6,11 @@ pub use crate::model::admin_catalogue_row_format;
 pub(crate) use crate::model::public_api;
 #[doc(hidden)]
 pub use crate::model::public_schema_convert;
-pub use crate::model::{metadata, policy_claims, public_schema, schema_lens, transaction};
+pub use crate::model::{metadata, policy_claims, public_schema, transaction};
 pub use crate::{app_id, identity};
+#[doc(hidden)]
+pub mod deployment;
+pub mod schema_lens;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
 pub mod sync;

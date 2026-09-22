@@ -329,6 +329,7 @@ mod ingest;
 mod node_aliases;
 pub(crate) use node_aliases::NodeAliases;
 pub(crate) mod maintained_subscription_view;
+pub(crate) mod migration_validation;
 mod open_tx;
 pub(crate) mod physical;
 mod policy;

@@ -467,21 +467,6 @@ pub(super) async fn migration_graph_handler(
         }
     }
 
-    if state.topology.is_edge() {
-        return match forward_catalogue_request(
-            &state,
-            admin_secret.expect("validated admin secret"),
-            reqwest::Method::GET,
-            "/admin/migrations/graph",
-            None,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => error.into_response(),
-        };
-    }
-
     match state.catalogue.migration_graph(&state.catalogue_store) {
         Ok(graph) => (StatusCode::OK, Json(graph)).into_response(),
         Err(err) => (
