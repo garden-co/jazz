@@ -1308,7 +1308,7 @@ pub struct InputSourceDelta {
 }
 
 /// Result of lowering a graph-builder fragment into the deduplicated graph.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompiledNode {
     pub(super) output: RecordDescriptor,
     pub(super) node: NodeId,
@@ -3987,7 +3987,7 @@ impl IvmRuntime {
             .ok_or(IvmRuntimeError::UnsupportedOperator)
     }
 
-    fn infer_builder_output_uncached(
+    pub(super) fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,

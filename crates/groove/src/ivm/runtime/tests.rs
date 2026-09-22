@@ -7,6 +7,137 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 #[futures_test::test]
+async fn immutable_compilation_reuse_preserves_live_updates_and_retirement() {
+    // The private hit counter proves avoided compilation; row equality alone
+    // cannot distinguish recompilation from reuse. All data and lifecycle
+    // behavior below goes through ordinary runtime subscription/tick APIs.
+    let schema = albums_schema();
+    let descriptor = schema.table("albums").unwrap().record_schema();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..32 {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let before = runtime.compilation_cache.hits;
+    let second = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    assert!(
+        runtime.compilation_cache.hits > before,
+        "shared immutable inputs should reuse compilation"
+    );
+    assert!(first.recv().unwrap().is_empty());
+    assert!(second.recv().unwrap().is_empty());
+    let values = vec![Value::U64(1), Value::String("shared".into())];
+    for weight in [1, -1] {
+        runtime
+            .tick(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "albums".into(),
+                    descriptor,
+                    deltas: vec![RecordDelta {
+                        record: descriptor.create(&values).unwrap().into(),
+                        weight,
+                    }],
+                }],
+                &storage,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(
+            second.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+    }
+    runtime.unsubscribe(first.id());
+    runtime.unsubscribe(second.id());
+    runtime.collect_unretained_ephemeral_nodes();
+    let third = runtime.subscribe_one_sink(graph, &storage).await.unwrap();
+    assert!(
+        third.recv().unwrap().is_empty(),
+        "compilation reuse must not retain evaluated rows"
+    );
+}
+
+#[futures_test::test]
+async fn immutable_compilation_reuse_still_rejects_retired_and_foreign_inputs() {
+    // Internal cache instrumentation verifies the failure follows a real hit,
+    // rather than testing only the uncached source-validation path.
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+    let id = runtime.allocate_input_source(descriptor);
+    let graph = GraphBuilder::input_source(id, descriptor)
+        .filter(PredicateExpr::gt("id", Value::U64(0)))
+        .project(["id"]);
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let before = runtime.compilation_cache.hits;
+    let second = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    assert!(runtime.compilation_cache.hits > before);
+    runtime.retire_input_sources([id], &storage).await.unwrap();
+    assert!(matches!(
+        runtime.subscribe_one_sink(graph.clone(), &storage).await,
+        Err(IvmRuntimeError::InputSourceRetired)
+    ));
+    let mut foreign = IvmRuntime::new(albums_schema()).unwrap();
+    assert!(matches!(
+        foreign.subscribe_one_sink(graph, &storage).await,
+        Err(IvmRuntimeError::ForeignInputSource)
+    ));
+    runtime.unsubscribe(first.id());
+    runtime.unsubscribe(second.id());
+}
+
+#[futures_test::test]
+async fn immutable_compilation_reuse_does_not_follow_mutated_arc_definitions() {
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+    let source =
+        GraphBuilder::inline_records(descriptor, [descriptor.create(&[Value::U64(1)]).unwrap()]);
+    let mut shared = Arc::new(
+        source
+            .clone()
+            .filter(PredicateExpr::eq("id", Value::U64(1))),
+    );
+    let wrap = |input| GraphBuilder::Project {
+        input,
+        fields: vec![ProjectField::named("id")],
+    };
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let first = runtime
+        .subscribe_one_sink(wrap(shared.clone()), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1)], 1)]
+    );
+    *Arc::make_mut(&mut shared) = source.filter(PredicateExpr::eq("id", Value::U64(2)));
+    let second = runtime
+        .subscribe_one_sink(wrap(shared), &storage)
+        .await
+        .unwrap();
+    assert!(second.recv().unwrap().is_empty());
+}
+
+#[futures_test::test]
 async fn typed_projection_reuse_keeps_sources_literals_and_descriptor_order_isolated() {
     let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());

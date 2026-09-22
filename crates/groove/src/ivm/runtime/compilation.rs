@@ -263,13 +263,35 @@ impl IvmRuntime {
     ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
-        // Precompute descriptors once for the complete graph. The postorder
-        // compiler below can then reuse those descriptors without repeatedly
-        // traversing a long policy graph from each parent.
-        self.infer_builder_output_cached(graph, &mut output_memo)?;
         let mut compiled_memo = HashMap::default();
-        for builder in graph.postorder() {
-            self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+        for (builder, owner) in compilation_cache::compilation_order(graph) {
+            let key = graph_builder_key(builder);
+            if let Some((compiled, inferred, logical_nodes)) = owner.and_then(|owner| {
+                self.compilation_cache
+                    .get(owner, &compiled_memo, &output_memo, &self.graph)
+            }) {
+                self.logical_nodes_requested += logical_nodes;
+                output_memo.insert(key, inferred);
+                compiled_memo.insert(key, compiled);
+                continue;
+            }
+            // Inputs have already been inferred and compiled. Source ownership
+            // and schema checks therefore run before a parent's reuse decision.
+            let inferred = self.infer_builder_output_uncached(builder, &mut output_memo)?;
+            output_memo.insert(key, inferred);
+            let before = self.logical_nodes_requested;
+            let compiled =
+                self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+            if let Some(owner) = owner {
+                self.compilation_cache.insert(
+                    owner,
+                    &compiled_memo,
+                    &output_memo,
+                    compiled,
+                    inferred,
+                    self.logical_nodes_requested - before,
+                );
+            }
         }
         compiled_memo
             .remove(&graph_builder_key(graph))

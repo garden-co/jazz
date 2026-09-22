@@ -758,6 +758,49 @@ impl GraphBuilder {
         ordered
     }
 
+    /// Visit immediate immutable inputs without walking or cloning their DAGs.
+    pub(crate) fn visit_inputs<'a>(&'a self, mut visit: impl FnMut(&'a Arc<Self>)) {
+        match self {
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::StreamingChecksum { input, .. }
+            | Self::UnwrapNullable { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::VariantProject { input, .. }
+            | Self::ArgMaxBy { input, .. }
+            | Self::ArgMinBy { input, .. }
+            | Self::TopBy { input, .. }
+            | Self::CollectBy { input, .. }
+            | Self::Aggregate { input, .. } => visit(input),
+            Self::Union { inputs } => inputs.iter().for_each(visit),
+            Self::Join { left, right, .. }
+            | Self::SemiJoin { left, right, .. }
+            | Self::AntiJoin { left, right, .. } => {
+                visit(left);
+                visit(right);
+            }
+            Self::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                visit(seed);
+                visit(step);
+                if let Some(witness) = step_witness {
+                    visit(witness);
+                }
+            }
+            Self::RecursiveStepWitness { recursive } => visit(recursive),
+            Self::Table { .. }
+            | Self::InlineRecords { .. }
+            | Self::InputSource { .. }
+            | Self::Index { .. }
+            | Self::FrontierSource { .. }
+            | Self::BindingSource { .. } => {}
+        }
+    }
+
     pub fn join(
         left: GraphBuilder,
         right: GraphBuilder,
