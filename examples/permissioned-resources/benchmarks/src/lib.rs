@@ -2284,6 +2284,10 @@ fn run_connect_and_subscribe(
             )
         })
         .unwrap_or_default();
+    let actual_rows = subscriptions
+        .iter()
+        .map(|sub| (sub.name.clone(), sub.rows.clone()))
+        .collect();
     let timelines = subscriptions
         .into_iter()
         .map(|sub| SubscriptionTimeline {
@@ -2385,7 +2389,7 @@ fn run_connect_and_subscribe(
     }
     RunSummary {
         _keepalive: None,
-        actual_rows: BTreeMap::new(),
+        actual_rows,
         expected_rows_by_table: None,
         tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
