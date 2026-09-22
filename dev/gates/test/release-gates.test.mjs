@@ -50,6 +50,30 @@ test("release starter gate covers the canonical scaffold catalogue and no ordina
   assert.ok(matrix, "could not find the starter E2E matrix");
   assert.deepEqual(listedStarters(matrix), expected);
 });
+test("manual starter filters reject unknown dispatch values before preparation", () => {
+  const prepare = job("prepare", "e2e");
+  const validation = prepare.match(
+    /- name: Validate workflow_dispatch starter[\s\S]*?(?=\n      - name:|\n  e2e:)/,
+  )?.[0];
+  assert.ok(validation, "missing manual starter validation step");
+  assert.match(validation, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(validation, /STARTER_FILTER: \$\{\{ github\.event\.inputs\.starter \}\}/);
+  assert.match(validation, /\*\)[\s\S]*?exit 1/);
+
+  const accepted = validation.match(/^\s+""\|([^)\n]+)\)$/m)?.[1]?.split("|");
+  assert.deepEqual(accepted, listedStarters(starters));
+  assert.ok(
+    prepare.indexOf("- name: Validate workflow_dispatch starter") <
+      prepare.indexOf("pnpm install --frozen-lockfile"),
+    "validate the dispatch filter before installing dependencies",
+  );
+  assert.ok(
+    prepare.indexOf("- name: Validate workflow_dispatch starter") <
+      prepare.indexOf("pnpm run build:core"),
+    "validate the dispatch filter before building the workspace",
+  );
+});
+
 
 test("release starter gate rejects prefix and unconditional trigger broadening", () => {
   for (const broadened of [
