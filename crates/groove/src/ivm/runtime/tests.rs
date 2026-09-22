@@ -6,6 +6,77 @@ use crate::storage::{MemoryStorage, OwnedStorage, RecordStore, TestStorage, Test
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+#[futures_test::test]
+async fn typed_projection_reuse_keeps_sources_literals_and_descriptor_order_isolated() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let graph = |id, title: &str, marker| {
+        GraphBuilder::inline_records(
+            descriptor,
+            [descriptor
+                .create(&[Value::U64(id), Value::String(title.into())])
+                .unwrap()],
+        )
+        .project_fields([
+            ProjectField::named("title"),
+            ProjectField::literal("marker", Value::U64(marker)),
+        ])
+    };
+    for (id, title, marker) in [(1, "one", 7), (2, "two", 7), (3, "three", 9)] {
+        let result = runtime
+            .query_snapshot(graph(id, title, marker), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.to_values().unwrap(),
+            vec![(vec![Value::String(title.into()), Value::U64(marker),], 1)]
+        );
+    }
+    // The same names in a different physical order must not reuse resolved
+    // field slots. This also exercises reuse after disposable graph retirement.
+    let reordered = RecordDescriptor::new([("title", ValueType::String), ("id", ValueType::U64)]);
+    let result = runtime
+        .query_snapshot(
+            GraphBuilder::inline_records(
+                reordered,
+                [reordered
+                    .create(&[Value::String("reordered".into()), Value::U64(4)])
+                    .unwrap()],
+            )
+            .project_fields([
+                ProjectField::named("title"),
+                ProjectField::literal("marker", Value::U64(7)),
+            ]),
+            &storage,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.to_values().unwrap(),
+        vec![(vec![Value::String("reordered".into()), Value::U64(7),], 1)]
+    );
+    // Repeated cache collisions/eviction are performance-only, not result state.
+    for marker in 0..600 {
+        let result = runtime
+            .query_snapshot(graph(5, "churn", marker), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.to_values().unwrap(),
+            vec![(vec![Value::String("churn".into()), Value::U64(marker),], 1)]
+        );
+    }
+    let result = runtime
+        .query_snapshot(graph(1, "again", 7), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.to_values().unwrap(),
+        vec![(vec![Value::String("again".into()), Value::U64(7),], 1)]
+    );
+}
+
 #[test]
 fn touched_unbounded_membership_matches_full_window_diff_for_signed_bags() {
     // Internal oracle intentionally exercises negative intermediate bag weights

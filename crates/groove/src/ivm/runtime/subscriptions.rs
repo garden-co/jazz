@@ -4097,7 +4097,7 @@ impl IvmRuntime {
             }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
-                project_descriptor(&input, fields)
+                Ok(self.projection_plan(input, fields)?.output)
             }
             GraphBuilder::StreamingChecksum {
                 input,
