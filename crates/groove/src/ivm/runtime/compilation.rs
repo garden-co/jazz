@@ -289,20 +289,12 @@ impl IvmRuntime {
         let recipe_key = compilation_recipes::RecipeKey::for_builder(graph, compiled_memo);
         if let Some(recipe) = recipe_key
             .as_ref()
-            .and_then(|key| self.compilation_recipes.lookup(key))
+            .and_then(|(key, _)| self.compilation_recipes.get_mut().lookup(key))
         {
-            // Inputs have already been compiled in postorder. Their exact
-            // identities include any graph-context-dependent rewrite inputs.
-            // Recreate released nodes without restoring any evaluation state.
-            for descriptor in &recipe.nodes {
-                let node = self
-                    .graph
-                    .dedup_node(descriptor.clone(), NodeDurability::Ephemeral);
-                self.initialize_node_runtime(node);
-            }
-            self.logical_nodes_requested += recipe.logical_nodes;
-            compiled_memo.insert(key, recipe.compiled.clone());
-            return Ok(recipe.compiled.clone());
+            // Bind fresh source identities, never an earlier execution.
+            let compiled = recipe.install(self, &recipe_key.as_ref().unwrap().1);
+            compiled_memo.insert(key, compiled.clone());
+            return Ok(compiled);
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         debug_assert!(self.compilation_capture.is_none());
@@ -343,9 +335,10 @@ impl IvmRuntime {
         };
         let captured = self.compilation_capture.take();
         let compiled = compiled?;
-        if let (Some(key), Some(nodes)) = (recipe_key, captured) {
-            self.compilation_recipes.insert(
+        if let (Some((key, bindings)), Some(nodes)) = (recipe_key, captured) {
+            self.compilation_recipes.get_mut().insert(
                 key,
+                &bindings,
                 nodes,
                 compiled.clone(),
                 self.logical_nodes_requested - logical_nodes_before,

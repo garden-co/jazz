@@ -3992,6 +3992,13 @@ impl IvmRuntime {
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        if let Some(output) = self
+            .compilation_recipes
+            .borrow()
+            .inferred_output(graph, output_memo)
+        {
+            return Ok(output);
+        }
         match graph {
             GraphBuilder::Table {
                 table,

@@ -1,10 +1,10 @@
 //! Bounded, immutable installation recipes, not retained executions.
 //!
-//! A recipe is scoped to exact compiled inputs in this runtime. Its shallow
-//! builder key includes every operator parameter, input descriptor and root
-//! ordering identity. It contains no row state, subscription or retainer.
-//! After GC, replay recreates nodes through ordinary graph validation and
-//! runtime initialization; after input/schema changes the key no longer matches.
+//! Recipes use typed input slots, never concrete source IDs. Their shallow
+//! keys include every operator parameter, input descriptor and input-aliasing /
+//! ordering pattern. Binding supplies the actual nodes at each installation.
+//! After GC, replay recreates nodes through ordinary validation and initialization;
+//! no row state, authorization, subscription, or retainer survives in a recipe.
 
 use super::*;
 
@@ -17,14 +17,14 @@ pub(super) struct RecipeKey {
     // builder's parameter representation avoids a second operator-definition
     // language which could omit a future semantic field.
     definition: GraphBuilder,
-    inputs: Vec<(NodeId, Option<NodeId>)>,
+    inputs: Vec<(usize, bool)>,
 }
 
 impl RecipeKey {
     pub(super) fn for_builder(
         graph: &GraphBuilder,
         compiled: &HashMap<usize, CompiledNode>,
-    ) -> Option<Self> {
+    ) -> Option<(Self, Vec<CompiledNode>)> {
         match graph {
             // These leaves are cheap, registry-sensitive or contain row data.
             // Recursive/collector compilation additionally has graph-context
@@ -38,6 +38,10 @@ impl RecipeKey {
             | GraphBuilder::Recursive { .. }
             | GraphBuilder::RecursiveStepWitness { .. }
             | GraphBuilder::CollectBy { .. }
+            // Projection composition and join pruning inspect surrounding
+            // operators, not just input types. Keep those rewrites outside
+            // this typed recipe; the pure projection plan is already cached.
+            | GraphBuilder::Project { .. }
             | GraphBuilder::Filter { .. }
             | GraphBuilder::Union { .. } => return None,
             // Direct-table ArgBy also validates the schema's primary key, not
@@ -51,9 +55,15 @@ impl RecipeKey {
         }
         let mut definition = graph.clone();
         let mut inputs = Vec::new();
+        let mut bindings: Vec<CompiledNode> = Vec::new();
         let mut bind = |input: &mut Arc<GraphBuilder>| -> Option<()> {
             let value = compiled.get(&(input.as_ref() as *const GraphBuilder as usize))?;
-            inputs.push((value.node, value.root_ordering_node));
+            let alias = bindings
+                .iter()
+                .position(|other| other.node == value.node)
+                .unwrap_or(bindings.len());
+            inputs.push((alias, value.root_ordering_node.is_some()));
+            bindings.push(value.clone());
             *input = Arc::new(GraphBuilder::InlineRecords {
                 output: value.output,
                 records: Vec::new(),
@@ -61,8 +71,7 @@ impl RecipeKey {
             Some(())
         };
         match &mut definition {
-            GraphBuilder::Project { input, .. }
-            | GraphBuilder::StreamingChecksum { input, .. }
+            GraphBuilder::StreamingChecksum { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
             | GraphBuilder::VariantProject { input, .. }
@@ -78,16 +87,116 @@ impl RecipeKey {
             }
             _ => return None,
         }
-        Some(Self { definition, inputs })
+        Some((Self { definition, inputs }, bindings))
     }
+}
+
+#[derive(Clone, Copy, Debug, Hash)]
+enum RecipeInput {
+    Input(usize),
+    Node(usize),
+}
+
+#[derive(Clone, Debug, Hash)]
+struct RecipeNode {
+    // The operator/output are typed; inputs are relocations below. This
+    // descriptor is never inserted before its input slots have been bound.
+    descriptor: NodeDescriptor,
+    inputs: Vec<RecipeInput>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct CompilationRecipe {
     key: RecipeKey,
-    pub(super) nodes: Vec<NodeDescriptor>,
-    pub(super) compiled: CompiledNode,
-    pub(super) logical_nodes: u64,
+    nodes: Vec<RecipeNode>,
+    output: RecordDescriptor,
+    node: RecipeInput,
+    // Input means inherit that input's root ordering, not its root node.
+    ordering: Option<RecipeInput>,
+    logical_nodes: u64,
+}
+
+impl CompilationRecipe {
+    fn capture(
+        key: RecipeKey,
+        bindings: &[CompiledNode],
+        descriptors: Vec<NodeDescriptor>,
+        compiled: CompiledNode,
+        logical_nodes: u64,
+    ) -> Option<Self> {
+        let mut references = bindings
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, input)| (input.node, RecipeInput::Input(index)))
+            .collect::<HashMap<_, _>>();
+        let mut nodes = Vec::new();
+        for mut descriptor in descriptors {
+            let id = descriptor.node_id();
+            let inputs = descriptor
+                .inputs
+                .iter()
+                .map(|id| references.get(id).copied())
+                .collect::<Option<Vec<_>>>()?;
+            descriptor.inputs.clear();
+            references.insert(id, RecipeInput::Node(nodes.len()));
+            nodes.push(RecipeNode { descriptor, inputs });
+        }
+        let node = *references.get(&compiled.node)?;
+        let ordering = if let Some(ordering) = compiled.root_ordering_node {
+            Some(
+                bindings
+                    .iter()
+                    .position(|input| input.root_ordering_node == Some(ordering))
+                    .map(RecipeInput::Input)
+                    .or_else(|| references.get(&ordering).copied())?,
+            )
+        } else {
+            None
+        };
+        Some(Self {
+            key,
+            nodes,
+            output: compiled.output,
+            node,
+            ordering,
+            logical_nodes,
+        })
+    }
+
+    pub(super) fn install(
+        &self,
+        runtime: &mut IvmRuntime,
+        bindings: &[CompiledNode],
+    ) -> CompiledNode {
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        let resolve = |input: RecipeInput, nodes: &[NodeId]| match input {
+            RecipeInput::Input(index) => bindings[index].node,
+            RecipeInput::Node(index) => nodes[index],
+        };
+        for template in &self.nodes {
+            let mut descriptor = template.descriptor.clone();
+            descriptor.inputs = template
+                .inputs
+                .iter()
+                .map(|input| resolve(*input, &nodes))
+                .collect();
+            let node = runtime
+                .graph
+                .dedup_node(descriptor, NodeDurability::Ephemeral);
+            runtime.initialize_node_runtime(node);
+            nodes.push(node);
+        }
+        runtime.logical_nodes_requested += self.logical_nodes;
+        CompiledNode {
+            output: self.output,
+            node: resolve(self.node, &nodes),
+            root_ordering_node: self.ordering.and_then(|ordering| match ordering {
+                RecipeInput::Input(index) => bindings[index].root_ordering_node,
+                RecipeInput::Node(index) => Some(nodes[index]),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -123,9 +232,55 @@ impl Hasher for PayloadHasher {
 }
 
 impl CompilationRecipes {
+    pub(super) fn inferred_output(
+        &self,
+        graph: &GraphBuilder,
+        outputs: &HashMap<usize, RecordDescriptor>,
+    ) -> Option<RecordDescriptor> {
+        // Passthrough outputs are cheaper than a lookup. Project already has
+        // its source-independent typed plan; recursive/collector validation
+        // remains on the ordinary path.
+        if !matches!(
+            graph,
+            GraphBuilder::Join { .. }
+                | GraphBuilder::Aggregate { .. }
+                | GraphBuilder::UnwrapNullable { .. }
+                | GraphBuilder::Unnest { .. }
+                | GraphBuilder::VariantProject { .. }
+        ) {
+            return None;
+        }
+        let mut definition = graph.clone();
+        let bind = |input: &mut Arc<GraphBuilder>| -> Option<()> {
+            let output = *outputs.get(&(input.as_ref() as *const GraphBuilder as usize))?;
+            *input = Arc::new(GraphBuilder::InlineRecords {
+                output,
+                records: Vec::new(),
+            });
+            Some(())
+        };
+        match &mut definition {
+            GraphBuilder::Join { left, right, .. } => {
+                bind(left)?;
+                bind(right)?;
+            }
+            GraphBuilder::Aggregate { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::VariantProject { input, .. } => bind(input)?,
+            _ => return None,
+        }
+        let mut hash = PayloadHasher::default();
+        definition.hash(&mut hash);
+        let recipe = self.slots[hash.finish() as usize % SLOTS].as_ref()?;
+        // Aliasing and root ordering affect node relocation, never this typed
+        // output. Exact definition equality includes input enum registries.
+        (recipe.key.definition == definition).then_some(recipe.output)
+    }
+
     pub(super) fn lookup(&mut self, key: &RecipeKey) -> Option<Rc<CompilationRecipe>> {
         let mut hash = PayloadHasher::default();
-        key.hash(&mut hash);
+        key.definition.hash(&mut hash);
         let value = self.slots[hash.finish() as usize % SLOTS].as_ref()?;
         if value.key != *key {
             return None;
@@ -140,23 +295,22 @@ impl CompilationRecipes {
     pub(super) fn insert(
         &mut self,
         key: RecipeKey,
+        bindings: &[CompiledNode],
         nodes: Vec<NodeDescriptor>,
         compiled: CompiledNode,
         logical_nodes: u64,
     ) {
         let mut hash = PayloadHasher::default();
-        key.hash(&mut hash);
+        key.definition.hash(&mut hash);
         let slot = hash.finish() as usize % SLOTS;
         nodes.hash(&mut hash);
         // Bound retained definitions as well as entry count. Descriptors are
         // interned immutable handles; this is not a live-heap accounting claim.
-        if hash.bytes <= MAX_PAYLOAD {
-            self.slots[slot] = Some(Rc::new(CompilationRecipe {
-                key,
-                nodes,
-                compiled,
-                logical_nodes,
-            }));
+        if hash.bytes <= MAX_PAYLOAD
+            && let Some(recipe) =
+                CompilationRecipe::capture(key, bindings, nodes, compiled, logical_nodes)
+        {
+            self.slots[slot] = Some(Rc::new(recipe));
         }
     }
 }

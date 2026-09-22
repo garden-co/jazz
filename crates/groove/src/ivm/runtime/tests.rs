@@ -55,7 +55,7 @@ async fn installation_recipes_rebuild_after_gc_without_restoring_rows_or_binding
             .unwrap();
         assert!(absent.to_values().unwrap().is_empty());
     }
-    assert!(runtime.compilation_recipes.hits > 0);
+    assert!(runtime.compilation_recipes.borrow().hits > 0);
     // Eviction must change work only. Recompile the same query and read the
     // last stored row, rather than accidentally keeping result state alive.
     runtime.compilation_recipes = Default::default();
@@ -135,6 +135,66 @@ async fn typed_projection_reuse_keeps_sources_literals_and_descriptor_order_isol
         result.to_values().unwrap(),
         vec![(vec![Value::String("again".into()), Value::U64(7),], 1)]
     );
+}
+
+#[futures_test::test]
+async fn typed_recipes_bind_fresh_ordering_and_preserve_join_input_aliases() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let source = |id| {
+        GraphBuilder::inline_records(
+            descriptor,
+            [descriptor
+                .create(&[Value::U64(id), Value::String(format!("row-{id}"))])
+                .unwrap()],
+        )
+    };
+    for id in [1, 2, 3] {
+        let ordered = GraphBuilder::top_by(
+            source(id),
+            Vec::<String>::new(),
+            [crate::ivm::TopByOrder::asc("id")],
+            ["id"],
+            0,
+            TopByLimit::Finite(1),
+        );
+        let joined = GraphBuilder::join(ordered.clone(), source(id), ["id"], ["id"]);
+        let compiled = runtime.add_dedup_graph(&joined).unwrap();
+        let root = runtime.add_dedup_graph(&ordered).unwrap();
+        // Ordering is the new binding's actual TopBy, never a cached NodeId.
+        assert_eq!(compiled.root_ordering_node, Some(root.node));
+        let rows = runtime
+            .query_snapshot(joined.project(["left.title"]), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.to_values().unwrap(),
+            vec![(vec![Value::String(format!("row-{id}"))], 1)]
+        );
+        for same_input in [true, false, true] {
+            let left = source(id);
+            let right = if same_input {
+                left.clone()
+            } else {
+                source(id + 1)
+            };
+            let rows = runtime
+                .query_snapshot(
+                    GraphBuilder::join(left, right, ["id"], ["id"]).project(["left.id"]),
+                    &storage,
+                )
+                .await
+                .unwrap();
+            let expected = if same_input {
+                vec![(vec![Value::U64(id)], 1)]
+            } else {
+                vec![]
+            };
+            assert_eq!(rows.to_values().unwrap(), expected);
+        }
+    }
+    assert!(runtime.compilation_recipes.borrow().hits > 0);
 }
 
 #[test]

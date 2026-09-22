@@ -177,7 +177,7 @@ pub struct IvmRuntime {
     graph: IvmGraph,
     /// Pure typed fragments, independent of source identity and live state.
     projection_plans: RefCell<typed_projection::ProjectionPlans>,
-    compilation_recipes: compilation_recipes::CompilationRecipes,
+    compilation_recipes: RefCell<compilation_recipes::CompilationRecipes>,
     compilation_capture: Option<Vec<NodeDescriptor>>,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
