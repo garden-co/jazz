@@ -239,7 +239,6 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     },
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
-      viteServerRef = viteServer;
       if (viteServer.config.command !== "serve" || options.server === false) return;
 
       let resolvedRuntime: ManagedRuntime;
@@ -261,6 +260,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         });
         throw error;
       }
+      viteServerRef = viteServer;
 
       viteServer.config.env ??= {};
       viteServer.config.env.PUBLIC_JAZZ_APP_ID = resolvedRuntime.appId;
