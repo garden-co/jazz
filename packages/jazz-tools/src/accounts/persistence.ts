@@ -117,8 +117,17 @@ export async function prepareAccountManager(options: {
   });
   automaticInitializers.set(manager, async () => {
     let changed = false;
+    let previous = manager.getSnapshot();
     const unsubscribe = manager.subscribe(() => {
-      changed = true;
+      const next = manager.getSnapshot();
+      // An error-only publish (e.g. reportPersistenceError) leaves the selection
+      // intact; every other publish (select, logout, operation) supersedes.
+      const errorOnly =
+        next.error !== undefined &&
+        next.account === previous.account &&
+        next.pending === previous.pending;
+      previous = next;
+      if (!errorOnly) changed = true;
     });
     try {
       // Generate outside the transform because transactional hosts may retry it.

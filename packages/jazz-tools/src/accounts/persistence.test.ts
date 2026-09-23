@@ -293,3 +293,40 @@ it("returns and persists a re-entrant explicit selection during automatic adopti
   await vi.waitFor(() => expect(JSON.parse(value!).selected).toBe(1));
   expect(JSON.parse(value!).roots).toEqual([automaticSecret, explicitSecret]);
 });
+
+it("keeps the durable automatic selection when a persistence error is reported during adoption", async () => {
+  const automaticSecret = formatAuthSecret(new Uint8Array(32).fill(8));
+  let value: string | null = null;
+  let updates = 0;
+  let finish!: () => void;
+  const durable = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      updates++;
+      value = transform(value);
+      if (updates === 1) await durable;
+    },
+  };
+  const manager = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => automaticSecret,
+  });
+  const pending = ensureAutomaticLocalFirst(manager);
+  await vi.waitFor(() => expect(updates).toBe(1));
+  // Another tab may already have adopted selected=0 from storage at this point.
+  expect(JSON.parse(value!).selected).toBe(0);
+  manager.reportPersistenceError(new Error("x"));
+  finish();
+  const adopted = await pending;
+  expect(adopted).toBe(manager.getLoggedIn());
+  expect(exportLocalFirstSecret(adopted)).toBe(automaticSecret);
+  expect(JSON.parse(value!)).toMatchObject({ selected: 0, roots: [automaticSecret] });
+});
