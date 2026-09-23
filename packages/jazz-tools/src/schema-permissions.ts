@@ -12,6 +12,7 @@ import type {
   PolicyExpr,
   PolicyLiteralValue,
   PolicyValue,
+  Schema,
   TablePolicies,
 } from "./schema.js";
 
