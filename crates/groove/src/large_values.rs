@@ -4692,6 +4692,7 @@ pub(crate) fn json_pointer_prefix(
                     serde_json::Value::Array(array) => component
                         .parse::<usize>()
                         .ok()
+                        .filter(|index| component == &index.to_string())
                         .and_then(|index| array.get(index)),
                     _ => None,
                 });
