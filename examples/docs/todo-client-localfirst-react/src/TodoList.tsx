@@ -61,12 +61,19 @@ export function TodoList() {
     setTitle("");
   };
 
-  if (allTodos.isLoading) {
-    return <p>Connecting…</p>;
-  }
-
   return (
     <>
+      <span
+        className={`settlement-badge settlement-badge--${allTodos.highestSettledAt}`}
+        role="status"
+        aria-label={`Query settlement: ${allTodos.highestSettledAt}`}
+      >
+        {allTodos.highestSettledAt === "unconfirmed"
+          ? "Waiting"
+          : allTodos.highestSettledAt === "local"
+            ? "On device"
+            : "Synced"}
+      </span>
       <form onSubmit={handleSubmit}>
         <input
           type="text"
