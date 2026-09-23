@@ -23,7 +23,8 @@ export function TodoList() {
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
-  const allTodos = useAll(app.todos);
+  // This query can show its local preview before authority confirmation.
+  const allTodos = useAll(app.todos, { tier: "remote-if-possible" });
   // `allTodos.data` may contain a local preview while `allTodos.isLoading` is `true`.
   // It is `undefined` only when no result is available yet.
   // Once the requested first result is ready, `allTodos.isLoading` is `false`.
