@@ -43,6 +43,38 @@
       .query-tier-control select {
         padding: 0.25rem 0.4rem;
       }
+      #tier-help-button {
+        padding: 0.25rem 0.5rem;
+      }
+      #query-preview-status {
+        margin: 0 0 0.75rem;
+        color: #475569;
+      }
+      #tier-help-dialog {
+        max-width: min(36rem, calc(100vw - 2rem));
+        max-height: calc(100vh - 2rem);
+        overflow-y: auto;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.5rem;
+        padding: 1.25rem;
+        color: #0f172a;
+      }
+      #tier-help-dialog::backdrop {
+        background: rgb(15 23 42 / 45%);
+      }
+      #tier-help-dialog h2 {
+        margin-top: 0;
+      }
+      #tier-help-dialog ul {
+        padding-left: 1.25rem;
+      }
+      #tier-help-dialog li {
+        display: list-item;
+        padding: 0.25rem 0;
+      }
+      #tier-help-close {
+        margin-top: 0.5rem;
+      }
       .settlement-badge {
         display: inline-flex;
         align-items: center;

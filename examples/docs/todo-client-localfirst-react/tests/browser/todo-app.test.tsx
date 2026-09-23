@@ -370,7 +370,7 @@ describe("React Todo App E2E", () => {
     await waitFor(
       () =>
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-        "Query settlement: local",
+        "Selected read tier: Local-first. Highest settlement this subscription has observed: On device.",
       10000,
       "local-first should settle the query on device",
     );
@@ -380,12 +380,14 @@ describe("React Todo App E2E", () => {
       () =>
         tierSelect.value === "remote-if-possible" &&
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Query settlement: remote",
+          "Selected read tier: Remote if possible. Highest settlement this subscription has observed: Synced.",
       10000,
       "the selected query should advance to remote settlement",
     );
 
-    expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe("Synced");
+    expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe(
+      "Selected: Remote if possible · Highest observed: Synced",
+    );
   });
 
   it("updates settlement when the preferred query tier changes", async () => {
@@ -401,7 +403,7 @@ describe("React Todo App E2E", () => {
     await waitFor(
       () =>
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-        "Query settlement: local",
+        "Selected read tier: Local-first. Highest settlement this subscription has observed: On device.",
       10000,
       "the default local-first query should settle on device",
     );
@@ -411,7 +413,7 @@ describe("React Todo App E2E", () => {
       () =>
         tierSelect.value === "remote" &&
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Query settlement: remote",
+          "Selected read tier: Remote only. Highest settlement this subscription has observed: Synced.",
       10000,
       "remote should wait for the server result",
     );
