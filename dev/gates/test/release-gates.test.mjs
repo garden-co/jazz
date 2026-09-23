@@ -94,7 +94,6 @@ test("manual starter filters reject unknown dispatch values before preparation",
   );
 });
 
-
 test("release starter gate rejects prefix and unconditional trigger broadening", () => {
   for (const broadened of [
     "github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/')",
