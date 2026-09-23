@@ -93,42 +93,47 @@ export function TodoList() {
   return (
     <>
       <div className="query-controls">
-        <label className="query-tier-control" htmlFor="query-tier">
-          Query read tier
-          <select
-            id="query-tier"
-            value={tier}
-            onChange={(event) => setTier(event.currentTarget.value as QueryTier)}
-          >
-            {queryTierOptions.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          id="tier-help-button"
-          type="button"
-          aria-haspopup="dialog"
-          onClick={() => tierHelpDialog.current?.showModal()}
-        >
-          Explain choices
-        </button>
-        <label className="query-tier-control" htmlFor="query-optimism">
-          UI optimism
-          <select
-            id="query-optimism"
-            value={optimism}
-            onChange={(event) => setOptimism(event.currentTarget.value as QueryOptimism)}
-          >
-            {queryOptimismOptions.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <details id="query-options" className="query-options">
+          <summary>Query options</summary>
+          <div className="query-options__controls">
+            <label className="query-tier-control" htmlFor="query-tier">
+              Query read tier
+              <select
+                id="query-tier"
+                value={tier}
+                onChange={(event) => setTier(event.currentTarget.value as QueryTier)}
+              >
+                {queryTierOptions.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              id="tier-help-button"
+              type="button"
+              aria-haspopup="dialog"
+              onClick={() => tierHelpDialog.current?.showModal()}
+            >
+              Explain choices
+            </button>
+            <label className="query-tier-control" htmlFor="query-optimism">
+              UI optimism
+              <select
+                id="query-optimism"
+                value={optimism}
+                onChange={(event) => setOptimism(event.currentTarget.value as QueryOptimism)}
+              >
+                {queryOptimismOptions.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </details>
         <span
           className={`settlement-badge settlement-badge--${allTodos.highestSettledAt}`}
           role="status"
