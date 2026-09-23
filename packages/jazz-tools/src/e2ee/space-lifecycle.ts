@@ -44,9 +44,21 @@ import {
 type DeviceState = Awaited<ReturnType<DeviceApproval["deviceStates"]>>;
 type Settled<T> = { rows: T[]; settlements: RowSettlement[] };
 type Address = { scopeId: string; identifier: string };
-// Only a malformed transcript or a checked signature mismatch proves a root invalid.
+// An identity mismatch, malformed transcript or checked signature mismatch invalidates a root.
 // Missing authority/history and operational failures must not be silently discarded.
 class InvalidSpaceRoot extends Error {}
+
+function spaceRootId(address: Address): string {
+  const digest = sha256(
+    new TextEncoder().encode(
+      JSON.stringify(["jazz.e2ee.space-id.v1", address.scopeId, address.identifier]),
+    ),
+  ).slice(0, 16);
+  digest[6] = (digest[6]! & 0x0f) | 0x80;
+  digest[8] = (digest[8]! & 0x3f) | 0x80;
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 type Snapshot = {
   roots: Settled<SpaceRoot>;
@@ -443,15 +455,7 @@ export class Spaces {
     secret: Uint8Array,
   ): Promise<SpaceRoot> {
     const roots = this.tables.__e2ee_spaces.where(address);
-    const digest = sha256(
-      new TextEncoder().encode(
-        JSON.stringify(["jazz.e2ee.space-id.v1", address.scopeId, address.identifier]),
-      ),
-    ).slice(0, 16);
-    digest[6] = (digest[6]! & 0x0f) | 0x80;
-    digest[8] = (digest[8]! & 0x3f) | 0x80;
-    const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const rootId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const rootId = spaceRootId(address);
     if (
       await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
         tier: "global",
@@ -822,6 +826,8 @@ export class Spaces {
     } catch {
       throw new InvalidSpaceRoot("Malformed E2EE space root transcript");
     }
+    if (root.id !== spaceRootId(root))
+      throw new InvalidSpaceRoot("Invalid E2EE space root identity");
     const history = snapshot.histories.get(root.accountId);
     if (!history) throw new Error("Missing E2EE space creator history");
     const position = positionOf(snapshot.roots, root.id);
