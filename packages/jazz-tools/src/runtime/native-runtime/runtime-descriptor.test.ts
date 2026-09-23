@@ -3,7 +3,8 @@ import { col } from "../../dsl.js";
 import { defineApp } from "../../typed-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
-import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
+import { decodeNestedRowBytes, rowsFromBatches } from "./native-runtime-adapter.js";
+import { formatUuid } from "../uuid.js";
 import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
 
 describe("formatUuid", () => {
