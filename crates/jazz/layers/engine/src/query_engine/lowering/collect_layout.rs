@@ -47,7 +47,22 @@ pub(super) fn collect_layout(
         // version fields that one-shot materialization exposes, so opening,
         // reset, and incremental collector output share one descriptor.
         FieldProjection::All => {
-            selected_root.extend(current_row_field_names(&root_source.table_schema))
+            selected_root.extend(current_row_field_names(&root_source.table_schema));
+            // Include-deleted CurrentRows retain their internal deletion state,
+            // before any claim routes, just as they retain version metadata.
+            selected_root.extend(
+                root_source
+                    .row_shape
+                    .descriptor
+                    .fields()
+                    .iter()
+                    .filter(|field| {
+                        field.name.as_deref() == Some("__jazz_deleted")
+                            && field.value_type == ValueType::Bool
+                            && crate::node::query_engine::descriptor_public_name(field).is_none()
+                    })
+                    .filter_map(|field| field.name.clone()),
+            );
         }
         FieldProjection::Fields(fields) => selected_root.extend(
             fields
