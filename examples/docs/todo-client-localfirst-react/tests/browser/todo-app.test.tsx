@@ -34,6 +34,13 @@ function typeInto(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Select an option in a React-controlled select. */
+function selectOption(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")!.set!;
+  setter.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -366,6 +373,37 @@ describe("React Todo App E2E", () => {
     );
 
     expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe("Synced");
+  });
+
+  it("updates settlement when the preferred query tier changes", async () => {
+    const el = await mountApp({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+    });
+    const tierSelect = el.querySelector<HTMLSelectElement>('[aria-label="Query read tier"]');
+    expect(tierSelect).not.toBeNull();
+    if (!tierSelect) return;
+
+    expect(tierSelect.value).toBe("remote-if-possible");
+    await act(async () => selectOption(tierSelect, "local-first"));
+    await waitFor(
+      () =>
+        tierSelect.value === "local-first" &&
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+          "Query settlement: local",
+      10000,
+      "local-first should settle the query on device",
+    );
+
+    await act(async () => selectOption(tierSelect, "remote"));
+    await waitFor(
+      () =>
+        tierSelect.value === "remote" &&
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+          "Query settlement: remote",
+      10000,
+      "remote should wait for the server result",
+    );
   });
 
   // -------------------------------------------------------------------------
