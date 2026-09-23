@@ -3,6 +3,7 @@ target/
 
 # Node
 node_modules/
+node-compile-cache/
 dist/
 *.log
 
