@@ -4783,6 +4783,7 @@ struct SubscriptionState {
     /// A non-durable foreground has not yet received its local owner's answer.
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
+    delivery: SubscriptionDelivery,
     sender: SubscriptionSender,
 }
 
@@ -4793,6 +4794,7 @@ struct SubscriptionSender {
     sender: UnboundedSender<SubscriptionEvent>,
     publication: Rc<RefCell<SubscriptionPublication>>,
     requested_tier: DurabilityTier,
+    delivery: SubscriptionDelivery,
 }
 
 #[derive(Default)]
@@ -4814,6 +4816,21 @@ impl SubscriptionPublicationSnapshot {
             snapshot: materialized_subscription_snapshot(snapshot, index)?,
             occurrences: snapshot_root_occurrences(snapshot, index)?,
         })
+    }
+}
+
+fn enforce_initial_owner_readiness(event: &mut SubscriptionEvent, owner_result_pending: bool) {
+    if owner_result_pending
+        && let SubscriptionEvent::Delta {
+            settled,
+            requested_ready,
+            attained_settlement,
+            ..
+        } = event
+    {
+        *settled = false;
+        *requested_ready = false;
+        *attained_settlement = QuerySettlementLevel::Unconfirmed;
     }
 }
 
@@ -4867,6 +4884,7 @@ impl SubscriptionSender {
         let publication = self.publication.borrow();
         if tier >= DurabilityTier::Global
             && !settled
+            && self.delivery == SubscriptionDelivery::Settled
             && publication.opened
             && publication.deferred.is_none()
         {
@@ -4882,19 +4900,30 @@ impl SubscriptionSender {
         before: Option<SubscriptionPublicationSnapshot>,
         snapshot: &RelationSnapshot,
         index: &RelationSnapshotIndex,
+        owner_result_pending: bool,
         materialized: bool,
     ) -> Result<bool, Error> {
+        enforce_initial_owner_readiness(&mut event, owner_result_pending);
         let SubscriptionEvent::Delta {
             reset,
             publishable,
             settled,
+            requested_ready,
+            attained_settlement,
             tier,
             ..
         } = &event
         else {
             return Ok(self.unbounded_send(event).is_ok());
         };
-        let (reset, publishable, settled, tier) = (*reset, *publishable, *settled, *tier);
+        let (reset, publishable, settled, requested_ready, attained_settlement, tier) = (
+            *reset,
+            *publishable,
+            *settled,
+            *requested_ready,
+            *attained_settlement,
+            *tier,
+        );
         if !publishable
             && matches!(&event, SubscriptionEvent::Delta {
             reset: false, added, updated, removed, terminal_operations, ..
@@ -4911,7 +4940,9 @@ impl SubscriptionSender {
         let mut publication = self.publication.borrow_mut();
         if !publishable
             || !materialized
-            || (self.requested_tier >= DurabilityTier::Global && !settled)
+            || (self.requested_tier >= DurabilityTier::Global
+                && !settled
+                && self.delivery == SubscriptionDelivery::Settled)
         {
             if publication.opened
                 && publication.deferred.is_none()
@@ -4944,6 +4975,8 @@ impl SubscriptionSender {
                 removed: Vec::new(),
                 terminal_operations: Vec::new(),
                 settled,
+                requested_ready,
+                attained_settlement,
                 tier,
             };
         } else if let Some(previous) = &publication.deferred {
@@ -4960,6 +4993,7 @@ impl SubscriptionSender {
         publication.opened = true;
         publication.deferred = None;
         publication.reset = false;
+        enforce_initial_owner_readiness(&mut event, owner_result_pending);
         Ok(self.sender.unbounded_send(event).is_ok())
     }
 
@@ -5141,6 +5175,10 @@ pub enum SubscriptionEvent {
         /// Public Edge/Global streams emit only settled results. Local streams
         /// can publish materialized local rows before remote coverage settles.
         settled: bool,
+        /// Whether the requested read tier is ready for consumers.
+        requested_ready: bool,
+        /// Highest settlement level attained by the materialized result.
+        attained_settlement: QuerySettlementLevel,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
     },
@@ -5384,8 +5422,25 @@ pub enum SerializedReadResult {
     Relation(RelationSnapshot),
 }
 
-/// Authorization route used when a host opens a serialized subscription.
+/// Settlement attained by a subscription result.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum QuerySettlementLevel {
+    Unconfirmed,
+    Local,
+    Remote,
+}
+
+/// Controls whether a serialized client-local subscription may publish a
+/// materialized local preview before its requested read tier is ready.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionDelivery {
+    Settled,
+    Progressive,
+}
+
+/// Authorization route used when a host opens a serialized subscription.
 #[doc(hidden)]
 pub enum SerializedSubscriptionAuthorization {
     ClientLocal,
@@ -5494,6 +5549,22 @@ impl PreparedQuery {
 fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
     !shape.query().joins.is_empty() || !shape.query().reachable.is_empty()
 }
+fn subscription_event_metadata(
+    tier: DurabilityTier,
+    settled: bool,
+    local_materialized: bool,
+) -> (bool, QuerySettlementLevel) {
+    (
+        local_materialized && (tier < DurabilityTier::Global || settled),
+        if !local_materialized {
+            QuerySettlementLevel::Unconfirmed
+        } else if settled && tier >= DurabilityTier::Global {
+            QuerySettlementLevel::Remote
+        } else {
+            QuerySettlementLevel::Local
+        },
+    )
+}
 
 fn subscription_delta_event(
     tier: DurabilityTier,
@@ -5533,13 +5604,23 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
                     if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
-                        let event = subscription_delta_event(
+                        let (requested_ready, attained_settlement) = subscription_event_metadata(
                             state_ref.read_tier,
                             false,
-                            &state_ref.snapshot,
-                            &state_ref.snapshot,
-                            state_ref.terminal_rows,
+                            !state_ref.pending_initial_owner_result,
                         );
+                        let event = SubscriptionEvent::Delta {
+                            reset: false,
+                            publishable: true,
+                            added: Vec::new(),
+                            updated: Vec::new(),
+                            removed: Vec::new(),
+                            terminal_operations: Vec::new(),
+                            settled: false,
+                            requested_ready,
+                            attained_settlement,
+                            tier: state_ref.read_tier,
+                        };
                         let _ = state_ref.sender.unbounded_send(event);
                     }
                 }
@@ -5562,6 +5643,7 @@ fn subscription_terminal_delta_event(
     current: &RelationSnapshot,
     current_occurrences: &[OutputOccurrenceId],
 ) -> Result<SubscriptionEvent, Error> {
+    let (requested_ready, attained_settlement) = subscription_event_metadata(tier, settled, true);
     let previous_roots = &previous.rows[..previous.root_count];
     let current_roots = &current.rows[..current.root_count];
     if previous_roots.len() != previous_occurrences.len()
@@ -5648,6 +5730,8 @@ fn subscription_terminal_delta_event(
         removed,
         terminal_operations: Vec::new(),
         settled,
+        requested_ready,
+        attained_settlement,
         tier,
     })
 }
@@ -5660,6 +5744,7 @@ fn subscription_delta_event_with_reset(
     reset: bool,
     _terminal_rows: bool,
 ) -> SubscriptionEvent {
+    let (requested_ready, attained_settlement) = subscription_event_metadata(tier, settled, true);
     // A reset is a complete ordered snapshot.  Re-keying it through the
     // occurrence BTreeMap below would sort by identity and silently discard
     // the maintained query order (for example `order_by rank`).
@@ -5678,6 +5763,8 @@ fn subscription_delta_event_with_reset(
             removed: Vec::new(),
             terminal_operations: Vec::new(),
             settled,
+            requested_ready,
+            attained_settlement,
             tier,
         };
     }
@@ -5730,6 +5817,8 @@ fn subscription_delta_event_with_reset(
         removed,
         terminal_operations: Vec::new(),
         settled,
+        requested_ready,
+        attained_settlement,
         tier,
     }
 }
@@ -5743,6 +5832,7 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
+    let (requested_ready, attained_settlement) = subscription_event_metadata(tier, settled, true);
     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
         let update_kind = match &update {
             LocalMaintainedViewSubscriptionUpdate::Structured {
@@ -5820,6 +5910,8 @@ fn apply_maintained_update_to_snapshot(
                     removed: Vec::new(),
                     terminal_operations: Vec::new(),
                     settled,
+                    requested_ready,
+                    attained_settlement,
                     tier,
                 });
             }
@@ -5892,6 +5984,7 @@ fn apply_maintained_membership_update_to_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
+    let (requested_ready, attained_settlement) = subscription_event_metadata(tier, settled, true);
     if snapshot.rows.is_empty()
         && snapshot.edges.is_empty()
         && snapshot.root_count == 0
@@ -5924,6 +6017,8 @@ fn apply_maintained_membership_update_to_snapshot(
             removed: Vec::new(),
             terminal_operations: Vec::new(),
             settled,
+            requested_ready,
+            attained_settlement,
             tier,
         };
     }
@@ -6037,6 +6132,8 @@ fn apply_maintained_membership_update_to_snapshot(
         removed,
         terminal_operations: Vec::new(),
         settled,
+        requested_ready,
+        attained_settlement,
         tier,
     }
 }
@@ -6058,6 +6155,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> Result<SubscriptionEvent, Error> {
+    let (requested_ready, attained_settlement) = subscription_event_metadata(tier, settled, true);
     let mut root_operations = Vec::new();
     let mut descendant_operations = Vec::new();
     for operation in operations {
@@ -6303,6 +6401,8 @@ fn apply_terminal_operations_to_subscription_snapshot(
         removed,
         terminal_operations: descendant_operations,
         settled,
+        requested_ready,
+        attained_settlement,
         tier,
     })
 }

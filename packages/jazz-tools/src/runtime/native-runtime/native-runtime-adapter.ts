@@ -7,6 +7,7 @@ import type {
   ColumnType,
   InsertValues,
   NativeTerminalOperation,
+  QuerySettlementLevel,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
   TablePolicies,
@@ -3274,6 +3275,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.schema,
       chunk.reset === true,
       subscription.outputColumns,
+      chunk.requestedReady,
+      chunk.attainedSettlement,
     );
     delta.terminalOperations = decodeRuntimeTerminalOperations(
       chunk.terminalOperations,
@@ -5768,6 +5771,8 @@ export function decodeSubscriptionDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  requestedReady = true,
+  attainedSettlement: QuerySettlementLevel = "local",
 ): RuntimeSubscriptionDelta {
   const decodeRows = (batches: NativeRowBatch[], keys: Uint8Array[], indices: number[]) => {
     const rows = rowsFromSubscriptionBatches(batches, schema, outputColumns, "full-record");
@@ -5801,6 +5806,8 @@ export function decodeSubscriptionDelta(
           ],
     ),
     ...(reset ? { reset: true } : {}),
+    requestedReady,
+    attainedSettlement,
   };
 }
 
@@ -6101,6 +6108,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
+      requestedReady: boolean;
+      attainedSettlement: QuerySettlementLevel;
     }
   | {
       type: "rejected";
@@ -6118,11 +6127,23 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reason?: unknown;
     reset?: unknown;
     terminalOperations?: unknown;
+    requestedReady?: unknown;
+    attainedSettlement?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
   }
   if (record.type === "delta" || record.type === "Delta") {
+    if (typeof record.requestedReady !== "boolean") {
+      throw new Error("subscription delta requestedReady must be a boolean");
+    }
+    if (
+      record.attainedSettlement !== "unconfirmed" &&
+      record.attainedSettlement !== "local" &&
+      record.attainedSettlement !== "remote"
+    ) {
+      throw new Error("subscription delta attainedSettlement is invalid");
+    }
     return {
       type: "delta",
       reset: record.reset === true,
@@ -6132,6 +6153,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
+      requestedReady: record.requestedReady,
+      attainedSettlement: record.attainedSettlement,
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {

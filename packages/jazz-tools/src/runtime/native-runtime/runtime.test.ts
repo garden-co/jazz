@@ -994,7 +994,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         {
           type: "delta",
           reset: true,
-          settled: true,
+          requestedReady: true,
+          attainedSettlement: "local",
           delta: encodeSubscriptionDelta({
             added: [{ table: "todos", rowId, title: "settled row" }],
             updated: [],
@@ -2372,6 +2373,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       const opening = subscriptionReset([{ table: "todos", rowId, title: "initial" }]);
       const change = {
         type: "delta",
+        requestedReady: true,
+        attainedSettlement: "local",
         delta: encodeSubscriptionDelta({
           added: [],
           updated: [{ table: "todos", rowId, title: "updated" }],
@@ -3100,6 +3103,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     controller!.enqueue({
       type: "delta",
       reset: true,
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: encodeTerminalSubscriptionDelta(relationSchema),
     });
     await Promise.resolve();
@@ -4328,6 +4333,8 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "delta",
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: encodeSubscriptionDelta({
         added: [
           {
@@ -4899,7 +4906,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const chunk = {
       type: "delta",
       reset: true,
-      settled: true,
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: encodeSubscriptionDelta({
         added: [
           {
@@ -4957,7 +4965,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = runtimeWithNativeSubscriptionChunk({
       type: "delta",
       reset: true,
-      settled: true,
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: encodeSubscriptionDelta({
         added: [
           { table: "todos", rowId, title: "direct" },
@@ -5062,7 +5071,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const chunk = {
       type: "delta",
       reset: true,
-      settled: true,
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: encodeUserWrappedSubscriptionDelta({
         table: "notes",
         rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
@@ -5111,7 +5121,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         {
           type: "delta",
           reset: true,
-          settled: true,
+          requestedReady: true,
+          attainedSettlement: "local",
           delta: encodeUserWrappedSubscriptionDelta({
             table: "notes",
             rowId: uuidBytes("00000000-0000-0000-0000-000000000322"),
@@ -6237,7 +6248,8 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
         const chunk = {
           type: "delta",
           reset: true,
-          settled: true,
+          requestedReady: true,
+          attainedSettlement: "local",
           delta: encodeSubscriptionDelta({ added: rows, updated: [], removed: [] }),
         };
         const runtime = runtimeWithNativeSubscriptionChunk(chunk);
@@ -6474,13 +6486,15 @@ function runtimeWithNativeRelationSubscriptionChunks(
 
 function relationSubscriptionChunk({
   reset = false,
-  settled = true,
+  requestedReady = true,
+  attainedSettlement = "local",
   rootAdded = [],
   rootUpdated = [],
   rootRemoved = [],
 }: {
   reset?: boolean;
-  settled?: boolean;
+  requestedReady?: boolean;
+  attainedSettlement?: "unconfirmed" | "local" | "remote";
   rootAdded?: EncodedTestRow[];
   rootUpdated?: EncodedTestRow[];
   rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
@@ -6488,7 +6502,8 @@ function relationSubscriptionChunk({
   return {
     type: "delta",
     reset,
-    settled,
+    requestedReady,
+    attainedSettlement,
     delta: encodeSubscriptionDelta({
       added: rootAdded,
       updated: rootUpdated,
@@ -7026,6 +7041,8 @@ function subscriptionReset(rows: EncodedTestRow[]) {
   return {
     type: "delta",
     reset: true,
+    requestedReady: true,
+    attainedSettlement: "local",
     delta: encodeSubscriptionDelta({ added: rows, updated: [], removed: [] }),
   };
 }

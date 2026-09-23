@@ -2,26 +2,42 @@ import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscr
 import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
 import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
+import type { QuerySettlementLevel } from "./drivers/types.js";
+
+const SETTLEMENT_RANK: Record<QuerySettlementLevel, number> = {
+  unconfirmed: 0,
+  local: 1,
+  remote: 2,
+};
+
+function maxSettlementLevel(
+  current: QuerySettlementLevel,
+  next: QuerySettlementLevel,
+): QuerySettlementLevel {
+  return SETTLEMENT_RANK[next] > SETTLEMENT_RANK[current] ? next : current;
+}
 
 type UseAllStatePending<T> = {
   status: "pending";
-  data: undefined;
+  data: T[] | undefined;
   promise: TrackedPromise<T[]>;
   error: null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 type UseAllStatefulfilledData<T> = {
   status: "fulfilled";
   data: T[];
   error: null;
+  highestSettledAt: QuerySettlementLevel;
 };
 
 type UseAllStateError = {
   status: "rejected";
   data: undefined;
   error: unknown;
+  highestSettledAt: QuerySettlementLevel;
 };
-
 export type UseAllState<T extends { id: string }> =
   | UseAllStatePending<T>
   | UseAllStatefulfilledData<T>
@@ -146,6 +162,7 @@ interface InternalCacheEntry<T extends { id: string }> {
   listeners: Set<QueryEntryCallbacks<T>>;
   cleanupTimeoutId: ReturnType<typeof setTimeout> | null;
   unsubscribe?: () => void;
+  highestSettledAt: QuerySettlementLevel;
   status: UseAllState<T>["status"];
   error: unknown;
   subscribe(callbacks: QueryEntryCallbacks<T>): () => void;
@@ -163,6 +180,7 @@ const SHARED_PENDING: UseAllStatePending<any> = {
   data: undefined,
   promise: makeDeferred<any>(),
   error: null,
+  highestSettledAt: "unconfirmed",
 };
 
 export class SubscriptionsOrchestrator {
@@ -248,7 +266,13 @@ export class SubscriptionsOrchestrator {
 
     const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
     if (existing && existing.state.status === "pending" && snapshot) {
-      existing.state = { status: "fulfilled", data: snapshot, error: null };
+      existing.highestSettledAt = "unconfirmed";
+      existing.state = {
+        status: "fulfilled",
+        data: snapshot,
+        error: null,
+        highestSettledAt: existing.highestSettledAt,
+      };
       existing.resolvefulfilled(snapshot);
     }
 
@@ -287,6 +311,7 @@ export class SubscriptionsOrchestrator {
         status: "fulfilled",
         data: queryDef.snapshot as T[],
         error: null,
+        highestSettledAt: "unconfirmed",
       };
       this.seededStates.set(key, seeded);
       return seeded;
@@ -307,6 +332,7 @@ export class SubscriptionsOrchestrator {
     }
 
     const hasSnapshot = queryDef.snapshot !== undefined;
+    const highestSettledAt: QuerySettlementLevel = "unconfirmed";
 
     const deferred = makeDeferred<T[]>({
       status: hasSnapshot ? "fulfilled" : "pending",
@@ -314,13 +340,19 @@ export class SubscriptionsOrchestrator {
     });
     // Callback-based consumers (non-suspense React, Svelte, Vue) never await
     // this promise, so a subscription failure would surface as an unhandled
-    // rejection. Attach a no-op handler; the suspense reader still attaches its
-    // own via `use()`.
+    // rejection. Attach a no-op handler; the suspense reader still attaches
+    // its own via `use()`.
     deferred.catch(() => {});
 
     const initialState: UseAllState<T> = hasSnapshot
-      ? { status: "fulfilled", data: queryDef.snapshot as T[], error: null }
-      : { status: "pending", data: undefined, promise: deferred, error: null };
+      ? { status: "fulfilled", data: queryDef.snapshot as T[], error: null, highestSettledAt }
+      : {
+          status: "pending",
+          data: undefined,
+          promise: deferred,
+          error: null,
+          highestSettledAt,
+        };
 
     const entry = {
       key,
@@ -329,6 +361,7 @@ export class SubscriptionsOrchestrator {
       generation: 0,
       state: initialState,
       promise: deferred,
+      highestSettledAt,
       resolvefulfilled: (data) => {
         deferred.resolve(data);
       },
@@ -343,10 +376,16 @@ export class SubscriptionsOrchestrator {
 
         if (entry.state.status === "rejected") {
           callbacks.onError?.(entry.state.error);
-        }
-
-        if (entry.state.status === "fulfilled") {
+        } else if (entry.state.status === "fulfilled") {
           callbacks.onfulfilled?.(entry.state.data);
+        } else if (entry.state.data !== undefined) {
+          callbacks.onDelta?.({
+            reset: true,
+            all: entry.state.data,
+            delta: [],
+            requestedReady: false,
+            attainedSettlement: entry.highestSettledAt,
+          });
         }
 
         return () => {
@@ -413,7 +452,12 @@ export class SubscriptionsOrchestrator {
     const reject = (error: unknown) => {
       this.trace("reject", entry, String(error));
       if (entry.generation !== generation || entry.state.status === "rejected") return;
-      entry.state = { status: "rejected", data: undefined, error };
+      entry.state = {
+        status: "rejected",
+        data: undefined,
+        error,
+        highestSettledAt: entry.highestSettledAt,
+      };
       entry.rejectfulfilled(error);
       for (const listener of Array.from(entry.listeners)) {
         try {
@@ -431,27 +475,63 @@ export class SubscriptionsOrchestrator {
           onDelta: (delta) => {
             this.trace("delta", entry, delta);
             if (entry.generation !== generation || entry.state.status === "rejected") return;
-            const wasPending = entry.state.status === "pending";
-            const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
-            applySubscriptionDelta(data, delta);
-            entry.state = {
-              status: "fulfilled",
-              data,
-              error: null,
-            };
 
-            if (wasPending) {
-              entry.resolvefulfilled(data);
+            const previousState = entry.state;
+            const wasPending = previousState.status === "pending";
+            const previousHighestSettledAt = entry.highestSettledAt;
+            entry.highestSettledAt = maxSettlementLevel(
+              entry.highestSettledAt,
+              delta.attainedSettlement,
+            );
+            const metadataOnly =
+              !delta.reset && delta.all === undefined && delta.delta.length === 0;
+            let data =
+              previousState.status === "fulfilled"
+                ? previousState.data
+                : previousState.status === "pending"
+                  ? previousState.data
+                  : undefined;
+            if (!metadataOnly) {
+              data = data === undefined ? [] : [...data];
+              applySubscriptionDelta(data, delta);
             }
 
-            for (const listener of Array.from(entry.listeners)) {
-              if (wasPending) {
-                listener.onfulfilled?.(data);
-              } else if (delta.reset) {
-                listener.onReset?.();
-                listener.onfulfilled?.(data);
-              } else {
-                listener.onDelta?.(delta);
+            const fulfillsPending = wasPending && delta.requestedReady && data !== undefined;
+            if (fulfillsPending || !wasPending) {
+              entry.state = {
+                status: "fulfilled",
+                data: data!,
+                error: null,
+                highestSettledAt: entry.highestSettledAt,
+              };
+            } else {
+              entry.state = {
+                status: "pending",
+                data,
+                promise: entry.promise,
+                error: null,
+                highestSettledAt: entry.highestSettledAt,
+              };
+            }
+
+            if (fulfillsPending) {
+              entry.resolvefulfilled(data!);
+            }
+
+            const observableChanged =
+              fulfillsPending ||
+              !metadataOnly ||
+              previousHighestSettledAt !== entry.highestSettledAt;
+            if (observableChanged) {
+              for (const listener of Array.from(entry.listeners)) {
+                if (fulfillsPending) {
+                  listener.onfulfilled?.(data!);
+                } else if (!wasPending && delta.reset) {
+                  listener.onReset?.();
+                  listener.onfulfilled?.(data!);
+                } else {
+                  listener.onDelta?.(delta);
+                }
               }
             }
 
@@ -485,7 +565,21 @@ export class SubscriptionsOrchestrator {
    * suspense read awaits the reload rather than the stale resolved promise.
    * Used by session-change resubscription.
    */
-  private resetEntryToPending<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+  private resetEntryToPending<T extends { id: string }>(
+    entry: InternalCacheEntry<T>,
+    retainDeferred = false,
+  ): void {
+    entry.highestSettledAt = "unconfirmed";
+    if (retainDeferred) {
+      entry.state = {
+        status: "pending",
+        data: undefined,
+        promise: entry.promise,
+        error: null,
+        highestSettledAt: entry.highestSettledAt,
+      };
+      return;
+    }
     const next = makeDeferred<T[]>();
     next.catch(() => {});
     entry.promise = next;
@@ -495,7 +589,13 @@ export class SubscriptionsOrchestrator {
     entry.rejectfulfilled = (error) => {
       next.reject(error);
     };
-    entry.state = { status: "pending", data: undefined, promise: next, error: null };
+    entry.state = {
+      status: "pending",
+      data: undefined,
+      promise: next,
+      error: null,
+      highestSettledAt: entry.highestSettledAt,
+    };
   }
 
   private resubscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
@@ -505,16 +605,11 @@ export class SubscriptionsOrchestrator {
     }
     entry.generation += 1;
 
-    // The prior session's rows are no longer valid. Drop a settled entry back to
-    // `pending` and tell listeners to clear, so stale data is nuked with the
-    // session instead of lingering until the new subscription's first delta. A
-    // still-`pending` entry is left as-is — its in-flight promise may already be
-    // awaited by a suspense reader.
-    if (entry.state.status !== "pending") {
-      this.resetEntryToPending(entry);
-      for (const listener of Array.from(entry.listeners)) {
-        listener.onReset?.();
-      }
+    // The prior session's rows are no longer valid. Clear them even if the
+    // previous subscription was still pending; only its deferred survives.
+    this.resetEntryToPending(entry, entry.state.status === "pending");
+    for (const listener of Array.from(entry.listeners)) {
+      listener.onReset?.();
     }
 
     this.subscribeEntry(entry);

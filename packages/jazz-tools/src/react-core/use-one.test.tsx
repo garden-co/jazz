@@ -37,7 +37,8 @@ function makeHarness() {
   return {
     client: attachSubscriptionStore({ db, session: null, shutdown: async () => {} }, manager),
     getSubscribedQuery: () => subscribedQuery,
-    emit: (all: Todo[]) => callback!({ all, delta: [] }),
+    emit: (all: Todo[]) =>
+      callback!({ all, delta: [], requestedReady: true, attainedSettlement: "local" }),
   };
 }
 

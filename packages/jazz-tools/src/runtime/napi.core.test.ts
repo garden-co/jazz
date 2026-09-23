@@ -994,7 +994,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     await waitFor(async () => updates.length > 0 || undefined, "initial local snapshot");
-    expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
+    expect(updates).toEqual([
+      { all: [], delta: [], reset: true, requestedReady: true, attainedSettlement: "local" },
+    ]);
 
     const inserted = runtime.insert("todos", {
       title: { type: "Text", value: "direct napi subscribed row" },
@@ -1398,7 +1400,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     await waitFor(async () => updates.length > 0 || undefined, "initial local snapshot");
-    expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
+    expect(updates).toEqual([
+      { all: [], delta: [], reset: true, requestedReady: true, attainedSettlement: "local" },
+    ]);
 
     const tx = beginTestBatch(runtime);
     const writeContext = JSON.stringify({ transaction_id: tx });
@@ -1564,7 +1568,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       async () => aliceDecodedUpdates.length > 0 || undefined,
       "initial Alice snapshot",
     );
-    expect(aliceDecodedUpdates[0]).toEqual({ all: [], delta: [], reset: true });
+    expect(aliceDecodedUpdates[0]).toEqual({
+      all: [],
+      delta: [],
+      reset: true,
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
 
     const aliceTodo = runtime.insert(
       "todos",

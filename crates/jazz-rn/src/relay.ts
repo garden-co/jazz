@@ -1,5 +1,5 @@
 import nativeRelay from "./NativeJazzRelay";
-import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
+import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 } from "./native-relay-abi";
 
 /**
  * Versioned private global installed by the native JSI bridge.
@@ -16,7 +16,7 @@ export interface NativeRelayAbiRange {
   maximum: number;
 }
 
-export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
+export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 };
 
 function requireNativeRelay() {
   if (nativeRelay == null) {
@@ -228,6 +228,8 @@ export type NativeForegroundSubscriptionEvent =
       reset: boolean;
       settled: boolean;
       tier: string;
+      requestedReady: boolean;
+      attainedSettlement: "unconfirmed" | "local" | "remote";
       delta: Uint8Array;
       terminalOperations?: unknown[];
     }
@@ -832,6 +834,20 @@ function decodeForegroundSubscriptionEvents(
       const tierLength = readVarint();
       const tier = decodeForegroundUtf8(bytes, offset, tierLength, "tier");
       offset += tierLength;
+      const requestedReady = bytes[offset++];
+      const attainedSettlement = bytes[offset++];
+      if (requestedReady !== 0 && requestedReady !== 1)
+        throw new Error("Jazz native foreground returned malformed requested-ready flag");
+      const attainedSettlementName =
+        attainedSettlement === 0
+          ? "unconfirmed"
+          : attainedSettlement === 1
+            ? "local"
+            : attainedSettlement === 2
+              ? "remote"
+              : null;
+      if (attainedSettlementName === null)
+        throw new Error("Jazz native foreground returned malformed settlement level");
       const deltaLength = readVarint();
       const delta = bytes.slice(offset, offset + deltaLength);
       offset += deltaLength;
@@ -852,6 +868,8 @@ function decodeForegroundSubscriptionEvents(
         reset: reset === 1,
         settled: settled === 1,
         tier,
+        requestedReady: requestedReady === 1,
+        attainedSettlement: attainedSettlementName,
         delta,
         ...(terminalOperations === undefined ? {} : { terminalOperations }),
       });

@@ -74,8 +74,8 @@ use jazz::db::{
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
-    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    SubscriptionDelivery as CoreSubscriptionDelivery, SubscriptionEvent as CoreSubscriptionEvent,
+    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::Value as CoreValue;
@@ -1181,6 +1181,13 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
     pub settled: bool,
+    #[napi(js_name = "requestedReady")]
+    pub requested_ready: bool,
+    #[napi(
+        js_name = "attainedSettlement",
+        ts_type = "'unconfirmed' | 'local' | 'remote'"
+    )]
+    pub attained_settlement: String,
     #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
     pub tier: String,
 }
@@ -3105,6 +3112,7 @@ impl NapiDb {
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
     ) -> napi::Result<Either<Subscription, PendingNativeSubscription>> {
+        let delivery = core_subscription_delivery_from_json(opts.as_ref())?;
         let opts = core_read_opts_from_json(opts)?;
         let trusted_client = self.trusted_backend;
         let explicit_author = author
@@ -3138,7 +3146,13 @@ impl NapiDb {
                             None => CoreSerializedSubscriptionAuthorization::ClientLocal,
                         };
                         let stream = db
-                            .subscribe_serialized_query(&query, opts, admission, authorization)
+                            .subscribe_serialized_query(
+                                &query,
+                                opts,
+                                admission,
+                                authorization,
+                                delivery,
+                            )
                             .await
                             .map_err(napi_error)?;
                         Ok(Subscription {
@@ -4050,6 +4064,24 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     }
     Ok(opts)
 }
+fn core_subscription_delivery_from_json(
+    value: Option<&JsonValue>,
+) -> napi::Result<CoreSubscriptionDelivery> {
+    let delivery = match value {
+        Some(value) => optional_json_string_prop(value, "subscription_delivery")?,
+        None => None,
+    };
+    let Some(delivery) = delivery else {
+        return Ok(CoreSubscriptionDelivery::Settled);
+    };
+    match delivery.as_str() {
+        "settled" | "Settled" => Ok(CoreSubscriptionDelivery::Settled),
+        "progressive" | "Progressive" => Ok(CoreSubscriptionDelivery::Progressive),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown subscription_delivery {other}"
+        ))),
+    }
+}
 
 fn core_branch_selector_from_json(value: JsonValue) -> napi::Result<CoreBranchSelector> {
     serde_json::from_value(value)
@@ -4367,6 +4399,8 @@ fn core_subscription_event_to_napi(
             removed,
             terminal_operations,
             settled,
+            requested_ready,
+            attained_settlement,
             tier,
             ..
         } => {
@@ -4382,6 +4416,8 @@ fn core_subscription_event_to_napi(
                 delta: Uint8Array::new(delta),
                 terminal_operations,
                 settled: *settled,
+                requested_ready: *requested_ready,
+                attained_settlement: format!("{attained_settlement:?}").to_ascii_lowercase(),
                 tier: format!("{tier:?}"),
             }))
         }
@@ -5372,7 +5408,8 @@ mod tests {
     use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        MergeableTxOps, Propagation as CorePropagation, QuerySettlementLevel,
+        SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7177,6 +7214,8 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: Vec::new(),
             settled: true,
+            requested_ready: true,
+            attained_settlement: QuerySettlementLevel::Local,
             tier: DurabilityTier::Local,
         })
         .expect("encode terminal delta");
@@ -7246,6 +7285,8 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: operations,
             settled: false,
+            requested_ready: false,
+            attained_settlement: QuerySettlementLevel::Local,
             tier: DurabilityTier::Global,
         })
         .expect("encode terminal operations");

@@ -16,6 +16,7 @@ import {
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
+import type { QuerySettlementLevel } from "../../drivers/types.js";
 
 const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
@@ -51,8 +52,9 @@ export type {
 export type SubscriptionDeltaChunk = {
   type: "delta";
   delta: NativeSubscriptionDelta;
-  settled?: boolean;
-  tier?: string;
+  reset?: boolean;
+  requestedReady: boolean;
+  attainedSettlement: QuerySettlementLevel;
 };
 export type SubscriptionRejectedChunk = {
   type: "rejected";

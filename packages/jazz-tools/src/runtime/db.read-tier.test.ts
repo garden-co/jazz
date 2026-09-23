@@ -112,6 +112,8 @@ function added(id: string, title: string): RuntimeSubscriptionDelta {
     ],
     removed: [],
     updated: [],
+    requestedReady: true,
+    attainedSettlement: "local",
   };
 }
 
@@ -494,7 +496,14 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
     const remoteReady = deferred<void>();
-    localCallback({ added: [], removed: [], updated: [], reset: true });
+    localCallback({
+      added: [],
+      removed: [],
+      updated: [],
+      reset: true,
+      requestedReady: true,
+      attainedSettlement: "local",
+    });
     const connection = (
       db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
     ).connection;

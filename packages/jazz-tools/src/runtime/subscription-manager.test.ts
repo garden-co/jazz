@@ -148,6 +148,8 @@ function emptyRuntimeDelta(
     added: [],
     removed: [],
     updated: [],
+    requestedReady: true,
+    attainedSettlement: "local",
     ...overrides,
   };
 }

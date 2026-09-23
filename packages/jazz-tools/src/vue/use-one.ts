@@ -1,11 +1,13 @@
 import { computed, toValue, type MaybeRefOrGetter, type Ref } from "vue";
 import { limitQueryToOne, type QueryBuilder, type QueryOptions } from "../runtime/db.js";
+import type { QuerySettlementLevel } from "../shared/index.js";
 import { useAll, useAllSuspense } from "./use-all.js";
 
 export interface UseOneResult<T extends { id: string }> {
   data: Ref<T | null | undefined>;
   error: Ref<Error | null>;
   isLoading: Ref<boolean>;
+  highestSettledAt: Ref<QuerySettlementLevel>;
 }
 
 export interface UseOneSuspenseResult<T extends { id: string }> {
@@ -24,7 +26,12 @@ export function useOne<T extends { id: string }>(
   const data = computed(() =>
     result.data.value === undefined ? undefined : (result.data.value[0] ?? null),
   );
-  return { data, error: result.error, isLoading: result.isLoading };
+  return {
+    data,
+    error: result.error,
+    isLoading: result.isLoading,
+    highestSettledAt: result.highestSettledAt,
+  };
 }
 
 export async function useOneSuspense<T extends { id: string }>(

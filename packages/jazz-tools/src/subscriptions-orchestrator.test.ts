@@ -70,6 +70,8 @@ function makeDelta(all: Todo[]): SubscriptionDelta<Todo> {
   return {
     all,
     delta: [],
+    requestedReady: true,
+    attainedSettlement: "local",
   };
 }
 
@@ -497,6 +499,104 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-P01 exposes an unready delta while keeping the cache pending", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const rows = [makeTodo("preview")];
+      const preview: SubscriptionDelta<Todo> & {
+        requestedReady: boolean;
+        attainedSettlement: string;
+      } = {
+        ...makeDelta(rows),
+        requestedReady: false,
+        attainedSettlement: "unconfirmed",
+      };
+
+      harness.emit(0, preview);
+
+      expect(entry.status).toBe("pending");
+      expect(entry.state.data).toEqual(rows);
+      expect(entry.promise.status).toBe("pending");
+
+      harness.emit(0, { ...preview, requestedReady: true, attainedSettlement: "local" });
+
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: rows,
+        error: null,
+        highestSettledAt: "local",
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-P03 notifies listeners when same-rank readiness fulfills a pending entry", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onfulfilled = vi.fn();
+      const onDelta = vi.fn();
+      const unsubscribe = entry.subscribe({ onfulfilled, onDelta });
+      const rows = [makeTodo("preview")];
+
+      harness.emit(0, {
+        ...makeDelta(rows),
+        requestedReady: false,
+        attainedSettlement: "local",
+      });
+      expect(entry.status).toBe("pending");
+      expect(entry.state.data).toEqual(rows);
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).toHaveBeenCalledTimes(1);
+
+      harness.emit(0, {
+        delta: [],
+        requestedReady: true,
+        attainedSettlement: "local",
+      });
+
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state.data).toEqual(rows);
+      expect(entry.state.highestSettledAt).toBe("local");
+      expect(onfulfilled).toHaveBeenCalledTimes(1);
+      expect(onfulfilled).toHaveBeenCalledWith(rows);
+      expect(onDelta).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-P02 preserves rows while metadata-only settlement advances monotonically", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      harness.emit(0, makeDelta([makeTodo("stable")]));
+      const materialized = entry.state.data;
+
+      harness.emit(0, {
+        delta: [],
+        requestedReady: false,
+        attainedSettlement: "remote",
+      });
+      expect(entry.state.data).toBe(materialized);
+      expect(entry.state.highestSettledAt).toBe("remote");
+
+      harness.emit(0, {
+        delta: [],
+        requestedReady: true,
+        attainedSettlement: "local",
+      });
+      expect(entry.state.data).toBe(materialized);
+      expect(entry.state.highestSettledAt).toBe("remote");
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U10 first delta transitions entry from pending to fulfilled", async () => {
     const harness = createUnitHarness();
     try {
@@ -510,6 +610,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "fulfilled",
         data: [makeTodo("1")],
         error: null,
+        highestSettledAt: "local",
       });
     } finally {
       await harness.manager.shutdown();
@@ -525,12 +626,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       harness.emit(0, makeDelta([]));
       await vi.advanceTimersByTimeAsync(1);
       expect(harness.all).not.toHaveBeenCalled();
-      expect(entry.state).toEqual({ status: "fulfilled", data: [], error: null });
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: [],
+        error: null,
+        highestSettledAt: "local",
+      });
       harness.emit(0, makeDelta([makeTodo("new")]));
       expect(entry.state).toEqual({
         status: "fulfilled",
         data: [makeTodo("new")],
         error: null,
+        highestSettledAt: "local",
       });
     } finally {
       await harness.manager.shutdown();
@@ -553,6 +660,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "fulfilled",
         data: secondSnapshot,
         error: null,
+        highestSettledAt: "local",
       });
     } finally {
       await harness.manager.shutdown();
@@ -627,6 +735,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: setupError,
+        highestSettledAt: "unconfirmed",
       });
     } finally {
       await harness.manager.shutdown();
@@ -648,6 +757,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: admissionError,
+        highestSettledAt: "unconfirmed",
       });
       expect(onError).toHaveBeenCalledWith(admissionError);
     } finally {
@@ -670,6 +780,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: openingError,
+        highestSettledAt: "unconfirmed",
       });
       expect(onError).toHaveBeenCalledOnce();
       expect(onError).toHaveBeenCalledWith(openingError);
@@ -700,6 +811,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: readinessError,
+        highestSettledAt: "unconfirmed",
       });
       expect(onError).toHaveBeenCalledOnce();
       await expect(entry.promise).rejects.toBe(readinessError);
@@ -751,6 +863,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: streamError,
+        highestSettledAt: "local",
       });
 
       harness.emit(0, makeDelta([makeTodo("2", "must stay terminal")]));
@@ -761,6 +874,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: streamError,
+        highestSettledAt: "local",
       });
     } finally {
       await harness.manager.shutdown();
@@ -930,6 +1044,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "fulfilled",
         data: snapshot,
         error: null,
+        highestSettledAt: "unconfirmed",
       });
       await expect(entry.promise).resolves.toEqual(snapshot);
     } finally {

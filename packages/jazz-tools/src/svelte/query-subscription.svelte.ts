@@ -1,6 +1,11 @@
 import { applyDelta } from "../shared/index.js";
 import { limitQueryToOne } from "../runtime/db.js";
-import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
+import type {
+  QueryBuilder,
+  QueryOptions,
+  QuerySettlementLevel,
+  SubscriptionDelta,
+} from "../shared/index.js";
 import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
@@ -10,8 +15,9 @@ function resolve<T>(value: MaybeGetter<T>): T {
 }
 
 /**
- * Reactive query subscription. Instantiate in a component script block,
- * access results via `.current`.
+ * Reactive query subscription. Instantiate in a component script block, access
+ * results via `.current`; `.isLoading` tracks requested readiness and
+ * `.highestSettledAt` records the highest observed settlement level.
  *
  * @param query - the database query, or a getter for a dynamic query
  *   (e.g. `() => filter ? app.todos.where({ title: { contains: filter } }) : undefined`).
@@ -39,7 +45,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
   current: Result | undefined = $state();
   isLoading: boolean = $state(true);
   error: Error | null = $state(null);
-
+  highestSettledAt: QuerySettlementLevel = $state("unconfirmed");
   protected constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
     options: MaybeGetter<QueryOptions | undefined> | undefined,
@@ -53,6 +59,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
         this.current = undefined;
         this.isLoading = false;
         this.error = null;
+        this.highestSettledAt = "unconfirmed";
         return;
       }
 
@@ -64,6 +71,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
 
       this.isLoading = true;
       this.error = null;
+      this.highestSettledAt = "unconfirmed";
 
       // Capture the unsubscribe in a local and return it directly, so the
       // effect's own teardown (on re-run and on root/component destroy) owns
@@ -75,40 +83,54 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
         const entry = store.getCacheEntry<T>(key);
 
         // Apply initial state from cache
+        this.highestSettledAt = entry.state.highestSettledAt;
         if (entry.state.status === "fulfilled") {
           this.current = (
             mode === "one" ? (entry.state.data[0] ?? null) : entry.state.data
           ) as Result;
           this.isLoading = false;
+        } else if (entry.state.status === "pending" && entry.state.data !== undefined) {
+          this.current = (
+            mode === "one" ? (entry.state.data[0] ?? null) : entry.state.data
+          ) as Result;
+          this.isLoading = true;
         }
-
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
             this.current = (mode === "one" ? (data[0] ?? null) : data) as Result;
+            this.highestSettledAt = entry.state.highestSettledAt;
             this.isLoading = false;
             this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
-            if (mode === "one") {
-              const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
-              if (!delta.all) applyDelta(rows, delta);
-              this.current = (rows[0] ?? null) as unknown as Result;
-            } else if (this.current) {
-              applyDelta(this.current as T[], delta);
-            } else if (delta.reset) {
-              this.current = delta.all as Result;
-            } else {
-              this.current = [] as unknown as Result;
-              applyDelta(this.current as T[], delta);
+            this.highestSettledAt = entry.state.highestSettledAt;
+            const metadataOnly =
+              !delta.reset && delta.all === undefined && delta.delta.length === 0;
+            if (!metadataOnly) {
+              if (mode === "one") {
+                const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
+                if (!delta.all) applyDelta(rows, delta);
+                this.current = (rows[0] ?? null) as unknown as Result;
+              } else if (this.current) {
+                applyDelta(this.current as T[], delta);
+              } else if (delta.reset) {
+                this.current = delta.all as Result;
+              } else {
+                this.current = [] as unknown as Result;
+                applyDelta(this.current as T[], delta);
+              }
             }
+            this.isLoading = entry.state.status === "pending";
           },
           onError: (error: unknown) => {
+            this.highestSettledAt = entry.state.highestSettledAt;
             this.error = error instanceof Error ? error : new Error(String(error));
             this.current = undefined;
             this.isLoading = false;
           },
           onReset: () => {
             this.current = undefined;
+            this.highestSettledAt = "unconfirmed";
             this.error = null;
             this.isLoading = true;
           },

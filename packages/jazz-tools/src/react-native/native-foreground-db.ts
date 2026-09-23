@@ -110,8 +110,8 @@ type ForegroundEvent =
   | {
       type: "delta";
       reset: boolean;
-      settled: boolean;
-      tier: string;
+      requestedReady: boolean;
+      attainedSettlement: "unconfirmed" | "local" | "remote";
       delta: Uint8Array;
       terminalOperations?: unknown[];
     }

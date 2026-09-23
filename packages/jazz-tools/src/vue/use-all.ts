@@ -4,6 +4,7 @@ import type {
   CacheEntryHandle,
   QueryBuilder,
   QueryOptions,
+  QuerySettlementLevel,
   SubscriptionDelta,
   UseAllState,
 } from "../shared/index.js";
@@ -11,14 +12,16 @@ import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 /**
- * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
- * while loading or on error), `error` is the last subscription error (or
- * `null`), and `isLoading` is `true` until the first result or error.
+ * Reactive result of {@link useAll}. `data` is the matching rows or a materialized
+ * preview while loading (and `undefined` on error), `error` is the last subscription
+ * error (or `null`), `isLoading` is `true` until the requested first result, and
+ * `highestSettledAt` is the highest settlement level observed during the subscription.
  */
 export interface UseAllResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
   isLoading: Ref<boolean>;
+  highestSettledAt: Ref<QuerySettlementLevel>;
 }
 
 /**
@@ -41,7 +44,9 @@ function applyEntryState<T extends { id: string }>(
   data: Ref<T[] | undefined>,
   error: Ref<Error | null>,
   isLoading: Ref<boolean>,
+  highestSettledAt: Ref<QuerySettlementLevel>,
 ): void {
+  highestSettledAt.value = state.highestSettledAt;
   if (state.status === "fulfilled") {
     data.value = state.data;
     error.value = null;
@@ -51,7 +56,9 @@ function applyEntryState<T extends { id: string }>(
     error.value = toError(state.error);
     isLoading.value = false;
   } else {
-    data.value = undefined;
+    data.value = state.data;
+    error.value = null;
+    isLoading.value = true;
   }
 }
 
@@ -60,33 +67,42 @@ function subscribeToEntry<T extends { id: string }>(
   data: Ref<T[] | undefined>,
   error: Ref<Error | null>,
   isLoading: Ref<boolean>,
+  highestSettledAt: Ref<QuerySettlementLevel>,
 ): () => void {
-  applyEntryState(entry.state, data, error, isLoading);
+  applyEntryState(entry.state, data, error, isLoading, highestSettledAt);
 
   return entry.subscribe({
     onfulfilled: (nextData) => {
       data.value = nextData;
+      highestSettledAt.value = entry.state.highestSettledAt;
       error.value = null;
       isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      if (data.value) {
-        applyDelta(data.value, delta);
-      } else if (delta.reset) {
-        data.value = delta.all;
-      } else {
-        data.value = [];
-        applyDelta(data.value, delta);
+      highestSettledAt.value = entry.state.highestSettledAt;
+      const metadataOnly = !delta.reset && delta.all === undefined && delta.delta.length === 0;
+      if (!metadataOnly) {
+        if (data.value) {
+          applyDelta(data.value, delta);
+        } else if (delta.reset) {
+          data.value = delta.all;
+        } else {
+          data.value = [];
+          applyDelta(data.value, delta);
+        }
       }
-      isLoading.value = false;
+      isLoading.value = entry.state.status === "pending";
+      error.value = null;
     },
     onError: (err) => {
+      highestSettledAt.value = entry.state.highestSettledAt;
       error.value = toError(err);
       data.value = undefined;
       isLoading.value = false;
     },
     onReset: () => {
       data.value = undefined;
+      highestSettledAt.value = "unconfirmed";
       error.value = null;
       isLoading.value = true;
     },
@@ -110,6 +126,7 @@ export function useAll<T extends { id: string }>(
   const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;
   const error = ref<Error | null>(null);
   const isLoading = ref(true);
+  const highestSettledAt = ref<QuerySettlementLevel>("unconfirmed");
 
   watchEffect((onCleanup) => {
     const resolvedQuery = toValue(query);
@@ -117,6 +134,7 @@ export function useAll<T extends { id: string }>(
       data.value = undefined;
       error.value = null;
       isLoading.value = false;
+      highestSettledAt.value = "unconfirmed";
       return;
     }
     const resolvedOptions = toValue(options);
@@ -126,14 +144,14 @@ export function useAll<T extends { id: string }>(
 
     const key = store.makeQueryKey(resolvedQuery, resolvedOptions);
     const entry = store.getCacheEntry<T>(key);
-    const unsubscribe = subscribeToEntry(entry, data, error, isLoading);
+    const unsubscribe = subscribeToEntry(entry, data, error, isLoading, highestSettledAt);
 
     onCleanup(() => {
       unsubscribe();
     });
   });
 
-  return { data, isLoading, error };
+  return { data, isLoading, error, highestSettledAt };
 }
 
 /**

@@ -1,12 +1,26 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 // #region reading-reactive-hooks-react
 import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema.js";
 
+const queryTierOptions = [
+  { value: "local-first", label: "Local-first" },
+  { value: "remote-if-possible", label: "Remote if possible" },
+  { value: "remote", label: "Remote only" },
+] as const;
+
+type QueryTier = (typeof queryTierOptions)[number]["value"];
+
+const queryOptimismOptions = [
+  { value: "show-previews", label: "Show previews" },
+  { value: "wait-for-tier", label: "Wait for the selected tier" },
+] as const;
+
+type QueryOptimism = (typeof queryOptimismOptions)[number]["value"];
+
 export function TodoList() {
   // #region read-write-react
   const db = useDb();
-  const { data: todos = [] } = useAll(app.todos);
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
   const { data: incompleteTodos } = useAll(
@@ -23,9 +37,26 @@ export function TodoList() {
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
-  const allTodos = useAll(app.todos);
-  // `allTodos.data` is `undefined` while loading the first result (and `allTodos.isLoading` is `true`).
-  // `allTodos.data` is `[]` when loaded but empty
+  // Local-first may show a local preview before its requested result is ready.
+  const [tier, setTier] = useState<QueryTier>("local-first");
+  const [optimism, setOptimism] = useState<QueryOptimism>("show-previews");
+  const tierHelpDialog = useRef<HTMLDialogElement>(null);
+  const allTodos = useAll(app.todos, { tier });
+  const selectedTierLabel = queryTierOptions.find(({ value }) => value === tier)?.label ?? tier;
+  const settlementLabel =
+    allTodos.highestSettledAt === "unconfirmed"
+      ? "Not confirmed yet"
+      : allTodos.highestSettledAt === "local"
+        ? "On device"
+        : "Server";
+  const isShowingPreview =
+    optimism === "show-previews" && allTodos.isLoading && allTodos.data !== undefined;
+  const waitingForTier = optimism === "wait-for-tier" && allTodos.isLoading;
+  const todos = waitingForTier ? [] : (allTodos.data ?? []);
+  // `allTodos.data` may contain a local preview while `allTodos.isLoading` is `true`.
+  // It is `undefined` only when no result is available yet.
+  // Once the requested first result is ready, `allTodos.isLoading` is `false`.
+  // A loaded empty query returns `[]`.
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react
@@ -59,12 +90,104 @@ export function TodoList() {
     setTitle("");
   };
 
-  if (allTodos.isLoading) {
-    return <p>Connecting…</p>;
-  }
-
   return (
     <>
+      <div className="query-controls">
+        <details id="query-options" className="query-options">
+          <summary>Query options</summary>
+          <div className="query-options__controls">
+            <label className="query-tier-control" htmlFor="query-tier">
+              Query read tier
+              <select
+                id="query-tier"
+                value={tier}
+                onChange={(event) => setTier(event.currentTarget.value as QueryTier)}
+              >
+                {queryTierOptions.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              id="tier-help-button"
+              type="button"
+              aria-haspopup="dialog"
+              onClick={() => tierHelpDialog.current?.showModal()}
+            >
+              Explain choices
+            </button>
+            <label className="query-tier-control" htmlFor="query-optimism">
+              UI optimism
+              <select
+                id="query-optimism"
+                value={optimism}
+                onChange={(event) => setOptimism(event.currentTarget.value as QueryOptimism)}
+              >
+                {queryOptimismOptions.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </details>
+        <span
+          className={`settlement-badge settlement-badge--${allTodos.highestSettledAt}`}
+          role="status"
+          aria-label={`Selected read tier: ${selectedTierLabel}. Highest settlement this subscription has observed: ${settlementLabel}.`}
+        >
+          Selected: {selectedTierLabel} · Highest observed: {settlementLabel}
+        </span>
+      </div>
+      <dialog
+        id="tier-help-dialog"
+        ref={tierHelpDialog}
+        aria-labelledby="tier-help-title"
+        aria-describedby="tier-help-intro"
+      >
+        <h2 id="tier-help-title">About these query choices</h2>
+        <p id="tier-help-intro">
+          The read tier sets how much confirmation the query waits for. UI optimism controls whether
+          this list shows data already available while the query is still loading.
+        </p>
+        <h3>Read tier</h3>
+        <ul>
+          <li>
+            <strong>Local-first:</strong> Shows locally cached data and pending local writes
+            immediately. It keeps syncing in the background.
+          </li>
+          <li>
+            <strong>Remote if possible:</strong> When connected, it reads remote-scope data and may
+            include eligible pending local changes. It uses local data only after an explicit
+            disconnect.
+          </li>
+          <li>
+            <strong>Remote only:</strong> Waits for server-confirmed results. It excludes pending
+            local writes and waits while offline. It does not show an early preview.
+          </li>
+        </ul>
+        <h3>UI optimism</h3>
+        <ul>
+          <li>
+            <strong>Show previews:</strong> Show any data already available while the query is
+            loading.
+          </li>
+          <li>
+            <strong>Wait for the selected tier:</strong> Hide available data until the selected tier
+            has returned its first result.
+          </li>
+        </ul>
+        <p>
+          The badge shows the read tier you selected and the highest settlement this subscription
+          has observed. It does not guarantee that every displayed row has reached that level.
+        </p>
+        <button id="tier-help-close" type="button" onClick={() => tierHelpDialog.current?.close()}>
+          Close
+        </button>
+      </dialog>
       <form onSubmit={handleSubmit}>
         <input
           type="text"
@@ -75,7 +198,16 @@ export function TodoList() {
         />
         <button type="submit">Add</button>
       </form>
-      <ul id="todo-list">
+      {allTodos.isLoading && (
+        <p id="query-preview-status" aria-live="polite">
+          {isShowingPreview
+            ? "Showing available data while waiting for the selected tier."
+            : waitingForTier
+              ? "Waiting for the selected tier before showing this list."
+              : "Waiting for data from the selected tier."}
+        </p>
+      )}
+      <ul id="todo-list" aria-busy={allTodos.isLoading}>
         {todos.map((todo) => (
           <li key={todo.id} className={todo.done ? "done" : ""}>
             <input

@@ -3849,6 +3849,7 @@ where
             authorization_mode,
             terminal_rows,
             upstream_subscription_handles,
+            delivery,
         ) = {
             let state = state.borrow();
             (
@@ -3864,9 +3865,11 @@ where
                 state.authorization_mode,
                 state.terminal_rows,
                 state.upstream_subscription_handles.clone(),
+                state.delivery,
             )
         };
-        let awaiting_initial_owner_result = state.borrow().pending_initial_owner_result;
+        let mut owner_result_pending = state.borrow().pending_initial_owner_result;
+        let awaiting_initial_owner_result = owner_result_pending;
         if awaiting_initial_owner_result {
             let owner = node.lock().await;
             let ready = !upstream_subscription_handles.is_empty()
@@ -3878,9 +3881,13 @@ where
                                 && !owner.opening_pending_for_authority_result(&key)
                         })
                 });
-            if !ready {
+            if delivery == SubscriptionDelivery::Settled && !ready {
                 retained.push(Rc::downgrade(&state));
                 continue;
+            }
+            if ready {
+                state.borrow_mut().pending_initial_owner_result = false;
+                owner_result_pending = false;
             }
         }
         let request_claims = state
@@ -3892,7 +3899,7 @@ where
         // A foreground's provisional graph may already have consumed an empty
         // first batch. Initialize it again after the owner's complete answer so
         // the ordinary cold-graph gate covers evaluation of all recovered inputs.
-        if awaiting_initial_owner_result
+        if (awaiting_initial_owner_result && delivery == SubscriptionDelivery::Settled)
             || state.borrow().groove_runtime_token != groove_runtime_token
         {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -3998,7 +4005,7 @@ where
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
                 state_ref.pending_initial_local_snapshot = replacement_is_cold;
-                state_ref.pending_initial_owner_result = false;
+
                 if replacement_is_cold {
                     // Own the replacement before yielding its cold initial batch;
                     // otherwise the next owner turn would retire and reopen it.
@@ -4223,6 +4230,7 @@ where
                 publication_before,
                 &state_ref.snapshot,
                 &state_ref.snapshot_index,
+                owner_result_pending,
                 materialized,
             )? {
                 changed += 1;
@@ -4573,6 +4581,7 @@ where
                         publication_before,
                         &refresh.snapshot,
                         &refresh.snapshot_index,
+                        owner_result_pending,
                         materialized,
                     )? {
                         changed += 1;
@@ -4678,6 +4687,7 @@ where
                                     publication_before,
                                     &refresh.snapshot,
                                     &refresh.snapshot_index,
+                                    owner_result_pending,
                                     materialized,
                                 )? {
                                     changed += 1;
@@ -4751,6 +4761,8 @@ where
                                 removed,
                                 terminal_operations: _,
                                 settled: event_settled,
+                                requested_ready,
+                                attained_settlement,
                                 ..
                             } = &mut event
                             {
@@ -4760,6 +4772,10 @@ where
                                     || !updated.is_empty()
                                     || !removed.is_empty();
                                 *event_settled = settled;
+                                let (event_requested_ready, event_attained_settlement) =
+                                    subscription_event_metadata(snapshot_tier, settled, true);
+                                *requested_ready = event_requested_ready;
+                                *attained_settlement = event_attained_settlement;
                             }
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
@@ -4772,6 +4788,7 @@ where
                                 publication_before,
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
+                                owner_result_pending,
                                 materialized,
                             )? {
                                 changed += 1;
@@ -4871,6 +4888,7 @@ where
                         publication_before,
                         &refresh.snapshot,
                         &refresh.snapshot_index,
+                        owner_result_pending,
                         materialized,
                     )?;
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -5054,6 +5072,7 @@ where
                 publication_before,
                 &state.snapshot,
                 &state.snapshot_index,
+                owner_result_pending,
                 materialized,
             )? {
                 changed += 1;

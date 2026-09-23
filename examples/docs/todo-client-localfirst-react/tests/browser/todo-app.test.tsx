@@ -34,6 +34,13 @@ function typeInto(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Select an option in a React-controlled select. */
+function selectOption(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")!.set!;
+  setter.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -349,6 +356,60 @@ describe("React Todo App E2E", () => {
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
+  });
+
+  it("updates settlement when the preferred query tier changes", async () => {
+    const el = await mountApp({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+    });
+    const tierSelect = el.querySelector<HTMLSelectElement>("#query-tier");
+    expect(tierSelect).not.toBeNull();
+    if (!tierSelect) return;
+
+    expect(tierSelect.value).toBe("local-first");
+    await waitFor(
+      () =>
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+        "Selected read tier: Local-first. Highest settlement this subscription has observed: On device.",
+      10000,
+      "the default local-first query should settle on device",
+    );
+
+    await act(async () => selectOption(tierSelect, "remote"));
+    await waitFor(
+      () =>
+        tierSelect.value === "remote" &&
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+          "Selected read tier: Remote only. Highest settlement this subscription has observed: Server.",
+      10000,
+      "remote should wait for the server result",
+    );
+  });
+
+  it("keeps settled todos visible when waiting for the selected tier", async () => {
+    const el = await mountApp();
+    const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
+    const form = input.closest("form")!;
+
+    await act(async () => {
+      typeInto(input, "Keep settled todo");
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await waitFor(
+      () => el.querySelector("#todo-list li span")?.textContent === "Keep settled todo",
+      3000,
+      "local-first should show the settled todo",
+    );
+
+    const optimism = el.querySelector<HTMLSelectElement>("#query-optimism");
+    expect(optimism).not.toBeNull();
+    if (!optimism) return;
+    expect(optimism.value).toBe("show-previews");
+
+    await act(async () => selectOption(optimism, "wait-for-tier"));
+    expect(optimism.value).toBe("wait-for-tier");
+    expect(el.querySelector("#todo-list li span")?.textContent).toBe("Keep settled todo");
   });
 
   // -------------------------------------------------------------------------

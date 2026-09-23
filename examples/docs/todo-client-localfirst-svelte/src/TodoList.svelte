@@ -15,7 +15,7 @@
   // #endregion filtering-svelte
 
   // #region reading-tier-svelte
-  const todosAtEdgeDurability = new QuerySubscription(app.todos, { tier: 'edge' });
+  const todosAtLocalFirstRead = new QuerySubscription(app.todos, { tier: 'local-first' });
   // #endregion reading-tier-svelte
 
   let title = $state('');
@@ -43,8 +43,8 @@
 
   // #region writing-durability-svelte
   async function addImportantTodo(todoTitle: string) {
-    const { id } = await db.insert(app.todos, { title: todoTitle, done: false }).wait({ tier: 'edge' });
-    await db.update(app.todos, id, { done: true }).wait({ tier: 'edge' });
+    const { id } = await db.insert(app.todos, { title: todoTitle, done: false }).wait({ tier: 'local' });
+    await db.update(app.todos, id, { done: true }).wait({ tier: 'local' });
     await db.delete(app.todos, id).wait({ tier: 'global' });
   }
   // #endregion writing-durability-svelte

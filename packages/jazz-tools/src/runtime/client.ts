@@ -438,6 +438,8 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
   );
 }
 
+type SubscriptionDelivery = "settled" | "progressive";
+
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
   tier?: InternalQueryReadTier;
@@ -446,6 +448,7 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
   runtimeSettledTier?: DurabilityTier | null;
+  subscriptionDelivery?: SubscriptionDelivery;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -454,6 +457,7 @@ export interface ResolvedQueryExecutionOptions {
   propagation: QueryPropagation;
   visibility: QueryVisibility;
   branch?: BranchView;
+  subscriptionDelivery?: SubscriptionDelivery;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -608,6 +612,7 @@ export function resolveEffectiveQueryExecutionOptions(
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
+    subscriptionDelivery: options?.subscriptionDelivery,
   };
 }
 
@@ -647,6 +652,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_id?: string;
+    subscription_delivery?: SubscriptionDelivery;
     read_view?: {
       source: {
         BranchView: {
@@ -678,11 +684,15 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
       },
     };
   }
+  if (options.subscriptionDelivery) {
+    payload.subscription_delivery = options.subscriptionDelivery;
+  }
 
   if (
     !payload.propagation &&
     !payload.local_updates &&
     !payload.transaction_id &&
+    !payload.subscription_delivery &&
     !payload.read_view
   ) {
     return undefined;

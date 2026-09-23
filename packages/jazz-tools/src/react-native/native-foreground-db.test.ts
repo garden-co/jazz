@@ -51,8 +51,8 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
                     {
                       type: "delta",
                       reset: false,
-                      settled: true,
-                      tier: "local",
+                      requestedReady: true,
+                      attainedSettlement: "local",
                       delta: Uint8Array.of(7),
                     },
                   ],
@@ -86,8 +86,8 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
     {
       type: "delta",
       reset: false,
-      settled: true,
-      tier: "local",
+      requestedReady: true,
+      attainedSettlement: "local",
       delta: Uint8Array.of(7),
     },
   ]);
