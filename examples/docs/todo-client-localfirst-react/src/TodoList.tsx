@@ -37,7 +37,7 @@ export function TodoList() {
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
-  // Remote-if-possible may show a local preview before authority confirmation.
+  // Local-first may show a local preview before its requested result is ready.
   const [tier, setTier] = useState<QueryTier>("local-first");
   const [optimism, setOptimism] = useState<QueryOptimism>("show-previews");
   const tierHelpDialog = useRef<HTMLDialogElement>(null);

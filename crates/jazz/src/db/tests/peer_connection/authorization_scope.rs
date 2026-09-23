@@ -157,6 +157,10 @@ fn foreground_initial_subscription_completes_empty_owner_answer() {
     assert_foreground_initial_owner_snapshot(false);
 }
 
+// Two manually driven peers are needed to hold the owner's first answer while
+// asserting the raw progressive events before and after that handoff; the
+// public client factory does not expose that scheduling boundary.
+
 #[test]
 fn progressive_foreground_preview_stays_unready_until_owner_answers() {
     let schema = schema_with_explicit_public_read();
