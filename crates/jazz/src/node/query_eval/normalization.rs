@@ -3433,8 +3433,11 @@ where
                 ));
             }
             arm_query.relation = Some(arm_relation);
-            let arm_shape =
-                arm_query.validate_with_schema_version(schema, shape.schema_version())?;
+            let arm_shape = crate::query::validate_union_arm_with_schema_version(
+                &arm_query,
+                schema,
+                shape.schema_version(),
+            )?;
             let mut normalized = self.normalized_row_set_shape(&arm_shape, binding)?;
             let prefix = format!("relation_union:{}", arm.label);
             prefix_normalized_relation_arm(

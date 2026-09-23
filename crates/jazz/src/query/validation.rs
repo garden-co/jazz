@@ -217,7 +217,46 @@ fn validate_query_with_schema_version(
     schema: &RuntimeSchema,
     schema_version: SchemaVersionId,
 ) -> Result<ValidatedQuery, QueryError> {
-    let (normalized, params, canonical) = validate_query_canonical_parts(query, schema)?;
+    validate_query_with_schema_version_as(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::Result,
+    )
+}
+
+/// Validate one arm of a retained relation UNION. An arm always keeps its
+/// explicit projection: the UNION terminal selects each member's arm-local
+/// projection, so an identity arm must not fall back to the ordinary shape.
+pub(crate) fn validate_union_arm_with_schema_version(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_schema_version_as(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::UnionArm,
+    )
+}
+
+/// Where a single relation's output projection is being validated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationProjectionRole {
+    /// The query's own result shape.
+    Result,
+    /// An arm of a retained relation UNION.
+    UnionArm,
+}
+
+fn validate_query_with_schema_version_as(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQuery, QueryError> {
+    let (normalized, params, canonical) = validate_query_canonical_parts_as(query, schema, role)?;
     let mut shape_identity = canonical.clone();
     shape_identity.extend_from_slice(schema_version.as_bytes());
     let shape_id = ShapeId(uuid::Uuid::new_v5(&QUERY_NAMESPACE, &shape_identity));
@@ -235,6 +274,14 @@ type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8
 fn validate_query_canonical_parts(
     query: &Query,
     schema: &RuntimeSchema,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_query_canonical_parts_as(query, schema, RelationProjectionRole::Result)
+}
+
+fn validate_query_canonical_parts_as(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
@@ -282,7 +329,7 @@ fn validate_query_canonical_parts(
             resolved.relation = None;
             resolved.select = query.select.clone();
             let retain_relation =
-                retain_relation_output_projection(query, relation, &root)?;
+                retain_relation_output_projection(query, relation, &root, role)?;
             let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
             if retain_relation {
                 normalized.relation = Some(relation.clone());
@@ -397,29 +444,31 @@ fn validate_query_canonical_parts(
 }
 
 /// Whether a single (non-UNION) relation keeps its explicit output
-/// projection as the result shape.
+/// projection as the result shape. UNION arms always keep theirs.
 ///
-/// The relation terminal publishes exactly its aliases, so it cannot also
-/// honour envelope presentation (`include` array subqueries or `select`).
-/// When the envelope carries such presentation:
-/// - a full identity projection (every output-table column exactly once under
-///   its own name, optionally `id`) is the ordinary row shape, so the
-///   projection is dropped and the ordinary path serves includes and select;
-/// - any renaming or narrowing projection is rejected rather than silently
-///   discarding the presentation.
+/// A full identity projection (every output-table column exactly once under
+/// its own name, optionally `id`) is the ordinary row shape. It is not
+/// retained, so it keeps the ordinary query preimage and shape id; the
+/// TypeScript adapter emits exactly this for hop and payload-`match` queries,
+/// and peers recompute shape ids on registration. The ordinary path also
+/// serves envelope presentation (`include` array subqueries and `select`).
+///
+/// Any renaming or narrowing projection is retained and publishes exactly its
+/// aliases, so it cannot also honour envelope presentation; that combination
+/// is rejected rather than silently discarding the presentation.
 fn retain_relation_output_projection(
     query: &Query,
     relation: &RelationQuery,
     output_table: &TableSchema,
+    role: RelationProjectionRole,
 ) -> Result<bool, QueryError> {
     if crate::query::relation_output_projection_if_present(relation)?.is_none() {
         return Ok(false);
     }
-    if query.array_subqueries.is_empty() && query.select.is_none() {
-        return Ok(true);
-    }
     let (output_scope, columns) = relation_output_projection(relation)?;
-    if is_full_identity_projection(output_table, &output_scope, &columns) {
+    if role == RelationProjectionRole::Result
+        && is_full_identity_projection(output_table, &output_scope, &columns)
+    {
         return Ok(false);
     }
     reject_presentation_over_relation_projection(query)?;
@@ -572,7 +621,8 @@ fn validate_retained_relation_union(
         }
         let mut arm_query = arm_query;
         arm_query.relation = Some(arm_relation);
-        let (_, arm_params, _) = validate_query_canonical_parts(&arm_query, schema)?;
+        let (_, arm_params, _) =
+            validate_query_canonical_parts_as(&arm_query, schema, RelationProjectionRole::UnionArm)?;
         for (name, ty) in arm_params {
             match params.entry(name) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
