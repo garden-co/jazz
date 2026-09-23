@@ -47,6 +47,11 @@ type Address = { scopeId: string; identifier: string };
 // An identity mismatch, malformed transcript or checked signature mismatch invalidates a root.
 // Missing authority/history and operational failures must not be silently discarded.
 class InvalidSpaceRoot extends Error {}
+class UnavailableSpaceKey extends Error {}
+
+function unavailableSpaceKey(cause: unknown): never {
+  throw new UnavailableSpaceKey("Unable to confirm E2EE space key", { cause });
+}
 
 function spaceRootId(address: Address): string {
   const digest = sha256(
@@ -262,17 +267,20 @@ export class Spaces {
         continue;
       let secret: Uint8Array | undefined;
       try {
-        secret = await this.keys.open(
-          material.recipient,
-          spaceRecoveryContext(this.accountContext(root.accountId), { ...root, epochId }, row),
-          row.envelope,
-        );
+        secret = await this.keys
+          .open(
+            material.recipient,
+            spaceRecoveryContext(this.accountContext(root.accountId), { ...root, epochId }, row),
+            row.envelope,
+          )
+          .catch(unavailableSpaceKey);
         await this.confirmHistory(snapshot, root, secret);
         this.assertOpen();
         return secret;
-      } catch {
+      } catch (error) {
         secret?.fill(0);
         this.assertOpen();
+        if (!(error instanceof UnavailableSpaceKey)) throw error;
       }
     }
     return undefined;
@@ -1268,16 +1276,20 @@ export class Spaces {
             continue;
           let opened: Uint8Array | undefined;
           try {
-            opened = await this.keys.open(
-              device,
-              spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
-              delivery.envelope,
-            );
+            opened = await this.keys
+              .open(
+                device,
+                spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
+                delivery.envelope,
+              )
+              .catch(unavailableSpaceKey);
             await this.confirmHistory(snapshot, root, opened);
             secret = opened;
             opened = undefined;
             break;
-          } catch {
+          } catch (error) {
+            this.assertOpen();
+            if (!(error instanceof UnavailableSpaceKey)) throw error;
             /* Another independently authenticated delivery may be usable. */
           } finally {
             opened?.fill(0);
@@ -1476,11 +1488,13 @@ export class Spaces {
     use?: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
   ) {
     let state = await this.validate(snapshot, root);
+    // Only the candidate's current key can be unavailable. Once it is confirmed,
+    // predecessor processing and historical replay failures belong to the operation.
+    await this.confirm(state.keyRoot, payload).catch(unavailableSpaceKey);
     let secret = payload;
     let owned: Uint8Array | undefined;
     try {
       for (;;) {
-        await this.confirm(state.keyRoot, secret);
         await use?.(secret, state.keyRoot);
         if (!state.successor) return;
         const successor = state.successor;
@@ -1495,6 +1509,7 @@ export class Spaces {
         state = await this.validate(snapshot, root, state.epochPosition);
         if (state.keyRoot.epochId !== successor.predecessor)
           throw new Error("Invalid E2EE space predecessor history");
+        await this.confirm(state.keyRoot, secret);
       }
     } finally {
       owned?.fill(0);
