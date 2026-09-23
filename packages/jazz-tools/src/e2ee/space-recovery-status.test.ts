@@ -44,6 +44,8 @@ it("inspects required space recovery paths without enrolment, repair or key rete
     const crypto = await createNativeCrypto();
     let corrupt = false;
     let injected = 0;
+    let failHistory = false;
+    const historyError = new Error("History provider unavailable");
     const open = async (
       account: Awaited<ReturnType<typeof localAccountConfig>>,
       inspect = false,
@@ -65,6 +67,11 @@ it("inspects required space recovery paths without enrolment, repair or key rete
             ...crypto,
             keyEnvelope: {
               ...crypto.keyEnvelope,
+              async unwrap(key, context, envelope) {
+                if (inspect && failHistory && new TextDecoder().decode(context).includes("history"))
+                  throw historyError;
+                return crypto.keyEnvelope.unwrap(key, context, envelope);
+              },
               async open(pair, context, envelope) {
                 if (
                   inspect &&
@@ -177,6 +184,12 @@ it("inspects required space recovery paths without enrolment, repair or key rete
           },
         ],
       },
+    });
+    failHistory = true;
+    await expect(observer.db.e2ee.recovery.status(material)).rejects.toBe(historyError);
+    failHistory = false;
+    expect(await observer.db.e2ee.recovery.status(material)).toMatchObject({
+      spaces: { validation: "checked", paths: [{ validation: "validated" }] },
     });
     await alice.e2ee.spaces.revoke(app.projects, project.id, bobAccount.account.id).wait();
     expect(await observer.db.e2ee.recovery.status(material)).toMatchObject({

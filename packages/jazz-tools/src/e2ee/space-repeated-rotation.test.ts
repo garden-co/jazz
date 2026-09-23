@@ -6,6 +6,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
+import { createBrowserCrypto } from "./browser.js";
 
 it("replays successive space rotations after regrant and delivers history to a newly approved device", async () => {
   const app = s.defineApp({
@@ -132,13 +133,41 @@ it("replays successive space rotations after regrant and delivers history to a n
 
     // This device has never seen either old epoch. Its latest delivery must
     // suffice to validate the complete predecessor chain.
-    const newcomer = await createDb({ ...alice, e2ee: { app, store: store() } });
+    const crypto = await createBrowserCrypto();
+    const historyError = new Error("History provider unavailable");
+    let failHistory = true;
+    let historySteps = 0;
+    const newcomer = await createDb({
+      ...alice,
+      e2ee: {
+        app,
+        store: store(),
+        crypto: {
+          ...crypto,
+          keyEnvelope: {
+            ...crypto.keyEnvelope,
+            async unwrap(key, context, envelope) {
+              if (
+                failHistory &&
+                new TextDecoder().decode(context).includes("history") &&
+                ++historySteps === 2
+              )
+                throw historyError;
+              return crypto.keyEnvelope.unwrap(key, context, envelope);
+            },
+          },
+        },
+      },
+    });
     clients.push(newcomer);
     const newRequest = (await newcomer.e2ee.devices.list()).find(
       (device) => device.state === "pending",
     )!;
     await remaining.e2ee.devices.approve(newRequest.id).wait();
     expect(await remaining.e2ee.explain(target)).toEqual({ state: "ready" });
+    // The non-author device must propagate a failure after opening one predecessor.
+    await expect(newcomer.e2ee.explain(target)).rejects.toBe(historyError);
+    failHistory = false;
     expect(await newcomer.e2ee.explain(target)).toEqual({ state: "ready" });
     const newcomerDeliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, recipientDeviceId: newRequest.id }),
