@@ -1,13 +1,18 @@
 import { createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
+import type { QuerySettlementLevel } from "../shared/index.js";
 
 const mocks = vi.hoisted(() => {
   const unsubscribe = vi.fn();
   const subscribe = vi.fn(() => unsubscribe);
   const makeQueryKey = vi.fn(() => "test-key");
   const getCacheEntry = vi.fn(() => ({
-    state: { status: "fulfilled", data: [] },
+    state: {
+      status: "fulfilled" as const,
+      data: [] as unknown[],
+      highestSettledAt: "unconfirmed" as QuerySettlementLevel,
+    },
     subscribe,
   }));
 
@@ -21,7 +26,11 @@ const mocks = vi.hoisted(() => {
       subscribe.mockReset().mockReturnValue(unsubscribe);
       makeQueryKey.mockReset().mockReturnValue("test-key");
       getCacheEntry.mockReset().mockReturnValue({
-        state: { status: "fulfilled", data: [] },
+        state: {
+          status: "fulfilled" as const,
+          data: [] as unknown[],
+          highestSettledAt: "unconfirmed" as QuerySettlementLevel,
+        },
         subscribe,
       });
     },
@@ -158,9 +167,13 @@ describe("solid/useAll", () => {
   it("SD-ALL-05: fulfilled entry exposes initial data", async () => {
     const alice = { id: "u1", name: "Alice" };
     mocks.getCacheEntry.mockReturnValue({
-      state: { status: "fulfilled" as const, data: [alice] },
+      state: {
+        status: "fulfilled" as const,
+        data: [alice],
+        highestSettledAt: "remote",
+      },
       subscribe: mocks.subscribe,
-    } as any);
+    });
 
     let dispose!: () => void;
     let result!: ReturnType<typeof useAll<{ id: string; name: string }>>;
@@ -176,6 +189,7 @@ describe("solid/useAll", () => {
       expect(result.data).toEqual([alice]);
       expect(result.isLoading).toBe(false);
       expect(result.error).toBeNull();
+      expect(result.highestSettledAt).toBe("remote");
     } finally {
       dispose?.();
     }
