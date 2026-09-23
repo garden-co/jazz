@@ -1,5 +1,5 @@
 import { startCoreObservationControl } from "./core-observation-control.mjs";
-import { boundedHarnessOutput, startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
+import { boundedHarnessOutput, startLocalServerSessionHarness } from "./server-session-harness.mjs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -43,7 +43,7 @@ const trySimctl = (args) => {
   }
 };
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
-const localSession = await startLocalEdgeSessionHarness({
+const localSession = await startLocalServerSessionHarness({
   device: udid,
   runNonce,
   host: "127.0.0.1",

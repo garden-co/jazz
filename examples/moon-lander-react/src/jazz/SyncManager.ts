@@ -1,14 +1,10 @@
 /**
  * SyncManager — all Jazz writes for the game.
  *
- * Jazz write APIs used here:
- *   db.insert(table, data, { tier })    — create a new row (fires WHERE ENTRY cross-client)
- *   db.update(table, id, data, { tier }) — update fields (fires WHERE EXIT/ENTRY cross-client)
- *   db.delete(table, id, { tier })  — delete a row (local only — server can't forward deleted objects)
- *
- * The "edge" tier broadcasts the write to all connected clients' live
- * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
- * The default "local" tier only updates the local IndexedDB database.
+ * Inserts, updates, and deletes are applied locally and uploaded to Core.
+ * Waiting for the "global" tier requires Core acceptance; waiting for "local"
+ * requires local persistence. Both kinds of write sync to other permitted
+ * subscribers when connected, including deletion notifications.
  *
  * Writes are fired immediately when game callbacks are invoked — no batching
  * interval. releasingIds guards against double-releasing the same deposit
@@ -98,7 +94,7 @@ export class SyncManager {
 
     // Sync update: preserves the row ID so the server can forward WHERE EXIT
     // to remote clients' where({collected:false}) subscriptions.
-    // Uses db.update (not db.update(...).wait({ tier: "edge" })) so the write
+    // Uses db.update (not db.update(...).wait({ tier: "global" })) so the write
     // is emitted to the bridge outbox immediately — waiting for an edge-tier
     // ack on the main thread never resolves here (main thread has no durability tier).
     this.db.update(app.fuel_deposits, id, { collected: true, collectedBy: this.playerId });
@@ -138,7 +134,7 @@ export class SyncManager {
         message: text,
         sentAtSeconds: Math.floor(Date.now() / 1000),
       })
-      .wait({ tier: "edge" })
+      .wait({ tier: "global" })
       .catch(console.error);
   }
 
@@ -147,7 +143,7 @@ export class SyncManager {
     if (!this.dbRowId) return;
     if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
     this.lastSynced = { ...state };
-    this.db.update(app.players, this.dbRowId, state).wait({ tier: "edge" }).catch(console.error);
+    this.db.update(app.players, this.dbRowId, state).wait({ tier: "global" }).catch(console.error);
   }
 
   setInputs(inputs: SyncInputs): void {
@@ -160,7 +156,7 @@ export class SyncManager {
         this.lastSynced = { ...this.latestState };
         this.db
           .update(app.players, this.dbRowId, this.latestState)
-          .wait({ tier: "edge" })
+          .wait({ tier: "global" })
           .catch(console.error);
       }
     }
@@ -180,7 +176,7 @@ export class SyncManager {
         const state = this.latestState;
         this.db
           .insert(app.players, state)
-          .wait({ tier: "edge" })
+          .wait({ tier: "global" })
           .then((row) => {
             if (!this.dbRowId) {
               this.dbRowId = row.id;
@@ -203,7 +199,7 @@ export class SyncManager {
           this.collectedByThis.delete(d.id);
           this.db
             .update(app.fuel_deposits, d.id, { collected: false, collectedBy: "" })
-            .wait({ tier: "edge" })
+            .wait({ tier: "global" })
             .finally(() => this.releasingIds.delete(d.id))
             .catch(console.error);
         }
@@ -214,7 +210,7 @@ export class SyncManager {
           this.collectedByThis.delete(id);
           this.db
             .update(app.fuel_deposits, id, { collected: false, collectedBy: "" })
-            .wait({ tier: "edge" })
+            .wait({ tier: "global" })
             .finally(() => this.releasingIds.delete(id))
             .catch(console.error);
         }
@@ -328,7 +324,7 @@ export async function reconcileDeposits(
               collected: false,
               collectedBy: "",
             })
-            .wait({ tier: "edge" }),
+            .wait({ tier: "global" }),
         );
       }
     } else if (diff < 0) {
@@ -341,7 +337,7 @@ export async function reconcileDeposits(
               collected: true,
               collectedBy: "__trimmed__",
             })
-            .wait({ tier: "edge" }),
+            .wait({ tier: "global" }),
         );
       }
     }

@@ -121,7 +121,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        let mode = if effective_read_tier(&opts) >= DurabilityTier::Edge {
+        let mode = if effective_read_tier(&opts) >= DurabilityTier::Global {
             QueryAuthorizationMode::ClientLocal
         } else {
             QueryAuthorizationMode::TrustedServing
@@ -180,7 +180,7 @@ where
             upstream_opts,
             self.identity.author,
             prepared.request_policy_binding(self.identity.author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -237,7 +237,7 @@ where
             upstream_opts,
             author,
             prepared.request_policy_binding(author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -357,7 +357,7 @@ where
             upstream_opts,
             author.unwrap_or(self.identity.author),
             prepared.request_policy_binding(author.unwrap_or(self.identity.author))?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -850,10 +850,19 @@ where
             .map_err(Into::into)
     }
 
-    /// Detach a one-shot query coverage request.
+    /// Detach a one-shot query coverage request. If storage owns the node,
+    /// physical cleanup runs on a subsequent tick after that operation yields it.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         self.detach_query_using(attachment, |subscription| {
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+            if let Some(mut owner) = self.node.node.try_lock() {
+                owner.apply_unsubscribe(subscription);
+            } else {
+                let node = Rc::clone(&self.node.node);
+                self.node.enqueue_transaction_cleanup(Box::pin(async move {
+                    node.lock().await.apply_unsubscribe(subscription);
+                    Ok(())
+                }));
+            }
         });
     }
 
@@ -945,28 +954,17 @@ where
         let read_tier = requested_read_tier;
         let pending_overlay = allow_pending_overlay
             && authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && opts.local_updates == LocalUpdates::Immediate;
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
-        node.ensure_peer_maintained_subscription_view_supported(
-            &prepared.shape,
-            &prepared.binding,
-            read_tier,
-            author,
-            &opts.read_view,
-            authorization_mode,
-        )
-        .await?;
-        let (local_shape, local_binding, _local_plan) = node
-            .prepare_query_binding_for_link_in_authorization_mode(
-                &prepared.shape,
-                &prepared.binding,
-                read_tier,
-                author,
-                authorization_mode,
-            )
-            .await?;
+        // The actual maintained opener below compiles and validates this exact
+        // read view, authorization scope, receiver inputs and pending overlay.
+        // Do not compile a throwaway support-check program or an AppRows plan:
+        // neither is executed by the maintained subscription. Its installed
+        // MultisinkSubscription owns the live graph independently of a plan.
+        let (local_shape, local_binding) =
+            node.query_binding_for_link(&prepared.shape, &prepared.binding)?;
         // The subscription opener performs one bounded IVM poll. Keep the
         // current host scheduler as the cold-storage continuation owner,
         // rather than the short-lived foreground future opening this stream.
@@ -978,7 +976,7 @@ where
                 author,
                 read_tier,
                 &opts.read_view,
-                Some(_local_plan),
+                None,
                 authorization_mode,
                 pending_overlay,
                 progress_waker.as_ref(),
@@ -1032,16 +1030,11 @@ where
                 (state_shape.clone(), state_binding.clone())
             } else {
                 let mut owner = self.node.node.lock().await;
-                let mut node = prepared.scoped_node(&mut owner, author)?;
-                let (shape, binding, _) = node
-                    .prepare_query_binding_for_link_in_authorization_mode(
-                        &prepared.shape,
-                        &prepared.binding,
-                        upstream_opts.tier,
-                        author,
-                        authorization_mode,
-                    )
-                    .await?;
+                let node = prepared.scoped_node(&mut owner, author)?;
+                // Binding normalization is tier-independent. Upstream coverage
+                // retains its own capability check in the destination context.
+                let (shape, binding) =
+                    node.query_binding_for_link(&prepared.shape, &prepared.binding)?;
                 (shape, binding)
             };
             state_shape = shape.clone();
@@ -1050,7 +1043,7 @@ where
             // Edge/Global cache possession is never a settlement receipt,
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
-            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
+            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Global;
             let opened = self
                 .open_subscription_upstream_coverage(
                     prepared,
@@ -1065,7 +1058,7 @@ where
             *opening_upstream.borrow_mut() = upstream_subscription_handles.clone();
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
-                && requested_read_tier >= DurabilityTier::Edge
+                && requested_read_tier >= DurabilityTier::Global
                 && opened.awaits_initial_authority_response
                 && snapshot.root_count == 0
                 && snapshot.edges.is_empty();
@@ -1167,7 +1160,7 @@ where
         // known while opening a fresh upstream handle, but an already-open
         // link has the same receipt requirement.
         suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && remote_read_tier.is_some()
             && !settled
             && snapshot.root_count == 0
@@ -1213,7 +1206,7 @@ where
         let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
-        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
+        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Global
             && remote_read_tier.is_some()
             && remote_propagate_upstream
             && opts.read_view.is_default()

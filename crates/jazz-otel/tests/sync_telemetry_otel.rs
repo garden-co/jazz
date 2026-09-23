@@ -71,7 +71,7 @@ async fn sync_layers_emit_otel_spans() {
             alice
                 .wait_for_transaction(
                     transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
+                    DurabilityTier::GlobalServer,
                 )
                 .await
                 .expect("alice persisted todo reaches edge");

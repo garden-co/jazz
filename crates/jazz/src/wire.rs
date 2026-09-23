@@ -6,6 +6,10 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
+pub mod channel_credit;
+pub mod channels;
+pub(crate) mod stream_backend;
+
 use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -59,7 +63,7 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
-/// Complete edge-authority publications, reconciled as a group at core.
+/// Reserved legacy edge-publication bit. Never advertised by current peers.
 pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
@@ -78,6 +82,56 @@ pub enum WireFrame {
     Error(WireError),
     /// One physical extent of an encoded logical sync message.
     MessageFragment(WireMessageFragment),
+    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v3.
+    Channel(WireChannelEnvelope),
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v3.
+    ChannelCredit(WireChannelCredit),
+}
+
+/// Which independently bounded transport resource this grant releases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireCreditKind {
+    /// Bytes removed from a physical frame queue.
+    Frames,
+    /// Decoded byte-message buffers whose last owner released them.
+    Messages {
+        /// Number of released buffer reservations.
+        count: u32,
+        /// Whether these buffers used the bulk byte window.
+        bulk: bool,
+    },
+}
+
+/// Uncompressed connection-scoped receiver buffer credit; never authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelCredit {
+    /// Admitted protocol version.
+    pub protocol_version: u16,
+    /// Admitted capability bits.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Credit class (Writes also represents the shared large-value bulk pool).
+    pub class: channels::ChannelClass,
+    /// Contiguous grant sequence in this connection direction.
+    pub sequence: u64,
+    /// Exact returned physical-byte charges, including the tiny-frame floor.
+    pub consumed_bytes: u64,
+    /// Physical queue capacity or retained decoded byte-message capacity.
+    pub kind: WireCreditKind,
+}
+
+/// Authenticated metadata around one independently compressed channel extent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelEnvelope {
+    /// Admitted wire protocol version.
+    pub protocol_version: u16,
+    /// Admitted features with exactly the active directional codec bit.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Explicit postcard-v1 channel metadata and bounded payload.
+    pub extent: channels::ChannelFrame,
 }
 
 /// A bounded physical extent of one encoded logical message.
@@ -118,16 +172,48 @@ impl std::fmt::Debug for WireMessageFragment {
 
 /// Link role advertised during handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "WirePeerRoleEncoding", into = "WirePeerRoleEncoding")]
 pub enum WirePeerRole {
     /// End-user or local application runtime.
     Client,
     /// Durable server or authority runtime.
     Core,
-    /// Edge runtime terminating client identity and policy composition.
+    /// Local relay/cache runtime without independent fate authority.
+    Relay = 3,
+}
+
+// Preserve the declared postcard role tags; the removed server role is never
+// constructible by callers and is rejected when decoding old handshakes.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WirePeerRoleEncoding {
+    Client,
+    Core,
     Edge,
-    /// Relay/cache runtime without a terminated end-user identity.
     Relay,
+}
+
+impl From<WirePeerRole> for WirePeerRoleEncoding {
+    fn from(role: WirePeerRole) -> Self {
+        match role {
+            WirePeerRole::Client => Self::Client,
+            WirePeerRole::Core => Self::Core,
+            WirePeerRole::Relay => Self::Relay,
+        }
+    }
+}
+
+impl TryFrom<WirePeerRoleEncoding> for WirePeerRole {
+    type Error = &'static str;
+
+    fn try_from(role: WirePeerRoleEncoding) -> Result<Self, Self::Error> {
+        match role {
+            WirePeerRoleEncoding::Client => Ok(Self::Client),
+            WirePeerRoleEncoding::Core => Ok(Self::Core),
+            WirePeerRoleEncoding::Relay => Ok(Self::Relay),
+            WirePeerRoleEncoding::Edge => Err("server edge role is no longer supported"),
+        }
+    }
 }
 
 /// Handshake payload used to negotiate a common wire version and feature set.
@@ -337,6 +423,34 @@ impl WireInboundContext {
         self.trusted_encoder = trusted;
     }
 
+    pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
+        if self.trusted_encoder {
+            let message = decode_sync_message_trusted(bytes).map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    error.to_string(),
+                )
+            })?;
+            ensure_sync_message_features(&message, self.negotiated_features)?;
+            Ok(message)
+        } else {
+            decode_sync_message_for_features(bytes, self.negotiated_features)
+        }
+    }
+
+    pub(crate) fn validate_channel_metadata(
+        &self,
+        frame: &WireChannelEnvelope,
+    ) -> Result<(), WireError> {
+        self.validate_envelope_metadata(&WireEnvelope {
+            protocol_version: frame.protocol_version,
+            features: frame.features,
+            session: frame.session.clone(),
+            payload: Vec::new(),
+        })
+    }
+
     pub(crate) fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
         if self.trusted_encoder {
             postcard::from_bytes(bytes)
@@ -365,17 +479,6 @@ impl WireInboundContext {
             envelope.protocol_version,
             envelope.features,
             envelope.session.as_ref(),
-        )
-    }
-
-    pub(crate) fn validate_fragment_metadata(
-        &self,
-        fragment: &WireMessageFragment,
-    ) -> Result<(), WireError> {
-        self.validate_metadata(
-            fragment.protocol_version,
-            fragment.features,
-            fragment.session.as_ref(),
         )
     }
 
@@ -601,6 +704,12 @@ pub fn validate_frame_for_artifact_corpus(
                 .map_err(|error| format!("semantic payload rejected: {}", error.message))
         }
         WireFrame::Error(_) => Ok(()),
+        WireFrame::ChannelCredit(_) => {
+            Err("credit frames require a persistent admitted endpoint".to_owned())
+        }
+        WireFrame::Channel(_) => {
+            Err("channel frames require a persistent admitted endpoint".to_owned())
+        }
         WireFrame::MessageFragment(_) => Err(
             "artifact corpus has no peer reassembly context for a standalone fragment".to_owned(),
         ),
@@ -849,7 +958,6 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-        | FEATURE_AUTHORITY_PUBLICATIONS
         | runtime_transport_compression_features()
 }
 
@@ -1121,6 +1229,25 @@ mod tests {
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+
+    /// Wire layout is tested internally because enum tags are not a query API.
+    #[test]
+    fn peer_role_tags_preserve_relay_and_reject_retired_edge() {
+        for (role, tag, name) in [
+            (WirePeerRole::Client, 0, "client"),
+            (WirePeerRole::Core, 1, "core"),
+            (WirePeerRole::Relay, 3, "relay"),
+        ] {
+            assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
+            assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
+            assert_eq!(serde_json::to_value(role).unwrap(), name);
+        }
+        assert!(postcard::from_bytes::<WirePeerRole>(&[2]).is_err());
+        assert!(serde_json::from_str::<WirePeerRole>(r#""edge""#).is_err());
+        // Complete former Edge Hello, not merely an isolated enum decoder.
+        assert!(decode_frame(&[0, 3, 3, 32, 2, 0]).is_err());
+        assert_eq!(current_wire_features() & FEATURE_AUTHORITY_PUBLICATIONS, 0);
+    }
 
     #[test]
     fn hello_json_shape_is_stable() {
@@ -1436,16 +1563,18 @@ mod tests {
         assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
 
         // Sensitivity plant: the final enum tag is durability.  A receiver
-        // must not silently retain Global when a payload says Edge.
+        // must decode the legacy Edge tag as Local, never as Global.
         let mut edge = fixture.clone();
         *edge.last_mut().expect("non-empty fixture") = 2;
+        // The untrusted boundary also rejects this sequenced Local receipt.
+        assert!(decode_sync_message(&edge).is_err());
         assert_eq!(
-            decode_sync_message(&edge).unwrap(),
+            decode_sync_message_trusted(&edge).unwrap(),
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
-                durability: Some(DurabilityTier::Edge),
+                durability: Some(DurabilityTier::Local),
             }
         );
     }
@@ -2133,10 +2262,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        feature = "transport-compression-lz4",
-        feature = "transport-compression-zstd"
-    ))]
+    #[cfg(feature = "transport-compression-zstd")]
     #[test]
     fn synthetic_small_delta_streaming_compression_receipt() {
         jazz_benchmark_guard::refuse_contaminated_measurement();
@@ -2147,37 +2273,38 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let messages = (0..300_u64)
+        let messages = (1..301_u64)
             .map(|i| {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    // Exercise the same sized, independently-delivered
-                    // control-plane payload without smuggling authority
-                    // terminal output across the peer wire.
-                    program_fact_adds: vec![
-                        crate::protocol::ProgramFactEntry::ReadFrontierSettled(
-                            crate::protocol::ReadFrontierSettledEntry {
-                                scope: format!("compression-{i}"),
-                                tier: DurabilityTier::Global,
-                                stream: Some(format!("stream-{i}")),
-                                frontier: vec![0xAB; 8],
-                            },
-                        ),
-                    ],
+                    // Use current wire-v3 empty supporting-set successors as
+                    // independently delivered control-plane messages. This is
+                    // a compression roundtrip receipt, not a historical size baseline.
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {
+                        predecessor: u128::from(i).to_le_bytes(),
+                        revision: u128::from(i + 1).to_le_bytes(),
+                        adds: Vec::new(),
+                        removes: Vec::new(),
+                    },
                 })
             })
             .collect::<Vec<_>>();
         let mut raw = 0_u64;
         let mut per_message_zstd = 0_u64;
-        let mut streaming_zstd = 0_u64;
-        let mut streaming_lz4 = 0_u64;
-        let mut zstd_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let mut zstd_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let mut lz4_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
-        let mut lz4_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        let streaming_zstd = crate::db::channel_endpoint::tests::compression_receipt(
+            &messages,
+            (current_wire_features() & !FEATURE_PAYLOAD_LZ4) | FEATURE_PAYLOAD_ZSTD,
+        );
+        #[cfg(feature = "transport-compression-lz4")]
+        let streaming_lz4 = crate::db::channel_endpoint::tests::compression_receipt(
+            &messages,
+            current_wire_features() | FEATURE_PAYLOAD_LZ4,
+        );
+        #[cfg(not(feature = "transport-compression-lz4"))]
+        let streaming_lz4 = 0_u64;
         for message in &messages {
             let payload = encode_sync_message(message).unwrap();
             raw += payload.len() as u64;
@@ -2186,20 +2313,6 @@ mod tests {
             let decompressed = decompress_sync_payload(&compressed, active).unwrap();
             assert_eq!(decompressed, payload);
             per_message_zstd += compressed.len() as u64;
-
-            let zstd_chunk = zstd_encoder.encode_message(&payload).unwrap();
-            let zstd_decoded = zstd_decoder
-                .decode_message(&zstd_chunk, FEATURE_PAYLOAD_ZSTD)
-                .unwrap();
-            assert_eq!(zstd_decoded, payload);
-            streaming_zstd += zstd_chunk.len() as u64;
-
-            let lz4_chunk = lz4_encoder.encode_message(&payload).unwrap();
-            let lz4_decoded = lz4_decoder
-                .decode_message(&lz4_chunk, FEATURE_PAYLOAD_LZ4)
-                .unwrap();
-            assert_eq!(lz4_decoded, payload);
-            streaming_lz4 += lz4_chunk.len() as u64;
         }
         eprintln!(
             "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"

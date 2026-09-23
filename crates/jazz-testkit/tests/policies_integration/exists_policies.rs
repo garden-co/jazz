@@ -123,7 +123,7 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
     let error = bob
         .wait_for_transaction(
             transaction_id.expect("permissive insert should commit immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect_err("the server must reject a non-admin insert under EXISTS");
@@ -223,7 +223,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
     let rejected = bob
         .wait_for_transaction(
             bob_transaction_id.expect("permissive update should commit immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect_err("bob's update should be rejected by EXISTS in USING policy on sync");
@@ -326,7 +326,7 @@ async fn explicit_session_update_using_exists_policy_allows_admin_and_denies_non
         .expect("stage optimistic non-admin update")
         .expect("update commits immediately");
     let rejection = client
-        .wait_for_transaction(bob_transaction, DurabilityTier::EdgeServer)
+        .wait_for_transaction(bob_transaction, DurabilityTier::GlobalServer)
         .await
         .expect_err("server must reject Bob's update");
     assert_transaction_policy_denied(rejection);
@@ -342,7 +342,7 @@ async fn explicit_session_update_using_exists_policy_allows_admin_and_denies_non
         .expect("stage admin update")
         .expect("update commits immediately");
     client
-        .wait_for_transaction(alice_transaction, DurabilityTier::EdgeServer)
+        .wait_for_transaction(alice_transaction, DurabilityTier::GlobalServer)
         .await
         .expect("server accepts Alice's update");
     wait_for_protected_row(

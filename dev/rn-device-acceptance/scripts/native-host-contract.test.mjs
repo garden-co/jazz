@@ -103,7 +103,7 @@ function assertAndroidHarnessStartupContract(driver, harness) {
   const build = harness.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
   const spawn = harness.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
   const readinessTimeout = harness.indexOf("60_000");
-  assert.ok(build >= 0, "the local Edge/Core harness must be built before it is started");
+  assert.ok(build >= 0, "the local Core harness must be built before it is started");
   assert.ok(spawn > build, "the readiness process must start only after its Cargo build succeeds");
   assert.ok(
     readinessTimeout > spawn,
@@ -121,7 +121,7 @@ function assertAndroidHarnessStartupContract(driver, harness) {
   assert.match(driver, /androidAdb\(\["get-state"\]\)/);
   assert.match(harness, /retainHarnessOutput\(stdout, chunk\)/);
   assert.match(harness, /retainHarnessOutput\(stderr, chunk\)/);
-  assert.match(harness, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
+  assert.match(harness, /JAZZ_RN_SERVER_SESSION \[redacted\]/);
   assert.match(harness, /\[redacted-token\]/);
 }
 
@@ -662,7 +662,7 @@ test("iOS receipt fixture needs no separate Jazz native admission header", () =>
 test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
   const driver = read("scripts/run-android.mjs");
   const fixture = read("native/android/JazzDeviceFixtureModule.kt");
-  const harness = read("scripts/edge-session-harness.mjs");
+  const harness = read("scripts/server-session-harness.mjs");
   assertAndroidHarnessStartupContract(driver, harness);
   // A planted return to `cargo run` in place of the explicit build puts cold
   // compilation back inside the quiet readiness window. The structural receipt
@@ -679,9 +679,9 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
       ),
     /must be built before it is started/,
   );
-  assert.match(harness, /rn_edge_session_harness/);
+  assert.match(harness, /rn_server_session_harness/);
   assert.match(driver, /host: "10\.0\.2\.2"/);
-  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.edge_port\}/);
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.server_port\}/);
   for (const input of ["jazzDeviceEdgeEndpoint"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));

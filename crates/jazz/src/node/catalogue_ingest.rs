@@ -250,6 +250,20 @@ where
         let planned_genesis = catalogue_genesis(&plan.catalogue)?;
         let runtime_semantics_changed =
             !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
+        // Global UUID adoption does not change local storage layouts, but live
+        // query metadata captures those identities (including table/column/enum
+        // manifests). Retire those plans and authority proofs after activation
+        // while retaining the storage runtime and raw history subscriptions.
+        let physical_identities_changed =
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema, previous)| {
+                    plan.catalogue
+                        .physical_mappings
+                        .get(schema)
+                        .is_some_and(|next| previous.identities != next.identities)
+                });
         let authorization_source_changed = !self.catalogue.active_schema.same_authorization_source(
             &plan.catalogue.active_schema,
             self.catalogue
@@ -419,6 +433,7 @@ where
         self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -430,6 +445,10 @@ where
         self.catalogue_activation_failed = false;
         self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
         self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
+        if physical_identities_changed {
+            self.invalidate_subscription_scopes();
+            self.physical_identity_generation = next_groove_runtime_token();
+        }
         if runtime_semantics_changed || authorization_source_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }

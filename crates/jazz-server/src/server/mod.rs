@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
 use crate::middleware::AuthConfig;
@@ -76,78 +77,6 @@ pub async fn push_catalogue_in_memory(
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
 pub(crate) const MAX_CATALOGUE_REQUEST_BODY_BYTES: usize = 8 << 20;
-pub(crate) const DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES: usize = 64 << 20;
-pub(crate) const FIXED_CATALOGUE_RESPONSE_LIMIT_BYTES: usize = 8 << 20;
-pub(crate) const FORWARDING_APPLICATION_CHUNK_BYTES: usize = 64 << 10;
-const FORWARDING_TRANSPORT_BYTES: usize = 2 * 1_032_192;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CatalogueForwardingPolicy {
-    pub(crate) list_response_limit_bytes: usize,
-}
-
-impl CatalogueForwardingPolicy {
-    pub(crate) fn new(list_response_limit_bytes: usize) -> Result<Self, String> {
-        let chunks = list_response_limit_bytes
-            .checked_div(FORWARDING_APPLICATION_CHUNK_BYTES)
-            .and_then(|whole| {
-                list_response_limit_bytes
-                    .checked_rem(FORWARDING_APPLICATION_CHUNK_BYTES)
-                    .and_then(|remainder| whole.checked_add(usize::from(remainder != 0)))
-            })
-            .ok_or_else(|| "catalogue forwarding response limit is invalid".to_owned())?;
-        if list_response_limit_bytes == 0 {
-            return Err("catalogue forwarding response limit must be positive".to_owned());
-        }
-        let application_bytes = chunks
-            .checked_mul(FORWARDING_APPLICATION_CHUNK_BYTES)
-            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
-        let descriptor_bytes = chunks
-            .checked_mul(std::mem::size_of::<Option<axum::body::Bytes>>())
-            .ok_or_else(|| "catalogue forwarding descriptor budget is invalid".to_owned())?;
-        let _descriptor_layout = std::alloc::Layout::array::<Option<axum::body::Bytes>>(chunks)
-            .map_err(|_| "catalogue forwarding descriptor layout is invalid".to_owned())?;
-        MAX_CATALOGUE_REQUEST_BODY_BYTES
-            .checked_add(application_bytes)
-            .and_then(|value| value.checked_add(descriptor_bytes))
-            .and_then(|value| value.checked_add(FORWARDING_TRANSPORT_BYTES))
-            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
-        Ok(Self {
-            list_response_limit_bytes,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ServerTopology {
-    #[default]
-    Core,
-    Edge,
-}
-
-impl ServerTopology {
-    pub fn is_edge(self) -> bool {
-        matches!(self, Self::Edge)
-    }
-}
-
-/// Operational state of an edge server's owned upstream connector.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EdgeUpstreamHealth {
-    /// This server has no owned upstream connector.
-    NotConfigured,
-    /// Bootstrap or socket establishment is in progress.
-    Connecting,
-    /// The ordinary upstream wire is attached.
-    Connected,
-    /// A recoverable outcome is waiting for its next attempt.
-    Reconnecting { reason: String },
-    /// A fatal outcome stopped the connector generation.
-    Failed { reason: String },
-    /// Shutdown cancelled and joined the connector.
-    Stopped,
-}
-
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub(crate) accounts: Option<accounts::AccountRegistryOwner>,
@@ -158,20 +87,14 @@ pub struct ServerState {
     pub app_id: AppId,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
-    /// Upstream HTTP base URL used by edge servers to forward catalogue HTTP requests.
-    pub upstream_http_url: Option<String>,
-    /// Whether this process is the core/global node or an edge syncing upstream.
-    pub topology: ServerTopology,
-    /// Shared HTTP client for forwarding admin requests to a remote authority.
-    ///
-    /// Replacement clients retain forwarding's application/body/deadline safety
-    /// but do not carry the builder client's bounded HTTP transport allowance.
-    pub http_client: reqwest::Client,
-    /// Private bounds and lifecycle policy used by edge catalogue forwarding.
-    pub(crate) forwarding_policy: CatalogueForwardingPolicy,
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
+    /// Per-state admission owner for policy-scoped WebSocket connections.
+    ///
+    /// The owner is shared by every router and connection task that clones
+    /// this `ServerState`, while independently built states remain isolated.
+    pub(crate) websocket_admissions: Arc<routes::WebSocketAdmissionState>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
@@ -184,82 +107,7 @@ pub struct ServerState {
     runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// Whether the current Edge shell generation has a fully installed,
-    /// validated catalogue and local projection registry. A durable Ready
-    /// generation remains usable offline; blank and refreshing generations do
-    /// not admit new downstream sessions.
-    dynamic_edge_catalogue_ready: AtomicBool,
-    edge_upstream_health: StdRwLock<EdgeUpstreamHealth>,
-    edge_upstream_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub shutdown: ShutdownController,
-}
-
-impl Drop for ServerState {
-    fn drop(&mut self) {
-        let task = self
-            .edge_upstream_task
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
-            task.abort();
-        }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test-only synchronization point immediately before the production
-    /// snapshot helper acquires the shell lock.
-    static CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn run_client_shell_snapshot_before_lock_hook() {
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
-            hook();
-        }
-    });
-}
-
-#[cfg(test)]
-fn with_client_shell_snapshot_before_lock_hook<T>(
-    hook: impl FnMut() + 'static,
-    callback: impl FnOnce() -> T,
-) -> T {
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        assert!(
-            slot.borrow().is_none(),
-            "snapshot hook is already installed"
-        );
-        *slot.borrow_mut() = Some(Box::new(hook));
-    });
-    let result = callback();
-    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
-        slot.borrow_mut().take();
-    });
-    result
-}
-
-/// Snapshot a shell and its dynamic-admission generation under one lock.
-///
-/// The readiness flag is atomic because the connector publishes it from an
-/// async task, but it is read while the shell lock is held. Dynamic bootstrap
-/// updates both values under that same write lock, so a client cannot pair the
-/// old generation's `true` with the newly published shell.
-fn client_shell_snapshot<T: Clone>(
-    topology: ServerTopology,
-    shell: &StdRwLock<Option<T>>,
-    dynamic_edge_catalogue_ready: &AtomicBool,
-) -> Option<T> {
-    #[cfg(test)]
-    run_client_shell_snapshot_before_lock_hook();
-    let shell = shell.read().unwrap();
-    if topology == ServerTopology::Edge && !dynamic_edge_catalogue_ready.load(Ordering::Acquire) {
-        return None;
-    }
-    shell.clone()
 }
 
 impl ServerState {
@@ -309,31 +157,18 @@ impl ServerState {
         }
     }
 
-    /// Test-only observation of whether an edge has installed a runtime shell.
+    /// Test-only observation of whether Core has installed a runtime shell.
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_test(&self) -> bool {
         self.runtime().is_some()
     }
 
-    /// Test-only observation of whether an edge is ready for downstream clients.
+    /// Test-only observation of whether Core is ready for downstream clients.
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_client_for_test(&self) -> bool {
         self.runtime_for_client().is_some()
-    }
-
-    /// Test-only adoption hook for exercising the interval between catalogue
-    /// installation and normal upstream-peer admission with a real server.
-    #[cfg(feature = "test")]
-    #[doc(hidden)]
-    pub fn start_dynamic_edge_shell_for_test(
-        &self,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
-    ) -> Result<(), String> {
-        self.start_dynamic_edge_shell(snapshot, edge_cache_budget)
-            .map(|_| ())
     }
 
     /// Test-only readback of the installed authority catalogue.
@@ -353,85 +188,9 @@ impl ServerState {
         self.core_server_shell.read().unwrap().clone()
     }
 
-    /// Return the runtime eligible for an ordinary downstream client session.
-    /// Bootstrap code may inspect [`Self::runtime`], but a blank or refreshing dynamic Edge
-    /// remains RetryLater until a complete catalogue generation is installed.
+    /// Return the Core runtime eligible for a client session.
     pub fn runtime_for_client(&self) -> Option<ServerRuntimeHandle> {
-        client_shell_snapshot(
-            self.topology,
-            &self.core_server_shell,
-            &self.dynamic_edge_catalogue_ready,
-        )
-    }
-
-    pub(crate) fn mark_dynamic_edge_catalogue_ready(&self) -> Result<(), String> {
-        // Serialize this Ready transition with dynamic shell publication and
-        // client snapshots. Callers reach this only after catalogue adoption
-        // and any required projection-registry rebuild have returned.
-        let _shell = self.core_server_shell.read().unwrap();
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge readiness publication".to_owned());
-        }
-        self.dynamic_edge_catalogue_ready
-            .store(true, Ordering::Release);
-        Ok(())
-    }
-
-    fn mark_dynamic_edge_catalogue_refreshing(&self) {
-        // Serialize the transition with downstream shell snapshots. A failed
-        // registry install leaves this generation gated until a later complete
-        // authenticated refresh succeeds.
-        let _shell = self.core_server_shell.write().unwrap();
-        self.dynamic_edge_catalogue_ready
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) async fn refresh_dynamic_edge_catalogue(
-        &self,
-        shell: &ServerRuntimeHandle,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-    ) -> Result<(), String> {
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge catalogue refresh".to_owned());
-        }
-        self.mark_dynamic_edge_catalogue_refreshing();
-        shell.apply_trusted_catalogue_snapshot(snapshot).await?;
-        // Applying the snapshot returns only after a semantic transition has
-        // rebuilt its local projections. The newly validated durable
-        // generation may therefore serve offline even if normal upstream
-        // attachment is still retrying.
-        self.mark_dynamic_edge_catalogue_ready()
-    }
-
-    pub fn edge_upstream_health(&self) -> EdgeUpstreamHealth {
-        self.edge_upstream_health.read().unwrap().clone()
-    }
-
-    pub(crate) fn set_edge_upstream_health(&self, health: EdgeUpstreamHealth) {
-        *self.edge_upstream_health.write().unwrap() = health;
-    }
-
-    pub(crate) fn own_edge_upstream_task(&self, task: tokio::task::JoinHandle<()>) {
-        let replaced = self.edge_upstream_task.lock().unwrap().replace(task);
-        debug_assert!(replaced.is_none(), "edge upstream task is installed once");
-    }
-
-    async fn stop_edge_upstream_task(&self) {
-        let task = self.edge_upstream_task.lock().unwrap().take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-            && !error.is_cancelled()
-        {
-            tracing::error!(%error, "edge upstream lifecycle task failed");
-        }
-        if self.topology == ServerTopology::Edge
-            && !matches!(
-                self.edge_upstream_health(),
-                EdgeUpstreamHealth::Failed { .. }
-            )
-        {
-            self.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
-        }
+        self.runtime()
     }
 
     pub(crate) fn start_core_server_shell(
@@ -455,49 +214,6 @@ impl ServerState {
             storage_config,
             self.storage_factory.clone(),
         )?;
-        *core_server_shell = Some(started.clone());
-        Ok(started)
-    }
-
-    /// Atomically publish a normal edge runtime after its independent
-    /// authenticated catalogue bootstrap completed. Holding the state lock
-    /// across construction makes downstream admission observe either no shell
-    /// (retry later) or the fully adopted ready shell, never a half-ready one.
-    pub(crate) fn start_dynamic_edge_shell(
-        &self,
-        snapshot: jazz::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
-    ) -> Result<ServerRuntimeHandle, String> {
-        if self.topology != ServerTopology::Edge {
-            return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
-        }
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
-        let storage_config = self
-            .core_server_shell_storage_config
-            .clone()
-            .ok_or_else(|| "server shell storage is not configured".to_owned())?;
-        let mut core_server_shell = self.core_server_shell.write().unwrap();
-        if let Some(existing) = core_server_shell.clone() {
-            return Ok(existing);
-        }
-        if self.shutdown.is_shutting_down() {
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
-        let started = ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
-            storage_config,
-            self.storage_factory.clone(),
-            edge_cache_budget,
-            snapshot,
-        )?;
-        self.dynamic_edge_catalogue_ready
-            .store(false, Ordering::Release);
-        if self.shutdown.is_shutting_down() {
-            drop(core_server_shell);
-            drop(started);
-            return Err("server shutdown started before edge shell publication".to_owned());
-        }
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -530,7 +246,6 @@ impl ServerState {
 
     async fn finalize_shutdown(&self) -> ShutdownPhase {
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
-        self.stop_edge_upstream_task().await;
         let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
         if !websockets_drained {
@@ -619,10 +334,8 @@ fn run_shutdown_finalizer(state: Arc<ServerState>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, RwLock};
-    use std::thread;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -730,69 +443,16 @@ mod tests {
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),
-            upstream_http_url: None,
-            topology: ServerTopology::Core,
-            http_client: reqwest::Client::builder()
-                .build()
-                .expect("build HTTP client"),
-            forwarding_policy: CatalogueForwardingPolicy::new(
-                DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
-            )
-            .expect("default forwarding policy"),
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
+            websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
             core_server_shell_storage_config: None,
             storage_factory: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
-            dynamic_edge_catalogue_ready: AtomicBool::new(true),
-            edge_upstream_health: StdRwLock::new(EdgeUpstreamHealth::NotConfigured),
-            edge_upstream_task: StdMutex::new(None),
             shutdown: ShutdownController::new(timeout),
         })
-    }
-
-    /// Dynamic publication must not let a downstream reader pair the prior
-    /// generation's readiness with the newly published shell. The test hook
-    /// synchronizes the actual production snapshot helper at its pre-lock
-    /// boundary; it is not a hand-written model of that helper.
-    #[test]
-    fn dynamic_client_shell_snapshot_cannot_mix_ready_generation_with_new_shell() {
-        let shell = Arc::new(RwLock::new(Some("old")));
-        let ready = Arc::new(AtomicBool::new(true));
-        let mut write = shell.write().unwrap();
-        let (at_lock_boundary_tx, at_lock_boundary_rx) = mpsc::channel();
-        let (continue_tx, continue_rx) = mpsc::channel();
-        let fixed_shell = Arc::clone(&shell);
-        let fixed_ready = Arc::clone(&ready);
-        let fixed_reader = thread::spawn(move || {
-            with_client_shell_snapshot_before_lock_hook(
-                move || {
-                    at_lock_boundary_tx
-                        .send(())
-                        .expect("tell publisher reader reached production lock boundary");
-                    continue_rx
-                        .recv()
-                        .expect("publisher releases production reader");
-                },
-                || client_shell_snapshot(ServerTopology::Edge, &fixed_shell, &fixed_ready),
-            )
-        });
-        at_lock_boundary_rx
-            .recv()
-            .expect("reader reached production helper lock boundary");
-        *write = Some("new");
-        ready.store(false, Ordering::Release);
-        drop(write);
-        continue_tx
-            .send(())
-            .expect("release reader after publication");
-        assert_eq!(
-            fixed_reader.join().expect("fixed reader joins"),
-            None,
-            "the lock-first production helper observes the new generation as unready"
-        );
     }
 
     #[tokio::test]

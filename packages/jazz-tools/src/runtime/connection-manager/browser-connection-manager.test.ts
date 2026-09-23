@@ -1035,7 +1035,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     );
 
     const disconnect = manager.disconnect();
-    const ready = manager.ensureReady("edge");
+    const ready = manager.ensureReady("global");
     const reconnect = manager.reconnect();
     await Promise.resolve();
     expect(connection.reconnect).not.toHaveBeenCalled();
@@ -1122,7 +1122,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(host.runtimeSource.createBrowserWorkerConnection).toHaveBeenCalledTimes(2);
     expect(first.reconnect).not.toHaveBeenCalled();
     expect(second.reconnect).toHaveBeenCalledOnce();
-    await expect(manager.ensureReady("edge")).resolves.toBeUndefined();
+    await expect(manager.ensureReady("global")).resolves.toBeUndefined();
   });
 
   it("rejects remote readiness on terminal failure while explicitly offline", async () => {
@@ -1140,14 +1140,14 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     fixture.contexts[0]?.onExplicitOfflineChange?.(true);
     expect(fixture.manager.isExplicitlyOffline()).toBe(true);
 
-    let edgeResult: unknown;
+    let remoteResult: unknown;
     let globalResult: unknown;
-    const edgeReady = fixture.manager.ensureReady("edge").then(
+    const remoteReady = fixture.manager.ensureReady("global").then(
       () => {
-        edgeResult = "resolved";
+        remoteResult = "resolved";
       },
       (error) => {
-        edgeResult = error;
+        remoteResult = error;
       },
     );
     const globalReady = fixture.manager.ensureReady("global").then(
@@ -1162,15 +1162,15 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     fixture.fail(failure);
 
     await vi.waitFor(() => {
-      expect(edgeResult).toBe(failure);
+      expect(remoteResult).toBe(failure);
       expect(globalResult).toBe(failure);
     });
-    await Promise.all([edgeReady, globalReady]);
+    await Promise.all([remoteReady, globalReady]);
     expect(fixture.manager.isExplicitlyOffline()).toBe(true);
 
     await expect(fixture.manager.reconnect()).resolves.toBeUndefined();
     expect(fixture.manager.isExplicitlyOffline()).toBe(false);
-    await expect(fixture.manager.ensureReady("edge")).resolves.toBeUndefined();
+    await expect(fixture.manager.ensureReady("global")).resolves.toBeUndefined();
   });
 
   it("disconnects a worker created while offline before an immediate reconnect", async () => {

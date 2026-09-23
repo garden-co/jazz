@@ -117,7 +117,9 @@ describe("PosterShop cross-topology recovery", () => {
               );
               const outsider = await openClient(server.appId, server.serverUrl, "outsider", token);
               await expect(
-                outsider.insert(app.shapes, shape(canvas.id, layer.id, 99)).wait({ tier: "edge" }),
+                outsider
+                  .insert(app.shapes, shape(canvas.id, layer.id, 99))
+                  .wait({ tier: "global" }),
               ).rejects.toThrow();
             },
           },
@@ -188,7 +190,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 1,
                 "reader receives canvas layer",
                 15_000,
-                "edge",
+                "global",
               );
               ctx.trackSubscription(
                 reader.subscribe(
@@ -196,7 +198,7 @@ describe("PosterShop cross-topology recovery", () => {
                   (rows) => {
                     windowSnapshots.push(rows.map((row) => ({ id: row.id, zIndex: row.zIndex })));
                   },
-                  { tier: "edge" },
+                  { tier: "global" },
                 ),
               );
               await waitForCondition(
@@ -231,20 +233,22 @@ describe("PosterShop cross-topology recovery", () => {
             name: "concurrent ordered canvas edits",
             run: async () => {
               const [ownerShape, editorShape] = await Promise.all([
-                owner.insert(app.shapes, shape(canvas.id, layer.id, 0)).wait({ tier: "edge" }),
-                editor.insert(app.shapes, shape(canvas.id, layer.id, 1)).wait({ tier: "edge" }),
+                owner.insert(app.shapes, shape(canvas.id, layer.id, 0)).wait({ tier: "global" }),
+                editor.insert(app.shapes, shape(canvas.id, layer.id, 1)).wait({ tier: "global" }),
               ]);
-              await owner.insert(app.shapes, shape(canvas.id, layer.id, 3)).wait({ tier: "edge" });
+              await owner
+                .insert(app.shapes, shape(canvas.id, layer.id, 3))
+                .wait({ tier: "global" });
               await owner
                 .insert(app.checkpoints, { canvasId: canvas.id, label: "Approved", branch: "main" })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               expect([ownerShape.zIndex, editorShape.zIndex]).toEqual([0, 1]);
             },
           },
           {
             name: "revoke editor before owner lifecycle fault",
             run: async () => {
-              await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
+              await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "global" });
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
           },
@@ -316,7 +320,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 5,
                 "reader receives offline replay",
                 20_000,
-                "edge",
+                "global",
               );
               expect(shapes.map((row) => row.zIndex)).toEqual([0, 1, 2, 3, 4]);
               await waitForCondition(
@@ -328,10 +332,12 @@ describe("PosterShop cross-topology recovery", () => {
                 "reader bounded shape window did not receive the offline replay",
               );
               expect(
-                (await reader.all(queries.shapeWindow, { tier: "edge" })).map((row) => row.zIndex),
+                (await reader.all(queries.shapeWindow, { tier: "global" })).map(
+                  (row) => row.zIndex,
+                ),
               ).toEqual([1, 2]);
               expect(
-                (await reader.all(queries.checkpoints, { tier: "edge" })).map((row) => row.label),
+                (await reader.all(queries.checkpoints, { tier: "global" })).map((row) => row.label),
               ).toEqual(["Approved"]);
             },
           },
@@ -345,7 +351,9 @@ describe("PosterShop cross-topology recovery", () => {
                 await getJazzServerJwtForUser("poster-editor", undefined, server.appId),
               );
               await expect(
-                coreEditor.insert(app.shapes, shape(canvas.id, layer.id, 5)).wait({ tier: "edge" }),
+                coreEditor
+                  .insert(app.shapes, shape(canvas.id, layer.id, 5))
+                  .wait({ tier: "global" }),
               ).rejects.toThrow();
             },
           },

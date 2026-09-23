@@ -87,7 +87,7 @@ describe("live authoritative overlapping relation replay", () => {
                 (row) => row.author?.name === "Author" && row.label?.name === "Label",
               );
             },
-            { tier: "edge" },
+            { tier: "global" },
           ),
         );
         const stopPlain = cleanup.trackSubscription(
@@ -96,7 +96,7 @@ describe("live authoritative overlapping relation replay", () => {
             (rows) => {
               plainIds = rows.map((row) => row.id);
             },
-            { tier: "edge" },
+            { tier: "global" },
           ),
         );
         const waitForBoth = () =>
@@ -154,7 +154,7 @@ describe("live authoritative overlapping relation replay", () => {
 async function assertUnrelatedRead(db: Db): Promise<void> {
   expect(
     await withTimeout(
-      db.all(app.unrelated, { tier: "edge" }),
+      db.all(app.unrelated, { tier: "global" }),
       10_000,
       "unrelated read after carrier delivery",
     ),

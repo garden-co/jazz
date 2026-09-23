@@ -11,7 +11,6 @@ use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
-use crate::node::query_engine::left_field;
 use crate::protocol::{
     KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef, SupportingRow,
     VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
@@ -333,13 +332,6 @@ where
             DurabilityTier::Global => global,
             // Local reads select the greatest global/ahead register winner.
             DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
-            // Edge filters ahead candidates before selecting a winner. A
-            // later Local register event must not shadow an earlier
-            // Edge-accepted event in that filter/argmax ordering.
-            DurabilityTier::Edge => {
-                self.edge_visible_deletion_winner_tx_id(table_id, table, row_uuid)
-                    .await?
-            }
             // No-tier reads do not have a settled maintained source.
             DurabilityTier::None => None,
         };
@@ -356,80 +348,6 @@ where
             .await?
             .into_iter()
             .find(|version| version.deletion().is_some()))
-    }
-
-    /// Mirror the Edge deletion source exactly: filter accepted
-    /// Edge-or-Global ahead entries first, then select the winner with the
-    /// settled global register.  This cannot be implemented by validating the
-    /// raw Local argmax afterwards because that loses an older visible ahead
-    /// row when a newer Local-only row shares the current key.
-    async fn edge_visible_deletion_winner_tx_id(
-        &mut self,
-        table_id: PhysicalTableId,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Result<Option<TxId>, Error> {
-        use groove::ivm::{LiteralValue, StaticScanSpec};
-
-        let scan = StaticScanSpec::Point(vec![
-            LiteralValue::from(Value::Bytes(BranchKey::default().canonical_bytes())),
-            LiteralValue::from(Value::Uuid(row_uuid.0)),
-        ]);
-        let fields = ["row_uuid", "tx_time", "tx_node_id"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let global = GraphBuilder::table_scan(
-            physical_register_global_current_table_name(table_id),
-            scan.clone(),
-        )
-        .project(fields.clone());
-        let ahead =
-            GraphBuilder::table_scan(physical_register_ahead_current_table_name(table_id), scan);
-        let edge_ahead = GraphBuilder::join(
-            ahead.project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                        PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::EnumTag(2)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
-                        ])
-                        .canonicalize(),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        );
-        let result = self
-            .database
-            .query_graph(GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, edge_ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ))
-            .await
-            .map_err(|error| Self::malformed_current_query_error(table, row_uuid, error))?;
-        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
-            return Ok(None);
-        };
-        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
-        let time = TxTime(record.get_u64(1)?);
-        let node_alias = NodeAlias(record.get_u64(2)?);
-        let node = self
-            .node_for_alias(node_alias)
-            .ok_or(Error::InvalidStoredValue(
-                "Edge deletion winner references an unknown node alias",
-            ))?;
-        Ok(Some(TxId::new(time, node)))
     }
 
     async fn preflight_view_bundle_conflicts(
@@ -1673,6 +1591,60 @@ where
         Ok(())
     }
 
+    /// Preserve a discarded Pending carrier's transaction identity for its
+    /// already-registered fate observer, without publishing any row version or
+    /// accepting the discarded view's supporting set. A later ordinary carrier
+    /// extends this existing zero-body, view-scoped fragment.
+    pub(crate) async fn remember_discarded_pending_view_transactions(
+        &mut self,
+        carriers: &[VersionCarrier],
+    ) -> Result<(), Error> {
+        let mut headers = BTreeMap::new();
+        for carrier in carriers {
+            for bundle in carrier
+                .bundle_refs()
+                .map_err(|_| Error::MalformedViewUpdate("malformed version-bundle run"))?
+            {
+                if !matches!(bundle.fate, Fate::Pending) {
+                    continue;
+                }
+                let mut tx = transaction_without_permission_subject(bundle.tx);
+                tx.n_total_writes = 0;
+                self.admit_contribution_merge_for_storage(&tx)?;
+                if headers
+                    .get(&tx.tx_id)
+                    .is_some_and(|previous| !known_transaction_payload_matches(previous, &tx))
+                {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                headers.insert(tx.tx_id, tx);
+            }
+        }
+        let mut missing = Vec::new();
+        for (tx_id, tx) in headers {
+            if let Some(stored) = self.query_transaction(tx_id).await? {
+                let mut identity = transaction_without_permission_subject(&stored.tx);
+                identity.n_total_writes = 0;
+                if !known_transaction_payload_matches(&identity, &tx) {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+            } else {
+                missing.push(tx);
+            }
+        }
+        for tx in missing {
+            self.ingest_transaction_fragment_without_current_indexes(
+                tx,
+                Vec::new(),
+                Fate::Pending,
+                None,
+                DurabilityTier::Local,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Persist immutable bodies carried by a stale authority link without
     /// accepting that link's source closure as an authority receipt.
     ///
@@ -2207,13 +2179,18 @@ where
             }
         }
 
+        // An empty-bundle reset may finish initial hydration even when it names
+        // peer payload refs: every covered input's body was already proven staged
+        // or physically resident by `validate_covered_input_body_witnesses`, which
+        // rejects the whole frame otherwise. This flag only ends the initial-sync
+        // flush cadence; it does not gate visibility, known state or authorization.
+        // Loosening witness validation would widen this shortcut.
         if self
             .query
             .authority_results
             .get(&authority_result_key)
             .is_some_and(|state| state.initial_hydration)
             && version_bundles_is_empty
-            && (!reset_input_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
             && !opening_pending
         {
@@ -2859,9 +2836,10 @@ where
             else {
                 continue;
             };
-            if canonical.schema_version_alias() == version.schema_version_alias()
-                && self.physical_table_id_for_version(&canonical)? == projected_table_id
-            {
+            // The read projection may change the schema alias even when the
+            // table layout is unchanged. This exact history key identifies the
+            // authored version; never replace its identity with the projection.
+            if self.physical_table_id_for_version(&canonical)? == projected_table_id {
                 return Ok(canonical);
             }
         }

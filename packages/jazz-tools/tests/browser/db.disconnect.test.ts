@@ -209,13 +209,13 @@ describe("Db disconnect/reconnect", () => {
   }, 60_000);
 
   describe("server-backed subscriptions", () => {
-    it.each(["edge", "global"] as const)(
+    it.each(["global"] as const)(
       "keeps a disconnected %s subscription pending, then hydrates its local write",
       async (tier) => {
         const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
         const serverTitle = "existing server row";
         await withTimeout(
-          peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "edge" }),
+          peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "global" }),
           SYNC_OPERATION_TIMEOUT_MS,
           "server row did not reach edge",
         );
@@ -224,7 +224,7 @@ describe("Db disconnect/reconnect", () => {
           (rows) => rows.some((row) => row.title === serverTitle),
           "db did not receive the existing server row",
           SYNC_OPERATION_TIMEOUT_MS,
-          "edge",
+          "global",
         );
         await db.disconnect();
 
@@ -294,7 +294,7 @@ describe("Db disconnect/reconnect", () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic update";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "server row did not reach edge",
       );
@@ -303,7 +303,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to update",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
       await db.disconnect();
 
@@ -324,12 +324,12 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge" },
+          { tier: "global" },
         ),
       );
 
       const update = db.update(todos, serverRow.id, { done: true });
-      const edgeWait = update.wait({ tier: "edge" }).then(() => {
+      const edgeWait = update.wait({ tier: "global" }).then(() => {
         edgeSettled = true;
       });
       await withTimeout(
@@ -338,7 +338,7 @@ describe("Db disconnect/reconnect", () => {
         "local update did not become visible",
       );
       await expectStillPending(
-        update.wait({ tier: "edge" }),
+        update.wait({ tier: "global" }),
         PENDING_ASSERTION_MS,
         "update settled before the delayed server snapshot was allowed to arrive",
       );
@@ -370,7 +370,7 @@ describe("Db disconnect/reconnect", () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic delete";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "server row did not reach edge",
       );
@@ -379,7 +379,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to delete",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
       await db.disconnect();
 
@@ -403,7 +403,7 @@ describe("Db disconnect/reconnect", () => {
       }> = [];
       let edgeSettled = false;
       let reconnectRequested = false;
-      const edgeWait = deletion.wait({ tier: "edge" }).then(() => {
+      const edgeWait = deletion.wait({ tier: "global" }).then(() => {
         edgeSettled = true;
       });
       const unsubscribe = ctx.trackSubscription(
@@ -416,11 +416,11 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge" },
+          { tier: "global" },
         ),
       );
       await expectStillPending(
-        deletion.wait({ tier: "edge" }),
+        deletion.wait({ tier: "global" }),
         PENDING_ASSERTION_MS,
         "delete settled before the delayed server snapshot was allowed to arrive",
       );
@@ -449,7 +449,7 @@ describe("Db disconnect/reconnect", () => {
       const { db, peer } = await createDbPair(ctx, createDirectDb);
       const deletedTitle = "server row deleted live";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title: deletedTitle, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: deletedTitle, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "server row did not reach edge",
       );
@@ -460,7 +460,7 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push(rows);
           },
-          { tier: "edge" },
+          { tier: "global" },
         ),
       );
 
@@ -470,7 +470,7 @@ describe("Db disconnect/reconnect", () => {
         "edge subscription did not show the server row",
       );
       await withTimeout(
-        peer.delete(todos, serverRow.id).wait({ tier: "edge" }),
+        peer.delete(todos, serverRow.id).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "server deletion did not reach edge",
       );
@@ -513,7 +513,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "direct server connection: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
     }, 60_000);
 
@@ -524,7 +524,7 @@ describe("Db disconnect/reconnect", () => {
 
       const serverOnlyTitle = "server only";
       await withTimeout(
-        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "direct server connection: peer write did not reach edge while db was disconnected",
       );
@@ -545,7 +545,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "direct server connection: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
     }, 60_000);
   });
@@ -564,7 +564,7 @@ describe("Db disconnect/reconnect", () => {
           secret,
         }),
       );
-      await owner.all(app.todos, { tier: "edge" });
+      await owner.all(app.todos, { tier: "global" });
       await owner.disconnect();
 
       const title = "namespace-wide offline write";
@@ -608,7 +608,7 @@ describe("Db disconnect/reconnect", () => {
         "worker namespace: late editor subscription did not use local fallback",
       );
 
-      const edgeWait = write.wait({ tier: "edge" });
+      const edgeWait = write.wait({ tier: "global" });
       await expectStillPending(
         edgeWait,
         PENDING_ASSERTION_MS,
@@ -655,7 +655,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "worker mode: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
     }, 60_000);
 
@@ -666,7 +666,7 @@ describe("Db disconnect/reconnect", () => {
 
       const serverOnlyTitle = "server only";
       await withTimeout(
-        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
         "worker mode: peer write did not reach edge while db was disconnected",
       );
@@ -686,7 +686,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "worker mode: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "global",
       );
     }, 60_000);
 
@@ -722,7 +722,9 @@ describe("Db disconnect/reconnect", () => {
         () => phase,
       );
 
-      const edgeWait = db.insert(todos, { title: "edge wait", done: false }).wait({ tier: "edge" });
+      const edgeWait = db
+        .insert(todos, { title: "edge wait", done: false })
+        .wait({ tier: "global" });
       await expectStillPending(
         edgeWait,
         PENDING_ASSERTION_MS,
@@ -781,7 +783,7 @@ describe("Db disconnect/reconnect", () => {
       await priorWrite.wait({ tier: "local" });
       await db.disconnect();
 
-      const edgeWait = priorWrite.wait({ tier: "edge" });
+      const edgeWait = priorWrite.wait({ tier: "global" });
       const laterWrite = db.insert(todos, { title: "after strict wait", done: false });
       await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
@@ -802,7 +804,7 @@ describe("Db disconnect/reconnect", () => {
       const write = db.insert(todos, { title: "blocked durability wait", done: false });
       await write.wait({ tier: "local" });
       await db.disconnect();
-      const edgeWait = write.wait({ tier: "edge" });
+      const edgeWait = write.wait({ tier: "global" });
       await expectStillPending(
         edgeWait,
         PENDING_ASSERTION_MS,
@@ -859,7 +861,7 @@ describe("Db disconnect/reconnect", () => {
         () => {
           callbacks += 1;
         },
-        { tier: "edge" },
+        { tier: "global" },
       );
       const connection = (db as unknown as { connection: { reconnectWaiters: Set<unknown> } })
         .connection;
@@ -988,7 +990,7 @@ async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = SYNC_OPERATION_TIMEOUT_MS,
-  tier?: "local" | "edge",
+  tier?: "local" | "global",
 ): Promise<Todo[]> {
   return waitForQuery(db, app.todos, predicate, label, timeoutMs, tier);
 }

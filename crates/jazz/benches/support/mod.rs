@@ -218,7 +218,6 @@ pub fn insert_durability_tier(fields: &mut Map<String, Value>, tier: DurabilityT
         json!(match tier {
             DurabilityTier::None => "None",
             DurabilityTier::Local => "Local",
-            DurabilityTier::Edge => "Edge",
             DurabilityTier::Global => "Global",
         }),
     );

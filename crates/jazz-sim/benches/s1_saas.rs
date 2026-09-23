@@ -4,7 +4,6 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use hdrhistogram::Histogram;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream,
@@ -19,12 +18,12 @@ use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::DurabilityTier;
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
     CellValueGen, EdgeSet, EntitySet, Fixture, FixtureBuilder, FixtureCommit, FixtureCommitApply,
     RefDistribution, apply_fixture_commit, apply_sync_message_settled,
-    commit_mergeable_unit_settled, ingest_commit_unit_settled, settle_outcome,
+    commit_mergeable_unit_settled, ingest_commit_unit_settled,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::view_accounting::version_bundle_refs;
@@ -434,10 +433,6 @@ struct Summary {
     result_set_rows: usize,
     closure_rows: usize,
     writes_applied: usize,
-    edge_acceptance: Histogram<u64>,
-    edge_hydration_bytes: u64,
-    edge_hydration_floor_bytes: u64,
-    edge_hydration_rows: usize,
 }
 
 #[derive(Clone)]
@@ -493,88 +488,16 @@ struct HighFanOutSummary {
     full_diff_recomputes: u64,
 }
 
-struct EdgeRoute {
-    name: String,
-    node: NodeState<RocksDbStorage>,
-    _dir: tempfile::TempDir,
-    core_peer: PeerState,
-}
-
-fn edge_acceptance_phase(
-    ctx: &mut dyn DriverContext,
-    client: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
-) -> Histogram<u64> {
-    let mut acceptance = Histogram::new(3).unwrap();
-    let issue = row(9_500_000);
-    let start = ctx.now_ms();
-    let (tx_id, unit) = commit_mergeable_unit_settled(
-        client,
-        MergeableCommit::new(ISSUES, issue, 950_000)
-            .made_by(AuthorSubject::SYSTEM)
-            .cells(BTreeMap::from([(
-                "title".to_owned(),
-                Value::String("edge-acceptance-probe".to_owned()),
-            )])),
-    )
-    .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        unreachable!();
-    };
-    ctx.send(
-        "client_0",
-        &edge.name,
-        SyncMessage::CommitUnit { tx, versions },
-    );
-    let delivered = ctx.recv(&edge.name);
-    let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
-        unreachable!();
-    };
-    // This direct edge probe uses the unadmitted SYSTEM peer, whose immutable
-    // request snapshot is the empty claim object.
-    let policy_claims = BTreeMap::new();
-    let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
-        &mut edge.node,
-        tx,
-        versions,
-        u64::MAX,
-        u64::MAX,
-        policy_claims,
-    ))
-    .unwrap();
-    let updates = settle_outcome(&mut edge.node, outcome).unwrap();
-    let _accepted = updates.iter().any(|message| {
-        matches!(
-            message,
-            SyncMessage::FateUpdate {
-                tx_id: seen,
-                fate: Fate::Accepted,
-                ..
-            } if *seen == tx_id
-        )
-    });
-    acceptance.record((ctx.now_ms() - start) * 1_000).unwrap();
-    acceptance
-}
-
 fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
     let schema = schema();
     let fixture = build_fixture(config);
     let (_core_dir, mut core) = open_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
     let mut clients = Vec::new();
-    let mut edges = Vec::new();
     let mut dirs = Vec::new();
     for idx in 0..config.clients {
         let (dir, client) = open_node(node(20 + idx as u8), schema.clone());
-        let (edge_dir, edge_node) = open_node(node(120 + idx as u8), schema.clone());
         dirs.push(dir);
-        edges.push(EdgeRoute {
-            name: format!("client_{idx}_edge"),
-            node: edge_node,
-            _dir: edge_dir,
-            core_peer: PeerState::new(),
-        });
         clients.push(client);
     }
 
@@ -612,18 +535,10 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
     let mut warm_settled = Vec::new();
     let mut cold_bytes = 0_u64;
     let mut cold_floor = 0_u64;
-    let mut edge_hydration_bytes = 0_u64;
-    let mut edge_hydration_floor_bytes = 0_u64;
-    let mut edge_hydration_rows = 0_usize;
     let mut result_set_rows = 0_usize;
     let mut total_closure_rows = BTreeSet::<(String, RowUuid)>::new();
 
-    for (((client_idx, client), edge), plan) in clients
-        .iter_mut()
-        .enumerate()
-        .zip(edges.iter_mut())
-        .zip(plans.iter())
-    {
+    for ((client_idx, client), plan) in clients.iter_mut().enumerate().zip(plans.iter()) {
         let mut peer = PeerState::new();
         let mut client_closure_rows = BTreeSet::<(String, RowUuid)>::new();
         let binding1 = query1
@@ -650,32 +565,21 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             ]))
             .expect("binding 2");
 
-        register_binding(ctx, &mut core, &edge.name, &query1, &binding1);
-        register_binding(ctx, &mut core, &edge.name, &query2, &binding2);
-        apply_binding(&mut edge.node, &query1, &binding1);
-        apply_binding(&mut edge.node, &query2, &binding2);
+        register_binding(ctx, &mut core, &plan.name, &query1, &binding1);
+        register_binding(ctx, &mut core, &plan.name, &query2, &binding2);
         apply_binding(client, &query1, &binding1);
         apply_binding(client, &query2, &binding2);
 
         for (shape, binding) in [(&query1, &binding1), (&query2, &binding2)] {
             let start_ms = ctx.now_ms();
-            let core_update = block_on(edge.core_peer.rehydrate_query(&mut core, shape, binding))
-                .expect("rehydrate query");
-            edge_hydration_bytes += view_update_bytes(&core_update);
-            edge_hydration_floor_bytes += bytes_floor(&core_update);
-            edge_hydration_rows += result_output_count(&core_update, ISSUES);
-            ctx.send("core", &edge.name, core_update);
-            let delivered_to_edge = ctx.recv(&edge.name);
-            apply_sync_message_settled(&mut edge.node, delivered_to_edge.message)
-                .expect("edge apply view");
-            let update = block_on(peer.rehydrate_query(&mut edge.node, shape, binding))
-                .expect("edge rehydrate query");
+            let update = block_on(peer.rehydrate_query(&mut core, shape, binding))
+                .expect("Core rehydrate query");
             let bytes = view_update_bytes(&update);
             cold_bytes += bytes;
             cold_floor += bytes_floor(&update);
             collect_result_rows(&update, &mut client_closure_rows);
             result_set_rows += result_output_count(&update, ISSUES);
-            ctx.send(&edge.name, &plan.name, update);
+            ctx.send("core", &plan.name, update);
             let delivered = ctx.recv(&plan.name);
             apply_sync_message_settled(client, delivered.message).expect("client apply view");
             cold_latencies.push((ctx.now_ms() - start_ms) * 1_000);
@@ -722,10 +626,6 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         result_set_rows,
         closure_rows: total_closure_rows.len(),
         writes_applied: config.writes,
-        edge_acceptance: edge_acceptance_phase(ctx, &mut clients[0], &mut edges[0]),
-        edge_hydration_bytes,
-        edge_hydration_floor_bytes,
-        edge_hydration_rows,
     }
 }
 
@@ -2017,43 +1917,19 @@ fn cell_uuid(commit: &FixtureCommit, column: &str) -> Option<RowUuid> {
 
 fn topology(config: &Config, profile: PeerProfile) -> Topology {
     let schema = schema();
-    let (client_edge_ms, edge_core_ms) = profile_leg_ms();
-    let client_edge = PeerProfile::new(
-        format!("{}:client-edge", profile.name),
-        client_edge_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
-    let edge_core = PeerProfile::new(
-        format!("{}:edge-core", profile.name),
-        edge_core_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
     let mut topology = Topology::default()
         .node("writer", schema.clone(), NodeRole::Writer)
         .node("core", schema.clone(), NodeRole::Core)
-        .link("writer", "core", edge_core.clone())
-        .link("core", "writer", edge_core.clone());
+        .link("writer", "core", profile.clone())
+        .link("core", "writer", profile.clone());
     for idx in 0..config.clients {
         let name = format!("client_{idx}");
-        let edge = format!("{name}_edge");
         topology = topology
             .node(&name, schema.clone(), NodeRole::Reader)
-            .node(&edge, schema.clone(), NodeRole::Edge)
-            .client_edge_core_line(&name, &edge, "core", client_edge.clone(), edge_core.clone());
+            .link(&name, "core", profile.clone())
+            .link("core", &name, profile.clone());
     }
     topology
-}
-
-fn profile_leg_ms() -> (u64, u64) {
-    let total = env_u64("JAZZ_LINK_ONE_WAY_MS", 1);
-    let client_edge = env_u64("JAZZ_CLIENT_EDGE_ONE_WAY_MS", total.min(1));
-    let edge_core = env_u64(
-        "JAZZ_EDGE_CORE_ONE_WAY_MS",
-        total.saturating_sub(client_edge).max(1),
-    );
-    (client_edge, edge_core)
 }
 
 fn schema() -> JazzSchema {
@@ -2329,6 +2205,7 @@ fn emit_summary(driver: &str, config: &Config, summary: &Summary) {
     fields.insert("fixture_hash".to_owned(), json!(summary.fixture_hash));
     fields.insert("fixture_rows".to_owned(), json!(summary.fixture_rows));
     fields.insert("clients".to_owned(), json!(summary.clients));
+    fields.insert("topology".to_owned(), json!("core_clients"));
     fields.insert(
         "cold_complete_p50_us".to_owned(),
         json!(summary.cold_complete_p50_us),
@@ -2370,36 +2247,6 @@ fn emit_summary(driver: &str, config: &Config, summary: &Summary) {
         json!(transport_codec_name(config.transport_codec)),
     );
     emit_object(fields);
-
-    let mut edge_acceptance = metadata_fields("s1_saas", driver, config.seed, &config.profile);
-    edge_acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
-    edge_acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.50)),
-    );
-    edge_acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.95)),
-    );
-    edge_acceptance.insert("durability_tier".to_owned(), json!("Edge"));
-    emit_object(edge_acceptance);
-
-    let mut edge_hydration = metadata_fields("s1_saas", driver, config.seed, &config.profile);
-    edge_hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
-    edge_hydration.insert("scope".to_owned(), json!("saas_query_closure"));
-    edge_hydration.insert(
-        "hydration_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_floor_bytes".to_owned(),
-        json!(summary.edge_hydration_floor_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_rows".to_owned(),
-        json!(summary.edge_hydration_rows),
-    );
-    emit_object(edge_hydration);
 }
 
 fn emit_reconnect_summary(config: &Config, summary: &ReconnectSummary) {

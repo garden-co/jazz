@@ -2,6 +2,484 @@
 
 use super::*;
 
+struct BackpressureAfterViewUpdateTransport {
+    inner: Box<dyn Transport>,
+    saw_view_update: bool,
+}
+
+impl Transport for BackpressureAfterViewUpdateTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        if self.saw_view_update {
+            return Err(TransportError::Backpressure);
+        }
+        let message = self.inner.try_recv();
+        if matches!(message, Some(SyncMessage::ViewUpdate(_))) {
+            self.saw_view_update = true;
+        }
+        Ok(message)
+    }
+}
+
+#[test]
+fn receive_backpressure_finalizes_consumed_view_update() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf1; 16]);
+    let server = open_core(0xf2, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xf3, alice, &schema);
+    let (client_transport, server_transport, server_sent) = duplex_with_server_outbound_tap();
+    let wrapped = BackpressureAfterViewUpdateTransport {
+        inner: client_transport,
+        saw_view_update: false,
+    };
+    let _upstream = block_on(client.connect_upstream(Box::new(wrapped)));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    assert!(
+        server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+    );
+
+    client
+        .tick()
+        .expect("receive backpressure defers after finalizing the consumed view update");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+}
+struct BackpressureDuringHandoffTransport {
+    inner: Box<dyn Transport>,
+    block_next_receive: Rc<std::cell::Cell<bool>>,
+    after_subscribe: Rc<RefCell<Option<Box<dyn FnMut()>>>>,
+}
+
+impl Transport for BackpressureDuringHandoffTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let subscribe = matches!(message, SyncMessage::Subscribe(_));
+        self.inner.send(message)?;
+        if subscribe {
+            if let Some(callback) = self.after_subscribe.borrow_mut().as_mut() {
+                callback();
+            }
+        }
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        if self.block_next_receive.replace(false) {
+            return Err(TransportError::Backpressure);
+        }
+        self.inner.try_recv_result()
+    }
+}
+
+struct TapTransport {
+    inner: Box<dyn Transport>,
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for TapTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner.try_recv_result()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+}
+
+#[test]
+fn handoff_receive_backpressure_keeps_transport_view_ineligible() {
+    handoff_receive_backpressure(false);
+}
+
+#[test]
+fn handoff_receive_backpressure_accepts_fast_confirming_snapshot() {
+    handoff_receive_backpressure(true);
+}
+
+// Internal transport scheduling is needed to put the authority's reply inside
+// send(), before the client's receive loop can run. Assertions cover the public
+// subscription settlement and visible rows.
+fn handoff_receive_backpressure(fast_reply: bool) {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf4; 16]);
+    let server = open_core(0xf5, AuthorSubject::SYSTEM, &schema);
+    server.server.set_permissions_ready(true).unwrap();
+    let queued_row = row(0xfa);
+    server
+        .insert_with_id("todos", queued_row, cells("queued", false, alice))
+        .unwrap();
+    let client = open_db(0xf6, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xf6; 16]),
+        1,
+        NodeUuid::from_bytes([0xf5; 16]),
+        1,
+    );
+    let server_sent = Rc::new(RefCell::new(VecDeque::new()));
+    let server_transport = Box::new(TapTransport {
+        inner: server_transport,
+        outbound: Rc::clone(&server_sent),
+    });
+    let block_next_receive = Rc::new(std::cell::Cell::new(false));
+    let after_subscribe: Rc<RefCell<Option<Box<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let wrapped = BackpressureDuringHandoffTransport {
+        inner: client_transport,
+        block_next_receive: Rc::clone(&block_next_receive),
+        after_subscribe: Rc::clone(&after_subscribe),
+    };
+    let upstream = block_on(client.connect_upstream(Box::new(wrapped)));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    assert!(subscription.try_next_event().is_none());
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let initial_view_count = server_sent
+        .borrow()
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        .count();
+    assert_eq!(initial_view_count, 1, "authority must send one opening");
+    client.tick().unwrap();
+    assert_eq!(
+        opened_rows(next_settled_opening(&mut subscription)).len(),
+        1
+    );
+
+    server
+        .insert_with_id("todos", row(0xfb), cells("second", false, alice))
+        .unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+            .count()
+            > initial_view_count
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        server_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+            .count(),
+        2,
+        "authority must queue the changed view before handoff"
+    );
+    assert!(
+        upstream.borrow().staged_inbound.is_empty(),
+        "the changed view must remain in the transport backlog before handoff"
+    );
+
+    block_next_receive.set(true);
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    assert!(
+        upstream.borrow().staged_inbound.is_empty(),
+        "interrupted handoff must leave the queued changed view on transport"
+    );
+    if fast_reply {
+        let fast_authority = Rc::clone(&subscriber);
+        *after_subscribe.borrow_mut() = Some(Box::new(move || {
+            for _ in 0..32 {
+                fast_authority.borrow_mut().tick().unwrap();
+            }
+        }));
+    }
+    client
+        .tick()
+        .expect("handoff receive backpressure remains recoverable");
+    let mut settled_update = None;
+    while let Some(event) = subscription.try_next_event() {
+        if fast_reply && event_settled(&event) {
+            settled_update = Some(event);
+            continue;
+        }
+        assert!(
+            !event_settled(&event),
+            "the transport-resident pre-handoff view must not settle: {event:?}"
+        );
+    }
+    if !fast_reply {
+        assert_eq!(prepared_read(&client, &Query::from("todos")).len(), 1);
+    }
+
+    for _ in 0..32 {
+        if settled_update.is_some() {
+            break;
+        }
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if event_settled(&event) {
+                settled_update = Some(event);
+                break;
+            }
+        }
+        if settled_update.is_some() {
+            break;
+        }
+    }
+    let _settled_update = settled_update.expect("a fresh confirming view must settle");
+    assert_eq!(prepared_read(&client, &Query::from("todos")).len(), 2);
+}
+
+#[test]
+fn handoff_receive_pre_staged_view_update_is_ineligible_after_immediate_drain() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf7; 16]);
+    let server = open_core(0xf8, AuthorSubject::SYSTEM, &schema);
+    server.server.set_permissions_ready(true).unwrap();
+    let client = open_db(0xf9, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xf9; 16]),
+        1,
+        NodeUuid::from_bytes([0xf8; 16]),
+        1,
+    );
+    let server_sent = Rc::new(RefCell::new(VecDeque::new()));
+    let server_transport = Box::new(TapTransport {
+        inner: server_transport,
+        outbound: Rc::clone(&server_sent),
+    });
+    let upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let _subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = server_sent
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.subscription),
+            _ => None,
+        })
+        .expect("authority must queue a view update before handoff staging");
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    loop {
+        let message = upstream
+            .borrow_mut()
+            .transport
+            .try_recv_result()
+            .unwrap()
+            .expect("authority must leave the view update on the transport");
+        let is_view_update = matches!(message, SyncMessage::ViewUpdate(_));
+        upstream
+            .borrow_mut()
+            .staged_inbound
+            .push_back(crate::db::StagedInboundMessage {
+                lease: None,
+                message,
+                authority_receipt_eligible: true,
+            });
+        if is_view_update {
+            break;
+        }
+    }
+    assert!(
+        upstream.borrow().staged_inbound.iter().any(|staged| {
+            matches!(staged.message, SyncMessage::ViewUpdate(_))
+                && staged.authority_receipt_eligible
+        }),
+        "regression setup must preload an eligible ViewUpdate"
+    );
+
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    assert!(
+        !upstream.borrow().inbound_authority_receipt_quarantine,
+        "an immediately drained handoff must not retain quarantine"
+    );
+    client
+        .tick()
+        .expect("pre-staged handoff receive remains recoverable");
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "a pre-staged handoff snapshot must not become an eligible authority receipt"
+    );
+}
+
+#[test]
+fn handoff_receive_transport_snapshot_is_ineligible_after_backpressure() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf7; 16]);
+    let server = open_core(0xf8, AuthorSubject::SYSTEM, &schema);
+    server.server.set_permissions_ready(true).unwrap();
+    let client = open_db(0xf9, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xf9; 16]),
+        1,
+        NodeUuid::from_bytes([0xf8; 16]),
+        1,
+    );
+    let server_sent = Rc::new(RefCell::new(VecDeque::new()));
+    let server_transport = Box::new(TapTransport {
+        inner: server_transport,
+        outbound: Rc::clone(&server_sent),
+    });
+    let block_next_receive = Rc::new(std::cell::Cell::new(false));
+    let upstream = block_on(client.connect_upstream(Box::new(
+        BackpressureDuringHandoffTransport {
+            inner: client_transport,
+            block_next_receive: Rc::clone(&block_next_receive),
+            after_subscribe: Rc::new(RefCell::new(None)),
+        },
+    )));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = server_sent
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.subscription),
+            _ => None,
+        })
+        .expect("authority must queue a view update before handoff staging");
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    // The authority's original opening snapshot is still on the transport,
+    // rather than a delta already excluded by awaiting_support_snapshots.
+    assert!(server_sent.borrow().iter().any(|message| {
+        matches!(message, SyncMessage::ViewUpdate(update) if update.supporting_rows.is_snapshot())
+    }));
+    assert!(upstream.borrow().staged_inbound.is_empty());
+    block_next_receive.set(true);
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    client
+        .tick()
+        .expect("transport-resident handoff receive remains recoverable");
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "a transport-resident handoff snapshot must not become an eligible authority receipt"
+    );
+    while let Some(event) = stream.try_next_event() {
+        assert!(
+            !event_settled(&event),
+            "old snapshot must not settle: {event:?}"
+        );
+    }
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+    }
+    let _ = next_settled_opening(&mut stream);
+}
+
 #[test]
 fn unordered_supporting_snapshots_preserve_public_subscription_rows() {
     let schema = schema();

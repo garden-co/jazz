@@ -208,8 +208,8 @@ identity evolution before admitting any catalogue state. Local numeric aliases
 are compression details and never authorize a replacement UUID manifest.
 
 Exactly one database-wide catalogue sequencer assigns a dense monotone
-`CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
-edges forward authenticated, prevalidated requests to that sequencer. Catalogue
+`CatalogueSeq`. Core owns this sequencer; clients and local relays never assign catalogue
+sequence. Authenticated publication requests are evaluated at Core. Catalogue
 sequence is an administrative ordering domain, not a Jazz data transaction and
 not branch-branch-local row causality. A receiver parks an envelope whose earlier catalogue
 sequence or active source schema is missing. The same sequence with different

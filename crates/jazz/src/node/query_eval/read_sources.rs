@@ -49,7 +49,13 @@ pub(super) struct CurrentSourceGraph {
     pub(super) metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy)]
+pub(super) enum HydrationLifetime {
+    FirstResult,
+    Retained,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
@@ -220,7 +226,7 @@ where
                 // the covered input rather than storage.
                 || matches!(
                     source,
-                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Edge
+                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Global
                 ))
         {
             // The compiler created this source map only for an exact
@@ -1335,8 +1341,8 @@ where
                     self.projected_visible_current_source_graph(request, &table, tier)
                         .await?
                 };
-                let graph = match &authorization {
-                    SourceAuthorizationRequest::System => source.graph,
+                let (graph, routing_fields) = match &authorization {
+                    SourceAuthorizationRequest::System => (source.graph, BTreeSet::new()),
                     SourceAuthorizationRequest::PolicyFiltered {
                         permission_subject,
                         plan,
@@ -1373,7 +1379,8 @@ where
                             );
                             request
                         });
-                        self.node
+                        let filtered = self
+                            .node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 source.graph,
@@ -1381,11 +1388,11 @@ where
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
+                            })?;
+                        (filtered.graph, filtered.route_fields)
                     }
                 };
-                (graph, source.descriptor, source.metadata, BTreeSet::new())
+                (graph, source.descriptor, source.metadata, routing_fields)
             }
         } else if request.visibility == RowVisibility::IncludeDeleted && pending_overlay {
             // A receiver's own pending deletion needs no read-policy proof.
@@ -1880,8 +1887,8 @@ where
                     self.projected_visible_current_source_graph(request, &table, tier)
                         .await?
                 };
-                let graph = match &authorization {
-                    SourceAuthorizationRequest::System => source.graph,
+                let (graph, routing_fields) = match &authorization {
+                    SourceAuthorizationRequest::System => (source.graph, BTreeSet::new()),
                     SourceAuthorizationRequest::PolicyFiltered {
                         permission_subject,
                         plan,
@@ -1918,7 +1925,8 @@ where
                             );
                             request
                         });
-                        self.node
+                        let filtered = self
+                            .node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 source.graph,
@@ -1926,11 +1934,11 @@ where
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
+                            })?;
+                        (filtered.graph, filtered.route_fields)
                     }
                 };
-                (graph, source.descriptor, source.metadata, BTreeSet::new())
+                (graph, source.descriptor, source.metadata, routing_fields)
             };
         let deletion_register =
             self.deletion_register_source_for_request(request, &table, Some(tier), None, None)?;
@@ -2660,11 +2668,7 @@ where
             global
         } else {
             let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
-            let ahead = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
-            } else {
-                ahead.project(physical_fields.clone())
-            };
+            let ahead = { ahead.project(physical_fields.clone()) };
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([global, ahead]),
                 ["row_uuid"],
@@ -2707,11 +2711,7 @@ where
             return Ok(global);
         }
         let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_source_graph(ahead, fields.clone())
-        } else {
-            ahead.project(fields.clone())
-        };
+        let ahead = { ahead.project(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
@@ -2933,11 +2933,7 @@ where
                 }
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 let ahead = self.exclude_settled_arm(request, ahead, true).await?;
-                let ahead = if tier == DurabilityTier::Edge {
-                    edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
-                } else {
-                    ahead.project(physical_fields.clone())
-                };
+                let ahead = { ahead.project(physical_fields.clone()) };
                 GraphBuilder::arg_max_by(
                     GraphBuilder::union([global, ahead]),
                     ["row_uuid"],
@@ -2978,11 +2974,7 @@ where
         }
         let global = global.project_fields(fields.clone());
         let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_source_graph(ahead, register_storage_field_names())
-        } else {
-            ahead.project_fields(fields.clone())
-        };
+        let ahead = { ahead.project_fields(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
@@ -3098,39 +3090,6 @@ fn deletion_register_current_source_graph(
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-pub(super) fn edge_accepted_transaction_source_graph() -> GraphBuilder {
-    GraphBuilder::table("jazz_transactions")
-        .filter(
-            PredicateExpr::And(vec![
-                PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                PredicateExpr::Or(vec![
-                    PredicateExpr::eq("durability", Value::EnumTag(2)),
-                    PredicateExpr::eq("durability", Value::EnumTag(3)),
-                ])
-                .canonicalize(),
-            ])
-            .canonicalize(),
-        )
-        .project(["time", "node_id"])
-}
-
-pub(super) fn edge_visible_ahead_current_source_graph(
-    source: GraphBuilder,
-    fields: Vec<String>,
-) -> GraphBuilder {
-    GraphBuilder::join(
-        source.project(fields.clone()),
-        edge_accepted_transaction_source_graph(),
-        ["tx_time", "tx_node_id"],
-        ["time", "node_id"],
-    )
-    .project_fields(
-        fields
-            .into_iter()
-            .map(|field| ProjectField::renamed(left_field(&field), field)),
-    )
-}
-
 fn content_version_current_source_graph(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -3143,30 +3102,8 @@ fn content_version_current_source_graph(
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(global_current_table_name(&table.name)).project(fields);
     }
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .iter()
-                .cloned()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    } else {
-        GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone())
-    };
+    let ahead =
+        { GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone()) };
     GraphBuilder::arg_max_by(
         GraphBuilder::union([
             GraphBuilder::table(global_current_table_name(&table.name)).project(fields.clone()),
@@ -3183,29 +3120,8 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
     }
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            key_fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    } else {
-        GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields)
-    };
+    let ahead =
+        { GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields) };
     GraphBuilder::arg_max_by(
         GraphBuilder::union([
             GraphBuilder::table(register_global_current_table_name(table)).project(key_fields),
@@ -3244,31 +3160,7 @@ fn selected_visible_current_primary_key_graph(
     ]);
     let content_scan = static_scan_for_prefix(prefix.clone(), 1);
     let deletion_scan = static_scan_for_prefix(prefix, 1);
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>, scan: StaticScanSpec| {
-        GraphBuilder::join(
-            GraphBuilder::table_scan(table_name, scan).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                        PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::EnumTag(2)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
-                        ])
-                        .canonicalize(),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deleted_winners) = if tier == DurabilityTier::Global {
         (
             GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
@@ -3281,13 +3173,7 @@ fn selected_visible_current_primary_key_graph(
             .project(["row_uuid"]),
         )
     } else {
-        let ahead_content = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_fields.clone(),
-                content_scan.clone(),
-            )
-        } else {
+        let ahead_content = {
             GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan.clone())
                 .project(content_fields.clone())
         };
@@ -3301,13 +3187,7 @@ fn selected_visible_current_primary_key_graph(
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deleted = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-                deletion_scan.clone(),
-            )
-        } else {
+        let ahead_deleted = {
             GraphBuilder::table_scan(
                 register_ahead_current_table_name(&table.name),
                 deletion_scan.clone(),
@@ -4044,13 +3924,15 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     branch_columns_nonnullable: bool,
     include_deletion_marker: bool,
 ) -> RecordDescriptor {
+    // Inline policy candidates may still contain indirect scalars. Preserve
+    // their semantic kind through this second encoding into query sources.
     let mut fields = std::iter::once(records::DescriptorField::new("row_uuid", ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
-                column.column_type.clone()
+                current_row_column_type(column)
             } else {
-                ValueType::Nullable(Box::new(column.column_type.clone()))
+                ValueType::Nullable(Box::new(current_row_column_type(column)))
             };
             current_row_column_field(column, value_type)
         }))
@@ -4228,10 +4110,7 @@ where
             // with the complete ahead overlay before choosing a winner, so a
             // newer row which leaves an equality prefix cannot leave behind a
             // stale settled match.
-            if matches!(
-                tier,
-                DurabilityTier::Global | DurabilityTier::Local | DurabilityTier::Edge
-            ) {
+            if matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
                 paths.insert(source, path);
             }
         }
@@ -4313,6 +4192,45 @@ where
         {
             *source_limit = Some(limit);
         }
+        Ok(paths)
+    }
+
+    /// Binding-specific access paths for an executing current query. Both a
+    /// one-result consumer and a retained subscription hydrate live sources;
+    /// neither may embed these prefixes into a generic prepared-plan cache.
+    pub(super) fn current_query_hydration_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        lifetime: HydrationLifetime,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let mut paths = match lifetime {
+            HydrationLifetime::Retained => {
+                self.current_query_primary_key_access_paths(shape, binding)?
+            }
+            HydrationLifetime::FirstResult => {
+                // Preserve bounded current ID reads. The policy-point guard
+                // from #2187 applies to future deletion delivery, not an
+                // initial snapshot whose owner releases it before any writes.
+                // Do not inherit snapshot-only secondary-index intersections
+                // or source limits: both consumers use live index graphs below.
+                let tier = request
+                    .reads
+                    .primary
+                    .source_current_tier(&root_source_id(&shape.query().table))
+                    .unwrap_or(DurabilityTier::None);
+                self.one_shot_access_paths(shape, binding, tier)?
+                    .into_iter()
+                    .filter(|(_, path)| matches!(path, CurrentAccessPath::PrimaryKey(_)))
+                    .collect()
+            }
+        };
+        paths.extend(
+            self.query_program_access_paths(request, true)?
+                .into_iter()
+                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+        );
         Ok(paths)
     }
 
@@ -5313,27 +5231,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                 ]),
         )
     };
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
-        GraphBuilder::join(
-            GraphBuilder::table(table_name).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deletion_current) = if tier == DurabilityTier::Global {
         (
             normalize_content_fields(
@@ -5343,12 +5241,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             GraphBuilder::table(register_global_current_table_name(&table.name)),
         )
     } else {
-        let ahead_content = if tier == DurabilityTier::Edge {
-            normalize_content_fields(edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_storage_fields.clone(),
-            ))
-        } else {
+        let ahead_content = {
             normalize_content_fields(
                 GraphBuilder::table(ahead_current_table_name(&table.name))
                     .project(content_storage_fields.clone()),
@@ -5364,12 +5257,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deletion = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-            )
-        } else {
+        let ahead_deletion = {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
                 .project(deletion_fields.clone())
         };

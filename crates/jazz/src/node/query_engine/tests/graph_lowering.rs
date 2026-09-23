@@ -47,7 +47,7 @@ fn shared_row_set_dag_reaches_owned_plan_and_groove_lowering() {
 fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs() {
     for tier in [
         DurabilityTier::Local,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         DurabilityTier::Global,
     ] {
         let request = QueryProgramRequest {

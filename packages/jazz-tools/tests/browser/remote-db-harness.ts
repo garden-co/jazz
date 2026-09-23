@@ -24,7 +24,7 @@ export interface RemoteBrowserDbWaitForTitleInput {
   id: string;
   title: string;
   timeoutMs: number;
-  tier?: "local" | "edge";
+  tier?: "local" | "global";
 }
 
 interface RemoteBrowserDbState {
@@ -120,7 +120,7 @@ export async function insertRemoteBrowserDbRow(input: {
   id: string;
   row: Record<string, unknown>;
   table?: string;
-  tier?: "local" | "edge";
+  tier?: "local" | "global";
 }): Promise<string> {
   const state = getRemoteStateStore().get(input.id);
   if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
@@ -158,7 +158,7 @@ export async function updateRemoteBrowserDbRow(input: {
 
 export async function queryRemoteBrowserDbRows(input: {
   id: string;
-  tier?: "local" | "edge";
+  tier?: "local" | "global";
 }): Promise<Record<string, unknown>[]> {
   const state = getRemoteStateStore().get(input.id);
   if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);

@@ -25,7 +25,6 @@ use crate::db::{
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
 use crate::ids::{AuthorSubject, MigrationLensId, RowUuid, SchemaVersionId};
-use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
     SyncMessage,
@@ -117,8 +116,6 @@ pub struct InMemoryServerShellConfig {
     pub identity: DbIdentity,
     /// Optional deterministic row-id seed for ABI writes.
     pub row_id_seed: Option<u64>,
-    /// Optional edge-cache byte budget. `None` disables automatic eviction.
-    pub edge_cache_budget: Option<EdgeCacheBudget>,
     /// Jazz-owned policy for unpublished large-value uploads and roots.
     pub large_value_staging_policy: crate::node::LargeValueStagingPolicy,
     /// Server role used for client-link semantics.
@@ -138,7 +135,6 @@ impl InMemoryServerShellConfig {
             schema,
             identity,
             row_id_seed: None,
-            edge_cache_budget: None,
             large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
@@ -149,12 +145,6 @@ impl InMemoryServerShellConfig {
     /// Set a deterministic row-id seed for server-side ABI writes.
     pub fn with_row_id_seed(mut self, row_id_seed: u64) -> Self {
         self.row_id_seed = Some(row_id_seed);
-        self
-    }
-
-    /// Configure automatic edge-cache eviction by byte budget.
-    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
-        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -195,7 +185,6 @@ impl fmt::Debug for InMemoryServerShellConfig {
             .field("schema", &self.schema)
             .field("identity", &self.identity)
             .field("row_id_seed", &self.row_id_seed)
-            .field("edge_cache_budget", &self.edge_cache_budget)
             .field(
                 "large_value_staging_policy",
                 &self.large_value_staging_policy,
@@ -214,7 +203,6 @@ impl fmt::Debug for InMemoryServerShellConfig {
 #[derive(Debug)]
 pub struct InMemoryServerShell {
     db: ShellDb,
-    role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
     upstream_connections: Vec<ShellPeerConnection>,
     wire_upstream_connections: BTreeMap<u64, ShellPeerConnection>,
@@ -320,6 +308,22 @@ struct WireQueues {
     outbound: VecDeque<Vec<u8>>,
 }
 
+impl WireQueues {
+    fn stage_inbound(&mut self, frame: Vec<u8>) -> std::result::Result<(), String> {
+        let charge = crate::wire::channel_credit::channel_frame_credit_cost;
+        let used = self
+            .inbound
+            .iter()
+            .map(|frame| charge(frame.len()))
+            .sum::<usize>();
+        if used.saturating_add(charge(frame.len())) > 8 * 1024 * 1024 {
+            return Err("inbound physical channel queue exceeds receive budget".to_owned());
+        }
+        self.inbound.push_back(frame);
+        Ok(())
+    }
+}
+
 pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
@@ -328,7 +332,19 @@ pub(super) struct ServerUpstreamIo {
 
 impl WireTransport for SharedWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
-        self.queues.borrow_mut().outbound.push_back(frame);
+        let mut queues = self.queues.borrow_mut();
+        if queues.outbound.len() >= 128
+            || queues
+                .outbound
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                .saturating_add(frame.len())
+                > 8 * 1024 * 1024
+        {
+            return Err(TransportError::Backpressure);
+        }
+        queues.outbound.push_back(frame);
         Ok(())
     }
 
@@ -396,61 +412,6 @@ impl ShellDb {
         }
     }
 
-    fn open_catalogue_uninitialized_edge(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<&dyn StorageFactory>,
-        row_id_seed: Option<u64>,
-    ) -> ShellResult<Self> {
-        let schema = JazzSchema::empty();
-        match storage_config {
-            StorageConfig::InMemory => {
-                let refs = schema.column_families();
-                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-                let mut config = DbConfig::new(
-                    schema,
-                    BoxedStorage::new(
-                        MemoryStorage::new(&refs).expect("valid memory storage families"),
-                    ),
-                    identity,
-                );
-                if let Some(seed) = row_id_seed {
-                    config = config.with_id_source(SeededRowIdSource::new(seed));
-                }
-                Ok(Self::Memory(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
-                )?))
-            }
-            StorageConfig::RocksDb { path } => {
-                let refs = schema.column_families();
-                let factory = storage_factory.ok_or_else(|| {
-                    ShellError::Storage(
-                        "durable server storage requires a target-shell storage factory".into(),
-                    )
-                })?;
-                let mut config = DbConfig::new(
-                    schema,
-                    crate::db::block_on(factory.open(
-                        path,
-                        refs,
-                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                    ))
-                    .map_err(db_storage_error)?,
-                    identity,
-                );
-                if let Some(seed) = row_id_seed {
-                    config = config.with_id_source(SeededRowIdSource::new(seed));
-                }
-                Ok(Self::Durable(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
-                )?))
-            }
-            StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
-                storage: storage_config,
-            }),
-        }
-    }
-
     fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
@@ -483,39 +444,10 @@ impl ShellDb {
         }
     }
 
-    fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
-        match self {
-            Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-            Self::Durable(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-        }
-    }
-
-    fn catalogue_bootstrap_is_ready(&self) -> bool {
-        match self {
-            Self::Memory(db) => db.catalogue_bootstrap_is_ready(),
-            Self::Durable(db) => db.catalogue_bootstrap_is_ready(),
-        }
-    }
-
-    fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
-            Self::Durable(db) => *db = crate::db::block_on(db.register_schema_view(schema))?,
-        }
-        Ok(())
-    }
-
     fn enable_authoritative_scalar_exit_refresh(&self) {
         match self {
             Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
             Self::Durable(db) => db.enable_authoritative_scalar_exit_refresh(),
-        }
-    }
-
-    fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        match self {
-            Self::Memory(db) => db.set_edge_cache_budget(budget),
-            Self::Durable(db) => db.set_edge_cache_budget(budget),
         }
     }
 
@@ -716,27 +648,6 @@ impl ShellDb {
         }
     }
 
-    fn accept_edge_authority_subscriber_with_claims_and_trust(
-        &self,
-        transport: Box<dyn crate::db::Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        trust: CommitUnitTrust,
-    ) -> ShellPeerConnection {
-        match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport, identity, claims, trust,
-                ),
-            ),
-            Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport, identity, claims, trust,
-                ),
-            ),
-        }
-    }
-
     fn detach_connection(&self, connection: &ShellPeerConnection) -> bool {
         match (self, connection) {
             (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
@@ -802,14 +713,6 @@ impl ShellPeerConnection {
         }
     }
 
-    fn set_partial_edge_query_host(&self) {
-        match self {
-            Self::Memory(connection) | Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).set_partial_edge_query_host()
-            }
-        }
-    }
-
     fn io_pump(&self) -> crate::db::PeerIoPump {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).io_pump(),
@@ -869,7 +772,6 @@ impl InMemoryServerShell {
         config: InMemoryServerShellConfig,
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
-        let edge_cache_budget = config.edge_cache_budget;
         let large_value_staging_policy = config.large_value_staging_policy;
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
@@ -922,12 +824,10 @@ impl InMemoryServerShell {
         if role == NodeRole::Core {
             db.enable_authoritative_scalar_exit_refresh();
         }
-        db.set_edge_cache_budget(edge_cache_budget);
         db.set_large_value_staging_policy(large_value_staging_policy);
 
         let mut shell = Self {
             db,
-            role,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
             wire_upstream_connections: BTreeMap::new(),
@@ -945,81 +845,6 @@ impl InMemoryServerShell {
         Ok(shell)
     }
 
-    /// Start from a blank dynamic-edge store, atomically adopt the supplied
-    /// authenticated authority snapshot, then expose the ordinary ready shell.
-    /// No application session can be admitted during this construction.
-    pub fn start_dynamic_edge_with_catalogue_snapshot(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> ShellResult<Self> {
-        let db = ShellDb::open_catalogue_uninitialized_edge(
-            identity,
-            storage_config,
-            storage_factory.as_deref(),
-            Some(0x5e),
-        )?;
-        db.apply_trusted_catalogue_snapshot(snapshot)?;
-        let structural = db.trusted_current_catalogue_schema()?;
-        let mut db = db;
-        db.select_schema_view(structural)?;
-        db.set_edge_cache_budget(edge_cache_budget);
-        Ok(Self {
-            db,
-            role: NodeRole::Edge,
-            sessions: Vec::new(),
-            upstream_connections: Vec::new(),
-            wire_upstream_connections: BTreeMap::new(),
-            next_wire_upstream_connection_id: 1,
-            resume_cursors: BTreeMap::new(),
-            next_resume_token: 1,
-            next_session_generation: 1,
-            runtime_schema_state: RuntimeSchemaState::default(),
-            metrics: InMemoryServerShellMetrics::default(),
-            drain_state: DrainState::Running,
-        })
-    }
-
-    /// Reopen an already-adopted dynamic edge without contacting upstream.
-    /// Returns `None` for a genuinely blank store so the owner can run the
-    /// authenticated bootstrap driver; malformed durable state remains an
-    /// error and is never treated as blank.
-    pub fn try_start_dynamic_edge_from_storage(
-        identity: DbIdentity,
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-    ) -> ShellResult<Option<Self>> {
-        let db = ShellDb::open_catalogue_uninitialized_edge(
-            identity,
-            storage_config,
-            storage_factory.as_deref(),
-            Some(0x5e),
-        )?;
-        if !db.catalogue_bootstrap_is_ready() {
-            return Ok(None);
-        }
-        let schema = db.trusted_current_catalogue_schema()?;
-        let mut db = db;
-        db.select_schema_view(schema)?;
-        db.set_edge_cache_budget(edge_cache_budget);
-        Ok(Some(Self {
-            db,
-            role: NodeRole::Edge,
-            sessions: Vec::new(),
-            upstream_connections: Vec::new(),
-            wire_upstream_connections: BTreeMap::new(),
-            next_wire_upstream_connection_id: 1,
-            resume_cursors: BTreeMap::new(),
-            next_resume_token: 1,
-            next_session_generation: 1,
-            runtime_schema_state: RuntimeSchemaState::default(),
-            metrics: InMemoryServerShellMetrics::default(),
-            drain_state: DrainState::Running,
-        }))
-    }
     /// Return the complete authority catalogue for the authenticated
     /// snapshot-only websocket exchange.
     pub(crate) fn trusted_catalogue_snapshot(
@@ -1043,23 +868,6 @@ impl InMemoryServerShell {
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) {
         self.db.set_catalogue_activation_failpoint(failpoint);
-    }
-
-    /// Encode the snapshot through the ordinary negotiated wire codec so
-    /// large catalogues retain the protocol's fragmentation and feature rules.
-    pub(crate) fn encoded_trusted_catalogue_snapshot(
-        &self,
-        protocol_version: u16,
-        features: crate::wire::WireFeatures,
-    ) -> ShellResult<Vec<AbiBytes>> {
-        let transport = SharedWireTransport::default();
-        let mut wire =
-            WireTransportAdapter::new(transport.clone(), protocol_version, features, None);
-        wire.send(SyncMessage::CatalogueSnapshot(Box::new(
-            self.trusted_catalogue_snapshot()?,
-        )))
-        .map_err(|error| ShellError::Transport(format!("{error:?}")))?;
-        Ok(transport.queues.borrow_mut().outbound.drain(..).collect())
     }
 
     /// Return the shell's ABI runtime handle for diagnostics in unit tests.
@@ -1257,9 +1065,6 @@ impl InMemoryServerShell {
             None,
             session_context,
         ));
-        // Only public sessions are Edge authority writes. Trusted native and
-        // backend links retain ordinary local Edge admission, which remains
-        // available while the Core authority is disconnected.
         let connection = if let ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } =
             link_admission
         {
@@ -1272,14 +1077,6 @@ impl InMemoryServerShell {
                 claims,
                 admission_epoch,
             )
-        } else if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
-            self.db
-                .accept_edge_authority_subscriber_with_claims_and_trust(
-                    transport_adapter,
-                    identity,
-                    claims,
-                    trust,
-                )
         } else {
             self.db.accept_subscriber_with_claims_and_trust(
                 transport_adapter,
@@ -1290,9 +1087,6 @@ impl InMemoryServerShell {
         };
         if link_admission == ServerLinkAdmission::AuthorityQueryDelegate {
             connection.admit_authority_query_delegate();
-        }
-        if self.role == NodeRole::Edge {
-            connection.set_partial_edge_query_host();
         }
         let auxiliary_pump = connection.io_pump();
         let session_state = ServerSessionState {
@@ -1532,7 +1326,12 @@ impl InMemoryServerShell {
                 crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
                     .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())
@@ -1557,7 +1356,12 @@ impl InMemoryServerShell {
                 .await
                 .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())
@@ -1598,6 +1402,24 @@ impl InMemoryServerShell {
     /// chunk reads before this future resumes.
     pub async fn tick_async(&mut self) -> ShellResult<()> {
         let stats = self.db.tick_stats_async().await?;
+        let retired = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(transport, state)| {
+                state
+                    .as_ref()
+                    .filter(|state| state.auxiliary_pump.is_disconnected())
+                    .map(|state| ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for session in retired {
+            self.close_session(session)?;
+        }
         self.metrics.ticks += 1;
         let stats = ShellTickStats {
             inbound: 0,
@@ -1626,19 +1448,20 @@ impl InMemoryServerShell {
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
         let state = self.session_state(session)?;
-        let mut frames = state
-            .transport
-            .queues
-            .borrow_mut()
-            .outbound
-            .drain(..)
-            .collect::<Vec<_>>();
-        while let Some(frame) = state
-            .auxiliary_pump
-            .take_outbound_wire_frame()
-            .map_err(ShellError::Transport)?
-        {
-            frames.push(frame);
+        let mut frames = Vec::new();
+        // Bound each host turn and alternate sources at physical-frame
+        // granularity. A chunk response may itself span several extents.
+        for _ in 0..16 {
+            let canonical = state.transport.queues.borrow_mut().outbound.pop_front();
+            let auxiliary = state
+                .auxiliary_pump
+                .take_outbound_wire_frame()
+                .map_err(ShellError::Transport)?;
+            if canonical.is_none() && auxiliary.is_none() {
+                break;
+            }
+            frames.extend(canonical);
+            frames.extend(auxiliary);
         }
         self.metrics.frames_sent += frames.len() as u64;
         self.metrics.bytes_sent += frames.iter().map(Vec::len).sum::<usize>() as u64;
@@ -1868,8 +1691,6 @@ fn db_storage_error(error: impl fmt::Display) -> ShellError {
 pub enum NodeRole {
     /// Stateless protocol relay with no fate authority.
     Relay,
-    /// Edge node that can cache and broker traffic near clients.
-    Edge,
     /// Durable core node that owns authoritative storage.
     Core,
 }
@@ -2226,7 +2047,7 @@ pub fn validate_config(config: &ServerConfig) -> Result<()> {
     if matches!(config.profile, DeploymentProfile::Production) && !config.storage.is_durable() {
         return Err(ConfigError::ProductionRequiresDurableStorage);
     }
-    if matches!(config.role, NodeRole::Core | NodeRole::Edge)
+    if matches!(config.role, NodeRole::Core)
         && matches!(config.profile, DeploymentProfile::Production)
         && !config.drain_on_shutdown
     {
@@ -2773,10 +2594,10 @@ mod tests {
     #[test]
     fn schema_dry_run_maps_server_config_to_runtime_plan() {
         let schema = simple_schema();
-        let mut config = ServerConfig::local("edge-a");
-        config.role = NodeRole::Edge;
+        let mut config = ServerConfig::local("core-a");
+        config.role = NodeRole::Core;
         config.storage = StorageConfig::RocksDb {
-            path: PathBuf::from("/var/lib/jazz/edge-a"),
+            path: PathBuf::from("/var/lib/jazz/core-a"),
         };
         let expected_column_family_count = required_column_families(&schema).len();
 
@@ -2789,7 +2610,7 @@ mod tests {
         assert_eq!(
             report.runtime_plan,
             ServerRuntimePlan {
-                core_role: NodeRole::Edge,
+                core_role: NodeRole::Core,
                 profile: DeploymentProfile::Local,
                 storage_kind: StorageKind::RocksDb,
                 schema_column_family_count: expected_column_family_count,

@@ -26,6 +26,7 @@ members = [
   # "examples/docs/todo-server-rs",
   "examples/todo-client-localfirst-ts/benchmarks",
   "examples/permissioned-resources/benchmarks",
+  "examples/policy-scoped-documents/benchmarks",
   "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
@@ -39,7 +40,7 @@ members = [
   "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
+exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
 
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }

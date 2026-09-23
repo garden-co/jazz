@@ -43,6 +43,14 @@ impl Transport for ObservedTestTransport {
         self.inner.try_recv()
     }
 
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner.try_recv_result()
+    }
+
+    fn try_recv_owned_result(&mut self) -> Result<Option<ReceivedSyncMessage>, TransportError> {
+        self.inner.try_recv_owned_result()
+    }
+
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.inner.connection_session_context()
     }
@@ -357,53 +365,6 @@ where
         Ok(db)
     }
 
-    /// Open an edge whose durable store has no authority catalogue yet.
-    ///
-    /// This is deliberately narrower than [`Db::open`]: callers may only use
-    /// it to receive one connection-authenticated catalogue snapshot and then
-    /// select one of the snapshot's admitted schema views.  Until then the
-    /// node has no application schema and rejects ordinary data/sync work.
-    #[cfg(feature = "runtime")]
-    pub(crate) async fn open_catalogue_uninitialized_edge(
-        config: DbConfig<S>,
-    ) -> Result<Self, Error> {
-        let bootstrap_schema = JazzSchema::empty();
-        let schema_version_id = bootstrap_schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&bootstrap_schema),
-            bootstrap_schema.clone(),
-        )])));
-        let node =
-            NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
-        let node = Node::new(node);
-        node.restore_pending_uploads(config.identity).await?;
-        node.restore_edge_authority_uploads().await?;
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: bootstrap_schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
-    }
-
     /// Install a complete catalogue received over the authenticated upstream
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.
@@ -439,23 +400,6 @@ where
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
         Ok(self.node.node.borrow().catalogue_snapshot()?)
-    }
-
-    /// Return the active authority-admitted schema, failing closed when this
-    /// dynamic edge still has no bootstrap receipt.
-    #[cfg(feature = "runtime")]
-    pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
-        let node = self.node.node.borrow();
-        let pointer = node.current_write_schema()?;
-        node.schema_with_active_permissions(pointer.schema)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
-    }
-
-    #[cfg(feature = "runtime")]
-    pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
-        self.node.node.borrow().catalogue_bootstrap_state()
-            == crate::node::CatalogueBootstrapState::Ready
     }
 
     /// Register a typed schema view on this database owner.
@@ -1153,14 +1097,6 @@ where
         self.node
             .mark_subscriber_connections_dirty_after_query_runtime_wake();
     }
-    /// Configure automatic edge-cache byte-budget eviction.
-    ///
-    /// `None` disables automatic eviction and preserves the historical manual
-    /// `evict_cold` behavior.
-    pub fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        self.node.set_edge_cache_budget(budget);
-    }
-
     /// Ask the installed scheduler to service pending peer-connection work.
     pub fn schedule_tick(&self, urgency: TickUrgency) {
         self.node.schedule_tick(urgency);
@@ -1300,31 +1236,6 @@ where
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
     }
 
-    /// Accept an edge-terminated subscriber with session claims.
-    pub fn accept_edge_subscriber_with_claims(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-    ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node
-            .accept_edge_subscriber_with_claims(transport, identity, claims)
-    }
-
-    /// Accept a subscriber whose host shell is wired as an edge fate authority.
-    pub fn accept_edge_authority_subscriber_with_claims_and_trust(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        trust: CommitUnitTrust,
-    ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node
-            .accept_edge_authority_subscriber_with_claims_and_trust(
-                transport, identity, claims, trust,
-            )
-    }
-
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
     pub fn accept_subscriber_with_resume(
         &self,
@@ -1367,32 +1278,24 @@ where
         if self.node.has_pending_local_publications() {
             self.node.poll_local_publication_settlement_once()?;
         }
-        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
-        // A queued read may await a delivery receipt without retaining the
-        // owner. Keep its FIFO position, but service the semantic/peer work
-        // producing that receipt. Cold operations holding the owner still yield.
-        if queued_mutation_pending && !self.node.owner_is_available() {
-            // A cold FIFO owner operation remains retained at the queue head.
-            // If a close future was cancelled while polling it, its terminal
-            // sweeps still belong to node maintenance and must not wait for
-            // that operation to wake before becoming observable.
-            if self.node.transaction_abandonment_shutdown_is_pending() {
-                self.node.finish_transaction_abandonment_shutdown().await?;
-            }
-            if self.node.subscription_finalization_shutdown_is_pending() {
-                self.node.drain_subscription_finalizations().await?;
-            }
+        // A retained operation or external read may need the next owner/peer
+        // turn to release this lock. Waiting here would prevent that turn.
+        // Leave cleanup queued; close still explicitly drains it before storage.
+        if !self.node.owner_is_available_or_wake_when_released() {
             return Ok(());
         }
+        self.flush_deferred_rejection_discards_after_tick().await?;
         self.node.drain_subscription_finalizations().await?;
         if self.node.has_pending_local_publications() {
             self.node.settle_local_publications().await?;
         }
         self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
+        if self.node.owner_is_available_or_wake_when_released() {
+            self.flush_deferred_rejection_discards_after_tick().await?;
+        }
         Ok(())
     }
 
@@ -1410,28 +1313,22 @@ where
         if self.node.has_pending_local_publications() {
             self.node.poll_local_publication_settlement_once()?;
         }
-        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
-        // A queued read may await a delivery receipt without retaining the
-        // owner. Keep its FIFO position, but service the semantic/peer work
-        // producing that receipt. Cold operations holding the owner still yield.
-        if queued_mutation_pending && !self.node.owner_is_available() {
-            if self.node.transaction_abandonment_shutdown_is_pending() {
-                self.node.finish_transaction_abandonment_shutdown().await?;
-            }
-            if self.node.subscription_finalization_shutdown_is_pending() {
-                self.node.drain_subscription_finalizations().await?;
-            }
+        // Match tick: do not retain the host turn behind another lock owner.
+        if !self.node.owner_is_available_or_wake_when_released() {
             return Ok(DbTickStats::default());
         }
+        self.flush_deferred_rejection_discards_after_tick().await?;
         self.node.drain_subscription_finalizations().await?;
         if self.node.has_pending_local_publications() {
             self.node.settle_local_publications().await?;
         }
         let stats = self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
+        if self.node.owner_is_available_or_wake_when_released() {
+            self.flush_deferred_rejection_discards_after_tick().await?;
+        }
         Ok(stats)
     }
 

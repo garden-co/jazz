@@ -1,9 +1,3 @@
-#[derive(Clone, Copy)]
-pub(super) enum MergeAuthority {
-    Edge,
-    Core,
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -13,7 +7,7 @@ where
         records: &[VersionRecord],
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let rows = self.merge_rows_for_versions(records)?;
-        self.create_merge_versions_for_rows(rows, MergeAuthority::Core).await
+        self.create_merge_versions_for_rows(rows).await
     }
 
     fn merge_rows_for_versions(
@@ -47,12 +41,11 @@ where
     pub(super) async fn create_merge_versions_for_rows(
         &mut self,
         rows: Vec<(String, BranchKey, RowUuid)>,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
         for (table, branch_key, row_uuid) in rows {
             let created = self
-                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid, authority)
+                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
                 .await?;
             outcome.append_outcome(created);
         }
@@ -65,7 +58,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid, MergeAuthority::Core)
+        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid)
             .await
     }
 
@@ -74,7 +67,6 @@ where
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.active_schema.schema, table)?;
@@ -174,18 +166,7 @@ where
             .cells(cells);
         let publication = self.commit_mergeable_at(merge_commit, made_at).await?;
         let merge_tx = publication.tx_id;
-        let work = match authority {
-            MergeAuthority::Core => self.resident_commit_unit(merge_tx).await?,
-            // This is a locally generated, authority-validated merge, not an
-            // unfated remote write. Settle its persistence before accepting it
-            // at Edge durability; never run global admission on an edge.
-            MergeAuthority::Edge => SyncMessage::FateUpdate {
-                tx_id: merge_tx,
-                fate: Fate::Accepted,
-                global_time: None,
-                durability: Some(DurabilityTier::Edge),
-            },
-        };
+        let work = self.resident_commit_unit(merge_tx).await?;
         Ok(PublicationOutcome::published_then(
             Vec::new(),
             publication,
@@ -795,20 +776,50 @@ where
         {
             self.merge_head_reachability_walks += 1;
         }
+        if start == target {
+            return Ok(true);
+        }
+        if target.time >= start.time {
+            return Ok(false);
+        }
+
+        let key = ContentVersionReachabilityCacheKey {
+            table_id,
+            branch_key: branch_key.clone(),
+            row_uuid,
+            start,
+        };
+        if let Some(reaches) = self.cached_content_version_reachability(&key, target) {
+            return Ok(reaches);
+        }
+
         let mut stack = vec![start];
-        let mut seen = BTreeSet::new();
+        let mut ancestors = FxHashSet::default();
+        let mut complete = true;
+        let mut reaches = false;
         while let Some(tx_id) = stack.pop() {
             if tx_id == target {
-                return Ok(true);
+                reaches = true;
+                // A witness is enough for this query, but the remaining
+                // ancestry was not inspected and must not be cached as a
+                // complete closure.
+                complete = false;
+                break;
             }
-            if !seen.insert(tx_id) {
+            if !ancestors.insert(tx_id) {
                 continue;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.merge_head_reachability_nodes += 1;
             }
             // Reachability is row-local. Preserve the transaction-presence and
             // resident-cache semantics without materializing its sibling rows.
             let Some(tx) = self.query_transaction(tx_id).await? else {
+                complete = false;
                 continue;
             };
+            let mut found_content_version = false;
             if self.query.tx_versions_cache.contains_key(&tx_id) {
                 for version in self
                     .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
@@ -817,6 +828,7 @@ where
                     if version.branch_key() == branch_key
                         && version.layer() == VersionLayer::Content
                     {
+                        found_content_version = true;
                         stack.extend(version.parents());
                     }
                 }
@@ -833,10 +845,19 @@ where
                 )
                 .await?
             {
+                found_content_version = true;
                 stack.extend(version.parents());
             }
+            if !found_content_version {
+                // A complete closure requires a witness for every transaction
+                // node. Missing history remains a valid non-cached answer.
+                complete = false;
+            }
         }
-        Ok(false)
+        if complete {
+            self.cache_content_version_reachability(key, ancestors);
+        }
+        Ok(reaches)
     }
 
     async fn content_version_reaches_tx_in_batch(
@@ -1471,8 +1492,8 @@ where
 
     /// Once a transaction is rejected or globally settled, it must not remain
     /// in the ahead-current overlay: accepted global effects live in current
-    /// tables, and rejected effects are no longer visible. Edge-accepted
-    /// no-global transactions intentionally stay ahead-visible at Edge tier.
+    /// tables, and rejected effects are no longer visible. Pending local
+    /// transactions remain in this overlay until Core supplies a final fate.
     /// Outbox/redelivery may keep the commit unit until fate arrives, so
     /// callers invoke this strictly after the cleanup-triggering fate is durable.
     pub(super) async fn cleanup_fated_ahead_current_for_tx(

@@ -43,7 +43,7 @@ use crate::node::CurrentRowBindingRole;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, TransactionBranchRowState, ViewUpdateParts,
@@ -56,7 +56,7 @@ use crate::protocol::{
     CoverageKey, CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction,
     PermissionAdviceRequestId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
@@ -76,13 +76,17 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
+pub(crate) mod channel_endpoint;
+mod routed_messages;
+pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
+pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
-pub use wire_transport::WireTransportAdapter;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
+pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -704,39 +708,56 @@ pub struct PeerIoPump {
     connection: u64,
     role: PeerIoPumpRole,
     wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
-    wire_outbound_frame: Option<Rc<RefCell<crate::wire::WireFrame>>>,
+    auxiliary_endpoint: Option<SharedAuxiliaryEndpoint>,
+    wire_reservation_active: Rc<Cell<bool>>,
+    wire_outbound_obligation: Rc<RefCell<Option<SyncMessage>>>,
+    canonical_credit_progress: Rc<Cell<bool>>,
 }
 
-/// One encoded auxiliary frame whose source obligation remains owned by this
-/// pump until the binding commits the handoff. Dropping the reservation restores
-/// the exact request/response batch to the front of its lane.
+/// One exact encoded channel frame retained by the endpoint until handoff.
+/// Dropping a reservation leaves both bytes and the logical obligation pending.
 pub(crate) struct ReservedOutboundWireFrame {
     pump: PeerIoPump,
-    message: Option<SyncMessage>,
-    frame: Option<Vec<u8>>,
+    frame: Vec<u8>,
+    credit_grant: bool,
 }
 
 impl ReservedOutboundWireFrame {
     pub(crate) fn take_frame(&mut self) -> Vec<u8> {
-        self.frame
-            .take()
-            .expect("reserved auxiliary wire frame is handed to the transport once")
+        self.frame.clone()
     }
 
-    pub(crate) fn commit(mut self) {
-        let message = self
-            .message
-            .take()
-            .expect("reserved auxiliary outbound batch is committed once");
-        self.pump.acknowledge_outbound(&message);
+    pub(crate) fn commit(self) {
+        if self.credit_grant {
+            self.pump
+                .channel_credits()
+                .expect("reserved credit has endpoint")
+                .lock()
+                .expect("channel credit lock poisoned")
+                .accept_grant()
+                .expect("reserved credit remains pending until handoff");
+            return;
+        }
+        let completed = self
+            .pump
+            .auxiliary_endpoint
+            .as_ref()
+            .expect("reserved frame has an auxiliary endpoint")
+            .lock()
+            .expect("auxiliary endpoint lock poisoned")
+            .accept_outbound()
+            .expect("reserved frame remains pending until handoff");
+        if completed.is_some() {
+            if let Some(message) = self.pump.wire_outbound_obligation.borrow_mut().take() {
+                self.pump.acknowledge_outbound(&message);
+            }
+        }
     }
 }
 
 impl Drop for ReservedOutboundWireFrame {
     fn drop(&mut self) {
-        if let Some(message) = self.message.take() {
-            self.pump.restore_outbound(message);
-        }
+        self.pump.wire_reservation_active.set(false);
     }
 }
 
@@ -749,16 +770,11 @@ impl PeerIoPump {
         wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
     ) -> Self {
         resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
-        let wire_outbound_frame = wire_inbound_context.as_ref().map(|context| {
-            let mut envelope = crate::wire::WireEnvelope::new(
-                context.expected_protocol_version(),
-                crate::wire::FEATURE_NONE,
-                Vec::new(),
-            );
-            if let Some(session) = context.expected_session().cloned() {
-                envelope = envelope.with_session(session);
-            }
-            Rc::new(RefCell::new(crate::wire::WireFrame::Message(envelope)))
+        let auxiliary_endpoint = wire_inbound_context.as_ref().map(|context| {
+            let mut endpoint = AuxiliaryChannelEndpoint::new((**context).clone())
+                .expect("paired transport has a valid auxiliary channel context");
+            endpoint.set_pump_owned();
+            std::sync::Arc::new(std::sync::Mutex::new(endpoint))
         });
         Self {
             resolver,
@@ -766,7 +782,59 @@ impl PeerIoPump {
             connection,
             role,
             wire_inbound_context,
-            wire_outbound_frame,
+            auxiliary_endpoint,
+            wire_reservation_active: Rc::new(Cell::new(false)),
+            wire_outbound_obligation: Rc::new(RefCell::new(None)),
+            canonical_credit_progress: Rc::new(Cell::new(false)),
+        }
+    }
+
+    pub(crate) fn with_shared_auxiliary_endpoint(
+        mut self,
+        endpoint: Option<SharedAuxiliaryEndpoint>,
+    ) -> Self {
+        if let Some(endpoint) = endpoint {
+            self.auxiliary_endpoint = Some(endpoint);
+        }
+        self
+    }
+
+    fn claim_binding_output(&self) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .set_pump_owned();
+        }
+    }
+
+    /// Remaining delay for the independent auxiliary receive deadline.
+    pub fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        self.auxiliary_endpoint
+            .as_ref()?
+            .lock()
+            .ok()?
+            .incomplete_receive_timeout_ms()
+    }
+
+    /// Service an auxiliary receive deadline without entering the semantic node.
+    pub fn expire_incomplete_receive(&self) -> Result<(), String> {
+        self.auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary endpoint unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .expire_incomplete_receive()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&self, timeout_ms: u64) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .set_incomplete_receive_timeout_for_test(timeout_ms);
         }
     }
 
@@ -914,6 +982,41 @@ impl PeerIoPump {
         }
     }
 
+    fn channel_credits(&self) -> Result<crate::wire::channel_credit::SharedChannelCredits, String> {
+        Ok(self
+            .auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary channel endpoint is unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .channel_credits())
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn take_canonical_credit_progress(&self) -> bool {
+        self.canonical_credit_progress.replace(false)
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn wire_frame_is_auxiliary(&self, frame: &[u8]) -> Result<bool, String> {
+        if self.is_disconnected() {
+            return Err("auxiliary connection is disconnected".to_owned());
+        }
+        Ok(
+            match self
+                .wire_inbound_context()?
+                .decode_frame(frame)
+                .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?
+            {
+                crate::wire::WireFrame::ChannelCredit(_) => true,
+                crate::wire::WireFrame::Channel(envelope) => {
+                    envelope.extent.channel == crate::wire::channels::AUXILIARY_CHANNEL
+                }
+                _ => false,
+            },
+        )
+    }
+
     /// Demultiplex one complete wire frame without taking the Jazz node lock.
     /// Auxiliary messages are consumed; canonical and fragmented frames are
     /// returned byte-for-byte for the ordinary semantic transport.
@@ -921,21 +1024,41 @@ impl PeerIoPump {
         &self,
         frame: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
+        if self.is_disconnected() {
+            return Err("auxiliary connection is disconnected".to_owned());
+        }
         let context = self.wire_inbound_context()?;
         let decoded = context
             .decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
-        let crate::wire::WireFrame::Message(envelope) = decoded else {
-            return Ok(Some(frame));
+        let envelope = match decoded {
+            crate::wire::WireFrame::ChannelCredit(grant) => {
+                self.channel_credits()?
+                    .lock()
+                    .map_err(|_| "channel credit lock poisoned".to_owned())?
+                    .receive_credit(grant)?;
+                self.canonical_credit_progress.set(true);
+                return Ok(None);
+            }
+            crate::wire::WireFrame::Channel(envelope) => envelope,
+            _ => return Ok(Some(frame)),
         };
-        let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
-            .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
-        let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
-            .map_err(|error| format!("malformed auxiliary wire envelope: {error:?}"))?;
-        match self.route_incoming(message).await {
-            Ok(()) => Ok(None),
-            Err(_) => Ok(Some(frame)),
+        if envelope.extent.channel != crate::wire::channels::AUXILIARY_CHANNEL {
+            return Ok(Some(frame));
         }
+        let message = self
+            .auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary channel endpoint is unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .receive(envelope, frame.len())?;
+        if let Some(message) = message {
+            self.route_incoming(message)
+                .await
+                .map_err(|_| "canonical message on reserved auxiliary channel".to_owned())?;
+        }
+        Ok(None)
     }
 
     /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
@@ -956,101 +1079,79 @@ impl PeerIoPump {
     pub(crate) fn reserve_outbound_wire_frame(
         &self,
     ) -> Result<Option<ReservedOutboundWireFrame>, String> {
-        let context = self.wire_inbound_context()?;
-        let Some(message) = self.take_outbound(1) else {
+        if self.is_disconnected() || self.wire_reservation_active.get() {
+            return Ok(None);
+        }
+        if let Some(frame) = self
+            .channel_credits()?
+            .lock()
+            .map_err(|_| "channel credit lock poisoned".to_owned())?
+            .peek_grant()?
+        {
+            self.wire_reservation_active.set(true);
+            return Ok(Some(ReservedOutboundWireFrame {
+                pump: self.clone(),
+                frame,
+                credit_grant: true,
+            }));
+        }
+        let endpoint = self.auxiliary_endpoint.as_ref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })?;
+        let mut endpoint = endpoint
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?;
+        if !endpoint.has_pending_outbound() {
+            let Some(message) = self.take_outbound(1) else {
+                return Ok(None);
+            };
+            if let Err(error) = endpoint.enqueue(message.clone()) {
+                self.restore_outbound(message);
+                return Err(format!(
+                    "cannot enqueue auxiliary channel message: {error:?}"
+                ));
+            }
+            *self.wire_outbound_obligation.borrow_mut() = Some(message);
+        }
+        let Some(frame) = endpoint.peek_outbound()? else {
             return Ok(None);
         };
-        let frame = match self.encode_outbound_wire_frame(message.clone(), context) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.restore_outbound(message);
-                return Err(error);
-            }
-        };
+        self.wire_reservation_active.set(true);
         Ok(Some(ReservedOutboundWireFrame {
             pump: self.clone(),
-            message: Some(message),
-            frame: Some(frame),
+            frame,
+            credit_grant: false,
         }))
     }
 
-    /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
-    /// frames. If the next complete frame would exceed `max_bytes`, it remains
-    /// queued for a later drain; no response is dropped merely because a host
-    /// transport chooses a smaller batch boundary.
+    /// Drain a bounded prefix while retaining exact encoded bytes for any frame
+    /// that does not fit the caller's budget.
     pub fn take_outbound_wire_frames(
         &self,
         max_frames: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, String> {
-        if max_frames == 0 || max_bytes == 0 {
-            return Ok(Vec::new());
-        }
-        let context = self.wire_inbound_context()?;
         let mut frames = Vec::new();
-        let mut total_bytes: usize = 0;
-        while frames.len() < max_frames {
-            let Some(message) = self.take_outbound(1) else {
+        let mut total_bytes = 0usize;
+        while frames.len() < max_frames && total_bytes < max_bytes {
+            let Some(mut reservation) = self.reserve_outbound_wire_frame()? else {
                 break;
             };
-            let frame = self.encode_outbound_wire_frame(message.clone(), context);
-            let frame = match frame {
-                Ok(frame) => frame,
-                Err(error) => {
-                    self.restore_outbound(message);
-                    return Err(error);
-                }
-            };
-            let Some(next_total) = total_bytes.checked_add(frame.len()) else {
-                self.restore_outbound(message);
-                break;
-            };
-            if next_total > max_bytes {
-                self.restore_outbound(message);
+            if reservation.frame.len() > max_bytes - total_bytes {
                 if frames.is_empty() {
                     return Err(format!(
                         "auxiliary wire frame exceeds bounded drain budget: frame={} budget={max_bytes}",
-                        frame.len()
+                        reservation.frame.len()
                     ));
                 }
                 break;
             }
-            total_bytes = next_total;
-            self.acknowledge_outbound(&message);
+            let frame = reservation.take_frame();
+            total_bytes += frame.len();
+            reservation.commit();
             frames.push(frame);
         }
         Ok(frames)
-    }
-
-    fn encode_outbound_wire_frame(
-        &self,
-        message: SyncMessage,
-        context: &crate::wire::WireInboundContext,
-    ) -> Result<Vec<u8>, String> {
-        let negotiated_features = context.negotiated_features();
-        let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
-            .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
-        let active_features = negotiated_features
-            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
-        let wire_outbound_frame = self.wire_outbound_frame.as_ref().ok_or_else(|| {
-            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
-        })?;
-        let mut frame = wire_outbound_frame.borrow_mut();
-        {
-            let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
-                unreachable!("auxiliary outbound template is always a message frame");
-            };
-            envelope.protocol_version = context.expected_protocol_version();
-            envelope.features = active_features;
-            envelope.payload = payload;
-        }
-        let encoded = crate::wire::encode_frame(&frame)
-            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"));
-        let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
-            unreachable!("auxiliary outbound template is always a message frame");
-        };
-        envelope.payload = Vec::new();
-        encoded
     }
 
     /// Drain one bounded auxiliary batch for immediate transmission.
@@ -1161,6 +1262,13 @@ impl PeerIoPump {
     /// Detach this link's hop-local routing state. Bindings call this when the
     /// socket closes; another registered upstream inherits unsent demand.
     pub fn disconnect(&self) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            if let Ok(endpoint) = endpoint.lock() {
+                if let Ok(mut credits) = endpoint.channel_credits().lock() {
+                    credits.close();
+                }
+            }
+        }
         self.resolver.disconnect(
             self.connection,
             matches!(self.role, PeerIoPumpRole::Upstream),
@@ -1168,6 +1276,24 @@ impl PeerIoPump {
     }
 
     fn has_outbound(&self) -> bool {
+        if self.is_disconnected() {
+            return false;
+        }
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            let endpoint = endpoint.lock().expect("auxiliary endpoint lock poisoned");
+            let credits = endpoint.channel_credits();
+            let credits = credits.lock().expect("channel credit lock poisoned");
+            if credits.has_pending_grant() {
+                return true;
+            }
+            if !credits.can_send(crate::wire::channels::ChannelClass::Auxiliary) {
+                return false;
+            }
+            drop(credits);
+            if endpoint.outbound_is_ready() {
+                return true;
+            }
+        }
         let state = self.resolver.state.borrow();
         match self.role {
             PeerIoPumpRole::Upstream => !state.outbound.is_empty(),
@@ -1206,6 +1332,26 @@ impl Future for PeerIoOutboundReady {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Ok(credits) = self.pump.channel_credits() {
+            if credits
+                .lock()
+                .expect("channel credit lock poisoned")
+                .poll_grant_ready(context)
+                .is_ready()
+            {
+                return Poll::Ready(());
+            }
+        }
+        if let Some(endpoint) = &self.pump.auxiliary_endpoint {
+            if endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .poll_outbound_ready(context)
+                .is_ready()
+            {
+                return Poll::Ready(());
+            }
+        }
         if self.pump.has_outbound() || self.pump.is_disconnected() {
             Poll::Ready(())
         } else {
@@ -1411,7 +1557,10 @@ pub trait TickScheduler {
     /// This is deliberately distinct from [`TickUrgency::Deferred`]: callers
     /// use it for protocol admission windows, where turning a deadline into a
     /// microtask would create a resend hot loop. Every host therefore supplies
-    /// a real timer implementation.
+    /// a real timer implementation. Hosts coalesce at the earliest requested
+    /// deadline and must bring an existing later timer forward. Servicing that
+    /// wake ticks all connections; live obligations re-arm their remaining
+    /// deadlines, so hosts need not retain every individual timer request.
     fn schedule_tick_after(&self, delay_ms: u64);
 
     /// A waker for cold query-runtime storage progress.
@@ -1779,8 +1928,6 @@ struct PendingLocalPublication {
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
 type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
-const MAX_EDGE_FATE_ROUTES: usize = 1024;
-const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 
 #[derive(Default)]
 struct AuthorityViewReceipts {
@@ -1799,6 +1946,7 @@ struct AuthorityViewReceipts {
 /// the selected connection's fresh view receipt.
 struct StagedInboundMessage {
     message: SyncMessage,
+    lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
 }
 
@@ -1807,56 +1955,23 @@ struct PendingAuthorityViewUpdate {
     authority_receipt_eligible: bool,
 }
 
-struct EdgeFateRoute {
-    authority: Option<AuthorityContext>,
-    queue: Weak<RefCell<Vec<SyncMessage>>>,
-    /// The edge-local acceptance has already been emitted to this exact
-    /// downstream session.  The later Core terminal fate remains separately
-    /// routable through the same retained obligation.
-    edge_acknowledged: bool,
-}
-
-/// The immutable identity of a client commit while its edge fate obligation is
-/// live.  An edge intentionally keeps a pre-proof upload out of durable
-/// transaction history, but it must still enforce history's one-payload-per-id
-/// rule across all client connections.  Normalize version order here because
-/// transport ordering is not semantically meaningful.
-#[derive(Clone, Debug)]
-struct EdgeFateCommitIdentity {
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-}
-
-impl EdgeFateCommitIdentity {
-    fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
-        let mut versions = versions.to_vec();
-        versions.sort();
-        let mut tx = tx.clone();
-        // An edge route compares durable commit identity across a local staged
-        // write and redacted carrier retransmissions. Its local policy hint is
-        // deliberately excluded from that identity.
-        tx.permission_subject = None;
-        Self { tx, versions }
-    }
-
-    fn matches(&self, other: &Self) -> bool {
-        self.tx == other.tx && self.versions == other.versions
-    }
-}
-
-/// The shared edge obligation for one transaction.
-struct EdgeFateObligation {
-    identity: EdgeFateCommitIdentity,
-    routes: Vec<EdgeFateRoute>,
-}
-
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
-
-struct LocalFateRoute {
+pub(super) struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
     local_acknowledged: bool,
+    /// A replay route is admitted before its causal closure is available.
+    /// Keep it alive across link replacement without allowing its queue to
+    /// receive a fate that the receiver cannot yet apply.
+    replay_ready: bool,
+    replay_author: Option<AuthorSubject>,
+    /// The exact pending unit is retained while the route is blocked. Durable
+    /// outbox recovery remains the source of truth for unsettled writes; this
+    /// copy covers a live link that receives a terminal fate before repair.
+    replay_unit: Option<SyncMessage>,
+    /// At most one latest fate is retained while replay is blocked. Local
+    /// acknowledgement is reconstructed from durable state after readiness.
+    held_fate: Option<SyncMessage>,
 }
-type LocalFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<LocalFateRoute>>>>;
+pub(super) type LocalFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<LocalFateRoute>>>>;
 
 fn register_local_fate_route(
     routes: &LocalFateRoutes,
@@ -1880,24 +1995,103 @@ fn register_local_fate_route_with_acknowledgement(
     queue: &PendingDownstreamFates,
     local_acknowledged: bool,
 ) {
+    register_local_fate_route_state(routes, tx_id, queue, local_acknowledged, true, None, None);
+}
+
+fn register_local_replay_route(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+    author: AuthorSubject,
+    replay_unit: Option<SyncMessage>,
+) {
+    register_local_fate_route_state(
+        routes,
+        tx_id,
+        queue,
+        false,
+        false,
+        Some(author),
+        replay_unit,
+    );
+}
+
+fn register_local_fate_route_state(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+    local_acknowledged: bool,
+    replay_ready: bool,
+    replay_author: Option<AuthorSubject>,
+    replay_unit: Option<SyncMessage>,
+) {
     let mut routes = routes.borrow_mut();
     routes.retain(|_, pending| {
-        pending.retain(|candidate| candidate.queue.upgrade().is_some());
+        pending.retain(|candidate| !candidate.replay_ready || candidate.queue.upgrade().is_some());
         !pending.is_empty()
     });
-    if routes.get(&tx_id).is_some_and(|pending| {
-        pending.iter().any(|candidate| {
-            candidate
+
+    if let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+        pending.iter_mut().find(|route| {
+            route
                 .queue
                 .upgrade()
-                .is_some_and(|candidate| Rc::ptr_eq(&candidate, queue))
+                .is_some_and(|existing| Rc::ptr_eq(&existing, queue))
         })
     }) {
+        candidate.local_acknowledged |= local_acknowledged;
+        if replay_ready {
+            candidate.replay_ready = true;
+            candidate.replay_unit = None;
+        } else {
+            candidate.replay_author = replay_author.or(candidate.replay_author);
+            if replay_unit.is_some() {
+                candidate.replay_unit = replay_unit;
+            }
+        }
         return;
     }
+
+    if !replay_ready
+        && let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+            pending.iter_mut().find(|route| {
+                !route.replay_ready
+                    && route.queue.upgrade().is_none()
+                    && route.replay_author == replay_author
+            })
+        })
+    {
+        candidate.queue = Rc::downgrade(queue);
+        candidate.local_acknowledged = local_acknowledged;
+        if candidate.replay_unit.is_none() {
+            candidate.replay_unit = replay_unit;
+        }
+        return;
+    }
+
+    let held_fate = if !replay_ready {
+        routes.get(&tx_id).and_then(|pending| {
+            pending.iter().find_map(|candidate| {
+                let live_same_author = !candidate.replay_ready
+                    && candidate.replay_author == replay_author
+                    && candidate.queue.upgrade().is_some();
+                live_same_author
+                    .then_some(candidate.held_fate.as_ref())
+                    .flatten()
+                    .filter(|fate| local_fate_is_terminal(fate))
+                    .cloned()
+            })
+        })
+    } else {
+        None
+    };
     routes.entry(tx_id).or_default().push(LocalFateRoute {
         queue: Rc::downgrade(queue),
         local_acknowledged,
+        replay_ready,
+        replay_author,
+        replay_unit,
+        held_fate,
     });
 }
 
@@ -1912,9 +2106,9 @@ where
         .borrow()
         .iter()
         .filter(|(_, pending)| {
-            pending
-                .iter()
-                .any(|route| !route.local_acknowledged && route.queue.strong_count() > 0)
+            pending.iter().any(|route| {
+                route.replay_ready && !route.local_acknowledged && route.queue.strong_count() > 0
+            })
         })
         .map(|(tx_id, _)| *tx_id)
         .collect::<Vec<_>>();
@@ -1935,9 +2129,9 @@ where
         let locally_durable = durable.contains(tx_id);
         pending.retain_mut(|route| {
             let Some(queue) = route.queue.upgrade() else {
-                return false;
+                return !route.replay_ready;
             };
-            if locally_durable && !route.local_acknowledged {
+            if route.replay_ready && locally_durable && !route.local_acknowledged {
                 queue.borrow_mut().push(SyncMessage::FateUpdate {
                     tx_id: *tx_id,
                     fate: Fate::Pending,
@@ -1952,8 +2146,8 @@ where
     });
 }
 
-fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
-    let terminal = matches!(
+fn local_fate_is_terminal(fate: &SyncMessage) -> bool {
+    matches!(
         fate,
         SyncMessage::FateUpdate {
             fate: Fate::Rejected(_),
@@ -1962,12 +2156,52 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
             durability: Some(DurabilityTier::Global),
             ..
         }
-    );
+    )
+}
+
+fn release_local_replay_fates(routes: &LocalFateRoutes) {
+    let mut routes = routes.borrow_mut();
+    routes.retain(|_, pending| {
+        pending.retain_mut(|route| {
+            if !route.replay_ready {
+                return true;
+            }
+            let Some(queue) = route.queue.upgrade() else {
+                return false;
+            };
+            let Some(fate) = route.held_fate.take() else {
+                return true;
+            };
+            let terminal = local_fate_is_terminal(&fate);
+            queue.borrow_mut().push(fate);
+            !terminal
+        });
+        !pending.is_empty()
+    });
+}
+
+fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
+    let terminal = local_fate_is_terminal(fate);
     let mut routes = routes.borrow_mut();
     let Some(pending) = routes.get_mut(&tx_id) else {
         return;
     };
-    pending.retain(|candidate| {
+    pending.retain_mut(|candidate| {
+        if !candidate.replay_ready {
+            // The durable transaction state is authoritative; retaining the
+            // latest wire fate only covers the interval before a repair-ready
+            // route can reconstruct and emit it. Never replace a terminal
+            // fate with a later non-terminal progress update.
+            if terminal
+                || candidate
+                    .held_fate
+                    .as_ref()
+                    .is_none_or(|held| !local_fate_is_terminal(held))
+            {
+                candidate.held_fate = Some(fate.clone());
+            }
+            return true;
+        }
         let Some(queue) = candidate.queue.upgrade() else {
             return false;
         };
@@ -1979,88 +2213,227 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
-/// Deliver the edge's own admission fate through the same route registry that
-/// later carries the selected Core fate.  This avoids a direct-response path
-/// that would acknowledge only the tick currently handling the upload (and
-/// would duplicate a retransmitted upload), while a rejection retires the
-/// obligation because there is no admitted unit for Core to settle.
-fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMessage) {
-    let terminal = matches!(
-        fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Rejected(_),
-            ..
-        }
-    );
-    let mut routes = routes.borrow_mut();
-    let Some(obligation) = routes.get_mut(&tx_id) else {
-        return;
+#[derive(Clone, Copy, PartialEq, Eq)]
+
+enum LocalReplayStatus {
+    Visiting,
+    Complete,
+    Blocked,
+}
+fn local_replay_unit_is_complete(unit: &SyncMessage) -> bool {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        return false;
     };
-    obligation.routes.retain_mut(|route| {
-        let Some(queue) = route.queue.upgrade() else {
-            return false;
-        };
-        if terminal || !route.edge_acknowledged {
-            queue.borrow_mut().push(fate.clone());
-            route.edge_acknowledged = true;
-        }
-        !terminal
-    });
-    if obligation.routes.is_empty() {
-        routes.remove(&tx_id);
-    }
+    usize::try_from(tx.n_total_writes).ok() == Some(versions.len())
 }
 
-async fn collect_local_replay_commit_units<S>(
+enum LocalReplayFrame {
+    Enter(TxId),
+    Exit(TxId),
+}
+
+async fn plan_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
-    tx_id: TxId,
-    visited: &mut BTreeSet<TxId>,
-    units: &mut Vec<(TxId, SyncMessage)>,
+    roots: &BTreeSet<TxId>,
+    retained_replay_units: &BTreeMap<TxId, SyncMessage>,
+) -> Result<
+    (
+        BTreeMap<TxId, LocalReplayStatus>,
+        BTreeMap<TxId, SyncMessage>,
+        Vec<(TxId, SyncMessage)>,
+    ),
+    crate::node::Error,
+>
+where
+    S: OrderedKvStorage,
+{
+    let mut statuses = BTreeMap::new();
+    let mut units = BTreeMap::new();
+    let mut overrides = retained_replay_units.clone();
+    let mut parents_by_tx: BTreeMap<TxId, Vec<TxId>> = BTreeMap::new();
+    let mut complete_units = Vec::new();
+
+    for root_tx_id in roots {
+        let mut frames = vec![LocalReplayFrame::Enter(*root_tx_id)];
+        while let Some(frame) = frames.pop() {
+            match frame {
+                LocalReplayFrame::Enter(tx_id) => {
+                    match statuses.get(&tx_id) {
+                        Some(LocalReplayStatus::Complete | LocalReplayStatus::Blocked) => continue,
+                        Some(LocalReplayStatus::Visiting) => {
+                            // A causal parent must not point back into the
+                            // active stack. Fail closed instead of publishing
+                            // a cyclic closure.
+                            statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                            continue;
+                        }
+                        None => {}
+                    }
+
+                    let unit = match overrides.remove(&tx_id) {
+                        Some(unit) => unit,
+                        None => match node.commit_unit_for(tx_id).await {
+                            Ok(unit) => unit,
+                            Err(crate::node::Error::MissingTransaction(_)) => {
+                                statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        },
+                    };
+                    let (n_total_writes, version_count, parents) = {
+                        let SyncMessage::CommitUnit { tx, versions } = &unit else {
+                            unreachable!("commit_unit_for always returns a commit unit")
+                        };
+                        (
+                            tx.n_total_writes,
+                            versions.len(),
+                            versions
+                                .iter()
+                                .flat_map(crate::protocol::VersionRecord::parents)
+                                .collect::<BTreeSet<_>>()
+                                .into_iter()
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    units.insert(tx_id, unit);
+                    if usize::try_from(n_total_writes).ok() != Some(version_count) {
+                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                        continue;
+                    }
+                    parents_by_tx.insert(tx_id, parents.clone());
+                    statuses.insert(tx_id, LocalReplayStatus::Visiting);
+                    frames.push(LocalReplayFrame::Exit(tx_id));
+                    for parent in parents.into_iter().rev() {
+                        frames.push(LocalReplayFrame::Enter(parent));
+                    }
+                }
+                LocalReplayFrame::Exit(tx_id) => {
+                    if !matches!(statuses.get(&tx_id), Some(LocalReplayStatus::Visiting)) {
+                        continue;
+                    }
+                    let complete = parents_by_tx
+                        .get(&tx_id)
+                        .into_iter()
+                        .flatten()
+                        .all(|parent| {
+                            matches!(statuses.get(parent), Some(LocalReplayStatus::Complete))
+                        });
+                    if complete {
+                        statuses.insert(tx_id, LocalReplayStatus::Complete);
+                        let unit = units
+                            .remove(&tx_id)
+                            .expect("visiting replay node retains its unit");
+                        complete_units.push((tx_id, unit));
+                    } else {
+                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((statuses, units, complete_units))
+}
+
+pub(super) async fn restore_local_subscriber_replay<S>(
+    node: &SharedNodeState<S>,
+    outbox: &Outbox,
+    routes: &LocalFateRoutes,
+    author: AuthorSubject,
+    downstream_fates: &PendingDownstreamFates,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage,
 {
-    if !visited.insert(tx_id) {
-        return Ok(());
-    }
-    let unit = node.commit_unit_for(tx_id).await?;
-    let SyncMessage::CommitUnit { versions, .. } = &unit else {
-        unreachable!("commit_unit_for always returns a commit unit")
+    let (retained_replay_roots, retained_replay_units) = {
+        let routes = routes.borrow();
+        let mut roots = BTreeSet::new();
+        let mut units = BTreeMap::new();
+        for (tx_id, routes) in routes.iter() {
+            let matching = routes
+                .iter()
+                .filter(|route| !route.replay_ready && route.replay_author == Some(author));
+            let mut has_matching_route = false;
+            for route in matching {
+                has_matching_route = true;
+                if let Some(unit) = &route.replay_unit
+                    && local_replay_unit_is_complete(unit)
+                {
+                    units.entry(*tx_id).or_insert_with(|| unit.clone());
+                }
+            }
+            if has_matching_route {
+                roots.insert(*tx_id);
+            }
+        }
+        (roots, units)
     };
-    let parents = versions
-        .iter()
-        .flat_map(crate::protocol::VersionRecord::parents)
-        .collect::<BTreeSet<_>>();
-    for parent in parents {
-        Box::pin(collect_local_replay_commit_units(
-            node, parent, visited, units,
-        ))
+    let mut node_state = node.lock().await;
+    let mut pending = node_state
+        .pending_transaction_ids_for_author(author)
         .await?;
+    pending.sort();
+    pending.dedup();
+    let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
+    let mut roots = pending_set.clone();
+    roots.extend(retained_replay_roots);
+    let (statuses, blocked_units, replay_units) =
+        plan_local_replay_commit_units(&mut node_state, &roots, &retained_replay_units).await?;
+    drop(node_state);
+
+    let mut outbox_units = outbox
+        .borrow()
+        .iter()
+        .filter_map(|pending| pending.unit.as_ref().map(|_| pending.tx_id))
+        .collect::<BTreeSet<_>>();
+    for (tx_id, unit) in replay_units {
+        // A reopened main-thread runtime has no transaction history. Send
+        // accepted causal ancestors before each pending unit so the latter
+        // can be ingested before its Local ack or later authority fate.
+        downstream_fates.borrow_mut().push(unit.clone());
+        if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
+            // Durable recovery omits exclusive snapshot/read evidence. A live
+            // sibling may already retain the exact authored unit; never
+            // replace that unit with its redacted history replay.
+            queue_pending_upload_in(outbox, tx_id, Some(unit));
+        }
     }
-    units.push((tx_id, unit));
+
+    let ready_roots = roots
+        .iter()
+        .filter(|tx_id| matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete)));
+    for tx_id in ready_roots {
+        // Re-admit through the blocked state first so a replacement queue can
+        // reclaim a dead same-author route and its held terminal fate.
+        register_local_replay_route(routes, *tx_id, downstream_fates, author, None);
+        register_local_fate_route(routes, *tx_id, downstream_fates);
+    }
+    for tx_id in roots {
+        if matches!(statuses.get(&tx_id), Some(LocalReplayStatus::Complete)) {
+            continue;
+        }
+        // Admission remains live while causal history is incomplete. Keep
+        // the exact pending root for a later repair-ready reconnect, but do
+        // not send it or any fate until its whole closure is present.
+        let unit = blocked_units
+            .get(&tx_id)
+            .cloned()
+            .or_else(|| retained_replay_units.get(&tx_id).cloned());
+        register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
+        if pending_set.contains(&tx_id)
+            && let Some(unit) = unit
+        {
+            if outbox_units.insert(tx_id) {
+                queue_pending_upload_in(outbox, tx_id, Some(unit));
+            }
+        }
+    }
+    queue_local_acknowledgements(routes, node).await;
+    release_local_replay_fates(routes);
     Ok(())
 }
 
-/// A parked fate either awaits its first admitted upstream or belongs to one
-/// admitted upstream epoch. Drop routes for departed/replaced sessions (and
-/// dead subscriber queues) eagerly: retaining a weak queue alone would let
-/// arbitrary uploads grow this registry forever.
-fn prune_edge_fate_routes(
-    routes: &mut BTreeMap<TxId, EdgeFateObligation>,
-    admitted: Option<AuthorityContext>,
-) {
-    routes.retain(|_, obligation| {
-        obligation.routes.retain(|route| {
-            route.queue.upgrade().is_some()
-                && match (route.authority, admitted) {
-                    (None, _) => true,
-                    (Some(route), Some(admitted)) => admitted.same_admitted_link(route),
-                    (Some(_), None) => false,
-                }
-        });
-        !obligation.routes.is_empty()
-    });
-}
 type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
@@ -2455,24 +2828,18 @@ struct ServedAuthorizationScopeClause {
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
 /// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
-type Outbox = Rc<RefCell<UploadOutbox>>;
+pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 
 #[derive(Default)]
-struct UploadOutbox {
+pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
-    authority_members: HashSet<TxId>,
-    authority_receipts: HashSet<TxId>,
 }
 
 impl UploadOutbox {
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
-        }
-        if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-            self.authority_members
-                .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
         }
         self.entries.push_back(pending);
         true
@@ -2491,44 +2858,9 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
-        self.reindex_authority_members();
-    }
-
-    fn reindex_authority_members(&mut self) {
-        self.authority_members.clear();
-        for pending in &self.entries {
-            if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-                self.authority_members
-                    .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
-            }
-        }
-        self.authority_receipts
-            .retain(|tx_id| self.authority_members.contains(tx_id));
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
-        if !self.authority_members.is_empty() {
-            self.authority_receipts.extend(
-                released
-                    .iter()
-                    .filter(|tx_id| self.authority_members.contains(tx_id))
-                    .copied(),
-            );
-            let completed = self
-                .entries
-                .iter()
-                .filter(|pending| match &pending.unit {
-                    Some(SyncMessage::AuthorityPublication(publication)) => publication
-                        .commits
-                        .iter()
-                        .all(|unit| self.authority_receipts.contains(&unit.tx.tx_id)),
-                    _ => released.contains(&pending.tx_id),
-                })
-                .map(|pending| pending.tx_id)
-                .collect::<HashSet<_>>();
-            self.retain(|pending| !completed.contains(&pending.tx_id));
-            return completed;
-        }
         // Ordinary single-transaction uploads retain their prefix fast path.
         let completed = released.clone();
         while self
@@ -2575,7 +2907,6 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
         // but before subscriber ingest queues the exact inbound unit. The
         // canonical payload must win even when both entries have a body.
         pending.unit = Some(unit);
-        outbox.reindex_authority_members();
         return true;
     }
     outbox.push(PendingUpload { tx_id, unit });
@@ -2798,7 +3129,6 @@ use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
 mod row_availability;
-mod row_version_repairs;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
@@ -4233,7 +4563,7 @@ where
         let state = self.write_state().await?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
-            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+            Fate::Pending if tier >= DurabilityTier::Global => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
             )),
@@ -4535,7 +4865,7 @@ impl SubscriptionSender {
         index: &RelationSnapshotIndex,
     ) -> Result<Option<SubscriptionPublicationSnapshot>, Error> {
         let publication = self.publication.borrow();
-        if tier >= DurabilityTier::Edge
+        if tier >= DurabilityTier::Global
             && !settled
             && publication.opened
             && publication.deferred.is_none()
@@ -4581,11 +4911,11 @@ impl SubscriptionSender {
         let mut publication = self.publication.borrow_mut();
         if !publishable
             || !materialized
-            || (self.requested_tier >= DurabilityTier::Edge && !settled)
+            || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
             if publication.opened
                 && publication.deferred.is_none()
-                && self.requested_tier >= DurabilityTier::Edge
+                && self.requested_tier >= DurabilityTier::Global
             {
                 publication.deferred = Some(before.ok_or_else(|| {
                     Error::new(
@@ -4598,7 +4928,7 @@ impl SubscriptionSender {
             // immediate delivery. Do not checkpoint those updates. If local
             // required cells are actually missing, resume with a canonical
             // reset when the maintained result becomes materialized again.
-            publication.reset |= reset || self.requested_tier < DurabilityTier::Edge;
+            publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
@@ -4996,7 +5326,7 @@ impl SubscriptionStream {
     }
 
     #[cfg(test)]
-    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+    fn compiled_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
         let state = self._state.borrow();
         let SubscriptionKind::Prepared {
             maintained_subscription,
@@ -5004,7 +5334,7 @@ impl SubscriptionStream {
         } = &state.kind;
         maintained_subscription
             .as_ref()
-            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
+            .and_then(LocalMaintainedViewSubscription::compiled_authorization_mode)
     }
 }
 
@@ -5150,7 +5480,7 @@ impl PreparedQuery {
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
-            DurabilityTier::None | DurabilityTier::Edge => None,
+            DurabilityTier::None => None,
         }
     }
 
@@ -5202,7 +5532,7 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .upstream_subscription_handles
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
-                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Edge {
+                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
                         let event = subscription_delta_event(
                             state_ref.read_tier,
                             false,
@@ -6609,3 +6939,6 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use crate::{protocol::VersionRecord, tx::Transaction};

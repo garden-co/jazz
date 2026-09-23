@@ -1,3 +1,4 @@
+import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
@@ -158,7 +159,7 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null };
+type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -413,6 +414,8 @@ export type Transport = {
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
   recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
+  auxiliaryReceiveTimeoutMs?(): number | null | undefined;
+  expireAuxiliaryReceive?(): void;
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   /** Bounded redacted diagnostics emitted by the auxiliary chunk relay. */
   takeAuxiliaryTrace?(): unknown[];
@@ -644,7 +647,9 @@ function openMemoryDb(
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
+  private readonly pendingNativeReadCancels = new Set<() => void>();
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -710,6 +715,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
   private coreTickScheduled = false;
+  private coreDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  private coreDeadlineAt: number | undefined;
   private coreTickAgain = false;
   private coreOperation: {
     kind: "tick" | "admission";
@@ -945,6 +952,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   retirePeerTransport(transport: Transport): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
+    this.auxiliaryReceiveDeadlines.get(transport)?.close();
+    this.auxiliaryReceiveDeadlines.delete(transport);
     if (!this.coreOperation) {
       transport.close();
       return Promise.resolve();
@@ -988,6 +997,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
     if (this.closed) throw new Error("Native runtime is already closed");
     this.closed = true;
+    this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
     const capture = this.captureForegroundTxTimeHighWater();
     this.foregroundLeaseCapture = capture;
@@ -1134,7 +1144,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
+    for (const cancel of this.pendingNativeReadCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
       await Promise.all(this.pendingStreamingMutations);
@@ -1162,7 +1174,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private closeRuntimeState(alreadyMarkedClosed = false): boolean {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
+    for (const cancel of this.pendingNativeReadCancels) cancel();
     for (const [handle, subscription] of this.subscriptions) {
       this.terminateSubscription(handle, subscription);
     }
@@ -1203,6 +1217,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     return true;
+  }
+
+  /** Row identity/defaults only; physical validation and staging happen on insertion. */
+  previewInsert(table: string, values: InsertValues, objectId?: string): WasmRow {
+    const row = this.rowStateFromValues(
+      table,
+      objectId ? parseUuid(objectId) : runtimeRandomBytes(16),
+      values,
+    );
+    return { id: row.id, values: row.values };
   }
 
   insert(
@@ -1855,10 +1879,11 @@ export class NativeRuntimeAdapter implements Runtime {
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    const transportTier = readPropagationIsFull(optionsJson) ? tier : undefined;
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
     await this.ensureClientSessionClaims(session);
-    await this.waitForStrictRemoteQueryTransport(tier);
+    await this.waitForStrictRemoteQueryTransport(transportTier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
     if (!pendingTx) {
@@ -2551,7 +2576,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     return this.awaitNativeRead(
       this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { tier?: string }).tier,
+      (opts as { propagation?: string }).propagation === "local_only"
+        ? undefined
+        : (opts as { tier?: string }).tier,
     );
   }
 
@@ -2618,17 +2645,27 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
-    for (;;) {
-      if (this.closed) throw new Error("native read was cancelled by runtime shutdown");
-      if (tier) this.throwServerTransportErrorForTier(tier);
-      const bytes = result.poll();
-      if (bytes !== null) return bytes;
-      // A core pass may itself suspend while the auxiliary transport fetches
-      // large-value chunks. Keep polling the owning read while that pass runs;
-      // awaiting the pump here would circularly wait for the read to resume it.
-      void this.pumpServerTransport();
-      if (tier) this.throwServerTransportErrorForTier(tier);
-      await sleep(0);
+    const cancel = () => result.cancel();
+    this.ownerRuntime.pendingNativeReadCancels.add(cancel);
+    try {
+      for (;;) {
+        if (this.closed || this.ownerRuntime.closed)
+          throw new Error("native read was cancelled by runtime shutdown");
+        if (tier) this.throwServerTransportErrorForTier(tier);
+        const bytes = result.poll();
+        if (bytes !== null) return bytes;
+        // Keep polling while a core pass waits for large-value chunks: the
+        // read itself may be what lets that pass resume.
+        this.pumpServerTransport();
+        if (tier) this.throwServerTransportErrorForTier(tier);
+        await sleep(0);
+      }
+    } finally {
+      this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
+      cancel();
+      // A suspended read may have held the owner while queued commands
+      // yielded. Resume those commands even without a network pump.
+      this.ownerRuntime.scheduleCoreTick();
     }
   }
 
@@ -2760,7 +2797,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
-    if (tier !== "edge" && tier !== "global") return;
+    if (tier !== "global") return;
     const initialIntent = this.serverReplacementIntent;
     const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
     const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
@@ -2830,12 +2867,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed || this.ownerRuntime.closed) return;
-      const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      await this.waitForStrictRemoteQueryTransport("edge");
+      const remoteOptionsJson = JSON.stringify({ propagation: "full" });
+      await this.waitForStrictRemoteQueryTransport("global");
       if (this.closed || this.ownerRuntime.closed) return;
       await this.readRowsForContextAsync(
         query,
-        readOptions("edge", false, edgeOptionsJson),
+        readOptions("global", false, remoteOptionsJson),
         this.nativeReadContext(session),
       );
     };
@@ -3008,6 +3045,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private clearCoreDeadline(): void {
+    if (this.coreDeadlineTimer !== undefined) clearTimeout(this.coreDeadlineTimer);
+    this.coreDeadlineTimer = undefined;
+    this.coreDeadlineAt = undefined;
+  }
+
   private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
     if (urgency === "after-current-turn") {
@@ -3024,7 +3067,17 @@ export class NativeRuntimeAdapter implements Runtime {
       // A protocol admission deadline is not a deferred microtask. Keep the
       // host event loop live and only wake the thread-affine core after the
       // promised window has elapsed.
-      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      const deadline = performance.now() + delayMs;
+      if (this.coreDeadlineAt !== undefined && this.coreDeadlineAt <= deadline) return;
+      this.clearCoreDeadline();
+      this.coreDeadlineAt = deadline;
+      this.coreDeadlineTimer = setTimeout(() => {
+        this.coreDeadlineTimer = undefined;
+        this.coreDeadlineAt = undefined;
+        // This tick services every connection. Still-live later obligations
+        // re-arm their remaining deadline through the same earliest timer.
+        this.scheduleCoreWake("immediate");
+      }, delayMs);
       return;
     }
     this.notifyPeerTransportWork();
@@ -3317,6 +3370,8 @@ export class NativeRuntimeAdapter implements Runtime {
     let processedInbound = false;
     const operation = this.serverInboundRouting.then(async () => {
       const transport = this.serverTransport;
+      const carrier = this.serverCarrier;
+      const generation = this.serverConnectionGeneration;
       if (!transport || this.pendingInboundServerFrames.length === 0) return;
       const frames = this.pendingInboundServerFrames.splice(0);
       processedInbound = true;
@@ -3326,6 +3381,9 @@ export class NativeRuntimeAdapter implements Runtime {
         const routed = transport.routeAuxiliaryWireFrame
           ? await transport.routeAuxiliaryWireFrame(frame)
           : frame;
+        if (carrier) this.refreshAuxiliaryReceiveDeadline(transport, carrier, generation);
+        if (transport !== this.serverTransport || generation !== this.serverConnectionGeneration)
+          return;
         if (routed != null) canonical.push(normalizeTransportFrame(routed));
       }
       this.publishAuxiliaryTrace(transport);
@@ -3339,7 +3397,6 @@ export class NativeRuntimeAdapter implements Runtime {
       // narrower than the general native tick scheduler, whose routine wakes
       // must remain coalescible to avoid self-sustaining peer-pump loops.
       this.notifyPeerTransportWork(true);
-      const carrier = this.serverCarrier;
       if (carrier) {
         this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
       }
@@ -3350,6 +3407,41 @@ export class NativeRuntimeAdapter implements Runtime {
     );
     await operation;
     return processedInbound;
+  }
+
+  private refreshAuxiliaryReceiveDeadline(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    if (
+      this.closed ||
+      transport !== this.serverTransport ||
+      generation !== this.serverConnectionGeneration
+    )
+      return;
+    let deadline = this.auxiliaryReceiveDeadlines.get(transport);
+    if (!deadline) {
+      deadline = new AuxiliaryReceiveDeadline(transport, (error) => {
+        if (
+          this.closed ||
+          transport !== this.serverTransport ||
+          generation !== this.serverConnectionGeneration
+        )
+          return;
+        const failure = error instanceof Error ? error : new Error(errorMessage(error));
+        const attempt = this.serverConnectionAttempt;
+        if (attempt?.transport === transport) {
+          this.finishServerConnectionAttempt(attempt, failure);
+        } else {
+          carrier.close();
+          this.handleServerTransportError(failure, generation);
+          void this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+        }
+      });
+      this.auxiliaryReceiveDeadlines.set(transport, deadline);
+    }
+    deadline.refresh();
   }
 
   private flushAuxiliaryOutbound(
@@ -3621,7 +3713,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      if (subscription.tier !== "edge" && subscription.tier !== "global") continue;
+      if (subscription.tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -3674,7 +3766,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
-    if ((tier === "edge" || tier === "global") && this.serverTransportError) {
+    if (tier === "global" && this.serverTransportError) {
       throw this.serverTransportError;
     }
   }
@@ -3682,7 +3774,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (this.serverTransportError) {
       return {
         promise: Promise.reject(this.serverTransportError),
@@ -3726,7 +3818,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (
       this.serverTransportWorkEpoch !== observedEpoch ||
       this.pendingInboundServerFrames.length > 0
@@ -4071,7 +4163,7 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "edge", "global"].includes(tier)) {
+  if (tier != null && !["local", "global"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);

@@ -219,14 +219,14 @@ fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_h
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     let scheduler = Rc::new(RecordingScheduler::default());
@@ -328,14 +328,14 @@ fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     control.take_observed();
@@ -1147,118 +1147,6 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     );
 }
 
-/// Edge admission compares a client HLC's Unix-millisecond physical component
-/// with the authority wall clock, not with the process-relative retry timer.
-/// This needs the real connection topology: direct NodeState admission never
-/// exercises the served-client edge path where retry timing is also available.
-#[test]
-fn edge_admits_client_write_with_current_unix_timestamp() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
-    let edge = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xd7, alice, &schema);
-
-    let (client_transport, edge_client_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_client_transport,
-            alice,
-            test_provider_claims(alice),
-            CommitUnitTrust::Session,
-        );
-
-    let unix_now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test clock is after Unix epoch")
-        .as_millis()
-        .try_into()
-        .expect("Unix milliseconds fit u64");
-    let write = client
-        .insert(
-            "todos",
-            cells("current timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd8)),
-                updated_at_ms: Some(unix_now_ms),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a current-time local write");
-
-    client.tick().expect("client uploads the write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the client write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id)),
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ) {
-            break;
-        }
-    }
-
-    let edge_state = crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id));
-    assert!(
-        matches!(
-            edge_state,
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ),
-        "a current Unix-time client write becomes Edge durable instead of being compared to the retry timer; observed {edge_state:?}"
-    );
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == write.tx_id),
-        "the admitted Edge write is retained for its upstream authority"
-    );
-
-    let future = client
-        .insert(
-            "todos",
-            cells("future timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd9)),
-                updated_at_ms: Some(
-                    unix_now_ms
-                        .saturating_add(crate::node::SKEW_TOLERANCE_MS)
-                        .saturating_add(10_000),
-                ),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a far-future local write");
-    client.tick().expect("client uploads the far-future write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the far-future write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id)),
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ) {
-            break;
-        }
-    }
-    let future_state =
-        crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id));
-    assert!(
-        matches!(
-            future_state,
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ),
-        "the same Edge path retains forward-skew rejection; observed {future_state:?}"
-    );
-}
-
 #[test]
 fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
     let schema = schema();
@@ -1361,9 +1249,9 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         block_on(
             client
                 .node
-                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
         )
-        .expect("Accepted Edge durability does not require a Global timestamp")
+        .expect("Local durability does not require a Global timestamp")
         .unwrap(),
         tx_id
     );
@@ -2225,19 +2113,26 @@ fn byte_wire_round_trips_subscription_to_client() {
         let queued = server_inbound.borrow();
         let first = queued.front().expect("register shape frame");
         let second = queued.get(1).expect("subscribe frame");
-        let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
-        let first = match decode_frame(first).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
+        let mut decoder = crate::db::channel_endpoint::ChannelEndpoint::new(
+            crate::wire::WireInboundContext::new(
+                WIRE_PROTOCOL_VERSION,
+                current_wire_features(),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut decode = |bytes: &Vec<u8>| match decode_frame(bytes).unwrap() {
+            WireFrame::Channel(envelope) => {
+                decoder.receive(envelope, bytes.len()).unwrap().unwrap()
+            }
+            other => panic!("expected channel frame, got {other:?}"),
         };
-        let second = match decode_frame(second).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
-        };
-        let SyncMessage::RegisterShape { shape_id, .. } = first else {
+        let first = decode(first);
+        let second = decode(second);
+        let SyncMessage::RegisterShape { shape_id, .. } = first.message else {
             panic!("expected RegisterShape, got {first:?}");
         };
-        let SyncMessage::Subscribe(subscribe) = second else {
+        let SyncMessage::Subscribe(subscribe) = second.message else {
             panic!("expected Subscribe, got {second:?}");
         };
         assert_eq!(subscribe.shape_id, shape_id);
@@ -3089,7 +2984,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_ti
             |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
         )
     );
-    for durability in [DurabilityTier::Local, DurabilityTier::Edge] {
+    for durability in [DurabilityTier::Local, DurabilityTier::Global] {
         authority
             .send(SyncMessage::FateUpdate {
                 tx_id,
@@ -3486,6 +3381,10 @@ fn cold_runtime_replacement_defers_empty_facade_until_local_snapshot_arrives() {
 // this particular cold scan. A child watchdog contains the historical busy
 // loop so a regression fails one test instead of hanging the suite.
 fn pending_restore_child(test_name: &str) -> bool {
+    pending_restore_child_with_timeout(test_name, std::time::Duration::from_secs(20))
+}
+
+fn pending_restore_child_with_timeout(test_name: &str, timeout: std::time::Duration) -> bool {
     const CHILD: &str = "JAZZ_PENDING_RESTORE_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(test_name) {
         return true;
@@ -3497,7 +3396,7 @@ fn pending_restore_child(test_name: &str) -> bool {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             let output = child.wait_with_output().unwrap();
@@ -3513,7 +3412,7 @@ fn pending_restore_child(test_name: &str) -> bool {
             child.kill().unwrap();
             let output = child.wait_with_output().unwrap();
             panic!(
-                "recovery did not yield to asynchronous storage within 20s: {}{}",
+                "recovery did not complete within {timeout:?}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -3624,6 +3523,698 @@ fn cold_browser_relay_restore_yields_to_storage() {
     ) {
         cold_pending_restore_yields_and_recovers(true);
     }
+}
+
+#[test]
+fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcf; 16]);
+    let worker = open_db(0xcf, author, &schema);
+    let core = open_core(0xd0, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("accepted parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert!(matches!(
+        worker.write_state(parent_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("pending child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.server.detach_connection(&core_subscriber));
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
+    assert!(
+        eviction.row_versions_evictable > 0,
+        "the accepted parent must be evictable while the pending child remains pinned"
+    );
+
+    let foreground = open_db(0xd1, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("worker admission must survive incomplete replay ancestry");
+        foreground
+            .tick()
+            .expect("foreground must not receive an unappliable replay frame");
+    }
+}
+
+#[test]
+fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() {
+    // Keep a recursive-regression stack overflow inside a subprocess so it
+    // reports a failing test instead of aborting every test in this binary.
+    if !pending_restore_child_with_timeout(
+        "db::tests::node_runtime::reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow",
+        std::time::Duration::from_secs(60),
+    ) {
+        return;
+    }
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let worker = open_db(0xc9, author, &schema);
+    let core = open_core(0xc8, AuthorSubject::SYSTEM, &schema);
+    let (worker_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("causal root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    let mut ancestors = vec![first.mergeable_tx_id()];
+    for index in 0..256 {
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        assert!(matches!(
+            worker.write_state(*ancestors.last().unwrap()).unwrap(),
+            WriteState {
+                fate: Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ));
+        if index < 255 {
+            let write = worker
+                .update(
+                    "todos",
+                    row_id,
+                    cells(&format!("accepted step {index}"), false, author),
+                    Default::default(),
+                )
+                .unwrap();
+            ancestors.push(write.mergeable_tx_id());
+        }
+    }
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.server.detach_connection(&core_subscriber));
+    let tip = worker
+        .update(
+            "todos",
+            row_id,
+            cells("pending causal tip", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let latest_tx = tip.mergeable_tx_id();
+    // Only the tip is a replay root: accepted ancestors cannot flatten the
+    // traversal by independently appearing first in the sorted pending list.
+    assert_eq!(
+        block_on(
+            worker
+                .node
+                .node
+                .borrow_mut()
+                .pending_transaction_ids_for_author(author)
+        )
+        .unwrap(),
+        vec![latest_tx]
+    );
+
+    let foreground = open_db(0xca, author, &schema);
+    foreground.set_non_durable_client();
+    assert_eq!(
+        foreground.write_state(latest_tx).unwrap_err().code,
+        ErrorCode::NotObserved
+    );
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("deep replay must not overflow the owner stack");
+        foreground
+            .tick()
+            .expect("foreground must not receive a malformed replay frame");
+    }
+    // No foreground query/subscription has run: only causal replay can make
+    // this transaction and its ancestors observable in the empty foreground.
+    assert!(matches!(
+        foreground.write_state(latest_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+    for ancestor in ancestors {
+        foreground
+            .write_state(ancestor)
+            .expect("replay delivers the complete ancestor chain");
+    }
+    let rows = prepared_read(&foreground, &foreground.table("todos"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("pending causal tip".to_owned()))
+    );
+}
+
+#[test]
+fn reopened_local_subscriber_replays_after_complete_parent_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
+    let worker = open_db(0xcb, author, &schema);
+    let core = open_core(0xcc, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("repairable parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert_eq!(
+        worker.write_state(parent_tx).unwrap().durability,
+        DurabilityTier::Global
+    );
+
+    let repair_requests = vec![crate::protocol::RowVersionRef::new(
+        "todos",
+        parent.row_uuid(),
+        parent_tx,
+    )];
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("repairable child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
+    assert!(eviction.row_versions_evictable > 0);
+
+    let foreground = open_db(0xcd, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+    for _ in 0..16 {
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        if worker.write_state(child_tx).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        worker.write_state(child_tx).unwrap().durability,
+        DurabilityTier::Global,
+        "the authority fate must arrive before the missing parent is repaired"
+    );
+
+    foreground.tick().unwrap();
+    assert_eq!(
+        foreground.write_state(child_tx).unwrap_err().code,
+        ErrorCode::NotObserved,
+        "a terminal fate alone must not release replay with missing ancestry"
+    );
+    // This scoped internal repair is necessary to isolate replay from query
+    // hydration: an authority query can independently supply the foreground
+    // with the child. Restore the genuine authority-owned ancestor, then use
+    // the server shell's progress notification boundary to service the same
+    // live foreground connection. No foreground query exists at this point.
+    let repaired_parent = core
+        .node()
+        .borrow_mut()
+        .row_version_payloads_for_refs(
+            &repair_requests,
+            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(author),
+        )
+        .unwrap();
+    assert_eq!(repaired_parent.len(), 1);
+    worker
+        .node
+        .node
+        .borrow_mut()
+        .apply_row_version_payloads_for_requests(&repair_requests, repaired_parent)
+        .unwrap();
+    let restored_parent = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(parent_tx)
+        .unwrap();
+    assert!(
+        local_replay_unit_is_complete(&restored_parent),
+        "repair must actually restore the complete parent"
+    );
+    worker.mark_subscriber_connections_dirty_for_test();
+
+    let mut repaired = false;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        foreground.tick().unwrap();
+        if matches!(
+            foreground.write_state(child_tx),
+            Ok(WriteState {
+                fate: Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            })
+        ) {
+            repaired = true;
+            break;
+        }
+    }
+    assert!(
+        repaired,
+        "a complete parent repair must release the child replay without a foreground query"
+    );
+    foreground
+        .write_state(parent_tx)
+        .expect("causal parent must arrive before the repaired child");
+    let rows = prepared_read(&foreground, &foreground.table("todos"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("repairable child".to_owned()))
+    );
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+    assert!(matches!(
+        foreground.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn local_replay_route_retains_terminal_fate_across_dead_queue() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let unrelated_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let tx_id = TxId::new(TxTime(1), NodeUuid::from_bytes([0xd3; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    drop(old_queue);
+    register_local_fate_route(
+        &routes,
+        TxId::new(TxTime(2), NodeUuid::from_bytes([0xd4; 16])),
+        &unrelated_queue,
+    );
+    register_local_replay_route(&routes, tx_id, &replacement_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &replacement_queue);
+    release_local_replay_fates(&routes);
+
+    assert!(matches!(
+        replacement_queue.borrow().as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: received,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        }] if *received == tx_id
+    ));
+}
+
+#[test]
+fn local_replay_routes_keep_independent_live_receivers() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let tx_id = TxId::new(TxTime(3), NodeUuid::from_bytes([0xd6; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(2)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [SyncMessage::FateUpdate {
+                tx_id: received,
+                fate: Fate::Accepted,
+                durability: Some(DurabilityTier::Global),
+                ..
+            }] if *received == tx_id
+        ));
+    }
+}
+
+/// A live same-author replay route stores a terminal fate before a second
+/// receiver attaches; repair must make both independent queues deliver:
+///
+/// ```text
+/// A: blocked ──terminal──► held fate
+/// B: blocked ──late attach─┘
+/// A,B: replay ──local ack──► terminal (once each)
+/// ```
+///
+/// This private route-registry seam is required because public APIs cannot
+/// deterministically force a terminal-before-late-attach ordering or inspect
+/// each receiver's queue independently.
+#[test]
+fn local_replay_route_copies_terminal_fate_to_late_live_receiver() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe0; 16]);
+    let worker = open_db(0xe1, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("late live replay route", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let replay = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap();
+
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay.clone()]));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(4)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    block_on(queue_local_acknowledgements(&routes, &worker.node.node));
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [
+                SyncMessage::CommitUnit { tx, .. },
+                SyncMessage::FateUpdate {
+                    tx_id: local_id,
+                    fate: Fate::Pending,
+                    durability: Some(DurabilityTier::Local),
+                    ..
+                },
+                SyncMessage::FateUpdate {
+                    tx_id: terminal_id,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                }
+            ] if tx.tx_id == tx_id && *local_id == tx_id && *terminal_id == tx_id
+        ));
+    }
+}
+
+#[test]
+fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xda; 16]);
+    let worker = open_db(0xdb, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("reconnectable replay", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    drop(old_queue);
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(3)),
+        durability: Some(DurabilityTier::Global),
+    };
+    route_local_fate(&routes, tx_id, &fate);
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &replacement_queue,
+    ))
+    .unwrap();
+
+    assert!(
+        replacement_queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id: received,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                } if *received == tx_id
+            )
+        }),
+        "a repaired replacement must receive the retained terminal fate"
+    );
+}
+
+#[test]
+fn incomplete_retained_root_reloads_after_storage_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xdc; 16]);
+    let worker = open_db(0xdd, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("repaired retained root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        mut versions,
+    } = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap()
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    versions.clear();
+    tx.n_total_writes = tx.n_total_writes.saturating_add(1);
+    let incomplete = SyncMessage::CommitUnit { tx, versions };
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &queue, author, Some(incomplete));
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &queue,
+    ))
+    .unwrap();
+
+    assert!(
+        queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+            )
+        }),
+        "a repaired root must be reconstructed instead of replaying partial retained data"
+    );
+}
+
+fn local_replay_restore_point_reads(chain_len: usize) -> usize {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let worker = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .unwrap();
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("shared replay root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    let mut expected_transactions = vec![first.mergeable_tx_id()];
+    worker.tick().unwrap();
+    for index in 0..chain_len {
+        let write = worker
+            .update(
+                "todos",
+                row_id,
+                cells(&format!("shared replay step {index}"), false, author),
+                Default::default(),
+            )
+            .unwrap();
+        expected_transactions.push(write.mergeable_tx_id());
+        worker.tick().unwrap();
+    }
+
+    eviction.evict_all();
+    let before = control.point_read_count();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let downstream: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &downstream,
+    ))
+    .unwrap();
+    let reads = control.point_read_count() - before;
+    let delivered = downstream
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::CommitUnit { tx, .. } => Some(tx.tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered, expected_transactions,
+        "the measured restore must deliver every causal transaction exactly once"
+    );
+    let local_acks = downstream
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Pending,
+                durability: Some(DurabilityTier::Local),
+                ..
+            } => Some(*tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_acks, expected_transactions,
+        "all pending roots receive local acknowledgement after replay"
+    );
+    assert!(
+        reads > 0,
+        "the evicted restore must perform actual storage work"
+    );
+    reads
+}
+
+#[test]
+fn reopened_local_subscriber_shares_replay_traversal_work() {
+    let smaller = local_replay_restore_point_reads(16);
+    let larger = local_replay_restore_point_reads(32);
+    assert!(
+        larger <= smaller * 3,
+        "doubling pending roots must stay near-linear: {smaller} reads for 17 roots, {larger} for 33 roots"
+    );
 }
 
 #[test]
@@ -3739,7 +4330,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         tx_id: rejected_id,
         fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     route_local_fate(&routes, rejected_id, &rejected);
     assert!(matches!(
@@ -3750,4 +4341,384 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         })
     ));
     assert!(!routes.borrow().contains_key(&rejected_id));
+}
+
+// The host scheduler and physical partial frame are intentionally exposed:
+// row-level APIs cannot simulate a peer falling silent halfway through a frame.
+// The only second service turn is triggered by the real scheduled timer.
+#[test]
+fn silent_partial_canonical_receive_schedules_its_own_expiry() {
+    struct TimerHost(std::sync::mpsc::Sender<()>);
+    impl TickScheduler for TimerHost {
+        fn schedule_tick(&self, _urgency: TickUrgency) {}
+        fn schedule_tick_after(&self, delay_ms: u64) {
+            let sender = self.0.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let _ = sender.send(());
+            });
+        }
+    }
+    let client = open_db(0x75, AuthorSubject::for_test_bytes([0x75; 16]), &schema());
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+    client.set_tick_scheduler(Some(Rc::new(TimerHost(wake_tx))));
+    let (client_bytes, mut remote) = byte_duplex_raw();
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let mut adapter =
+        WireTransportAdapter::new(client_bytes, WIRE_PROTOCOL_VERSION, features, None);
+    adapter.set_incomplete_receive_timeout_for_test(20);
+    let connection = block_on(client.connect_upstream(Box::new(adapter)));
+    remote
+        .send_frame(
+            encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+                protocol_version: WIRE_PROTOCOL_VERSION,
+                features,
+                session: None,
+                extent: crate::wire::channels::ChannelFrame {
+                    channel: 3,
+                    generation: 0,
+                    sequence: 0,
+                    class: crate::wire::channels::ChannelClass::Delivery,
+                    first: true,
+                    last: false,
+                    message_len: 2,
+                    decoded_len: 1,
+                    payload: vec![0],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    block_on(async { connection.lock().await.tick().await }).unwrap();
+    wake_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("a silent partial receive must schedule its own host timer");
+    let error = block_on(async { connection.lock().await.tick().await }).unwrap_err();
+    assert!(
+        error.message.contains("incomplete channel message expired"),
+        "{error:?}"
+    );
+}
+
+/// Alice's second independent query may finish the first query's cold graph.
+/// Its completed first batch must still trigger local publication after the
+/// shared runtime becomes idle. Controlled storage fixes that interleaving;
+/// a public JazzClient cannot pause one graph at the storage boundary.
+///
+/// A opens (cold) -> storage resumes -> B opens/drives A -> owner tick -> A reset
+#[test]
+fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
+    use crate::tools::test_support::AllowAll;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct HostWake(AtomicBool);
+    impl futures::task::ArcWake for HostWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    struct HostScheduler(Arc<HostWake>);
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _urgency: TickUrgency) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn schedule_tick_after(&self, _delay_ms: u64) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(futures::task::waker(self.0.clone()))
+        }
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("records_a").column("value", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("records_b").column("value", PublicColumnType::Text),
+            )
+            .allow_all(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xe1; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    let wake = Arc::new(HostWake(AtomicBool::new(false)));
+    db.set_tick_scheduler(Some(Rc::new(HostScheduler(wake.clone()))));
+    let expected = db
+        .insert(
+            "records_a",
+            BTreeMap::from([("value".to_owned(), Value::String("first".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    db.insert(
+        "records_b",
+        BTreeMap::from([("value".to_owned(), Value::String("second".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let first = db.prepare_query(&db.table("records_a")).unwrap();
+    let second_query = db.prepare_query(&db.table("records_b")).unwrap();
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let mut first = block_on(db.subscribe(&first, ReadOpts::default())).unwrap();
+    assert!(first.try_next_event().is_none());
+    wake.0.store(false, Ordering::SeqCst);
+    control.resume();
+    let mut second = block_on(db.subscribe(&second_query, ReadOpts::default())).unwrap();
+    db.node.node.borrow_mut().drive_query_runtime().unwrap();
+    assert!(!db.node.node.borrow().has_pending_query_runtime());
+    assert!(wake.0.load(Ordering::SeqCst));
+    // Native relay may consume the cross-thread wake before the owner tick.
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    // Cancellation inside refresh must not acknowledge undelivered work.
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut interrupted = Box::pin(db.node.tick());
+    let host_waker = futures::task::waker(wake.clone());
+    let mut cx = std::task::Context::from_waker(&host_waker);
+    assert!(matches!(
+        interrupted.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
+    drop(interrupted);
+    drop(pause);
+    for _ in 0..16 {
+        if !wake.0.swap(false, Ordering::SeqCst) {
+            break;
+        }
+        db.tick().unwrap();
+    }
+    assert!(!wake.0.load(Ordering::SeqCst), "owner must become idle");
+    let first_events = std::iter::from_fn(|| first.try_next_event()).collect::<Vec<_>>();
+    let second_events = std::iter::from_fn(|| second.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        first_events.iter().any(|event| matches!(event,
+            SubscriptionEvent::Delta { reset: true, added, .. }
+            if added.iter().any(|row| row.row_uuid() == expected)
+        )),
+        "first subscription must publish after independent progress: first={first_events:?} second={second_events:?}\n{}",
+        db.query_delivery_diagnostics_for_test()
+    );
+    assert!(second_events.iter().any(|event| matches!(event,
+        SubscriptionEvent::Delta { reset: true, added, .. } if added.len() == 1
+    )));
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0
+    );
+    assert!(first.try_next_event().is_none());
+    assert!(second.try_next_event().is_none());
+    assert!(!wake.0.load(Ordering::SeqCst));
+
+    // Consume a newer wake while refresh owns an older generation.
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut refresh = Box::pin(db.node.tick());
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    pause.release();
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    drop(refresh);
+    drop(pause);
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        2,
+        "newer wake consumed during await must survive older generation acknowledgment"
+    );
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0,
+        "successful refresh must acknowledge the retained generation"
+    );
+}
+
+/// Only the retired receipt is planted internally: current APIs cannot create
+/// it. Everything after that uses durable reopen, ordinary connections and
+/// transaction waits, with no query that could independently trigger repair.
+fn assert_legacy_edge_receipt_replays_to_core(known_to_core: bool, permission_revoked: bool) {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc6; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = |author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            DbIdentity { author, ..identity },
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open(author);
+    let tx_id = client
+        .insert(
+            "todos",
+            cells("original offline payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe6)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let pump = |client: &Db<RocksDbStorage>| {
+        client.tick().unwrap();
+        core.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let settle = |client: &Db<RocksDbStorage>| {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
+            *observed.borrow_mut() = Some(outcome)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.borrow().is_none() && std::time::Instant::now() < deadline {
+            pump(client);
+            std::thread::yield_now();
+        }
+        let outcome = result
+            .borrow_mut()
+            .take()
+            .expect("reopen must settle the original write without a query");
+        outcome
+    };
+    let original_global_time = if known_to_core {
+        let (up, down) = duplex();
+        let upstream = block_on(client.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, author);
+        assert_eq!(settle(&client).unwrap(), tx_id);
+        drop(upstream);
+        drop(subscriber);
+        core.node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .global_time
+    } else {
+        None
+    };
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(tx_id),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    // Sharing a durable store does not let another account replay this author.
+    let other = open(other_author);
+    {
+        let (up, down) = duplex();
+        let _upstream = block_on(other.connect_upstream(up));
+        let _subscriber = core.accept_subscriber(down, other_author);
+        for _ in 0..16 {
+            pump(&other);
+        }
+        assert!(
+            other.node.outbox.borrow().iter().next().is_none(),
+            "recovery must remain author-scoped"
+        );
+        if !known_to_core {
+            assert!(core.node().borrow_mut().transaction_record(tx_id).is_none());
+        }
+    }
+    block_on(other.close()).unwrap();
+    drop(other);
+
+    let client = open(author);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .transaction_state_settled(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    // A changed provider claim represents permission loss since the old receipt.
+    let claims = test_provider_claims(if permission_revoked {
+        other_author
+    } else {
+        author
+    });
+    let _subscriber = core.accept_subscriber_with_claims(down, author, claims);
+    let outcome = settle(&client);
+    if permission_revoked {
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+        assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+    } else {
+        assert_eq!(outcome.unwrap(), tx_id);
+        let audit = core.node().borrow_mut().transaction_record(tx_id).unwrap();
+        assert_eq!(audit.made_by, author);
+        assert_eq!(audit.tx_id, tx_id);
+        assert_eq!(audit.n_total_writes, 1);
+        assert_eq!(audit.fate, Fate::Accepted);
+        assert_eq!(audit.durability, DurabilityTier::Global);
+        assert!(audit.global_time.is_some());
+        if known_to_core {
+            assert_eq!(audit.global_time, original_global_time);
+        }
+        let rows = core.read(&Query::from("todos")).unwrap();
+        assert_eq!(row_ids(&rows), vec![row(0xe6)]);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "title"),
+            Some(Value::String("original offline payload".to_owned()))
+        );
+    }
+    block_on(client.close()).unwrap();
+}
+
+#[test]
+fn legacy_edge_receipt_reopens_and_uploads_without_query() {
+    assert_legacy_edge_receipt_replays_to_core(false, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_preserves_existing_core_acceptance() {
+    assert_legacy_edge_receipt_replays_to_core(true, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_obeys_current_core_permissions() {
+    assert_legacy_edge_receipt_replays_to_core(false, true);
 }

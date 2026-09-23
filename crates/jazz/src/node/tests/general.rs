@@ -655,40 +655,6 @@ fn malformed_version_receipts_fail_closed_at_direct_semantic_ingress() {
     }));
     assert_no_panic(received);
 
-    for edge_identity in [None, Some(AuthorSubject::SYSTEM)] {
-        let (_edge_dir, mut edge) = open_node();
-        let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let outcome = if let Some(identity) = edge_identity {
-                edge.ingest_edge_authority_mergeable_commit_unit_with_identity(
-                    tx.clone(),
-                    vec![malformed.clone()],
-                    10,
-                    identity,
-                )
-                .resolve()?
-            } else {
-                edge.ingest_edge_authority_mergeable_commit_unit(
-                    tx.clone(),
-                    vec![malformed.clone()],
-                    10,
-                )
-                .resolve()?
-            };
-            if matches!(
-                outcome.value.as_slice(),
-                [SyncMessage::FateUpdate {
-                    fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
-                    ..
-                }]
-            ) {
-                Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
-            } else {
-                Ok(())
-            }
-        }));
-        assert_no_panic(received);
-    }
-
     let (_relay_dir, mut relay) = open_node();
     assert_no_panic(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || {
@@ -734,7 +700,6 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
             Some(CommitUnitIngestContext {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
-                edge_authority: false,
                 admitted_write_authorization: false,
             }),
         )
@@ -842,7 +807,6 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     assert!(matches!(
@@ -921,7 +885,6 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let mut root = prepared
@@ -982,7 +945,6 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let start = receiver
@@ -1106,7 +1068,6 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let _ = receiver
@@ -1154,7 +1115,6 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        edge_authority: false,
         admitted_write_authorization: false,
     });
     let started = receiver
@@ -1801,14 +1761,13 @@ fn deletion_register_hides_and_restore_reveals_current_content() {
 }
 
 #[test]
-fn durability_tier_ladder_orders_edge_between_local_and_global() {
+fn durability_tier_ladder_orders_local_before_global() {
     assert!(DurabilityTier::None < DurabilityTier::Local);
-    assert!(DurabilityTier::Local < DurabilityTier::Edge);
-    assert!(DurabilityTier::Edge < DurabilityTier::Global);
+    assert!(DurabilityTier::Local < DurabilityTier::Global);
 }
 
 #[test]
-fn edge_current_rows_exclude_purely_local_pending_writes() {
+fn global_current_rows_exclude_purely_local_pending_writes() {
     let (_temp_dir, mut node) = open_node();
     let row = row(0xe1);
     node.commit_mergeable_settled(
@@ -1825,41 +1784,12 @@ fn edge_current_rows_exclude_purely_local_pending_writes() {
         vec![row]
     );
     assert!(
-        node.current_rows("todos", DurabilityTier::Edge)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn edge_current_rows_include_edge_accepted_ahead_versions() {
-    let (_temp_dir, mut node) = open_node();
-    let row = row(0xe2);
-    let tx_id = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row, 10).cells(title_cells("edge accepted")),
-        )
-        .unwrap();
-
-    // E1: edge-accept produced directly; E2 wires the acceptance path.
-    node.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
-        .unwrap();
-
-    assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
-    assert_eq!(
-        node.current_rows("todos", DurabilityTier::Edge)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![row]
-    );
-    assert!(
         node.current_rows("todos", DurabilityTier::Global)
             .unwrap()
             .is_empty()
     );
 }
+
 
 #[test]
 fn global_fate_cleans_ahead_current_overlay() {
@@ -2303,7 +2233,7 @@ fn known_parent_must_match_exact_physical_table_for_local_and_replicated_version
             vec![remote],
             Fate::Accepted,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )
         .unwrap_err();
     assert!(matches!(
@@ -2510,8 +2440,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     assert_eq!(
@@ -2559,8 +2489,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
             },
             vec![wrong_partial.clone()],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
     assert_eq!(
@@ -2596,8 +2526,8 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
             },
             vec![wrong_partial, wrong_completion],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap_err();
     assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
@@ -2651,8 +2581,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     let wrong_partial = version_record(
@@ -2678,8 +2608,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
             },
             vec![wrong_partial.clone()],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
     let matching = version_record(
@@ -2705,8 +2635,8 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
             },
             vec![wrong_partial, matching],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(1)),
+            DurabilityTier::Global,
         )
         .unwrap();
 
@@ -2779,4 +2709,29 @@ fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
         node.active_session_claim_scope_key(alice).is_none(),
         "cancelling a scoped query must restore the prior claim context"
     );
+}
+
+// Pin both supported encoding boundaries. Public durability has no Edge tier,
+// but old bytes must decode as Local without renumbering Global.
+#[test]
+fn durability_encoding_preserves_global_tag_and_decodes_legacy_edge_as_local() {
+    use groove::records::{RecordField, ScalarEnumSchema, ValueType};
+    let ty = ValueType::EnumTag(ScalarEnumSchema::new(
+        "durability", ["none", "local", "edge", "global"],
+    ).unwrap());
+    for (tag, tier, encoded) in [
+        (0, DurabilityTier::None, 0),
+        (1, DurabilityTier::Local, 1),
+        (2, DurabilityTier::Local, 1),
+        (3, DurabilityTier::Global, 3),
+    ] {
+        assert_eq!(postcard::from_bytes::<DurabilityTier>(&[tag]).unwrap(), tier);
+        assert_eq!(postcard::to_allocvec(&tier).unwrap(), vec![encoded]);
+        assert_eq!(DurabilityTier::from_discriminant(tag).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(DurabilityTier::read_tuple_raw(&[tag], &ty).unwrap(), tier);
+        assert_eq!(tier.to_value(), Value::EnumTag(encoded));
+    }
+    assert!(DurabilityTier::from_discriminant(4).is_err());
+    assert!(postcard::from_bytes::<DurabilityTier>(&[4]).is_err());
 }

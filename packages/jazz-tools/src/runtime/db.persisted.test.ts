@@ -191,12 +191,12 @@ describe("Db write handles", () => {
       undefined,
     );
     expect(remove).toHaveBeenCalledWith("todos", "todo-1", undefined, undefined, undefined);
-    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
+    await expect(updated.wait({ tier: "global" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
     await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-update",
     );
-    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
     await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-delete",
     );
@@ -277,7 +277,7 @@ describe("Db write handles", () => {
       title: "With session",
       done: true,
     });
-    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
+    await expect(updated.wait({ tier: "global" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
     await expect(insertClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-insert",
@@ -286,7 +286,7 @@ describe("Db write handles", () => {
     await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-update",
     );
-    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
     await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-delete",
     );

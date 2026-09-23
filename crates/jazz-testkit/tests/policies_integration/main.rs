@@ -110,7 +110,7 @@ fn assert_transaction_policy_denied(err: crate::JazzError) {
     };
     assert_eq!(
         message,
-        "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+        "transaction was rejected before reaching GlobalServer durability: authorization_denied",
         "expected authority policy rejection",
     );
 }

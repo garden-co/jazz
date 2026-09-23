@@ -70,7 +70,7 @@ export async function waitForQuery<T>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "edge",
+  tier?: "local" | "global",
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -108,7 +108,7 @@ export async function waitForQuery<T>(
  * Race a promise against a timeout.
  *
  * Useful for operations that should complete within a deadline (e.g.
- * `db.insert(...).wait({ tier: "edge" })`) but don't have built-in timeout support.
+ * `db.insert(...).wait({ tier: "global" })`) but don't have built-in timeout support.
  */
 export async function withTimeout<T>(
   promise: Promise<T>,

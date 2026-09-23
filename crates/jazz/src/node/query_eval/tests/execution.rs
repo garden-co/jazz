@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn reachable_query_rows_uses_prepared_groove_plan() {
+fn reachable_query_hydration_preserves_results_and_releases_ownership() {
     let (_dir, mut node) = open_recursive_node();
     let schema = recursive_schema();
     let team1 = row(1);
@@ -65,37 +65,33 @@ fn reachable_query_rows_uses_prepared_groove_plan() {
     }
 
     let shape = recursive_shape(&schema);
-    let binding = shape
-        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
-        .unwrap();
-    assert!(
-        !node
-            .query
-            .query_shape_cache
-            .keys()
-            .any(|(shape_id, tier, _)| {
-                *shape_id == shape.shape_id() && *tier == DurabilityTier::Global
-            })
-    );
+    // Keep this ownership receipt internal: exact public results cannot reveal
+    // a leaked prepared shape or binding after a short-lived read is released.
+    let baseline = node.database.runtime_stats();
+    for (team, expected) in [
+        (team1, BTreeSet::from([resource1, resource2])),
+        (team3, BTreeSet::from([resource1])),
+        (team1, BTreeSet::from([resource1, resource2])),
+    ] {
+        let binding = shape
+            .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]))
+            .unwrap();
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(rows, expected, "fresh hydration for team {team:?}");
 
-    let rows = node
-        .query_rows(&shape, &binding, DurabilityTier::Global)
-        .unwrap()
-        .into_iter()
-        .map(|row| row.row_uuid())
-        .collect::<BTreeSet<_>>();
-
-    assert_eq!(rows, BTreeSet::from([resource1, resource2]));
-    assert!(matches!(
-        node.query
-            .query_shape_cache
-            .iter()
-            .find(|((shape_id, tier, _), _)| {
-                *shape_id == shape.shape_id() && *tier == DurabilityTier::Global
-            })
-            .map(|(_, plan)| plan.as_ref()),
-        Some(PreparedQueryPlan::Prepared { .. })
-    ));
+        let after = node.database.runtime_stats();
+        assert_eq!(after.active_subscriptions, baseline.active_subscriptions);
+        assert_eq!(
+            after.active_prepared_shapes,
+            baseline.active_prepared_shapes
+        );
+        assert_eq!(after.active_shape_params, baseline.active_shape_params);
+    }
 }
 
 #[test]

@@ -281,7 +281,7 @@ fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
             .current_query_program_request(
                 &shape,
                 &binding,
-                DurabilityTier::Edge,
+                DurabilityTier::Global,
                 AuthorSubject::SYSTEM,
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
@@ -489,7 +489,7 @@ fn retained_root_window_sources_do_not_cross_policy_scopes() {
         source.shape_id(),
         binding.binding_id(),
         RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..RegisterShapeOptions::default()
         }
         .read_view_key(),
@@ -1167,14 +1167,14 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
 }
 
 /// Storage-backed scalar subscriptions resolve deletion/restore winners at
-/// their own Local or Edge current frontier instead of accidentally reading
-/// the Global register.
+/// their selected frontier: Local includes pending changes, while Global
+/// includes only Core-confirmed changes.
 ///
 /// server ──tier-accepted insert/delete/restore──► peer ──ViewUpdate──► reader
-/// server ──later Local delete (Edge only)───────► Edge frontier unchanged
+/// server ──later Local delete (Global only)───────► Global frontier unchanged
 #[test]
-fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() {
-    for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
+fn storage_backed_maintained_deletion_winners_follow_local_and_global_frontiers() {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         let scalar_schema =
             public_query_eval_schema(PublicSchemaBuilder::new().table(
                 PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
@@ -1185,11 +1185,9 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
         );
         let (_reader_dir, mut reader) =
             open_node_with_uuid(NodeUuid::from_bytes([0x60 + tier as u8; 16]), scalar_schema);
-        // Edge is the foreground/relay handoff frontier. A durable node
-        // consumes its upstream Global frontier instead, so model the client
-        // receiver explicitly rather than accidentally asserting that a
-        // durable authority reads an Edge-only receipt.
-        if tier == DurabilityTier::Edge {
+        // Exercise the foreground receiver as well as the durable local
+        // receiver; both consume the same Core-confirmed frontier.
+        if tier == DurabilityTier::Global {
             reader.set_non_durable_client();
         }
         let shape = Query::from("notes")
@@ -1251,8 +1249,10 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
             let tx_id = node
                 .commit_mergeable_settled(write)
                 .expect("commit tiered row");
-            node.apply_fate_update(tx_id, Fate::Accepted, None, Some(tier))
-                .expect("accept tiered row");
+            if tier == DurabilityTier::Global {
+                node.accept_global_for_test(tx_id)
+                    .expect("Core confirms row");
+            }
             tx_id
         };
 
@@ -1324,7 +1324,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
             "{tier:?} ordinary reader lookup agrees with restored membership"
         );
 
-        if tier == DurabilityTier::Edge {
+        if tier == DurabilityTier::Global {
             let local_delete = server
                 .commit_mergeable_settled(
                     MergeableCommit::new("notes", row(0), 4)
@@ -1341,9 +1341,9 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                 )
                 .expect("accept Local-only deletion");
             // This deliberately overwrites the ahead-current register at
-            // Local. Edge's executable source filters it out and sees no
-            // membership transition; its materialized reader stays visible.
-            if let Some(edge_after_local) = peer
+            // Local. The Global source still reads the confirmed register,
+            // so its materialized reader stays visible.
+            if let Some(global_after_local) = peer
                 .query_update_for_subscription_with_opts(
                     &mut server,
                     subscription,
@@ -1351,29 +1351,29 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                     &binding,
                     opts,
                 )
-                .expect("evaluate Edge after Local-only register write")
+                .expect("evaluate Global after Local-only register write")
             {
-                let SyncMessage::ViewUpdate(payload) = &edge_after_local else {
-                    panic!("Edge scalar subscription must produce a view update");
+                let SyncMessage::ViewUpdate(payload) = &global_after_local else {
+                    panic!("Global scalar subscription must produce a view update");
                 };
                 assert!(!payload.peer_payload_inventory.opening_pending);
                 reader
-                    .apply_sync_message_settled(edge_after_local)
-                    .expect("reader applies no-op Edge update");
+                    .apply_sync_message_settled(global_after_local)
+                    .expect("reader applies no-op Global update");
             }
             assert_eq!(
                 receiver_rows_in_read_view(
                     &mut reader,
                     &shape,
                     &binding,
-                    DurabilityTier::Edge,
+                    DurabilityTier::Global,
                     &read_view,
                 )
                 .into_iter()
                 .map(|row| row.row_uuid())
                 .collect::<BTreeSet<_>>(),
                 BTreeSet::from([row(0)]),
-                "Edge remains at its prior visible register frontier"
+                "Global remains at its prior visible register frontier"
             );
         }
 
@@ -1381,14 +1381,14 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
     }
 }
 
-/// A fresh Edge reader must receive the earlier Edge-visible restore even when
-/// a newer Local-only register event occupies the raw ahead-current key.
+/// A fresh Global reader receives the confirmed restore even when a newer
+/// pending local deletion occupies the ahead-current key.
 ///
-/// server: Global delete t2 ──► Edge restore t3 ──► Local delete t4
+/// server: Global delete t2 ──► Global restore t3 ──► Local delete t4
 ///                                     │                   │
-///                                     └────fresh Edge reader sees t3─────┘
+///                                     └────fresh Global reader sees t3─────┘
 #[test]
-fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
+fn storage_backed_global_restore_ignores_newer_pending_local_deletion() {
     let scalar_schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
@@ -1397,14 +1397,16 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
         open_node_with_uuid(NodeUuid::from_bytes([0x73; 16]), scalar_schema.clone());
     let shape = Query::from("notes")
         .validate(&server.catalogue.schema)
-        .expect("validate Edge shadow query");
-    let binding = shape.bind(BTreeMap::new()).expect("bind Edge shadow query");
-    let edge_opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        .expect("validate Global shadow query");
+    let binding = shape
+        .bind(BTreeMap::new())
+        .expect("bind Global shadow query");
+    let global_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
-    register_query_shape(&mut server, &shape, edge_opts.clone());
-    subscribe_query_binding_as_system_with_opts(&mut server, &shape, &binding, edge_opts.clone());
+    register_query_shape(&mut server, &shape, global_opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut server, &shape, &binding, global_opts.clone());
 
     let content_tx = server
         .commit_mergeable_settled(
@@ -1439,21 +1441,21 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
             Some(DurabilityTier::Global),
         )
         .expect("accept global deletion");
-    let edge_restore_tx = server
+    let global_restore_tx = server
         .commit_mergeable_settled(
             MergeableCommit::new("notes", row(0), 3)
                 .made_by(AuthorSubject::SYSTEM)
                 .deletion(crate::tx::DeletionEvent::Restored),
         )
-        .expect("commit Edge restore");
+        .expect("commit Global restore");
     server
         .apply_fate_update(
-            edge_restore_tx,
+            global_restore_tx,
             Fate::Accepted,
-            None,
-            Some(DurabilityTier::Edge),
+            Some(GlobalTime(3)),
+            Some(DurabilityTier::Global),
         )
-        .expect("accept Edge restore");
+        .expect("accept Global restore");
     let local_delete_tx = server
         .commit_mergeable_settled(
             MergeableCommit::new("notes", row(0), 4)
@@ -1473,44 +1475,44 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
     let (_reader_dir, mut reader) =
         open_node_with_uuid(NodeUuid::from_bytes([0x74; 16]), scalar_schema);
     reader.set_non_durable_client();
-    register_query_shape(&mut reader, &shape, edge_opts.clone());
-    subscribe_query_binding_as_system_with_opts(&mut reader, &shape, &binding, edge_opts.clone());
+    register_query_shape(&mut reader, &shape, global_opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut reader, &shape, &binding, global_opts.clone());
     let update = PeerState::new()
-        .rehydrate_query_with_opts(&mut server, &shape, &binding, edge_opts.clone())
-        .expect("serve fresh Edge hydration");
+        .rehydrate_query_with_opts(&mut server, &shape, &binding, global_opts.clone())
+        .expect("serve fresh Global hydration");
     let bundles = match &update {
         SyncMessage::ViewUpdate(payload) => {
             crate::protocol::expand_version_carriers(&payload.version_carriers)
-                .expect("fresh Edge carriers should expand")
+                .expect("fresh Global carriers should expand")
         }
-        _ => panic!("fresh Edge scalar subscription must produce a view update"),
+        _ => panic!("fresh Global scalar subscription must produce a view update"),
     };
     assert!(
         bundles.iter().any(|bundle| {
-            bundle.tx.tx_id == edge_restore_tx
+            bundle.tx.tx_id == global_restore_tx
                 && bundle.versions.iter().any(|version| {
                     version.row_uuid() == row(0)
                         && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
                 })
         }),
-        "fresh Edge hydration ships t3 instead of the Global t2 deletion or Local t4 deletion"
+        "fresh Global hydration ships t3 instead of the Global t2 deletion or Local t4 deletion"
     );
     reader
         .apply_sync_message_settled(update)
-        .expect("fresh reader applies Edge hydration");
+        .expect("fresh reader applies Global hydration");
     assert_eq!(
         receiver_rows_in_read_view(
             &mut reader,
             &shape,
             &binding,
-            DurabilityTier::Edge,
-            &edge_opts.read_view,
+            DurabilityTier::Global,
+            &global_opts.read_view,
         )
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0)]),
-        "fresh reader matches the source's filter-before-argmax Edge view"
+        "fresh reader matches the source's filter-before-argmax Global view"
     );
 }
 
@@ -1526,7 +1528,7 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
         .client_settled_binding_view_key_for_query(
             &shape,
             &binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             &ReadViewSpec::default(),
         )
         .expect("NodeState preserves the host-selected authority tier");
@@ -1534,7 +1536,7 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
         shape.shape_id(),
         binding.binding_id(),
         RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..RegisterShapeOptions::default()
         }
         .read_view_key(),
@@ -1546,7 +1548,7 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
         node.client_settled_binding_view_key_for_query(
             &shape,
             &binding,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             &ReadViewSpec::default(),
         ),
         Some(expected_ordinary),

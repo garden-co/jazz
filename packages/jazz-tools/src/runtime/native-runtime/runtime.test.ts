@@ -326,7 +326,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     let settled = false;
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge").then((rows) => {
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "global").then((rows) => {
       settled = true;
       return rows;
     });
@@ -414,7 +414,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "global",
     );
     await Promise.resolve();
 
@@ -474,7 +474,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "global",
     );
     await vi.advanceTimersByTimeAsync(25);
     await waitForFakeWebSocketNegotiation();
@@ -566,11 +566,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
         null,
-        "edge",
+        "global",
       ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
+    expect(calls[0]?.[1]).toEqual({ tier: "global" });
   });
 
   it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
@@ -616,7 +616,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "global",
     );
     await waitForFakeWebSocketNegotiation();
     expect(relationQueries).toBe(0);
@@ -668,7 +668,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "global",
     );
     await waitForFakeWebSocketNegotiation();
     sockets[0]!.emitMessage(
@@ -712,7 +712,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "global",
     );
     await waitForFakeWebSocketNegotiation();
     expect(relationQueries).toBe(0);
@@ -882,7 +882,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
     await waitForFakeWebSocketNegotiation();
 
     sockets[0]!.emitMessage(
@@ -971,7 +971,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await waitForFakeWebSocketNegotiation();
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
     const updates = vi.fn();
     runtime.executeSubscription(handle, updates);
     await Promise.resolve();
@@ -986,7 +986,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]).toHaveLength(1);
   });
 
-  it.each(["local", "edge", "global"] as const)(
+  it.each(["local", "global"] as const)(
     "forwards the core's ready %s subscription reset directly",
     (tier) => {
       const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
@@ -1385,7 +1385,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const deltas: unknown[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
     runtime.executeSubscription(handle, (delta: unknown) => {
       deltas.push(delta);
     });
@@ -1399,9 +1399,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(await committedTxId(inserted), "edge");
+    await runtime.waitForTransaction(await committedTxId(inserted), "global");
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+    ).resolves.toEqual([
       {
         table: "todos",
         id: "00000000-0000-0000-0000-000000000123",
@@ -3373,12 +3375,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "global",
         JSON.stringify({ propagation: "local-only" }),
       ),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(readOptions).toEqual([{ tier: "global", propagation: "local_only" }]);
   });
 
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
@@ -3539,7 +3541,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     runtime.connectUpstreamPeer();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+    ).resolves.toEqual([
       {
         id: "00000000-0000-0000-0000-000000000001",
         table: "todos",
@@ -3547,7 +3551,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "global" }]);
   });
 
   it("forwards a standalone exact Edge read through all", async () => {
@@ -3582,11 +3586,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           conditions: [{ column: "id", op: "eq", value: "00000000-0000-0000-0000-000000000001" }],
         }),
         null,
-        "edge",
+        "global",
       ),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "global" }]);
   });
 
   it("ignores the removed propagate read option", async () => {
@@ -3616,12 +3620,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "global",
         JSON.stringify({ propagate: false }),
       ),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "global" }]);
   });
 
   it("keeps concurrent client reads on the raw client path", async () => {
@@ -3659,7 +3663,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: "https://issuer.example",
           user_id: "00000000-0000-0000-0000-0000000000a1",
         }),
-        "edge",
+        "global",
       ),
       runtime.query(
         JSON.stringify({ table: "todos" }),
@@ -3667,7 +3671,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: "https://issuer.example",
           user_id: "00000000-0000-0000-0000-0000000000b2",
         }),
-        "edge",
+        "global",
       ),
     ]);
 
@@ -3677,9 +3681,9 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("passes supported read tiers and branch views through", async () => {
     const runtime = emptyNativeRuntime();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+    ).resolves.toEqual([]);
     await expect(
       runtime.query(JSON.stringify({ table: "todos" }), null, "planetary"),
     ).rejects.toThrow("unsupported read tier");
@@ -3733,10 +3737,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos", include_deleted: true }), null, "edge"),
+      runtime.query(JSON.stringify({ table: "todos", include_deleted: true }), null, "global"),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge", include_deleted: true }]);
+    expect(readOptions).toEqual([{ tier: "global", include_deleted: true }]);
   });
 
   it("polls a pending binding-owned read until it completes", async () => {
@@ -3747,6 +3751,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => ({
               poll: () => (++polls < 2 ? null : encodeRows([])),
+              cancel: () => {},
             }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -3763,9 +3768,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     runtime.connectUpstreamPeer();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+    ).resolves.toEqual([]);
     expect(polls).toBe(2);
   });
 
@@ -3816,7 +3821,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => ({ poll: () => null }),
+            all: () => ({ poll: () => null, cancel: () => {} }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),
@@ -3833,7 +3838,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await waitForFakeWebSocketNegotiation();
 
-    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
     await Promise.resolve();
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(4, 3, "server busy")]));
 
@@ -3844,7 +3849,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = emptyNativeRuntime();
 
     expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge"),
+      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global"),
     ).not.toThrow();
     expect(() =>
       runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "planetary"),
@@ -4201,12 +4206,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "global",
         JSON.stringify({ propagation: "local-only" }),
       ),
     ).not.toThrow();
 
-    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(readOptions).toEqual([{ tier: "global", propagation: "local_only" }]);
   });
 
   it("passes non-default read_view subscription options through", () => {
@@ -4216,7 +4221,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "global",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
     ).not.toThrow();
@@ -4224,7 +4229,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "global",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
     ).not.toThrow();
@@ -5576,7 +5581,7 @@ describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
     const runtime = openRuntime({ all, connectUpstream: () => new FakeTransport([]) });
     try {
       await runtime.connectUpstreamPeer();
-      await expect(runtime.query(query, null, "edge")).rejects.toBe(failure);
+      await expect(runtime.query(query, null, "global")).rejects.toBe(failure);
       await expect(runtime.query(query, null, "local")).resolves.toEqual([]);
       expect(all).toHaveBeenCalledTimes(2);
     } finally {
@@ -5588,7 +5593,7 @@ describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
     const failure = new Error("background coverage failure");
     const runtime = openRuntime({
       all: (_query, options) => {
-        if ((options as { tier?: string }).tier === "edge") throw failure;
+        if ((options as { tier?: string }).tier === "global") throw failure;
         return encodeRows([]);
       },
     });

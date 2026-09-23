@@ -32,7 +32,7 @@ function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   // registers a public subscription the overlay's Subscriptions tab should display.
   const { data: readinessTodos = [] } = useAll(
     app.todos.where({ title: { in: ["First seeded todo", "Second seeded todo"] } }).limit(2),
-    { tier: "edge" },
+    { tier: "global" },
   );
   const primaryReady = readinessTodos.some((todo) => todo.title === "First seeded todo");
   const iframeRef = useRef<HTMLIFrameElement>(null);

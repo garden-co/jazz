@@ -380,7 +380,6 @@ impl Fixture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BenchTopology {
     TwoNode,
-    ThreeHop,
 }
 
 impl BenchTopology {
@@ -390,9 +389,10 @@ impl BenchTopology {
             .as_str()
         {
             "2node" | "two-node" | "direct" => Self::TwoNode,
-            "3hop" | "three-hop" | "relay" => Self::ThreeHop,
             other => {
-                panic!("unsupported JAZZ_POLICY_GRAPH_TOPOLOGY {other:?}; expected 2node or 3hop")
+                panic!(
+                    "unsupported JAZZ_POLICY_GRAPH_TOPOLOGY {other:?}; expected 2node (server-edge topology was removed)"
+                )
             }
         }
     }
@@ -400,7 +400,6 @@ impl BenchTopology {
     fn label(self) -> &'static str {
         match self {
             Self::TwoNode => "2node",
-            Self::ThreeHop => "3hop",
         }
     }
 }
@@ -892,12 +891,7 @@ fn run_cold(
     match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(2), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     }
 }
@@ -911,24 +905,14 @@ fn run_warm(
     let first = match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(4), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     };
 
     let second = match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(6), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     };
     assert!(
@@ -942,64 +926,23 @@ fn run_warm(
 
 fn run_connect_and_subscribe(
     seeded: &Seeded,
-    relay_node: Option<DbNode>,
     client: DbNode,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
     let start = Instant::now();
-    let _relay_upstream;
-    let _core_sub;
-    let _client_upstream;
-    let _relay_sub;
-    let active_relay;
-    let client_counters;
-    match relay_node {
-        Some(relay_node) => {
-            let relay_core = duplex_counted();
-            let client_relay = duplex_counted();
-            let counters = ClientTransportCounters {
-                right_inbound: Rc::clone(&client_relay.right_inbound),
-                right_to_left: Rc::clone(&client_relay.right_to_left),
-            };
-            _relay_upstream = Some(jazz::db::block_on(
-                relay_node.db.connect_upstream(relay_core.left_transport),
-            ));
-            _core_sub = seeded
-                .core
-                .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
-            _client_upstream =
-                jazz::db::block_on(client.db.connect_upstream(client_relay.left_transport));
-            _relay_sub = Some(relay_node.db.accept_edge_subscriber_with_claims(
-                client_relay.right_transport,
-                config.identity.author(seeded),
-                seeded.claims.clone(),
-            ));
-            relay_node
-                .db
-                .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
-            active_relay = Some(relay_node);
-            client_counters = counters;
-        }
-        None => {
-            let client_core = duplex_counted();
-            let counters = ClientTransportCounters {
-                right_inbound: Rc::clone(&client_core.right_inbound),
-                right_to_left: Rc::clone(&client_core.right_to_left),
-            };
-            _relay_upstream = None;
-            _client_upstream =
-                jazz::db::block_on(client.db.connect_upstream(client_core.left_transport));
-            _core_sub = seeded.core.accept_edge_subscriber_with_claims(
-                client_core.right_transport,
-                config.identity.author(seeded),
-                seeded.claims.clone(),
-            );
-            _relay_sub = None;
-            active_relay = None;
-            client_counters = counters;
-        }
-    }
+    let client_core = duplex_counted();
+    let client_counters = ClientTransportCounters {
+        right_inbound: Rc::clone(&client_core.right_inbound),
+        right_to_left: Rc::clone(&client_core.right_to_left),
+    };
+    let _client_upstream =
+        jazz::db::block_on(client.db.connect_upstream(client_core.left_transport));
+    let _core_sub = seeded.core.accept_subscriber_with_claims(
+        client_core.right_transport,
+        config.identity.author(seeded),
+        seeded.claims.clone(),
+    );
     client
         .db
         .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
@@ -1052,12 +995,6 @@ fn run_connect_and_subscribe(
         let core_tick = jazz::db::block_on(seeded.core.tick_stats()).expect("core tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
         accumulate_tick_stats(core_tick);
-        if let Some(relay) = &active_relay {
-            let relay_start = Instant::now();
-            let relay_tick = jazz::db::block_on(relay.db.tick_stats()).expect("relay tick");
-            server_open_bundle_ms += relay_start.elapsed().as_millis();
-            accumulate_tick_stats(relay_tick);
-        }
 
         let _queued_to_client = client_counters.right_inbound.borrow().len();
         let client_start = Instant::now();

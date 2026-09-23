@@ -1042,10 +1042,7 @@ impl PendingNativeRead {
 
 impl Drop for PendingNativeRead {
     fn drop(&mut self) {
-        self.future.borrow_mut().take();
-        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
-            cleanup();
-        }
+        self.cancel();
     }
 }
 
@@ -1095,6 +1092,14 @@ impl PendingNativeRead {
     #[napi]
     pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
         self.poll_once()
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+            cleanup();
+        }
     }
 }
 
@@ -1480,6 +1485,23 @@ impl Transport {
             frames.push(Uint8Array::new(frame));
         }
         Ok(frames)
+    }
+
+    #[napi(js_name = "auxiliaryReceiveTimeoutMs")]
+    pub fn auxiliary_receive_timeout_ms(&self) -> Option<u32> {
+        self.auxiliary_pump
+            .incomplete_receive_timeout_ms()
+            .map(|delay| delay.min(u64::from(u32::MAX)) as u32)
+    }
+
+    #[napi(js_name = "expireAuxiliaryReceive")]
+    pub fn expire_auxiliary_receive(&self) -> napi::Result<()> {
+        self.auxiliary_pump
+            .expire_incomplete_receive()
+            .map_err(|error| {
+                self.auxiliary_pump.disconnect();
+                napi::Error::from_reason(error)
+            })
     }
 
     #[napi(js_name = "auxiliaryOutboundReady")]
@@ -2934,10 +2956,12 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! read {
             ($db:expr) => {{
+                let drive_read = matches!(db, NapiDbInnerStorage::Memory(_));
                 let db = Rc::clone($db);
                 let release_db = Rc::clone(&db);
                 let preceding_writes =
                     (!synchronous && open_tx.is_none()).then(|| db.queued_mutation_barrier());
+                let transaction_owner = open_tx.map(|_| Rc::clone(&db));
                 let future = Box::pin(async move {
                     if let Some(preceding_writes) = preceding_writes {
                         preceding_writes
@@ -2950,7 +2974,7 @@ impl NapiDb {
                             .map_err(napi_error)?;
                     }
                     let requires_coverage = non_durable_client
-                        || (opts.tier >= jazz::tx::DurabilityTier::Edge
+                        || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
                     let coverage_deadline = Instant::now() + Duration::from_secs(15);
                     let result = db
@@ -2975,7 +2999,24 @@ impl NapiDb {
                     .map(Uint8Array::new)
                     .map_err(napi_error)
                 });
-                native_covered_read_or_pending(future, Box::new(|| {}))
+                if let Some((open_tx, owner)) = open_tx.zip(transaction_owner) {
+                    let read =
+                        owner.enqueue_transaction_read(open_tx, async move { Ok(future.await) });
+                    if drive_read {
+                        owner.drive_queued_mutation_once();
+                    }
+                    native_read_or_pending(Box::pin(async move {
+                        read.await
+                            .map_err(|_| {
+                                napi::Error::from_reason(
+                                    "transaction read owner operation was cancelled",
+                                )
+                            })?
+                            .map_err(napi_error)?
+                    }))
+                } else {
+                    native_covered_read_or_pending(future, Box::new(|| {}))
+                }
             }};
         }
         match db {
@@ -4255,7 +4296,6 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
     match tier {
         "None" | "none" => Ok(CoreDurabilityTier::None),
         "Local" | "local" => Ok(CoreDurabilityTier::Local),
-        "Edge" | "edge" => Ok(CoreDurabilityTier::Edge),
         "Global" | "global" => Ok(CoreDurabilityTier::Global),
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
@@ -4272,7 +4312,7 @@ fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
         // connection manager resolves RemoteIfPossible before the ABI call;
         // direct NAPI callers therefore retain strict remote behavior.
         "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
-            Ok(CoreDurabilityTier::Edge)
+            Ok(CoreDurabilityTier::Global)
         }
         _ => core_durability_tier_from_str(tier),
     }
@@ -4636,7 +4676,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -4669,16 +4709,14 @@ impl JazzServer {
             opts.data_dir.unwrap_or_else(|| "./data".to_string())
         };
 
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_native_transport_connector(std::sync::Arc::new(
-                jazz_native_transport::NativeWebSocketConnector,
-            ));
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         if let Some(schema) = core_server_shell_schema {
             server_builder = server_builder.with_core_server_shell_schema(schema);
         }
-        if let Some(upstream_url) = opts.upstream_url.clone() {
-            server_builder = server_builder.with_upstream_url(upstream_url);
+        if opts.upstream_url.is_some() {
+            return Err(napi::Error::from_reason(
+                "server edges are no longer supported; remove upstreamUrl and connect clients directly to Core",
+            ));
         }
 
         if in_memory {
@@ -5202,7 +5240,7 @@ mod tests {
         );
         assert_eq!(
             core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            jazz::tx::DurabilityTier::Edge
+            jazz::tx::DurabilityTier::Global
         );
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),
@@ -7208,14 +7246,14 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: operations,
             settled: false,
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
         })
         .expect("encode terminal operations");
 
         let Either3::A(payload) = payload else {
             panic!("expected delta payload");
         };
-        assert_eq!(payload.tier, "Edge");
+        assert_eq!(payload.tier, "Global");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
         assert_eq!(insert.root_key, vec![0, 255]);

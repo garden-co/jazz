@@ -244,9 +244,6 @@ struct DbSurfaceSummary {
     current_p95_us: u64,
     elapsed_us: u128,
     history_bytes: u64,
-    edge_acceptance: Histogram<u64>,
-    edge_hydration_bytes: u64,
-    edge_hydration_rows: usize,
 }
 
 #[derive(Debug)]
@@ -439,8 +436,6 @@ fn run_jazz(config: &Config) -> JazzSummary {
 fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let schema = schema();
     let (core_dir, mut core) = open_node(node(250), schema.clone());
-    let (_edge_dir, mut edge) = open_node(node(170), schema.clone());
-    let mut edge_peer = PeerState::new();
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
     let (dir, db) = open_db(node(70), schema.clone());
@@ -448,7 +443,6 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
     })));
-    let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
         let stream_write = block_on(db.insert(
@@ -461,15 +455,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         ))
         .expect("db stream insert");
         block_on(stream_write.wait(DurabilityTier::Local)).expect("db stream local wait");
-        drain_db_route(
-            &db,
-            &outbound,
-            &inbound,
-            &mut edge,
-            &mut edge_peer,
-            &mut core,
-            &mut edge_acceptance,
-        );
+        drain_db_route(&db, &outbound, &inbound, &mut core);
         let doc_write = block_on(db.insert(
             STREAM_DOCS,
             cells([
@@ -483,38 +469,8 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         ))
         .expect("db stream doc insert");
         block_on(doc_write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
-        drain_db_route(
-            &db,
-            &outbound,
-            &inbound,
-            &mut edge,
-            &mut edge_peer,
-            &mut core,
-            &mut edge_acceptance,
-        );
+        drain_db_route(&db, &outbound, &inbound, &mut core);
     }
-    let mut edge_hydration_bytes = 0;
-    let mut edge_hydration_rows = 0;
-    for table in [STREAMS, STREAM_DOCS] {
-        let shape = Query::from(table).validate(&schema).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
-        register_query_receiver(
-            &mut edge,
-            &shape,
-            &binding,
-            Default::default(),
-            jazz::protocol::DelegatedSessionBinding {
-                identity: AuthorSubject::SYSTEM,
-                claims: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-        let update = block_on(edge_peer.rehydrate_query(&mut core, &shape, &binding)).unwrap();
-        edge_hydration_bytes += view_update_bytes(&update);
-        edge_hydration_rows += result_row_count(&update, table);
-        apply_sync_message_settled(&mut edge, update).unwrap();
-    }
-
     let query = Query::from(STREAM_DOCS);
     let prepared = db.prepare_query(&query).expect("prepare stream docs query");
     let mut watches = (0..config.tailers)
@@ -555,15 +511,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             block_on(write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
             wait_latencies.push(wait_start.elapsed().as_micros() as u64);
             let drain_start = Instant::now();
-            drain_db_route(
-                &db,
-                &outbound,
-                &inbound,
-                &mut edge,
-                &mut edge_peer,
-                &mut core,
-                &mut edge_acceptance,
-            );
+            drain_db_route(&db, &outbound, &inbound, &mut core);
             drain_latencies.push(drain_start.elapsed().as_micros() as u64);
             append_latencies.push(before.elapsed().as_micros() as u64);
 
@@ -603,9 +551,6 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         current_p95_us: percentile(&mut current_latencies, 95),
         elapsed_us: start.elapsed().as_micros(),
         history_bytes: storage_bytes(dir.path()) + storage_bytes(core_dir.path()),
-        edge_acceptance,
-        edge_hydration_bytes,
-        edge_hydration_rows,
     }
 }
 
@@ -728,35 +673,15 @@ fn drain_db_route(
     db: &Db<RocksDbStorage>,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
-    edge: &mut NodeState<RocksDbStorage>,
-    edge_peer: &mut PeerState,
     core: &mut NodeState<RocksDbStorage>,
-    edge_acceptance: &mut Histogram<u64>,
 ) {
     block_on(db.tick()).unwrap();
     while let Some(unit) = outbound.borrow_mut().pop_front() {
-        let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
+        if !matches!(&unit, SyncMessage::CommitUnit { .. }) {
             continue;
-        };
-        let start = Instant::now();
-        // The locally constructed peer is SYSTEM and has no admitted claims.
-        let policy_claims = BTreeMap::new();
-        let outcome = block_on(edge_peer.ingest_edge_mergeable_commit_unit(
-            edge,
-            tx,
-            versions,
-            u64::MAX,
-            u64::MAX,
-            policy_claims,
-        ))
-        .unwrap();
-        settle_outcome(edge, outcome).unwrap();
-        edge_acceptance
-            .record(start.elapsed().as_micros() as u64)
-            .unwrap();
+        }
         let outcome = block_on(core.apply_sync_message(unit)).unwrap();
         for update in settle_outcome(core, outcome).unwrap() {
-            apply_sync_message_settled(edge, update.clone()).unwrap();
             inbound.borrow_mut().push_back(update);
             block_on(db.tick()).unwrap();
         }
@@ -1041,52 +966,6 @@ fn emit_db_surface_summary(config: &Config, profile: &PeerProfile, summary: &DbS
         json!("db_watch_tailers_prefix_monotone_and_final_exact"),
     );
     emit_json_line("s5_durable_stream", &JsonValue::Object(fields).to_string());
-
-    let mut acceptance = metadata_fields(
-        "s5_durable_stream",
-        "db_surface",
-        config.seed,
-        &profile.name,
-    );
-    acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
-    acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.50)),
-    );
-    acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.95)),
-    );
-    acceptance.insert("durability_tier".to_owned(), json!("Edge"));
-    emit_json_line(
-        "s5_durable_stream",
-        &JsonValue::Object(acceptance).to_string(),
-    );
-
-    let mut hydration = metadata_fields(
-        "s5_durable_stream",
-        "db_surface",
-        config.seed,
-        &profile.name,
-    );
-    hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
-    hydration.insert("scope".to_owned(), json!("durable_stream_table_surface"));
-    hydration.insert(
-        "hydration_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    hydration.insert(
-        "hydration_floor_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    hydration.insert(
-        "hydration_rows".to_owned(),
-        json!(summary.edge_hydration_rows),
-    );
-    emit_json_line(
-        "s5_durable_stream",
-        &JsonValue::Object(hydration).to_string(),
-    );
 }
 
 fn emit_process_local_resume_canary(
@@ -1243,21 +1122,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
         }
-        _ => 0,
-    }
-}
-
-fn result_row_count(update: &SyncMessage, table: &str) -> usize {
-    match update {
-        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            supporting_rows, ..
-        }) => supporting_rows
-            .added_rows()
-            .iter()
-            .filter(|input| input.version_table.as_str() == table)
-            .map(|input| input.row)
-            .collect::<BTreeSet<_>>()
-            .len(),
         _ => 0,
     }
 }

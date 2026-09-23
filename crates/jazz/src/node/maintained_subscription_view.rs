@@ -59,9 +59,10 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
-    /// Keep reader exclusion inputs alive until the final serving view closes.
-    pub(crate) edge_availability_owner:
-        Option<std::sync::Arc<super::query_eval::EdgeAvailabilityOwner>>,
+    /// Test receipt from the exact program passed to subscribe_lowered_program,
+    /// not from an unrelated prepared AppRows plan or caller-supplied label.
+    #[cfg(test)]
+    pub(crate) compiled_authorization_mode: Option<super::query_engine::QueryAuthorizationMode>,
     /// The immutable resolved read-view identity of this maintained program.
     /// Terminal row members must retain it so distinct branch views never
     /// collapse when their source row and transaction coincide.
@@ -136,7 +137,8 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
-            edge_availability_owner: None,
+            #[cfg(test)]
+            compiled_authorization_mode: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
             result_weights: RetainedResultMap::default(),

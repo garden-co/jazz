@@ -24,11 +24,11 @@ type ExpectLike = (value: unknown) => {
 };
 type TestDbMethodCallback = (db: Db) => unknown;
 type PendingWrite = {
-  wait(options: { tier: "edge" }): Promise<unknown>;
+  wait(options: { tier: "global" }): Promise<unknown>;
 };
 type SeedWrite<T> = {
   readonly value: T;
-  wait(options: { tier: "local" | "edge" }): Promise<T>;
+  wait(options: { tier: "local" | "global" }): Promise<T>;
 };
 
 /** @internal */
@@ -39,7 +39,7 @@ export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
 /** @internal */
 export async function settlePolicySeedForSessionReads<T>(write: SeedWrite<T>): Promise<T> {
   await settlePolicySeed(write);
-  return write.wait({ tier: "edge" });
+  return write.wait({ tier: "global" });
 }
 
 /**
@@ -58,8 +58,8 @@ export type TestDb = Db & {
   /**
    * Assert that a write is rejected by the serving authority.
    *
-   * Client writes are admitted optimistically, so this checks the write's edge
-   * receipt rather than expecting synchronous local permission enforcement.
+   * Client writes are admitted optimistically, so this checks Core's write
+   * outcome rather than expecting synchronous local permission enforcement.
    */
   expectDenied(callback: (db: Db) => PendingWrite): Promise<void>;
 };
@@ -106,7 +106,7 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     expectDenied: {
       value: async (callback: (db: Db) => PendingWrite) => {
         const write = callback(db);
-        await expect(write.wait({ tier: "edge" })).rejects.toThrow(
+        await expect(write.wait({ tier: "global" })).rejects.toThrow(
           /AuthorizationDenied|Write rejected by server authorization/,
         );
       },
@@ -131,7 +131,7 @@ export class PolicyTestApp {
   /**
    * Seed the database with one admin write and wait until the serving
    * authority has accepted it before returning. Session-scoped reads default
-   * to the edge tier, so local staging alone can otherwise race their first
+   * to remote/Core confirmation, so local staging alone can otherwise race their first
    * policy-evaluated query.
    */
   async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {

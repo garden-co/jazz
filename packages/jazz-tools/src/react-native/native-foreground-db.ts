@@ -236,7 +236,7 @@ export class NativeForegroundDb {
     query: Uint8Array,
     opts: unknown,
     openTransactionId?: string,
-  ): Uint8Array | { poll(): Uint8Array | null } {
+  ): Uint8Array | { poll(): Uint8Array | null; cancel(): void } {
     const transaction =
       openTransactionId === undefined
         ? undefined
@@ -450,7 +450,7 @@ export class NativeForegroundDb {
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string, observeOnly = false): Promise<void> {
-    if (!["local", "edge", "global"].includes(tier)) {
+    if (!["local", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
     let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });
@@ -470,17 +470,26 @@ export class NativeForegroundDb {
     return this.executeAllowClosed(command);
   }
 
-  private pendingRows(operation: number): { poll(): Uint8Array | null } {
+  private pendingRows(operation: number): { poll(): Uint8Array | null; cancel(): void } {
+    let completed = false;
     return {
       poll: () => {
+        if (completed) throw new Error("Native foreground read is already complete");
         this.tick();
         const response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
+        completed = true;
         if (response.type === "operationError") {
           throw new Error(`React Native native foreground read failed: ${response.reason}`);
         }
         if (response.type !== "rows") return unexpected("poll", response.type);
         return response.rows;
+      },
+      cancel: () => {
+        if (completed || this.closed) return;
+        completed = true;
+        const response = this.execute({ type: "cancel", operation });
+        if (response.type !== "cancelled") return unexpected("read cancellation", response.type);
       },
     };
   }

@@ -21,14 +21,12 @@ use super::super::node::{
 };
 use super::super::protocol::{
     AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
+    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
 use super::super::tools::OutputOccurrenceId;
-use super::super::tx::{DurabilityTier, Transaction, TxId};
-
-const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
+use super::super::tx::{DurabilityTier, TxId};
 
 pub(super) fn fast_current_membership_position(
     known_state: &Option<KnownStateDeclaration>,
@@ -145,6 +143,8 @@ pub(super) struct PeerSubscriptionState {
     pub(super) maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     pub(super) prepared_query: Option<CachedPeerQueryPlan>,
     pub(super) groove_runtime_token: Option<u64>,
+    /// UUID adoption invalidates publication metadata without replacing Groove.
+    pub(super) physical_identity_generation: Option<u64>,
     pub(super) authorization_progress: u64,
     pub(super) has_served_authorization_progress: bool,
 }
@@ -159,6 +159,7 @@ impl PeerSubscriptionState {
             prepared_query.clear_runtime_plan();
         }
         self.groove_runtime_token = None;
+        self.physical_identity_generation = None;
     }
 
     pub(super) fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {
@@ -279,50 +280,8 @@ impl CachedPeerQueryPlan {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct DeferredEdgeFate {
-    pub(super) tx: Transaction,
-    pub(super) versions: Vec<VersionRecord>,
-    /// Wall-clock authority time captured when the client upload arrived.
-    /// Deferred admission deliberately preserves this security boundary rather
-    /// than treating time spent awaiting permission support as client slack.
-    pub(super) admission_now_ms: u64,
-    pub(super) permission_identity: AuthorSubject,
-    /// Immutable claims captured from the admitted uploading link. Deferred
-    /// support must not consult the identity-global compatibility cache on a
-    /// later drain turn.
-    pub(super) policy_claims: BTreeMap<String, Value>,
-    pub(super) scope_subscriptions: Vec<SubscriptionKey>,
-}
-
-/// Peer-owned inputs to the edge eviction pin set.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeerEvictionPins {
-    /// Transactions currently parked on edge fate assignment.
-    pub deferred_edge_fate_txs: BTreeSet<TxId>,
-    /// Permission-scope subscriptions retained by active edge acceptance gates.
-    pub referenced_scope_subscriptions: BTreeSet<SubscriptionKey>,
-}
-
-impl PeerEvictionPins {
-    /// Merge another peer's pin roots into this aggregate pin set.
-    pub fn extend(&mut self, other: Self) {
-        self.deferred_edge_fate_txs
-            .extend(other.deferred_edge_fate_txs);
-        self.referenced_scope_subscriptions
-            .extend(other.referenced_scope_subscriptions);
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MemberSlot {
     pub(super) member: ResultMemberEntry,
     pub(super) refcount: usize,
-}
-
-pub(super) fn edge_scope_ttl_ms() -> u64 {
-    std::env::var("JAZZ_EDGE_SCOPE_TTL_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_EDGE_SCOPE_TTL_MS)
 }

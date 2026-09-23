@@ -1111,7 +1111,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed_inner() {
 /// admin ──create chat(created_by=alice,is_public=false)──► server
 /// alice ──update name────────────────────────────────────► server ──✓ stored metadata still matches
 /// alice ──update is_public=true──────────────────────────► server ──✗ no stored row matches new metadata
-/// observer ──EdgeServer query────────────────────────────► sees renamed chat, protected fields unchanged
+/// observer ──GlobalServer query────────────────────────────► sees renamed chat, protected fields unchanged
 /// ```
 #[tokio::test]
 async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
@@ -1189,7 +1189,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     let protected_update = match transaction_id {
         Ok(Some(transaction_id)) => {
             alice
-                .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
+                .wait_for_transaction(transaction_id, DurabilityTier::GlobalServer)
                 .await
         }
         Ok(None) => panic!("chat update should commit immediately"),
@@ -1235,7 +1235,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
 /// ```text
 /// admin ──grant edit to alice──► server
 /// bob ──update title───────────► server ──✗ reject
-/// observer ──EdgeServer query──► sees original row, no update delta
+/// observer ──GlobalServer query──► sees original row, no update delta
 /// ```
 #[tokio::test]
 async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_state() {
@@ -1318,12 +1318,12 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after rejected exists update");
+        .expect("GlobalServer query after rejected exists update");
     assert!(
         rows_after_update
             .iter()
             .any(|(id, values)| *id == doc_id && *values == title_document_values("Original")),
-        "rejected EXISTS update must not persist at EdgeServer: rows={rows_after_update:?}"
+        "rejected EXISTS update must not persist at GlobalServer: rows={rows_after_update:?}"
     );
 
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;

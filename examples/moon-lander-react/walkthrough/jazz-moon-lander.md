@@ -181,7 +181,7 @@ The first `useAll` result may arrive before all remote data has synced. Moon Lan
 
 ```typescript
 // "edge" tier: isLoading = still connecting to server; data = [] or [...] once the server responds
-const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
+const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "global" });
 
 const settled = !allUncollected.isLoading;
 const uncollectedDeposits = allUncollected.data ?? [];
@@ -285,15 +285,15 @@ export class SyncManager {
     /* db.update */
   }
   sendMessage(text: string) {
-    /* db.insert(...).wait({ tier: "edge" }) */
+    /* db.insert(...).wait({ tier: "global" }) */
   }
   updateState(state: PlayerInit) {
-    /* db.update(...).wait({ tier: "edge" }) if changed */
+    /* db.update(...).wait({ tier: "global" }) if changed */
   }
 }
 ```
 
-The game engine calls these methods synchronously. Writes that need durability guarantees use `insert(...).wait({ tier: "edge" })` or `update(...).wait({ tier: "edge" })`. Hot-path writes like `collectDeposit` use eventually consistent `db.update` for instant local-store updates.
+The game engine calls these methods synchronously. Writes that need durability guarantees use `insert(...).wait({ tier: "global" })` or `update(...).wait({ tier: "global" })`. Hot-path writes like `collectDeposit` use eventually consistent `db.update` for instant local-store updates.
 
 ---
 
@@ -371,7 +371,7 @@ Every player's position, velocity, fuel level, and mode are written to the `play
 if (!this.dbRowId) return;
 if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
 this.lastSynced = { ...state };
-this.db.update(app.players, this.dbRowId, state).wait({ tier: "edge" });
+this.db.update(app.players, this.dbRowId, state).wait({ tier: "global" });
 ```
 
 Player insert happens once, after the edge subscription has settled:
@@ -380,7 +380,7 @@ Player insert happens once, after the edge subscription has settled:
 // src/jazz/SyncManager.ts - setInputs(), after settled
 this.db
   .insert(app.players, state)
-  .wait({ tier: "edge" })
+  .wait({ tier: "global" })
   .then((row) => {
     this.dbRowId = row.id;
   });

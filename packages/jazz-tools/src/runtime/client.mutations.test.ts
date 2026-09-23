@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { schema as s } from "../index.js";
+import { runInTransaction, Transaction } from "./db.js";
+import { ExclusiveWriteResult } from "./client.js";
 import {
   JazzClient,
   type TxId,
@@ -127,12 +130,12 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "local" | "edge" | "global",
+      defaultDurabilityTier: "local" | "global",
     ): JazzClient;
   };
 
   return {
-    client: new JazzClientCtor(runtime, context, "edge"),
+    client: new JazzClientCtor(runtime, context, "global"),
     runtime,
     insertCalls,
     restoreCalls,
@@ -144,6 +147,312 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
 }
 
 describe("JazzClient write attribution", () => {
+  it.each(["mergeable", "exclusive"] as const)(
+    "preserves registered %s preparation failure without submitting the transaction",
+    async (kind) => {
+      const failure = new Error("Key lookup failed");
+      let submitted = false;
+      let continued = false;
+      let rolledBack = false;
+      const { client } = makeClient({
+        waitForTransaction: async (id) => {
+          await id;
+        },
+        commitTransaction: () => {
+          submitted = true;
+          return "unexpected" as TxId;
+        },
+        rollbackTransaction: async () => {
+          rolledBack = true;
+          return true;
+        },
+      });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const id = tx.openTransactionId();
+      const result = await runInTransaction(
+        tx,
+        () => {
+          client.prepareTransaction(id, async () => {
+            throw failure;
+          });
+          client.prepareTransaction(id, async () => {
+            continued = true;
+          });
+        },
+        client,
+      );
+      await expect(result.wait({ tier: "global" })).rejects.toBe(failure);
+      expect(submitted).toBe(false);
+      expect(continued).toBe(false);
+      expect(rolledBack).toBe(true);
+      expect(() => client.prepareTransaction(id, async () => {})).toThrow("closed");
+    },
+  );
+
+  it("does not start queued preparation after rollback", async () => {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let continued = false;
+    const { client } = makeClient();
+    const tx = new Transaction("exclusive", () => client, undefined, undefined, client);
+    const id = tx.openTransactionId();
+    client.prepareTransaction(id, async () => {
+      started();
+      await ready;
+    });
+    client.prepareTransaction(id, async () => {
+      continued = true;
+    });
+    try {
+      await running;
+      await tx.rollback();
+    } finally {
+      release();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(continued).toBe(false);
+    expect(() => client.prepareTransaction(id, async () => {})).toThrow("closed");
+  });
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "drains registered %s preparation before a dependent read and commit",
+    async (kind) => {
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let prepared = "not started";
+      const { client } = makeClient({
+        waitForTransaction: async (id) => {
+          await id;
+        },
+        query: async () => {
+          if (prepared !== "complete") throw new Error("Read overtook preparation");
+          return [];
+        },
+        commitTransaction: () => {
+          if (prepared !== "complete") throw new Error("Commit overtook preparation");
+          return "prepared-transaction" as TxId;
+        },
+      });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      client.prepareTransaction(tx.openTransactionId(), async () => {
+        await ready;
+        prepared = "first";
+      });
+      client.prepareTransaction(tx.openTransactionId(), async () => {
+        if (prepared !== "first") throw new Error("Preparation ran out of order");
+        prepared = "complete";
+      });
+      const reading = tx.all(app.todos);
+      const committed = tx.commit();
+      expect(committed).not.toBeInstanceOf(Promise);
+      let finished = false;
+      const waiting = committed.wait({ tier: "global" }).then(() => {
+        finished = true;
+      });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(finished).toBe(false);
+        expect(prepared).toBe("not started");
+      } finally {
+        release();
+        await Promise.allSettled([reading, waiting]);
+      }
+      await expect(reading).resolves.toEqual([]);
+      await waiting;
+      expect(finished).toBe(true);
+    },
+  );
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "preserves a %s read failure when rollback closes another in-flight read",
+    async (kind) => {
+      const failure = new Error("Read preparation failed");
+      let failRead!: (error: Error) => void;
+      const failedRead = new Promise<unknown[]>((_, reject) => {
+        failRead = reject;
+      });
+      let finishRead!: (rows: unknown[]) => void;
+      const delayedRead = new Promise<unknown[]>((resolve) => {
+        finishRead = resolve;
+      });
+      let open = true;
+      let queryNumber = 0;
+      const { client } = makeClient({
+        query: async () => {
+          const rows = await (queryNumber++ === 0 ? failedRead : delayedRead);
+          if (!open) throw new Error("Read view closed by rollback");
+          return rows;
+        },
+        rollbackTransaction: async () => {
+          const wasOpen = open;
+          open = false;
+          return wasOpen;
+        },
+        waitForTransaction: async (id) => {
+          await id;
+        },
+      });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const first = tx.all(app.todos, { tier: "local" });
+      const second = tx.all(app.todos, { tier: "local" });
+      try {
+        const result = await runInTransaction(tx, () => "callback value", client);
+        const waiting =
+          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+        failRead(failure);
+        await expect(waiting).rejects.toBe(failure);
+        await expect(first).rejects.toBe(failure);
+        finishRead([]);
+        await expect(second).rejects.toThrow("Read view closed by rollback");
+      } finally {
+        failRead(failure);
+        finishRead([]);
+        await Promise.allSettled([first, second]);
+      }
+    },
+  );
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "rejects further %s operations while a no-read commit is deferred",
+    async (kind) => {
+      let complete!: (id: TxId) => void;
+      const pending = new Promise<TxId>((resolve) => {
+        complete = resolve;
+      });
+      const { client } = makeClient({ commitTransaction: () => pending });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const committed = tx.commit();
+      try {
+        expect(committed).not.toBeInstanceOf(Promise);
+        expect(() => tx.commit()).toThrow("after commit has been requested");
+        expect(() => tx.insert(app.todos, { title: "too late" })).toThrow(
+          "after commit has been requested",
+        );
+        expect(() => tx.rollback()).toThrow("after commit has been requested");
+        await expect(tx.all(app.todos, { tier: "local" })).rejects.toThrow(
+          "after commit has been requested",
+        );
+      } finally {
+        complete("prepared-transaction" as TxId);
+        await committed.txId;
+      }
+    },
+  );
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "closes a %s callback transaction after deferred commit fails",
+    async (kind) => {
+      const failure = new Error("Preparation failed before submission");
+      let open = true;
+      const { client } = makeClient({
+        commitTransaction: () => Promise.reject(failure),
+        rollbackTransaction: async () => {
+          const wasOpen = open;
+          open = false;
+          return wasOpen;
+        },
+        waitForTransaction: async (id) => {
+          await id;
+        },
+      });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const result = await runInTransaction(tx, () => "callback value", client);
+      const waiting =
+        result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+      await expect(waiting).rejects.toBe(failure);
+      // The callback helper owns cleanup; no open transaction remains for its caller.
+      await expect(tx.rollback()).resolves.toBe(false);
+    },
+  );
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "retains a deferred %s failure for a later wait without an unhandled rejection",
+    async (kind) => {
+      const failure = new Error("Preparation failed");
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const { client } = makeClient({
+          commitTransaction: () => Promise.reject(failure),
+          waitForTransaction: async (id) => {
+            await id;
+          },
+        });
+        const tx = new Transaction(kind, () => client, undefined, undefined, client);
+        const result = await runInTransaction(tx, () => "callback value", client);
+        // Applications can attach their wait after the asynchronous failure arrives.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const waiting =
+          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+        await expect(waiting).rejects.toBe(failure);
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    },
+  );
+
+  it.each(["mergeable", "exclusive"] as const)(
+    "returns a %s callback result before deferred commit, but waits for persistence",
+    async (kind) => {
+      let prepare!: (id: TxId) => void;
+      const prepared = new Promise<TxId>((resolve) => {
+        prepare = resolve;
+      });
+      let persist!: () => void;
+      const persisted = new Promise<void>((resolve) => {
+        persist = resolve;
+      });
+      const { client } = makeClient({
+        commitTransaction: () => prepared,
+        waitForTransaction: async (id) => {
+          await id;
+          await persisted;
+        },
+      });
+      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const resultPromise = runInTransaction(tx, () => "callback value", client);
+      try {
+        // Runtime I/O is controlled; no transaction or write-handle method is mocked.
+        const result = await Promise.race([
+          resultPromise,
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 0)),
+        ]);
+        expect(result, "callback result must not await deferred commit").toBeDefined();
+        if (!result) throw new Error("callback result was withheld");
+        expect(result.value).toBe("callback value");
+        let completed = false;
+        const waiting =
+          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+        waiting.then(() => {
+          completed = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(completed).toBe(false);
+        prepare("prepared-transaction" as TxId);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(completed).toBe(false);
+        persist();
+        await expect(waiting).resolves.toBe("callback value");
+      } finally {
+        prepare("prepared-transaction" as TxId);
+        persist();
+        await resultPromise;
+      }
+    },
+  );
+
   it("keeps public author out of serialized writes while retaining the trusted token", () => {
     const { client, insertCalls } = makeClient();
     const session = internalSessionFromVerifiedReservedJwtPayload(

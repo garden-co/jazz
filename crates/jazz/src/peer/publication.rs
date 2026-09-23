@@ -123,6 +123,8 @@ impl PeerState {
             .get(&subscription)
             .is_some_and(|state| {
                 state.groove_runtime_token == Some(node.groove_runtime_token())
+                    && state.physical_identity_generation
+                        == Some(node.physical_identity_generation())
                     && state
                         .maintained_subscription_view
                         .as_ref()
@@ -343,16 +345,11 @@ impl PeerState {
         }
     }
 
-    /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorSubject) -> Self {
-        Self::client_link(identity)
-    }
-
-    /// Construct an edge peer whose wire identity and read-policy identity differ.
+    /// Construct a client link whose wire identity and read-policy identity differ.
     ///
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
-    pub fn edge_client_with_permission_identity(
+    pub fn client_link_with_permission_identity(
         identity: AuthorSubject,
         permission_identity: AuthorSubject,
     ) -> Self {
@@ -530,7 +527,7 @@ impl PeerState {
 
     fn clear_stale_groove_runtime_handles<S>(
         &mut self,
-        node: &NodeState<S>,
+        node: &mut NodeState<S>,
         subscription: SubscriptionKey,
     ) where
         S: OrderedKvStorage,
@@ -543,9 +540,20 @@ impl PeerState {
                 state
                     .groove_runtime_token
                     .is_some_and(|token| token != current_token)
+                    || state.physical_identity_generation.is_some_and(|generation| {
+                        generation != node.physical_identity_generation()
+                    })
             })
         {
             if let Some(state) = self.publication_states.get_mut(&subscription) {
+                // UUID adoption can invalidate metadata while the underlying
+                // runtime remains live. Release that graph now; an old-runtime
+                // subscription ID must never address a replacement runtime.
+                if state.groove_runtime_token == Some(current_token)
+                    && let Some(stale) = state.maintained_subscription_view.take()
+                {
+                    node.unsubscribe_groove_subscription(stale.subscription.id());
+                }
                 state.clear_groove_runtime_handles();
             }
             self.refresh_maintained_subscription_view_footprint(subscription);
@@ -566,6 +574,7 @@ impl PeerState {
             let previous_runtime_token = state.groove_runtime_token;
             let stale = state.maintained_subscription_view.replace(replacement);
             state.groove_runtime_token = Some(runtime_token);
+            state.physical_identity_generation = Some(node.physical_identity_generation());
             (previous_runtime_token == Some(runtime_token))
                 .then_some(stale)
                 .flatten()
@@ -681,6 +690,7 @@ impl PeerState {
             let state = self.publication_states.entry(subscription).or_default();
             state.prepared_query = Some(cached);
             state.groove_runtime_token = Some(node.groove_runtime_token());
+            state.physical_identity_generation = Some(node.physical_identity_generation());
         } else {
             self.publication_states.entry(subscription).or_default();
         }
@@ -952,17 +962,19 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        // Losing the Groove runtime also loses the maintained source frontier.
-        // Its replacement is necessarily a complete successor closure: an
-        // incremental add list cannot retract source facts that belonged to
-        // the retired runtime.
-        let runtime_was_stale = self
+        // Replacing the runtime or adopting new physical identities retires
+        // the maintained source frontier. Publish a complete successor closure:
+        // incremental adds cannot retract facts under the old physical IDs.
+        let metadata_was_stale = self
             .publication_states
             .get(&subscription)
             .is_some_and(|state| {
                 state
                     .groove_runtime_token
                     .is_some_and(|token| token != node.groove_runtime_token())
+                    || state.physical_identity_generation.is_some_and(|generation| {
+                        generation != node.physical_identity_generation()
+                    })
             });
         self.clear_stale_groove_runtime_handles(node, subscription);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
@@ -1034,6 +1046,7 @@ impl PeerState {
                 ));
             }
             state.groove_runtime_token = Some(node.groove_runtime_token());
+            state.physical_identity_generation = Some(node.physical_identity_generation());
         }
         self.rehydrate_query_maintained_subscription_view(
             node,
@@ -1042,7 +1055,7 @@ impl PeerState {
                 binding,
                 subscription,
                 previous_member_result_set: &previous_member_result_set,
-                reset_input_set: runtime_was_stale,
+                reset_input_set: metadata_was_stale,
                 result_table_filter: None,
                 tier,
                 read_view: &read_view,
@@ -1700,7 +1713,7 @@ impl PeerState {
                 // same authority-selected membership, including unbounded
                 // filtered queries whose supporting rows are absent locally.
                 RehydratePurpose::Query if relay_edge_requires_authority_source => scoped
-                    .open_seeded_relay_edge_subscription_view_with_waker(
+                    .open_seeded_relay_subscription_view_with_waker(
                         shape,
                         binding,
                         policy_identity,
@@ -1810,7 +1823,7 @@ impl PeerState {
             }
             Err(error) => return Err(error),
         };
-        // `open_seeded_relay_edge_subscription_view_with_waker` has already
+        // `open_seeded_relay_subscription_view_with_waker` has already
         // installed the exact source closure, driven the receiver graph, and
         // folded the same terminal batch it returns here. Repeating that work
         // used to create a second opening path that could publish a different
@@ -2264,6 +2277,7 @@ impl PeerState {
         let state = self.publication_states.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
+        state.physical_identity_generation = Some(node.physical_identity_generation());
         state.result_member_set = previous_member_result_set.clone();
         state.member_index = previous_member_index;
         state.local_authority = previous_local_authority;

@@ -102,6 +102,66 @@ fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
         result_member_removes: Vec::new(),
     }
 }
+struct ResidentInventoryFixture {
+    _reader_dir: tempfile::TempDir,
+    reader: NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+    global_time: GlobalTime,
+    durability: DurabilityTier,
+    subscription: SubscriptionKey,
+    source_closure: Vec<crate::protocol::SupportingRow>,
+}
+
+fn resident_inventory_fixture() -> ResidentInventoryFixture {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
+
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_time: Some(global_time),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let source_closure = versions
+        .iter()
+        .map(|version| todos_covered_input(tx_id, version))
+        .collect();
+
+    ResidentInventoryFixture {
+        _reader_dir: reader_dir,
+        reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    }
+}
 
 #[test]
 fn cold_and_warm_complete_snapshots_ingest_same_versions() {
@@ -569,8 +629,8 @@ fn accepted_view_scoped_child_for_parent(
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
 }
@@ -610,8 +670,8 @@ fn pending_parent_time_proof_skips_newer_but_checks_equal_and_older_parents() {
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     for (time, parent_node, should_scan) in [
@@ -957,6 +1017,13 @@ fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically
         if succeeds {
             result.unwrap();
             assert!(reader.query_transaction(parent).unwrap().is_some());
+            let current = reader.current_rows("todos", DurabilityTier::Global).unwrap();
+            assert_eq!(current.len(), 1);
+            assert_eq!(
+                current[0].cell(&schema().tables[0], "title"),
+                Some(Value::String("accepted partial child".to_owned())),
+                "an older reset must ingest missing history without rewinding the cached child",
+            );
             assert!(
                 reader
                     .database
@@ -1061,39 +1128,19 @@ fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
 
 #[test]
 fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(2));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    register_whole_table_receiver(&mut reader, "todos");
-
-    let row_uuid = row(1);
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected commit unit");
-    };
-    let [fate] = core
-        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let SyncMessage::FateUpdate {
-        global_time: Some(global_time),
-        durability: Some(durability),
-        ..
-    } = fate
-    else {
-        panic!("expected accepted fate");
-    };
-    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let ResidentInventoryFixture {
+        _reader_dir,
+        mut reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    } = resident_inventory_fixture();
     // The preceding reset supplies the manifest; this live frame adds rows only.
-    let source_closure = versions
-        .iter()
-        .map(|version| todos_covered_input(tx_id, version))
-        .collect();
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -1155,6 +1202,112 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
     assert_eq!(reader.sync_metrics().parked_orphans, 0);
+}
+
+#[test]
+fn receiver_inventory_only_reset_finishes_initial_sync_cadence() {
+    let ResidentInventoryFixture {
+        _reader_dir,
+        mut reader,
+        row_uuid,
+        tx_id,
+        tx,
+        versions,
+        global_time,
+        durability,
+        subscription,
+        source_closure,
+    } = resident_inventory_fixture();
+
+    // Admit the exact transaction body before the target reset. The target
+    // frame below is the first frame using this process's relaxed cadence.
+    reader
+        .apply_view_updates_in_batch(vec![
+            ViewUpdateParts {
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    true,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                subscription,
+                settled_through: global_time,
+                defer_settlement: false,
+                reset_input_set: true,
+                version_carriers: Vec::new(),
+                peer_complete_tx_payload_refs: Vec::new(),
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+            },
+            ViewUpdateParts {
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    false,
+                    source_closure.clone(),
+                    Vec::new(),
+                )),
+                subscription,
+                settled_through: global_time,
+                defer_settlement: false,
+                reset_input_set: false,
+                version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                    tx,
+                    versions,
+                    fate: Fate::Accepted,
+                    global_time: Some(global_time),
+                    durability,
+                })],
+                peer_complete_tx_payload_refs: vec![tx_id],
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    reader.set_initial_sync_flush_cadence(2).unwrap();
+    // Private hydration and cadence state is intentional here: public row
+    // results cannot observe whether initial-sync cadence has completed.
+    assert!(!reader.initial_sync_flush_active);
+    assert!(!reader.initial_sync_flush_completed);
+
+    reader
+        .apply_view_updates_in_batch(vec![ViewUpdateParts {
+            wire_rows: Some(fixture_scope_update(
+                subscription,
+                true,
+                source_closure,
+                Vec::new(),
+            )),
+            subscription,
+            settled_through: global_time,
+            defer_settlement: false,
+            reset_input_set: true,
+            version_carriers: Vec::new(),
+            peer_complete_tx_payload_refs: vec![tx_id],
+            authorization_progress: None,
+            opening_pending: false,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+        }])
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("one"))])
+    );
+    assert!(authority_hydration_receipts(&reader).0.is_empty());
+    assert!(!reader.initial_sync_flush_active);
+    assert!(reader.initial_sync_flush_completed);
 }
 
 /// Two independently authorized reset fragments from one exclusive transaction
@@ -1596,7 +1749,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             full.clone(),
             Fate::Pending,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )])
         .unwrap();
     assert_eq!(
@@ -2827,4 +2980,115 @@ fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+}
+
+
+
+#[test]
+fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
+    use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
+    for scope in [CompleteTransaction, ViewScoped] {
+        let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let tx = reset_scope_tx(tx_id, 2);
+        let versions = vec![
+            version_record(row(1), Vec::new(), title_cells("one"), None),
+            version_record(row(2), Vec::new(), title_cells("two"), None),
+        ];
+        let carrier = VersionCarrier::Bundle(VersionBundle {
+            scope, tx: tx.clone(), versions: versions.clone(),
+            fate: Fate::Pending, global_time: None, durability: DurabilityTier::Local,
+        });
+        reader.remember_discarded_pending_view_transactions(&[carrier.clone()]).unwrap();
+        let mut conflicting = carrier.clone();
+        let VersionCarrier::Bundle(conflicting_bundle) = &mut conflicting else { unreachable!() };
+        conflicting_bundle.tx.made_by = AuthorSubject::system_at(node(9));
+        assert!(matches!(
+            crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflicting])),
+            Err(Error::ConflictingCommitUnit(id)) if id == tx_id
+        ));
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.tx.n_total_writes, 0);
+        assert!(stored.view_scoped_cardinality);
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        reader.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
+        // A duplicate discarded Pending header must leave a terminal identity intact.
+        reader.remember_discarded_pending_view_transactions(&[carrier]).unwrap();
+        let terminal = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(terminal.fate, Fate::Accepted);
+        assert_eq!(terminal.global_time, Some(GlobalTime(1)));
+        assert_eq!(terminal.durability, DurabilityTier::Global);
+        drop(reader);
+        let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert!(stored.view_scoped_cardinality);
+        assert_eq!(stored.tx.n_total_writes, 0);
+        assert_eq!(stored.fate, Fate::Accepted);
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        register_whole_table_receiver(&mut reader, "todos");
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let bundle = VersionBundle { scope, tx, versions, fate: Fate::Pending,
+            global_time: None, durability: DurabilityTier::Local };
+        if scope == ViewScoped {
+            let mut first_fragment = bundle.clone();
+            first_fragment.versions.truncate(1);
+            first_fragment.tx.n_total_writes = 1;
+            reader.apply_view_updates_in_batch(vec![reset_scope_update(subscription, vec![first_fragment])]).unwrap();
+            let partial = reader.query_transaction(tx_id).unwrap().unwrap();
+            assert_eq!(partial.fate, Fate::Accepted, "first fragment preserves terminal fate");
+            assert_eq!(partial.tx.n_total_writes, 1);
+            assert!(partial.view_scoped_cardinality);
+        }
+        reader.apply_view_updates_in_batch(vec![reset_scope_update(subscription, vec![bundle])]).unwrap();
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(stored.view_scoped_cardinality, scope == ViewScoped);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(stored.fate, Fate::Accepted, "later pending carrier must preserve terminal identity ({scope:?})");
+        assert_eq!(stored.global_time, Some(GlobalTime(1)));
+        assert_eq!(stored.durability, DurabilityTier::Global);
+        drop(reader);
+        let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.fate, Fate::Accepted);
+        assert_eq!(stored.global_time, Some(GlobalTime(1)));
+        assert_eq!(stored.durability, DurabilityTier::Global);
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
+    let (_dir, mut reader) = open_node_with_uuid(node(3));
+    let tx_id = TxId::new(TxTime::from(11), node(1));
+    let mut tx = reset_scope_tx(tx_id, 1);
+    tx.kind = TxKind::Exclusive;
+    tx.row_read_set = Some(Vec::new());
+    tx.absent_read_set = Some(Vec::new());
+    tx.predicate_read_set = Some(Vec::new());
+    let full = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx: tx.clone(), versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    tx.row_read_set = None;
+    tx.absent_read_set = None;
+    tx.predicate_read_set = None;
+    let redacted = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx, versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    // Both duplicate entries in a delivery and later redacted deliveries use
+    // the ordinary transaction-identity contract.
+    reader.remember_discarded_pending_view_transactions(&[full.clone(), redacted.clone()]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[full]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[redacted.clone()]).unwrap();
+    let mut conflict = redacted;
+    let VersionCarrier::Bundle(bundle) = &mut conflict else { unreachable!() };
+    bundle.tx.user_metadata_json = Some("true".to_owned());
+    assert!(matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
 }

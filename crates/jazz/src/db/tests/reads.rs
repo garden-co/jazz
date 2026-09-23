@@ -2,6 +2,58 @@
 
 use super::*;
 
+/// Alice detaches a query while its storage read owns the runtime. Detachment
+/// must release coverage without re-entering that owner or breaking later reads.
+/// This is internal because a server test cannot deterministically pause storage
+/// at this ownership boundary or inspect coverage attachment cleanup.
+///
+/// alice: pause read -> detach -> resume -> coverage released -> read again
+#[test]
+fn detach_query_during_suspended_read_releases_coverage_without_reentry() {
+    use futures::executor::block_on;
+    use futures::task::noop_waker;
+    use groove::storage::TestStorage;
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x31; 16]),
+            author: AuthorSubject::for_test_bytes([0x41; 16]),
+        },
+    )))
+    .unwrap();
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let attachment =
+        block_on(db.attach_query_with_opts_async(&prepared, ReadOpts::default(), None, None))
+            .unwrap();
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut read = Box::pin(db.all(&prepared, opts.clone()));
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+
+    db.detach_query(attachment);
+
+    control.resume();
+    assert!(block_on(read).unwrap().is_empty());
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
+}
+
 fn joined_issue_query() -> Query {
     Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
 }
@@ -2974,12 +3026,12 @@ fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
 }
 
 #[test]
-fn edge_read_opts_and_wait_honor_edge_durability() {
+fn global_read_and_wait_require_core_confirmation() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let write = db
         .insert(
             "todos",
-            doctest_support::todo_cells("edge observed", false),
+            doctest_support::todo_cells("core confirmed", false),
             Default::default(),
         )
         .unwrap();
@@ -2988,19 +3040,19 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
 
     assert_eq!(
         effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         }),
-        DurabilityTier::Edge
+        DurabilityTier::Global
     );
     assert!(
         doctest_support::block_on(db.all_for_identity(
             &prepared_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 local_updates: LocalUpdates::Immediate,
                 propagation: Propagation::LocalOnly,
                 include_deleted: false,
@@ -3011,23 +3063,23 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
         .unwrap()
         .is_empty()
     );
-    let not_observed = doctest_support::block_on(write.wait(DurabilityTier::Edge)).unwrap_err();
+    let not_observed = doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap_err();
     assert_eq!(not_observed.code, ErrorCode::NotObserved);
 
-    // E1: edge-accept produced directly; E2 wires the acceptance path.
+    // Simulate the Core confirmation received after local persistence.
     db.node
         .node
         .borrow_mut()
         .apply_fate_update(
             write.mergeable_tx_id(),
             Fate::Accepted,
-            None,
-            Some(DurabilityTier::Edge),
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
         )
         .unwrap();
 
     assert_eq!(
-        doctest_support::block_on(write.wait(DurabilityTier::Edge)).unwrap(),
+        doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap(),
         write.mergeable_tx_id()
     );
     assert_eq!(
@@ -3035,7 +3087,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
             &doctest_support::block_on(db.all_for_identity(
                 &prepared_query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     local_updates: LocalUpdates::Immediate,
                     propagation: Propagation::LocalOnly,
                     include_deleted: false,
@@ -3470,4 +3522,53 @@ fn required_nested_nullable_includes_preserve_parent_descriptors() {
         let removed = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
         assert!(removed.rows.is_empty());
     }
+}
+
+// This internal scheduling fixture is necessary because a public remote source
+// cannot hold a read forever while exposing whether its owner future was dropped.
+#[test]
+fn cancelled_pending_read_releases_fence_preserving_later_operation() {
+    struct ObserveDrop(Rc<Cell<bool>>);
+    impl Drop for ObserveDrop {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    let dropped = Rc::new(Cell::new(false));
+    let guard = ObserveDrop(Rc::clone(&dropped));
+    let receiver = db.node.enqueue_transaction_read(tx.tx_id, async move {
+        let _guard = guard;
+        std::future::pending::<Result<(), Error>>().await
+    });
+    let advanced = Rc::new(Cell::new(false));
+    let mark = Rc::clone(&advanced);
+    db.node
+        .enqueue_transaction_operation(
+            tx.tx_id,
+            Box::pin(async move {
+                mark.set(true);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(!dropped.get());
+    assert!(
+        !advanced.get(),
+        "later same-transaction operation must remain fenced"
+    );
+    drop(receiver);
+    for _ in 0..3 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        dropped.get(),
+        "cancelled receiver must drop the indefinitely pending read"
+    );
+    assert!(
+        advanced.get(),
+        "cancellation must release the read fence without dropping later work"
+    );
 }

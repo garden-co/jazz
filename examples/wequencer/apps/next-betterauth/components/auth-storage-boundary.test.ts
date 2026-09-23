@@ -46,7 +46,7 @@ describe("Better Auth storage boundary", () => {
         createdAt: new Date(0),
         updatedAt: new Date(0),
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     ordinarySession = await createJazzSession({
       appId: server.appId,
@@ -58,7 +58,7 @@ describe("Better Auth storage boundary", () => {
       initial: "local-first",
     });
     const client = ordinarySession.getSnapshot().client!.db;
-    await expect(client.all(app.better_auth_user, { tier: "edge" })).resolves.toEqual([]);
+    await expect(client.all(app.better_auth_user, { tier: "global" })).resolves.toEqual([]);
     await expect(
       client
         .insert(app.better_auth_user, {
@@ -68,7 +68,7 @@ describe("Better Auth storage boundary", () => {
           createdAt: new Date(0),
           updatedAt: new Date(0),
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     await session.close();

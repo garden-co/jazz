@@ -16,7 +16,6 @@ history) and ch. 8 (the wire protocol).
 
 Invariant digest:
 
-- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
 - `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
@@ -29,7 +28,7 @@ Invariant digest:
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
 - `INV-TX-12`: Local durability MUST NOT imply upstream survival; committed local transactions that have not reached an upstream tier MAY be lost if local storage is destroyed.
-- `INV-TX-13`: An exclusive transaction MUST capture the highest authority-committed `GlobalTime` known to its node as `base_snapshot.global_base`. On a history-complete core this is also the complete local-history frontier; on a partial edge/client it is a remote history coordinate, and cold reads MUST hydrate through the authority at that frozen snapshot.
+- `INV-TX-13`: An exclusive transaction MUST capture the highest authority-committed `GlobalTime` known to its node as `base_snapshot.global_base`. On a history-complete core this is also the complete local-history frontier; on a partial client it is a remote history coordinate, and cold reads MUST hydrate through the authority at that frozen snapshot.
 - `INV-TX-14`: Exclusive snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
@@ -40,7 +39,7 @@ Invariant digest:
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
-- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
+- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -53,7 +52,9 @@ following terms:
 - `TxId { time: TxTime, node: NodeUuid }` (ch. 2) names a transaction.
 - `TxKind` is `Mergeable` or `Exclusive`.
 - `Fate` is `Pending`, `Accepted`, or `Rejected(RejectionReason)`.
-- `DurabilityTier` is `None`, `Local`, `Edge`, or `Global` — separate from fate.
+- `DurabilityTier` is `None`, `Local`, or `Global` — separate from fate.
+  Legacy persisted Edge durability decodes as Local (ch. 9); it is not a
+  distinct runtime acknowledgement or authorization outcome.
 - `OpenTransactionId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
   is used unchanged for synchronous, thread-local, and worker-hosted runtimes.
 - `TransactionId` names the immutable commit produced by a successful commit and is the
@@ -119,9 +120,10 @@ redelivered with a different payload, it fails as `ConflictingCommitUnit`
 publication (`INV-TX-25`). The store may internally stage canonical history,
 currency/index state, IVM durable terminals, fate metadata, and recovery
 markers, but neither an acknowledgement nor a derived/subscription payload may
-escape until the required durable boundary completes. This also applies to edge
-relays: a returned `FateUpdate`, a `ViewUpdate`, and an edge-forwarded unit are
-publication, not speculative progress.
+escape until the required durable boundary completes. A local persistence
+relay acknowledges only its own durable boundary; it cannot manufacture a
+Core acceptance. A returned `FateUpdate` or `ViewUpdate` is publication, not
+speculative progress.
 
 If a process stops after an implementation's first durable stage and before its
 final marker/cleanup stage, recovery must inspect that state before serving it.
@@ -183,7 +185,7 @@ atomically at the durable publication boundary (§3.2.1). A downstream node
 advances `committed_global_time` only after it successfully applies a validated,
 non-pending receipt from its selected authority. Because only cores are
 history-complete, the same value proves complete local history only when paired
-with `history_complete`; on an edge/client it is a stable coordinate for remote
+with `history_complete`; on a client it is a stable coordinate for remote
 snapshot reads. No `+1` gap inference participates in either meaning. Recovery
 restores the core cut from durable accepted state and a partial node's known cut
 from its durable authority receipts.
@@ -212,19 +214,19 @@ Mergeable transactions are the eventually consistent write path. They give a
 writer atomic commit and read-your-own-writes, but **no serializable isolation**:
 concurrent mergeable writes to the same row merge by column LWW (ch. 4).
 
-Mergeable fate can be accepted before the transaction reaches the global
-authority. When an edge authority has already accepted a mergeable transaction,
-the core finalizes it by stamping a new `GlobalTime` and
-`DurabilityTier::Global`; it does not re-judge write-policy authorization or the
-merge outcome (`INV-EDGE-8`). Edge mergeable authority and its
-permission-subscription gating are ch. 9.
+A client or local persistence relay can acknowledge Local durability, but only
+Core accepts or rejects a submitted transaction. A locally persisted write
+remains Pending until Core returns its outcome. Core evaluates write policy,
+reconciles concurrent heads, and records Global durability with a GlobalTime.
+Reconnecting and replaying the same commit returns its existing outcome when
+its immutable payload matches; local persistence does not bypass admission.
 
 ### 3.5 Exclusive transactions
 
 Exclusive transactions are the serializable write path. Each one evaluates
 against a fixed `Snapshot { owner, global_base, local_base, dots }`. On a
 history-complete core, `global_base` is the core's atomically committed global
-time (`INV-TX-13`). A partial edge/client has no node-wide global possession
+time (`INV-TX-13`). A partial client has no node-wide global possession
 claim: query freshness is carried by per-binding receipts (ch. 8), and locally
 held transactions outside a core base are represented by the snapshot's
 owner-local component or explicit dots. `local_base` and `dots`
@@ -251,8 +253,8 @@ invisible outside the transaction (`INV-TX-2`).
 ### 3.6 Authority admission
 
 Fate authority is **structural**. A node acts as fate authority exactly when the
-host wires it as one: the core accept path for global authority, or the
-edge-authority ingest entry point for edge-decided mergeable fates. There is no
+host wires it as Core. Clients and local persistence relays cannot accept a
+transaction on Core’s behalf. There is no
 row-content inference, topology guess, or ambient `is_authority` flag that turns
 ordinary sync receipt into acceptance authority.
 
@@ -331,6 +333,19 @@ recorded reads against current global state:
 _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
+
+Schema migrations must preserve the physical identity used by these checks.
+Predicate validation resolves the recorded shape against its matching retained
+schema, rather than interpreting its table names in the current schema alone.
+Snapshot rows and their version witnesses must use that same schema mapping.
+
+Point-read and absent-read records carry a table name but no schema ID.
+Authority validation accepts that name only when all retained mappings for it
+identify the same physical table. This supports unambiguous renames.
+An unknown name, or a name reused for a different physical table, rejects the
+transaction as `ExclusiveConflict`; neither case may be treated as evidence
+that a row is absent. Supporting ambiguous name reuse would require additional
+read-set identity information.
 
 ### 3.8 Rejection and cascade
 

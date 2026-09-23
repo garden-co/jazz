@@ -168,6 +168,13 @@ An authority evaluates ordinary Jazz read policy for a candidate row/version.
 After success, its view may disclose the row's descriptor. A receiver installs
 that descriptor into Groove; Groove then walks its own storage directly.
 
+Write-policy candidates and their inline query sources retain each column's
+schema-derived large-scalar kind, including JSON, across runtime re-encoding.
+Owner-only predicates do not materialize unrelated large payloads. Crossing the
+inline boundary does not change insert/update authorization or turn a denied
+write into a transport failure; candidate descriptors remain runtime carriers,
+not a new history or wire format.
+
 Read policies that themselves inspect a large value execute at an authority
 whose internal capability may resolve the candidate root for policy evaluation.
 The candidate row/root is not released to the reader until policy succeeds. A
@@ -467,7 +474,7 @@ Jazz has no large-value-specific durable root registry. A Jazz version is an
 ordinary Groove physical record, and Groove's persisted record mutation owns
 the descriptor reference delta described in Groove chapter 9. Jazz updates and
 logical deletes append versions and therefore do not release old roots. The
-existing edge-cache eviction and rejected-version cleanup paths physically
+existing explicit client-cache eviction and rejected-version cleanup paths physically
 delete or move versions; their ordinary Groove batches account for descriptors
 like every other physical-record mutation.
 

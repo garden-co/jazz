@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::db::{ConnectionSessionContext, WireTransportAdapter};
+use jazz::db::ConnectionSessionContext;
+#[cfg(test)]
+use jazz::db::WireTransportAdapter;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
@@ -13,15 +15,15 @@ use jazz::wire::{
     negotiate_wire,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
-    ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportConnector,
-    NativeTransportError, NativeTransportFuture, NativeTransportRequest, NativeTransportTerminal,
+    ConnectedNativeTransport, NativeTransportConnector, NativeTransportError,
+    NativeTransportFuture, NativeTransportRequest, NativeTransportTerminal,
     NativeTransportTerminalFuture,
 };
 use jazz::tools::websocket_prelude_auth::AuthConfig;
@@ -147,8 +149,6 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
 
 pub struct WebSocketTransport {
     inbound: Arc<Mutex<mpsc::Receiver<InboundFrame>>>,
-    inbound_error: Arc<Mutex<Option<String>>>,
-    inbound_notify: Arc<Notify>,
     outbound: BoundedOutbound,
     task: tokio::task::JoinHandle<()>,
     terminal: Option<oneshot::Receiver<NativeTransportTerminal>>,
@@ -165,26 +165,16 @@ pub struct WebSocketTransport {
 pub struct NativeWebSocketConnector;
 
 impl NativeTransportConnector for NativeWebSocketConnector {
-    fn validate_catalogue_bootstrap_url(
-        &self,
-        server_url: &str,
-        app_id: AppId,
-    ) -> Result<(), jazz::tools::native_transport_connector::NativeTransportError> {
-        validate_catalogue_bootstrap_upstream_url(server_url, app_id)
-            .map_err(NativeTransportError::Terminal)
-    }
-
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
             let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
                 && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
-            let mut transport = WebSocketTransport::connect_with_wake_and_bootstrap(
+            let mut transport = WebSocketTransport::connect_with_link(
                 request.server_url,
                 request.app_id,
                 request.peer_identity,
                 request.auth,
                 request.wake,
-                false,
                 request.requested_link,
             )
             .await
@@ -200,22 +190,6 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 permits_delegated_sessions,
                 terminal,
             })
-        })
-    }
-
-    fn bootstrap_catalogue(
-        &self,
-        request: NativeTransportRequest,
-    ) -> NativeCatalogueBootstrapFuture {
-        Box::pin(async move {
-            WebSocketTransport::connect_catalogue_bootstrap(
-                request.server_url,
-                request.app_id,
-                request.peer_identity,
-                request.auth,
-            )
-            .await
-            .map_err(native_transport_error)
         })
     }
 }
@@ -274,7 +248,8 @@ impl BoundedOutbound {
         bytes: Vec<u8>,
         after_backpressure_arm: impl FnOnce(),
     ) -> Result<(), TransportError> {
-        let charge = bytes.len().max(1);
+        // A per-frame floor also caps tiny-frame queue cardinality at 512.
+        let charge = bytes.len().max(16 * 1024);
         let reserve = || {
             self.queued_bytes
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -378,90 +353,24 @@ impl WebSocketTransport {
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, WebSocketClientError> {
-        Self::connect_with_wake_and_bootstrap(
+        Self::connect_with_link(
             base_url,
             app_id,
             peer_identity,
             auth,
             wake,
-            false,
             NativeTransportLink::OrdinarySession,
         )
         .await
     }
 
-    /// Open the authenticated snapshot-only bootstrap exchange.  The returned
-    /// transport is deliberately short-lived: after adoption the edge opens a
-    /// fresh ordinary peer connection against the now-ready runtime.
-    pub async fn connect_catalogue_bootstrap(
-        base_url: impl AsRef<str>,
-        app_id: AppId,
-        peer_identity: AuthorSubject,
-        auth: AuthConfig,
-    ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
-        validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
-            .map_err(WebSocketClientError::ServerRejected)?;
-        let transport = Self::connect_with_wake_and_bootstrap(
-            base_url,
-            app_id,
-            peer_identity,
-            auth,
-            Arc::new(|| {}),
-            true,
-            NativeTransportLink::OrdinarySession,
-        )
-        .await?;
-        let (protocol_version, features, session_context) =
-            transport.negotiated_transport_metadata();
-        let inbound_error = Arc::clone(&transport.inbound_error);
-        let inbound_notify = Arc::clone(&transport.inbound_notify);
-        let mut wire = WireTransportAdapter::new_with_session_context(
-            transport,
-            protocol_version,
-            features,
-            None,
-            session_context,
-        );
-        let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
-        loop {
-            let notified = inbound_notify.notified();
-            match wire.try_recv_strict() {
-                Ok(Some(message)) => {
-                    return match message {
-                        jazz::protocol::SyncMessage::CatalogueSnapshot(snapshot) => Ok(*snapshot),
-                        _ => Err(WebSocketClientError::ServerRejected(
-                            "bootstrap peer sent application traffic instead of a catalogue snapshot"
-                                .to_owned(),
-                        )),
-                    };
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(WebSocketClientError::ServerRejected(format!(
-                        "bootstrap wire validation failed: {:?}: {}",
-                        error.code, error.message
-                    )));
-                }
-            }
-            if let Some(error) = inbound_error.lock().ok().and_then(|error| error.clone()) {
-                return Err(WebSocketClientError::ServerRejected(error));
-            }
-            tokio::select! {
-                _ = notified => {}
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err(WebSocketClientError::HandshakeTimeout);
-                }
-            }
-        }
-    }
-
-    async fn connect_with_wake_and_bootstrap(
+    async fn connect_with_link(
         base_url: impl AsRef<str>,
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
-        bootstrap_catalogue: bool,
+
         requested_link: NativeTransportLink,
     ) -> Result<Self, WebSocketClientError> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
@@ -474,7 +383,7 @@ impl WebSocketTransport {
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .map_err(WebSocketClientError::Connect)?;
 
-        let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue, requested_link)?;
+        let prelude = encode_prelude(peer_identity, auth, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -541,26 +450,19 @@ impl WebSocketTransport {
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
         let inbound = Arc::new(Mutex::new(inbound_rx));
-        let inbound_error = Arc::new(Mutex::new(None));
-        let inbound_notify = Arc::new(Notify::new());
         let inbound_budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let (outbound, outbound_rx, outbound_backpressured) = BoundedOutbound::channel();
         let (terminal_tx, terminal) = oneshot::channel();
         let terminal_publisher = Arc::new(Mutex::new(Some(terminal_tx)));
-        let pump_inbound_error = Arc::clone(&inbound_error);
-        let pump_inbound_notify = Arc::clone(&inbound_notify);
         let pump_terminal_publisher = Arc::clone(&terminal_publisher);
         let task = tokio::spawn(async move {
             let terminal = run_ws_pump(
                 ws,
                 inbound_tx,
                 inbound_budget,
-                pump_inbound_error,
-                pump_inbound_notify,
                 outbound_rx,
                 outbound_backpressured,
                 wake,
-                bootstrap_catalogue,
             )
             .await;
             if let Some(publisher) = pump_terminal_publisher
@@ -574,8 +476,6 @@ impl WebSocketTransport {
 
         Ok(Self {
             inbound,
-            inbound_error,
-            inbound_notify,
             outbound,
             task,
             terminal: Some(terminal),
@@ -639,8 +539,7 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
-    #[serde(default, skip_serializing_if = "is_false")]
-    bootstrap_catalogue: bool,
+
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
 }
@@ -649,20 +548,16 @@ fn is_ordinary_link(value: &NativeTransportLink) -> bool {
     *value == NativeTransportLink::OrdinarySession
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
-    bootstrap_catalogue: bool,
+
     requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
-        bootstrap_catalogue,
+
         requested_link,
     })
     .map_err(WebSocketClientError::EncodePrelude)
@@ -683,54 +578,6 @@ fn client_websocket_config() -> WebSocketConfig {
         // logical catalogue snapshots still span many such WebSocket messages.
         .max_message_size(Some(MAX_WIRE_FRAME_BYTES))
         .max_frame_size(Some(MAX_WIRE_FRAME_BYTES))
-}
-
-fn validate_catalogue_bootstrap_upstream_url(base_url: &str, app_id: AppId) -> Result<(), String> {
-    validate_bootstrap_upstream_url(&ws_url(base_url, app_id)).map_err(|error| error.to_string())
-}
-
-/// Bootstrap relies on the configured upstream transport for server identity:
-/// `wss://` gets the existing WebSocket/TLS validation, while plaintext is
-/// deliberately limited to loopback by default.  This is not mutual TLS or a
-/// new cryptographic authority proof; operators must configure a trusted WSS
-/// endpoint for remote edges.
-fn validate_bootstrap_upstream_url(base_url: &str) -> Result<(), WebSocketClientError> {
-    let url = reqwest::Url::parse(base_url).map_err(|error| {
-        WebSocketClientError::ServerRejected(format!("invalid bootstrap upstream URL: {error}"))
-    })?;
-    if url.scheme() != "ws" {
-        return Ok(());
-    }
-    let loopback = url.host_str().is_some_and(|host| {
-        let host = host.trim_matches(['[', ']']);
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    let explicitly_allowed = std::env::var("JAZZ_ALLOW_INSECURE_EDGE_BOOTSTRAP_WS")
-        .ok()
-        .as_deref()
-        == Some("1");
-    if loopback || explicitly_allowed {
-        Ok(())
-    } else {
-        Err(WebSocketClientError::ServerRejected(
-            "plaintext ws:// bootstrap is allowed only for loopback; configure wss:// or set JAZZ_ALLOW_INSECURE_EDGE_BOOTSTRAP_WS=1 for an explicit development override"
-                .to_owned(),
-        ))
-    }
-}
-
-fn fail_inbound(
-    error_slot: &Arc<Mutex<Option<String>>>,
-    notify: &Notify,
-    error: impl Into<String>,
-) {
-    if let Ok(mut slot) = error_slot.lock() {
-        *slot = Some(error.into());
-    }
-    notify.notify_waiters();
 }
 
 async fn receive_server_hello(
@@ -786,12 +633,9 @@ async fn run_ws_pump(
     >,
     inbound: mpsc::Sender<InboundFrame>,
     inbound_budget: Arc<Semaphore>,
-    inbound_error: Arc<Mutex<Option<String>>>,
-    inbound_notify: Arc<Notify>,
     mut outbound: mpsc::UnboundedReceiver<QueuedOutboundFrame>,
     outbound_backpressured: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    bootstrap_catalogue: bool,
 ) -> NativeTransportTerminal {
     let terminal = async {
         loop {
@@ -859,39 +703,32 @@ async fn run_ws_pump(
                         Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                         Some(Ok(Message::Close(frame))) => {
                             let reason = format!("websocket peer closed: {frame:?}");
-                            fail_inbound(&inbound_error, &inbound_notify, &reason);
                             return NativeTransportTerminal::PeerClosed(reason);
                         }
                         Some(Ok(_)) => {
                             let reason = "websocket peer sent a non-binary wire batch".to_owned();
-                            fail_inbound(&inbound_error, &inbound_notify, &reason);
                             let _ = ws.close(None).await;
                             return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         Some(Err(error)) => {
                             let classified = native_transport_error(WebSocketClientError::Receive(error));
-                            let reason = classified.to_string();
-                            fail_inbound(&inbound_error, &inbound_notify, &reason);
                             return NativeTransportTerminal::Failed(classified);
                         }
                         None => {
                             let reason = "websocket peer closed before completing wire exchange"
                                 .to_owned();
-                            fail_inbound(&inbound_error, &inbound_notify, &reason);
                             return NativeTransportTerminal::PeerClosed(reason);
                         }
                     };
-                    let frames = match decode_inbound_batch(&bytes, bootstrap_catalogue) {
+                    let frames = match decode_inbound_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(error) => {
-                            fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
                             return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
                     };
                     for frame in frames {
                         if let Err(error) = validate_wire_frame_len(frame.len()) {
-                            fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
                             return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
@@ -915,7 +752,6 @@ async fn run_ws_pump(
                         // A maximum logical message can exceed the bounded
                         // channel. Wake on every frame so its consumer drains
                         // before the producer blocks on a later fragment.
-                        inbound_notify.notify_one();
                         wake();
                     }
                 }
@@ -927,7 +763,7 @@ async fn run_ws_pump(
     terminal
 }
 
-fn decode_inbound_batch(bytes: &[u8], _bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
+fn decode_inbound_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let frames = jazz::wire::decode_websocket_frame_batch(bytes)
         .map_err(|_| "websocket peer sent malformed wire batch".to_owned())?;
     Ok(frames)
@@ -1152,44 +988,88 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
 
     #[derive(Clone)]
-    struct FrameSink(Arc<Mutex<VecDeque<Vec<u8>>>>);
+    struct FrameSink {
+        outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
 
     impl WireTransport for FrameSink {
         fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.0.lock().expect("frame sink lock").push_back(frame);
+            self.outbound
+                .lock()
+                .expect("frame sink lock")
+                .push_back(frame);
             Ok(())
         }
 
         fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            None
+            self.inbound.lock().expect("frame source lock").pop_front()
         }
     }
 
     fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
         let frames = Arc::new(Mutex::new(VecDeque::new()));
-        let sink = FrameSink(Arc::clone(&frames));
+        let credits = Arc::new(Mutex::new(VecDeque::new()));
+        let received_frames = Arc::new(Mutex::new(VecDeque::new()));
         let features = FEATURE_SYNC_MESSAGE_PAYLOAD | jazz::wire::FEATURE_MESSAGE_FRAGMENTATION;
-        let mut sender = WireTransportAdapter::new(sink, WIRE_PROTOCOL_VERSION, features, None);
+        let mut sender = WireTransportAdapter::new(
+            FrameSink {
+                outbound: Arc::clone(&frames),
+                inbound: Arc::clone(&credits),
+            },
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        );
+        let mut receiver = WireTransportAdapter::new(
+            FrameSink {
+                outbound: credits,
+                inbound: Arc::clone(&received_frames),
+            },
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        );
         let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
             .map(|index| char::from((index % 251) as u8))
             .collect::<String>();
+        let message = jazz::protocol::SyncMessage::SessionClaims {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::from([(
+                "catalogue_fixture".to_owned(),
+                jazz::groove::records::Value::String(body),
+            )]),
+        };
         sender
-            .send(jazz::protocol::SyncMessage::SessionClaims {
-                identity: AuthorSubject::SYSTEM,
-                claims: BTreeMap::from([(
-                    "catalogue_fixture".to_owned(),
-                    jazz::groove::records::Value::String(body),
-                )]),
-            })
+            .send(message.clone())
             .expect("encode valid fragmented logical message");
-        let frames = frames
-            .lock()
-            .expect("frame sink lock")
-            .drain(..)
-            .collect::<Vec<_>>();
-        assert!(frames.len() > 1, "message must be wire fragmented");
-        assert!(frames.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
-        frames
+        let mut captured = Vec::new();
+        for _ in 0..1024 {
+            let turn = frames
+                .lock()
+                .expect("frame sink lock")
+                .drain(..)
+                .collect::<Vec<_>>();
+            received_frames.lock().unwrap().extend(turn.iter().cloned());
+            captured.extend(turn);
+            if let Some(received) = receiver
+                .try_recv_strict()
+                .expect("receive fragmented message")
+            {
+                assert_eq!(
+                    received, message,
+                    "credit-driven fragmentation preserves the full bootstrap"
+                );
+                assert!(captured.len() > 1, "message must be wire fragmented");
+                assert!(captured.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
+                return captured;
+            }
+            assert_eq!(
+                sender.try_recv_strict().expect("apply receiver credits"),
+                None
+            );
+        }
+        panic!("credit-driven fragmented bootstrap must finish within bounded pump turns");
     }
 
     #[test]
@@ -1271,29 +1151,18 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_truncated_batch_wakes_bootstrap_with_a_terminal_error() {
-        let error = Arc::new(Mutex::new(None));
-        let notify = Notify::new();
-        fail_inbound(&error, &notify, "websocket peer sent malformed wire batch");
-        assert_eq!(
-            error.lock().expect("queue lock").as_deref(),
-            Some("websocket peer sent malformed wire batch")
-        );
-    }
-
-    #[test]
-    fn bootstrap_count_flood_or_empty_batch_is_rejected_before_ingress_staging() {
+    fn transport_count_flood_or_empty_batch_is_rejected_before_ingress_staging() {
         let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
         assert!(
-            decode_inbound_batch(&empty, true).is_err(),
-            "bootstrap must reject empty batches"
+            decode_inbound_batch(&empty).is_err(),
+            "transport must reject empty batches"
         );
 
         let flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
             .expect("encode count flood below physical byte cap");
         assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
         assert!(
-            decode_inbound_batch(&flood, false).is_err(),
+            decode_inbound_batch(&flood).is_err(),
             "count flood must be rejected before channel staging"
         );
     }
@@ -1307,14 +1176,14 @@ mod tests {
             "frozen WebSocket batch corpus must remain canonical"
         );
         assert_eq!(
-            decode_inbound_batch(&valid, false).expect("decode complete valid batch"),
+            decode_inbound_batch(&valid).expect("decode complete valid batch"),
             vec![vec![0x42]]
         );
 
         let mut suffixed = valid.to_vec();
         suffixed.push(0x00);
         assert!(
-            decode_inbound_batch(&suffixed, false).is_err(),
+            decode_inbound_batch(&suffixed).is_err(),
             "a valid batch plus a suffix must not acquire a second interpretation"
         );
     }
@@ -1346,9 +1215,6 @@ mod tests {
                 encode_prelude(
                     identity,
                     auth,
-                    entry["bootstrap_catalogue"]
-                        .as_bool()
-                        .expect("fixture bootstrap flag"),
                     if entry["requested_link"] == "scope_isolated_client_relay" {
                         NativeTransportLink::ScopeIsolatedClientRelay
                     } else {
@@ -1365,39 +1231,6 @@ mod tests {
                 entry["name"].as_str().expect("fixture name")
             );
         }
-    }
-
-    #[test]
-    fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
-        let bytes = encode_prelude(
-            AuthorSubject::SYSTEM,
-            AuthConfig::default(),
-            true,
-            NativeTransportLink::OrdinarySession,
-        )
-        .expect("encode snapshot bootstrap prelude");
-        let prelude: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("decode snapshot bootstrap prelude");
-        assert_eq!(
-            prelude.get("bootstrap_catalogue"),
-            Some(&serde_json::Value::Bool(true)),
-            "bootstrap callers must opt into the snapshot-only server exchange"
-        );
-    }
-
-    #[test]
-    fn remote_plaintext_bootstrap_requires_explicit_override() {
-        assert!(validate_bootstrap_upstream_url("ws://127.0.0.1:4200").is_ok());
-        assert!(validate_bootstrap_upstream_url("ws://[::1]:4200").is_ok());
-        assert!(validate_bootstrap_upstream_url("wss://core.example.test").is_ok());
-        assert!(validate_bootstrap_upstream_url("ws://[::2]:4200").is_err());
-        assert!(validate_bootstrap_upstream_url("ws://core.example.test").is_err());
-        assert!(
-            validate_bootstrap_upstream_url("ws://core.example.test")
-                .expect_err("remote plaintext bootstrap must fail")
-                .to_string()
-                .contains("plaintext ws:// bootstrap")
-        );
     }
 
     // The connector handshake itself is the public observable contract here;
@@ -1462,8 +1295,6 @@ mod tests {
         let task = tokio::spawn(std::future::pending());
         let mut transport = WebSocketTransport {
             inbound: Arc::new(Mutex::new(inbound)),
-            inbound_error: Arc::new(Mutex::new(None)),
-            inbound_notify: Arc::new(Notify::new()),
             outbound,
             task,
             terminal: None,

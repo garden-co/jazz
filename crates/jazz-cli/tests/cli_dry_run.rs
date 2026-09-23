@@ -310,15 +310,36 @@ struct QueuedWireTransport {
 struct WireQueues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+    delivery_credits: u64,
+    delivery_frames: u64,
 }
 
 impl QueuedWireTransport {
     fn drain_outbound(&self) -> Vec<Vec<u8>> {
-        self.queues.borrow_mut().outbound.drain(..).collect()
+        let mut queues = self.queues.borrow_mut();
+        let frames = queues.outbound.drain(..).collect::<Vec<_>>();
+        for frame in &frames {
+            if let Ok(jazz::wire::WireFrame::ChannelCredit(grant)) = jazz::wire::decode_frame(frame)
+            {
+                if grant.class == jazz::wire::channels::ChannelClass::Delivery
+                    && grant.kind == jazz::wire::WireCreditKind::Frames
+                {
+                    queues.delivery_credits += grant.consumed_bytes;
+                }
+            }
+        }
+        frames
     }
 
     fn push_inbound(&self, frame: Vec<u8>) {
-        self.queues.borrow_mut().inbound.push_back(frame);
+        let mut queues = self.queues.borrow_mut();
+        if let Ok(jazz::wire::WireFrame::Channel(envelope)) = jazz::wire::decode_frame(&frame) {
+            if envelope.extent.class == jazz::wire::channels::ChannelClass::Delivery {
+                queues.delivery_frames +=
+                    jazz::wire::channel_credit::channel_frame_credit_cost(frame.len()) as u64;
+            }
+        }
+        queues.inbound.push_back(frame);
     }
 }
 
@@ -449,8 +470,9 @@ struct BackpressureGateState {
     large_frame_started: bool,
     large_frame_payload_bytes: Option<u64>,
     large_frame_count: usize,
-    large_frame_total_payload_bytes: u64,
+    response_payload_bytes: u64,
     released: bool,
+    stopped: bool,
 }
 
 impl BackpressureGate {
@@ -466,7 +488,7 @@ impl BackpressureGate {
         state.large_frame_started = false;
         state.large_frame_payload_bytes = None;
         state.large_frame_count = 0;
-        state.large_frame_total_payload_bytes = 0;
+        state.response_payload_bytes = 0;
     }
 
     fn set_receive_window(&self, bytes: usize) {
@@ -502,13 +524,21 @@ impl BackpressureGate {
             .expect("receive window became unavailable")
     }
 
+    fn record_response_payload(&self, payload_bytes: u64) {
+        let mut state = self.lock_state();
+        if state.armed {
+            // Channel extents and their final tails can be below the gate's
+            // large-frame threshold, but all binary bytes consume TCP budget.
+            state.response_payload_bytes += payload_bytes;
+        }
+    }
+
     fn record_large_frame(&self, payload_bytes: u64) -> bool {
         let mut state = self.lock_state();
         if !state.armed {
             return false;
         }
         state.large_frame_count += 1;
-        state.large_frame_total_payload_bytes += payload_bytes;
         let first = !state.large_frame_started;
         if first {
             state.large_frame_started = true;
@@ -560,10 +590,7 @@ impl BackpressureGate {
                 "server response did not produce enough large WebSocket batches"
             );
         }
-        (
-            state.large_frame_count,
-            state.large_frame_total_payload_bytes,
-        )
+        (state.large_frame_count, state.response_payload_bytes)
     }
 
     fn wait_until_released(&self) {
@@ -576,8 +603,15 @@ impl BackpressureGate {
         }
     }
 
-    fn is_released(&self) -> bool {
-        self.lock_state().released
+    fn is_stopped(&self) -> bool {
+        self.lock_state().stopped
+    }
+
+    fn stop(&self) {
+        let mut state = self.lock_state();
+        state.released = true;
+        state.stopped = true;
+        self.changed.notify_all();
     }
 
     fn release(&self) {
@@ -661,7 +695,7 @@ impl BackpressureProxy {
     }
 
     fn shutdown(mut self) {
-        self.release();
+        self.gate.stop();
         self.thread
             .take()
             .expect("backpressure proxy thread")
@@ -872,6 +906,9 @@ fn relay_server_to_client(
                 .expect("forward proxy WebSocket header");
         }
 
+        if header[0] & 0x0f == 2 {
+            gate.record_response_payload(payload_len);
+        }
         if payload_len >= LARGE_FRAME_BYTES && gate.record_large_frame(payload_len) {
             gate.wait_until_released();
         }
@@ -909,7 +946,11 @@ fn read_proxy_byte(upstream: &mut TcpStream, gate: &BackpressureGate) -> Option<
                 if matches!(
                     error.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) && !gate.is_released() => {}
+                ) && !gate.is_stopped() =>
+            {
+                // Releasing A permits a real credit-driven stream to resume.
+                // An inter-frame pause is not EOF: only shutdown stops polling.
+            }
             Err(_) => return None,
         }
     }
@@ -1121,7 +1162,8 @@ fn help_lists_dev_server_commands() {
             .iter()
             .any(|line| line.contains("JAZZ_ALLOW_LOCAL_FIRST_AUTH"))
     );
-    assert!(lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("--upstream-url")));
 }
 
 #[test]
@@ -2157,6 +2199,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     // is withholding its payload. This is the concrete bounded-backpressure
     // barrier: the pre-connect receive window is known, so no fixed sleep
     // decides when B is introduced.
+    let delivery_credits_before_release = stalled.wire.queues.borrow().delivery_credits;
     let gated_payload_bytes = proxy.wait_for_large_frame(Duration::from_secs(15));
     assert!(
         gated_payload_bytes > receive_window_bytes as u64,
@@ -2197,6 +2240,11 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     );
     drop(_auxiliary_subscription);
 
+    assert_eq!(
+        stalled.wire.queues.borrow().delivery_credits,
+        delivery_credits_before_release,
+        "A must withhold delivery credits while B settles"
+    );
     proxy.release();
     // Release A only after B has completed. The gate then forwards the held
     // frame so the strict FIFO assertion can consume it.
@@ -2247,6 +2295,14 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     assert!(
         response_batch_count >= BACKPRESSURE_MIN_RESPONSE_BATCHES,
         "A's response must span multiple oversized WebSocket batches, got {response_batch_count}"
+    );
+    assert!(
+        stalled.wire.queues.borrow().delivery_credits > delivery_credits_before_release,
+        "A must return real delivery credits to resume the withheld response"
+    );
+    assert!(
+        stalled.wire.queues.borrow().delivery_frames > gated_payload_bytes,
+        "A must consume additional delivery extents after the gated frame"
     );
     assert!(
         response_payload_bytes > tcp_send_buffer_ceiling_bytes,
@@ -2411,7 +2467,7 @@ fn bug_306_rejects_privileged_secret_aliases_with_actionable_replacements() {
 }
 
 #[test]
-fn dry_run_rejects_upstream_url_for_local_server_mode() {
+fn dry_run_rejects_removed_upstream_url() {
     let output = jazz_server_command()
         .args(["dry-run", "--upstream-url", "wss://example.invalid/sync"])
         .output()
@@ -2421,8 +2477,9 @@ fn dry_run_rejects_upstream_url_for_local_server_mode() {
     assert!(output.stdout.is_empty());
 
     let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
-    assert!(stderr.contains("error=unsupported_upstream_url=wss://example.invalid/sync"));
-    assert!(stderr.contains("local-only"));
+    assert!(stderr.contains("error=unsupported_upstream_url:"));
+    assert!(stderr.contains("connect clients directly to Core"));
+    assert!(!stderr.contains("wss://example.invalid/sync"));
 }
 
 #[test]

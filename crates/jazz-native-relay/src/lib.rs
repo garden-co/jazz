@@ -2823,7 +2823,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Edge,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -2846,7 +2845,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             };
             let tier = match tier.as_str() {
                 "local" => CoreDurabilityTier::Local,
-                "edge" => CoreDurabilityTier::Edge,
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
@@ -6345,15 +6343,16 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
+        if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
+            return Err(failure(
+                "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
+            ));
+        }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            (
-                "tier",
-                Some(
-                    "edge" | "Edge" | "remote" | "Remote" | "remote-if-possible"
-                    | "RemoteIfPossible",
-                ),
-            ) => Some("Edge"),
+            ("tier", Some("remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible")) => {
+                Some("Global")
+            }
             ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
             ("tier", Some("none" | "None")) => Some("None"),
             ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
@@ -6886,26 +6885,9 @@ mod tests {
     use jazz::time::TxTime;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
     use jazz::tx::TxId;
-    use jazz_server::{EdgeUpstreamHealth, JazzServer, TestJwtIssuer};
+    use jazz_server::{JazzServer, TestJwtIssuer};
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
-
-    #[derive(Default)]
-    struct TestWireTransport {
-        inbound: VecDeque<Vec<u8>>,
-        outbound: Vec<Vec<u8>>,
-    }
-
-    impl WireTransport for TestWireTransport {
-        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.outbound.push(frame);
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            self.inbound.pop_front()
-        }
-    }
 
     struct IdleWire;
 
@@ -6956,13 +6938,6 @@ mod tests {
                     },
                 )
             })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
         }
     }
 
@@ -7021,13 +6996,6 @@ mod tests {
                 )
             })
         }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
-        }
     }
 
     struct PendingTestConnector {
@@ -7052,13 +7020,6 @@ mod tests {
                     },
                 )
             })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
         }
     }
 
@@ -7791,13 +7752,13 @@ mod tests {
         panic!("timed out waiting for {stage} to materialize from the persistent native relay");
     }
 
-    /// A real Core and Edge authenticate a native private-session bearer while
+    /// A real Core authenticates a native private-session bearer while
     /// Alice writes through a foreground relay. Revoking that admission stops
     /// its socket/relay; a fresh worker then reopens the same SQLite partition
     /// and reads Alice's row back through the ordinary foreground protocol.
     ///
     /// ```text
-    /// alice foreground ──peer──► native SQLite relay ──JWT WebSocket──► Edge ──upstream──► Core
+    /// alice foreground ──peer──► native SQLite relay ──JWT WebSocket──► Core
     ///       │                         │
     ///       └──write, close/revoke────┴──new worker/relay──readback──► persisted row
     /// ```
@@ -7807,12 +7768,12 @@ mod tests {
     /// an Android emulator/device run remains a separate installed-artifact
     /// acceptance receipt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn private_session_edge_core_write_survives_worker_and_relay_restart() {
+    async fn private_session_core_write_survives_worker_and_relay_restart() {
         private_session_restart_receipt(false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn private_session_edge_core_write_survives_offline_relay_restart() {
+    async fn private_session_core_write_survives_offline_relay_restart() {
         private_session_restart_receipt(true).await;
     }
 
@@ -7824,7 +7785,6 @@ mod tests {
         let server = JazzServer::builder()
             .with_schema(schema.public_schema().clone())
             .with_jwks_url(issuer.endpoint())
-            .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await
             .expect("start test server");
@@ -7922,7 +7882,6 @@ mod tests {
         let server = JazzServer::builder()
             .with_schema(schema.public_schema().clone())
             .with_jwks_url(issuer.endpoint())
-            .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await
             .expect("start test server");
@@ -8019,7 +7978,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
                 transaction: None,
             },
         );
@@ -8141,7 +8100,6 @@ mod tests {
         let edge = JazzServer::builder()
             .with_schema(schema.public_schema().clone())
             .with_jwks_url(issuer.endpoint())
-            .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await
             .expect("start test server");
@@ -8194,42 +8152,19 @@ mod tests {
         );
     }
 
-    /// A strict native read crosses both authenticated hops and must retain
+    /// A strict native read crosses the local relay and authenticated Core link and must retain
     /// its policy binding without exporting a hop-local relay capability.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn private_session_strict_read_crosses_edge_and_core() {
+    async fn private_session_strict_read_crosses_local_relay_and_core() {
         let issuer = TestJwtIssuer::start().await;
         let schema = permissive_schema();
         let public_schema = schema.public_schema().clone();
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())
             .with_jwks_url(issuer.endpoint())
-            .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await
             .expect("start test server");
-        let edge = JazzServer::builder()
-            .with_app_id(core.app_id())
-            .with_schema(public_schema)
-            .with_jwks_url(issuer.endpoint())
-            .with_admin_secret(core.admin_secret().to_owned())
-            .with_upstream_url(core.base_url())
-            .with_native_transport_connector(jazz_testkit::native_connector())
-            .start()
-            .await
-            .expect("start test server");
-
-        jazz_testkit::wait_for(
-            Duration::from_secs(15),
-            "local Edge attaches its ordinary upstream Core wire",
-            || {
-                let connected =
-                    edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected;
-                async move { connected.then_some(()) }
-            },
-        )
-        .await;
-
         // Mint this bearer at runtime from the local issuer. No bearer or
         // signing material is checked into the relay/device fixture.
         let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
@@ -8237,7 +8172,7 @@ mod tests {
         let fixture = NativeHostAbiFixture::new();
         let admitted = fixture
             .begin_account_session(
-                &edge.base_url(),
+                &core.base_url(),
                 &core.app_id().to_string(),
                 &bearer,
                 storage.path(),
@@ -8248,9 +8183,9 @@ mod tests {
 
         jazz_testkit::wait_for(
             Duration::from_secs(15),
-            "native relay's scoped authenticated Edge websocket",
+            "native relay's scoped authenticated Core websocket",
             || {
-                let connected = edge.server_state().shutdown.active_websockets() > 0;
+                let connected = core.server_state().shutdown.active_websockets() > 0;
                 async move { connected.then_some(()) }
             },
         )
@@ -8265,7 +8200,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
                 transaction: None,
             },
         );
@@ -8283,10 +8218,6 @@ mod tests {
         assert_exact_todo_rows(&rows, RowUuid::from_bytes(row_id), "strict two-hop row");
         fixture.revoke_private_session(&admitted);
         assert_eq!(
-            edge.shutdown().await,
-            jazz_server::ShutdownPhase::StorageClosed
-        );
-        assert_eq!(
             core.shutdown().await,
             jazz_server::ShutdownPhase::StorageClosed
         );
@@ -8299,32 +8230,9 @@ mod tests {
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())
             .with_jwks_url(issuer.endpoint())
-            .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await
             .expect("start test server");
-        let edge = JazzServer::builder()
-            .with_app_id(core.app_id())
-            .with_schema(public_schema)
-            .with_jwks_url(issuer.endpoint())
-            .with_admin_secret(core.admin_secret().to_owned())
-            .with_upstream_url(core.base_url())
-            .with_native_transport_connector(jazz_testkit::native_connector())
-            .start()
-            .await
-            .expect("start test server");
-
-        jazz_testkit::wait_for(
-            Duration::from_secs(15),
-            "local Edge attaches its ordinary upstream Core wire",
-            || {
-                let connected =
-                    edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected;
-                async move { connected.then_some(()) }
-            },
-        )
-        .await;
-
         // Mint this bearer at runtime from the local issuer. No bearer or
         // signing material is checked into the relay/device fixture.
         let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
@@ -8332,7 +8240,7 @@ mod tests {
         let fixture = NativeHostAbiFixture::new();
         let admitted = fixture
             .begin_account_session(
-                &edge.base_url(),
+                &core.base_url(),
                 &core.app_id().to_string(),
                 &bearer,
                 storage.path(),
@@ -8343,9 +8251,9 @@ mod tests {
 
         jazz_testkit::wait_for(
             Duration::from_secs(15),
-            "native relay's normal bearer-authenticated Edge websocket",
+            "native relay's normal bearer-authenticated Core websocket",
             || {
-                let connected = edge.server_state().shutdown.active_websockets() > 0;
+                let connected = core.server_state().shutdown.active_websockets() > 0;
                 async move { connected.then_some(()) }
             },
         )
@@ -8378,15 +8286,10 @@ mod tests {
             "revoked private-session capability cannot restart the old worker"
         );
 
-        let endpoint = edge.base_url();
+        let endpoint = core.base_url();
         let app_id = core.app_id().to_string();
-        let mut edge = Some(edge);
         let mut core = Some(core);
         if offline {
-            assert_eq!(
-                edge.take().unwrap().shutdown().await,
-                jazz_server::ShutdownPhase::StorageClosed
-            );
             assert_eq!(
                 core.take().unwrap().shutdown().await,
                 jazz_server::ShutdownPhase::StorageClosed
@@ -8400,9 +8303,9 @@ mod tests {
         if !offline {
             jazz_testkit::wait_for(
                 Duration::from_secs(15),
-                "replacement native worker reconnects through normal Edge auth",
+                "replacement native worker reconnects through normal Core auth",
                 || {
-                    let connected = edge
+                    let connected = core
                         .as_ref()
                         .unwrap()
                         .server_state()
@@ -8425,10 +8328,6 @@ mod tests {
 
         fixture.revoke_private_session(&reopened);
         if !offline {
-            assert_eq!(
-                edge.take().unwrap().shutdown().await,
-                jazz_server::ShutdownPhase::StorageClosed
-            );
             assert_eq!(
                 core.take().unwrap().shutdown().await,
                 jazz_server::ShutdownPhase::StorageClosed
@@ -10873,7 +10772,7 @@ mod tests {
             .unwrap();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = match client
-            .start_foreground_read(query, "{\"tier\":\"edge\"}".into(), None)
+            .start_foreground_read(query, "{\"tier\":\"global\"}".into(), None)
             .unwrap()
         {
             ForegroundOperationPoll::Pending { operation } => operation,
@@ -11188,7 +11087,7 @@ mod tests {
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         for _ in 0..7 {
             let ForegroundOperationPoll::Pending { operation } = client
-                .start_foreground_read(query.clone(), "{\"tier\":\"edge\"}".into(), None)
+                .start_foreground_read(query.clone(), "{\"tier\":\"global\"}".into(), None)
                 .unwrap()
             else {
                 panic!("remote read without an authority remains pending");
@@ -12421,7 +12320,7 @@ mod tests {
             .subscribe_foreground_query_with_options(
                 postcard::to_allocvec(&Query::from("todos")).unwrap(),
                 ReadOpts {
-                    tier: CoreDurabilityTier::Edge,
+                    tier: CoreDurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             )
@@ -12871,24 +12770,38 @@ mod tests {
         // A peer adapter produces a real framed network payload. The relay
         // bridge receives that frame only through another adapter; it cannot
         // accidentally accept an unframed postcard message as a second wire.
-        let mut peer = WireTransportAdapter::current(TestWireTransport::default());
-        peer.send(inbound.clone()).unwrap();
-        let peer_wire = peer.into_inner();
-        let mut upstream = WireTransportAdapter::current(TestWireTransport {
-            inbound: peer_wire.outbound.into(),
-            outbound: Vec::new(),
+        struct DuplexWire {
+            inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+            outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        }
+        impl WireTransport for DuplexWire {
+            fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+                self.outbound.lock().unwrap().push_back(frame);
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.lock().unwrap().pop_front()
+            }
+        }
+        let to_relay = Arc::new(Mutex::new(VecDeque::new()));
+        let to_peer = Arc::new(Mutex::new(VecDeque::new()));
+        let mut peer = WireTransportAdapter::current(DuplexWire {
+            inbound: Arc::clone(&to_peer),
+            outbound: Arc::clone(&to_relay),
         });
-
+        let mut upstream = WireTransportAdapter::current(DuplexWire {
+            inbound: to_relay,
+            outbound: to_peer,
+        });
+        peer.send(inbound.clone()).unwrap();
         assert!(bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
         assert_eq!(relay_wire.inbound.lock().unwrap().pop(), Some(inbound));
-
-        let sent_to_edge = upstream.into_inner().outbound;
-        assert_eq!(sent_to_edge.len(), 1);
-        let mut edge = WireTransportAdapter::current(TestWireTransport {
-            inbound: sent_to_edge.into(),
-            outbound: Vec::new(),
-        });
-        assert_eq!(edge.try_recv(), Some(outbound));
+        assert_eq!(peer.try_recv_strict().unwrap(), Some(outbound));
+        assert_eq!(
+            peer.try_recv_strict().unwrap(),
+            None,
+            "credits are not semantic messages"
+        );
     }
 
     // Internal queue seam: a host cannot deliberately block the relay owner.
@@ -14000,18 +13913,19 @@ mod tests {
         let tx = client
             .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
             .unwrap();
-        let release = relay
+        let (release, pending_read) = relay
             .run(move |worker| {
                 let (db, transaction) = worker.foreground_transaction(id, tx)?;
                 let (release, released) = futures::channel::oneshot::channel::<()>();
                 let held = Rc::clone(&db);
-                let _read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
+                let read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
                     let hold = Box::pin(held.hold_node_owner_for_test());
                     let _ = futures::future::select(released, hold).await;
                     Ok(())
                 });
                 db.drive_queued_mutation_once();
-                Ok(release)
+                // Dropping the receiver cancels the queued read and releases contention.
+                Ok((release, read))
             })
             .unwrap();
         client
@@ -14038,6 +13952,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(relay.run(|worker| Ok(worker.closing.is_empty())).unwrap());
+        drop(pending_read);
         assert!(host.close_foreground(next).unwrap());
         assert!(host.close_foreground(keeper).unwrap());
     }

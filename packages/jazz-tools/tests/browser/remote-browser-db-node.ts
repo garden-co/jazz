@@ -422,7 +422,7 @@ export async function updateRemoteBrowserDbRow(
 export async function queryRemoteBrowserDbRows(
   id: string,
   tabIndex: number,
-  tier?: "local" | "edge",
+  tier?: "local" | "global",
 ): Promise<Record<string, unknown>[]> {
   const handle = remoteBrowserDbs.get(id);
   const page = handle?.pages[tabIndex];
