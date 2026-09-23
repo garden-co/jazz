@@ -7,6 +7,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 async function createFixture() {
   const app = s.defineApp({
+    events: s.table({ message: s.string() }, {}),
     projects: s.table({ title: s.string() }, {}),
     notes: s
       .table(
@@ -17,6 +18,8 @@ async function createFixture() {
       .indexOnly(["projectId"]),
   });
   const permissions = definePermissions(app, ({ policy, session }) => {
+    policy.events.allowRead.always();
+    policy.events.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.notes.allowRead.always();
@@ -34,6 +37,7 @@ async function createFixture() {
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  const additionalClients: Awaited<ReturnType<typeof createDb>>[] = [];
   let retained: string | null = null;
   try {
     await deploy({
@@ -62,13 +66,36 @@ async function createFixture() {
       app,
       db,
       account,
+      async openOtherAccount() {
+        const other = await localAccountConfig(server.appId, server.url);
+        let saved: string | null = null;
+        const client = await createDb({
+          ...other,
+          e2ee: {
+            app,
+            store: {
+              async read() {
+                return saved;
+              },
+              async update(transform: (current: string | null) => string) {
+                saved = transform(saved);
+              },
+            },
+          },
+        });
+        additionalClients.push(client);
+        return { client, account: other };
+      },
       async close() {
-        await db?.shutdown();
+        await Promise.all([
+          db?.shutdown(),
+          ...additionalClients.map((client) => client.shutdown()),
+        ]);
         await server.stop();
       },
     };
   } catch (error) {
-    await db?.shutdown();
+    await Promise.all([db?.shutdown(), ...additionalClients.map((client) => client.shutdown())]);
     await server.stop();
     throw error;
   }
@@ -145,6 +172,43 @@ it("keeps encrypted row scope stable across pending deletes and upserts", async 
   }
 }, 120_000);
 
+it("commits an encrypted write when an exclusive transaction resumes after yielding", async () => {
+  const fixture = await createFixture();
+  const { app, db } = fixture;
+  try {
+    const tx = db.beginExclusiveTransaction();
+    await Promise.resolve();
+    expect(await tx.all(app.events, { tier: "local" })).toEqual([]);
+    const project = tx.insert(app.projects, { title: "Resumed scope" });
+    const note = tx.insert(app.notes, {
+      projectId: project.id,
+      body: "Prepared after yielding",
+      bytes: new Uint8Array([9]),
+    });
+    await tx.commit().wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+  } finally {
+    await fixture.close();
+  }
+}, 120_000);
+
+it("anchors encrypted application snapshots at public begin rather than the first operation", async () => {
+  const fixture = await createFixture();
+  const { app, db } = fixture;
+  try {
+    const before = db.insert(app.events, { message: "Before begin" }).value;
+    const tx = db.beginExclusiveTransaction();
+    try {
+      db.insert(app.events, { message: "After begin" });
+      expect(await tx.all(app.events, { tier: "local" })).toEqual([before]);
+    } finally {
+      await tx.rollback();
+    }
+  } finally {
+    await fixture.close();
+  }
+}, 120_000);
+
 it("keeps encrypted bytes unchanged when insert input and preview buffers are mutated", async () => {
   const fixture = await createFixture();
   const { app, db } = fixture;
@@ -184,6 +248,51 @@ it("keeps encrypted bytes unchanged when insert input and preview buffers are mu
   }
 }, 120_000);
 
+it("uses the public begin snapshot for cold and late initial recipients", async () => {
+  const fixture = await createFixture();
+  const { app, db } = fixture;
+  try {
+    const cold = await fixture.openOtherAccount();
+    const coldTx = db.beginExclusiveTransaction();
+    const coldProject = coldTx.insert(
+      app.projects,
+      { title: "Cold recipient scope" },
+      { initialRecipients: [cold.account.account.id] },
+    );
+    const coldNote = coldTx.insert(app.notes, {
+      projectId: coldProject.id,
+      body: "Available at begin",
+      bytes: new Uint8Array([1]),
+    });
+    await coldTx.commit().wait({ tier: "global" });
+    expect(await cold.client.one(app.notes.where({ id: coldNote.id }), { tier: "global" })).toEqual(
+      coldNote,
+    );
+
+    const lateTx = db.beginExclusiveTransaction();
+    expect(
+      await lateTx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "global" }),
+    ).toBeNull();
+    const late = await fixture.openOtherAccount();
+    const lateProject = lateTx.insert(
+      app.projects,
+      { title: "Late recipient scope" },
+      { initialRecipients: [late.account.account.id] },
+    );
+    lateTx.insert(app.notes, {
+      projectId: lateProject.id,
+      body: "Unavailable after begin",
+      bytes: new Uint8Array([2]),
+    });
+    await expect(lateTx.commit().wait({ tier: "global" })).rejects.toThrow(
+      "E2EE initial recipient account is unavailable",
+    );
+    expect(await db.one(app.projects.where({ id: lateProject.id }), { tier: "global" })).toBeNull();
+  } finally {
+    await fixture.close();
+  }
+}, 120_000);
+
 it("reads plaintext-only projections in exclusive transactions without the local key store", async () => {
   const fixture = await createFixture();
   const { app, db, account } = fixture;
@@ -197,10 +306,11 @@ it("reads plaintext-only projections in exclusive transactions without the local
       bytes: new Uint8Array([55]),
     });
     await initial.commit().wait({ tier: "global" });
-
     const storeError = new Error("Local key store unavailable");
     let reads = 0;
     let updates = 0;
+    let unavailable = false;
+    let retained: string | null = null;
     observer = await createDb({
       ...account,
       e2ee: {
@@ -208,22 +318,26 @@ it("reads plaintext-only projections in exclusive transactions without the local
         store: {
           async read() {
             reads += 1;
-            throw storeError;
+            if (unavailable) throw storeError;
+            return retained;
           },
-          async update() {
+          async update(transform: (current: string | null) => string) {
             updates += 1;
-            throw storeError;
+            if (unavailable) throw storeError;
+            retained = transform(retained);
           },
         },
       },
     });
+    const startupStoreAccesses = { reads, updates };
+    unavailable = true;
 
     const plain = app.notes.where({ id: note.id }).select("id", "projectId");
     expect(await observer.one(plain, { tier: "global" })).toEqual({
       id: note.id,
       projectId: project.id,
     });
-    expect({ reads, updates }).toEqual({ reads: 0, updates: 0 });
+    expect({ reads, updates }).toEqual(startupStoreAccesses);
 
     const exclusive = observer.beginExclusiveTransaction();
     try {
@@ -231,7 +345,7 @@ it("reads plaintext-only projections in exclusive transactions without the local
         id: note.id,
         projectId: project.id,
       });
-      expect({ reads, updates }).toEqual({ reads: 0, updates: 0 });
+      expect({ reads, updates }).toEqual(startupStoreAccesses);
     } finally {
       await exclusive.rollback();
     }
