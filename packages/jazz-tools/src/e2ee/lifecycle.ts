@@ -1,6 +1,10 @@
+import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { accountRegistry } from "../accounts/enrollment.js";
+import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
+import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
+import { E2eeRecoveryError } from "./recovery-error.js";
 import type { AccountHandle } from "../accounts/state.js";
 import type { Db } from "../runtime/db.js";
 import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
@@ -10,6 +14,11 @@ import type { CryptoMechanism } from "./envelope.js";
 import { localDevice } from "./local-device.js";
 import { firstAccountEpoch } from "./first-epoch.js";
 import { DeviceApproval } from "./device-approval.js";
+import {
+  prefetchPublicMembershipHistory,
+  readPublicMembershipHistory,
+  replayAccountMembership,
+} from "./public-membership.js";
 import type { JazzCrypto } from "./types.js";
 
 export type E2eeConfig = {
@@ -31,6 +40,18 @@ export type DeviceInfo = Readonly<{
 
 const contexts = new WeakMap<Db, E2ee>();
 
+export type RecoveryStatus = Readonly<{
+  configured: boolean;
+  account: {
+    epochId: string | null;
+    /** Accepted active registrations, not evidence that a device is online. */
+    activeDeviceIds: string[];
+    recoveryRootIds: string[];
+    validation: "not-checked" | "validated";
+    validatedRootId?: string;
+  };
+}>;
+
 /** @internal Only verified account-context creation binds lifecycle state. */
 export function attachE2ee(db: Db, account: AccountHandle, config: E2eeConfig, env: string): void {
   contexts.set(db, new E2ee(db, account, config, env));
@@ -50,6 +71,148 @@ export class E2ee {
   private preparation: Promise<void> | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
+
+  readonly recovery = {
+    status: async (material?: string): Promise<RecoveryStatus> => {
+      this.assertOpen();
+      if (material !== undefined) return this.inspectRecovery(material);
+      await prefetchPublicMembershipHistory(this.db, this.account.id, this.app);
+      const read = await exclusiveE2eeTransaction(this.db, (tx) =>
+        readPublicMembershipHistory(tx, this.account.id, this.app),
+      );
+      const history = await read.wait({ tier: "global" });
+      this.assertOpen();
+      let membership: Awaited<ReturnType<typeof replayAccountMembership>> | undefined;
+      if (history.roots.rows.length) {
+        const signer =
+          this.config.crypto?.deviceSigner ??
+          (await (await import("./browser.js")).createBrowserDeviceSigner());
+        membership = await replayAccountMembership(history, this.scope, signer);
+        this.assertOpen();
+      }
+      if (
+        membership?.recoveryRoots.length &&
+        this.account.identity.issuer === "urn:jazz:local-first"
+      )
+        return this.withProtectedRecovery((value) => this.inspectRecovery(value));
+      // Registration is evidence of configuration, never of retained recovery secrets.
+      return {
+        configured: !!membership?.recoveryRoots.length,
+        account: {
+          epochId: membership?.epochId ?? null,
+          activeDeviceIds: [...(membership?.active ?? [])].sort(),
+          recoveryRootIds: membership?.recoveryRoots.map((root) => root.id).sort() ?? [],
+          validation: "not-checked",
+        },
+      };
+    },
+    use: (material?: string): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        if (material !== undefined) {
+          await this.approval!.useRecovery(material);
+        } else await this.restoreProtectedRecovery();
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    create: (): { wait(): Promise<{ material: string }> } => {
+      const completion = (async () => {
+        await this.prepare();
+        const result = await this.approval!.createRecovery();
+        if (this.account.identity.issuer === "urn:jazz:local-first") {
+          const secret = parseAuthSecret(exportLocalFirstSecret(this.account));
+          try {
+            const cipher =
+              this.config.crypto?.cellCipher ??
+              (await (await import("./browser.js")).createBrowserCellCipher());
+            const rootId: string = JSON.parse(result.material).rootId;
+            const target = { application: this.scope, accountId: this.account.id, rootId };
+            const material = await protectRecoveryMaterial(cipher, secret, target, result.material);
+            if ((await openRecoveryMaterial(cipher, secret, target, material)) !== result.material)
+              throw new Error("Invalid E2EE recovery protector output");
+            this.assertOpen();
+            await this.db
+              .insert(this.app.__e2ee_recovery_protectors, { rootId, material })
+              .wait({ tier: "global" });
+            this.assertOpen();
+          } finally {
+            secret.fill(0);
+          }
+        }
+        return result;
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+  };
+
+  private async inspectRecovery(material: string): Promise<RecoveryStatus> {
+    const keys =
+      this.config.crypto?.keyEnvelope ??
+      (await (await import("./browser.js")).createBrowserKeyEnvelope());
+    const signer =
+      this.config.crypto?.deviceSigner ??
+      (await (await import("./browser.js")).createBrowserDeviceSigner());
+    this.assertOpen();
+    const reader = new DeviceApproval(
+      this.db,
+      this.account.id,
+      this.scope,
+      keys,
+      signer,
+      () => this.assertOpen(),
+      this.app,
+    );
+    const account = await reader.inspectRecovery(material);
+    this.assertOpen();
+    return { configured: true, account };
+  }
+
+  private restoreProtectedRecovery(): Promise<void> {
+    return this.withProtectedRecovery(async (material) => {
+      await this.approval!.useRecovery(material);
+      this.assertOpen();
+    });
+  }
+
+  private async withProtectedRecovery<T>(consume: (material: string) => Promise<T>): Promise<T> {
+    const secret = parseAuthSecret(exportLocalFirstSecret(this.account));
+    try {
+      const cipher =
+        this.config.crypto?.cellCipher ??
+        (await (await import("./browser.js")).createBrowserCellCipher());
+      const rows = await this.db.all(this.app.__e2ee_recovery_protectors, { tier: "edge" });
+      let failure: unknown = new E2eeRecoveryError("recovery-protector-missing");
+      for (const row of rows) {
+        this.assertOpen();
+        let material: string;
+        try {
+          material = await openRecoveryMaterial(
+            cipher,
+            secret,
+            { application: this.scope, accountId: this.account.id, rootId: row.rootId },
+            row.material,
+          );
+          if (JSON.parse(material).rootId !== row.rootId)
+            throw new Error("E2EE recovery protector root mismatch");
+        } catch {
+          this.assertOpen();
+          failure = new E2eeRecoveryError("recovery-protector-unusable");
+          continue;
+        }
+        try {
+          return await consume(material);
+        } catch (error) {
+          this.assertOpen();
+          failure = error;
+        }
+      }
+      throw failure;
+    } finally {
+      secret.fill(0);
+    }
+  }
 
   readonly devices = {
     list: async (): Promise<DeviceInfo[]> => {
