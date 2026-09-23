@@ -1,6 +1,6 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
-import { formatUuidAt } from "../hex.js";
+import { formatUuid, parseUuid } from "../uuid.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
@@ -6739,20 +6739,6 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false;
   return left.every((byte, index) => byte === right[index]);
-}
-
-export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

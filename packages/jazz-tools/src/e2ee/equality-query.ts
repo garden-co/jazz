@@ -4,6 +4,7 @@ import { normalizeBuiltQuery } from "../runtime/query-builder-shape.js";
 import { resolveSelectedColumns } from "../runtime/select-projection.js";
 import { toWriteRecord } from "../runtime/value-converter.js";
 import { toTimestampMs } from "../runtime/query-adapter.js";
+import { formatUuid, parseUuid } from "../runtime/uuid.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptedSchemas, equalityIndexColumn } from "./encrypted-schema.js";
 import { equalityToken, equalityValue } from "./equality-data.js";
@@ -97,6 +98,7 @@ export async function prepareEqualityQuery(
   );
   if (typeof scopeCondition?.value !== "string")
     throw new Error("Encrypted equality queries require a plaintext space constraint");
+  const scopeIdentifier = formatUuid(parseUuid(scopeCondition.value));
   const table = new TypedTableQueryBuilder(built.table, query._schema);
   const scope = new TypedTableQueryBuilder(declaration.scope, query._schema);
   const values = predicates.map((predicate) => {
@@ -117,7 +119,7 @@ export async function prepareEqualityQuery(
   const epochs = new Set<string>();
   await transaction?.ready();
   const initial = transaction?.initialSpaceKeys.size
-    ? transaction.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${scopeCondition.value}`)
+    ? transaction.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${scopeIdentifier}`)
     : undefined;
   const collect = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
     epochs.add(root.epochId);
@@ -127,7 +129,7 @@ export async function prepareEqualityQuery(
       ]);
   };
   if (initial) await collect(initial.secret, initial.root);
-  else await withSpaceKeys(db, scope, scopeCondition.value, collect, true);
+  else await withSpaceKeys(db, scope, scopeIdentifier, collect, true);
   if (tokens.some((values) => !values.length)) throw new E2eeDataError("key-unavailable");
   const wanted = predicates.map((predicate, i) =>
     equalityValue(table, predicate.column, values[i]!),
@@ -153,7 +155,7 @@ export async function prepareEqualityQuery(
     : undefined;
   return {
     json: JSON.stringify(physical),
-    space: { scope: declaration.scope, identifier: scopeCondition.value },
+    space: { scope: declaration.scope, identifier: scopeIdentifier },
     async isCurrent() {
       // This key belongs to the atomic transaction, not published history yet.
       if (initial) return true;
@@ -163,7 +165,7 @@ export async function prepareEqualityQuery(
       await withSpaceKeys(
         db,
         scope,
-        scopeCondition.value as string,
+        scopeIdentifier,
         async (_secret, root) => {
           current.add(root.epochId);
         },
