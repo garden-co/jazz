@@ -441,7 +441,7 @@ test("one source admission covers nested consumers while snapshot checks continu
     writeCorrectnessArtifactProducerManifest(root, snapshot);
     const publicEnvironment = correctnessArtifactConsumerEnvironment(root);
     const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
-    await runCorrectnessConsumer(
+    const nested = runCorrectnessConsumer(
       process.execPath,
       [
         "--input-type=module",
@@ -457,6 +457,10 @@ test("one source admission covers nested consumers while snapshot checks continu
       ],
       { cwd: root, rootDir: root },
     );
+    // Only Linux supplies the process-start identity needed for inherited admission.
+    // Other platforms must freshly admit the changed source and reject it.
+    if (process.platform === "linux") await nested;
+    else await assert.rejects(nested, /correctness consumer failed/);
     assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
     assert.throws(
       () => runCorrectnessConsumer(process.execPath, ["-e", ""], { cwd: root, rootDir: root }),
