@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
@@ -29,12 +29,10 @@ function deployed(hash = "abc123def4567890") {
   };
 }
 
-function makeViteServer(
-  command: "serve" | "build",
-  root = "/tmp/jazz-sveltekit-test",
-): ViteDevServer & { restart: ReturnType<typeof vi.fn> } {
+async function makeViteServer(command: "serve" | "build", root?: string) {
+  const viteRoot = root ?? (await tempRoots.create("jazz-sveltekit-vite-"));
   return {
-    config: { root, command, env: {} },
+    config: { root: viteRoot, command, env: {} },
     httpServer: { once() {} },
     ws: { send() {} },
     restart: vi.fn(() => Promise.resolve()),
@@ -56,11 +54,6 @@ beforeEach(() => {
 afterEach(async () => {
   await __resetJazzSvelteKitPluginForTests();
   await tempRoots.cleanup();
-  // Shared /tmp roots accumulate .env files from managed-runtime's app-id
-  // persistence; wipe them so the plugin's env-file backfill starts clean.
-  for (const shared of ["/tmp/jazz-sveltekit-test", "/tmp/jazz-sk-noserver"]) {
-    await rm(join(shared, ".env"), { force: true }).catch(() => undefined);
-  }
   vi.restoreAllMocks();
 
   if (originalJazzAppId === undefined) {
@@ -114,7 +107,7 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port, adminSecret: "sveltekit-test-admin" },
     });
-    const viteServer = makeViteServer("serve", root);
+    const viteServer = await makeViteServer("serve", root);
     const configureServer = plugin.configureServer as (server: typeof viteServer) => Promise<void>;
     await configureServer(viteServer);
 
@@ -156,7 +149,7 @@ describe("jazzSvelteKit", () => {
       server: { port: 19882, adminSecret: "sveltekit-telemetry-admin" },
       telemetry: "http://127.0.0.1:54418",
     });
-    const viteServer = makeViteServer("serve", root);
+    const viteServer = await makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     const startOptions = startSpy.mock.calls[0]![0] as Record<string, unknown>;
@@ -308,7 +301,7 @@ describe("jazzSvelteKit", () => {
     ) => unknown;
     await config({ root }, { command: "serve", mode: "development" });
 
-    const viteServer = makeViteServer("serve", root);
+    const viteServer = await makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(viteServer.restart).not.toHaveBeenCalled();
@@ -321,7 +314,9 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19999, adminSecret: "build-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("build"));
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      await makeViteServer("build"),
+    );
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
@@ -331,7 +326,9 @@ describe("jazzSvelteKit", () => {
     const spy = vi.spyOn(devServer, "startLocalJazzServer");
 
     const plugin = jazzSvelteKit({ server: false });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      await makeViteServer("serve"),
+    );
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
@@ -353,7 +350,9 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19998, adminSecret: "backend-secret-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      await makeViteServer("serve"),
+    );
 
     expect(process.env.BACKEND_SECRET).toBe("test-backend-secret");
   });
@@ -442,7 +441,7 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({ adminSecret: "env-test-admin" });
-    const viteServer = makeViteServer("serve");
+    const viteServer = await makeViteServer("serve");
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
@@ -465,7 +464,9 @@ describe("jazzSvelteKit", () => {
       adminSecret: "str-admin",
       appId: "00000000-0000-0000-0000-000000000020",
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      await makeViteServer("serve"),
+    );
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
     expect(catalogueProject.deploy).toHaveBeenCalledWith(
@@ -490,7 +491,7 @@ describe("jazzSvelteKit", () => {
     await writeFile(join(root, "src", "lib", "permissions.ts"), "export default {};\n");
 
     const plugin = jazzSvelteKit({ server: { port } });
-    const viteServer = makeViteServer("serve", root);
+    const viteServer = await makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
@@ -502,7 +503,9 @@ describe("jazzSvelteKit", () => {
 
     const plugin = jazzSvelteKit({ adminSecret: "admin" });
     await expect(
-      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve")),
+      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+        await makeViteServer("serve"),
+      ),
     ).rejects.toThrow("appId is required when connecting to an existing server");
   });
 
