@@ -10261,6 +10261,250 @@ mod tests {
         client.close().unwrap();
     }
 
+    /// A foreground with a registered platform wake callback, which is how
+    /// every RN host runs it: its Db tick requests reach the owner as drives.
+    fn attached_write_client(
+        name: &str,
+        author: u8,
+    ) -> (
+        tempfile::TempDir,
+        NativeRelay,
+        NativeRelayClient,
+        Arc<QueuedNativeWake>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join(format!("{name}.sqlite")),
+            Some(name),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let wake = Arc::new(QueuedNativeWake::active());
+        client
+            .set_foreground_wake_callback(
+                1,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+        (directory, relay, client, wake)
+    }
+
+    fn hold_foreground_owner(relay: &NativeRelay, id: u64) -> u64 {
+        let holder = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        let ForegroundOperationPoll::Pending { operation } = holder else {
+            unreachable!()
+        };
+        operation
+    }
+
+    fn admit_title(
+        relay: &NativeRelay,
+        id: u64,
+        title: String,
+    ) -> Result<(TransactionId, RowUuid), RelayError> {
+        relay.run(move |worker| {
+            worker.direct_foreground_mutation(
+                id,
+                ForegroundMutationKind::Insert,
+                "todos".into(),
+                None,
+                encoded_title_cells(&title),
+                "{}".into(),
+            )
+        })
+    }
+
+    /// Poll a foreground read without any platform tick or explicit pump:
+    /// only the owner's own drive turns may make it progress.
+    fn owner_driven_rows(
+        client: &NativeRelayClient,
+        mut read: ForegroundOperationPoll,
+    ) -> Vec<RowUuid> {
+        for _ in 0..2_000 {
+            match read {
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) => {
+                    let batches: Vec<DecodedForegroundRowBatch> =
+                        postcard::from_bytes(&rows).unwrap();
+                    return batches
+                        .into_iter()
+                        .flat_map(|batch| batch.rows.into_iter().map(|row| row.row_id))
+                        .collect();
+                }
+                ForegroundOperationPoll::Pending { operation } => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    read = client.poll_foreground_operation(operation).unwrap();
+                }
+                _ => panic!("foreground read failed"),
+            }
+        }
+        panic!("owner drive turns did not complete the foreground read");
+    }
+
+    // Internal receipt (#3273): "admitted but not yet applied" and the owner's
+    // self-driven turns are not observable through the public JS API. The RN
+    // public-API harness pins the same fence through `Db` in
+    // packages/jazz-tools/tests/react-native/write-contract.test.ts.
+    #[test]
+    fn direct_mutations_return_before_apply_and_fence_reads_and_subscriptions() {
+        let (_directory, relay, client, _wake) = attached_write_client("fence", 0x61);
+        let id = client.id;
+        let holder = hold_foreground_owner(&relay, id);
+        let (tx_id, row_id) = admit_title(&relay, id, "fenced".into()).unwrap();
+        assert_eq!(
+            relay
+                .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
+                .unwrap(),
+            "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}",
+            "admission returns before the owner applies the write"
+        );
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query.clone(), "{}".into(), None)
+            .unwrap();
+        assert!(
+            matches!(read, ForegroundOperationPoll::Pending { .. }),
+            "a read admitted after an unapplied write waits for it"
+        );
+        let subscription = client
+            .subscribe_foreground_query_with_options(query, ReadOpts::default())
+            .unwrap();
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+
+        assert_eq!(owner_driven_rows(&client, read), vec![row_id]);
+        let mut first_frame = None;
+        let mut pending = None;
+        for _ in 0..2_000 {
+            let poll = match pending.take() {
+                Some(operation) => client.poll_foreground_operation(operation).unwrap(),
+                None => client.drain_foreground_subscription(subscription).unwrap(),
+            };
+            match poll {
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
+                    events,
+                )) if !events.is_empty() => {
+                    first_frame = Some(events);
+                    break;
+                }
+                ForegroundOperationPoll::Pending { operation } => pending = Some(operation),
+                ForegroundOperationPoll::Ready(_) => {}
+                _ => panic!("subscription drain failed"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let first_frame = first_frame.expect("the owner delivers the first subscription frame");
+        assert!(
+            first_frame.iter().any(|event| match event {
+                ForegroundSubscriptionEvent::Delta { delta, .. }
+                | ForegroundSubscriptionEvent::StructuredDelta { delta, .. } => delta
+                    .windows(16)
+                    .any(|candidate| candidate == row_id.as_bytes()),
+                _ => false,
+            }),
+            "the first frame of a same-turn subscription contains the write"
+        );
+        client.close().unwrap();
+    }
+
+    // Internal receipt (#3273): the per-foreground owner-queue depth is not a
+    // public API value. The public burst scenario lives in write-contract.test.ts.
+    #[test]
+    fn direct_mutation_queue_rejects_without_admitting_when_it_cannot_progress() {
+        let (_directory, relay, client, _wake) = attached_write_client("cap-held", 0x62);
+        let id = client.id;
+        let holder = hold_foreground_owner(&relay, id);
+        let mut admitted = Vec::new();
+        for index in 0..NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
+            admitted.push(admit_title(&relay, id, format!("held-{index}")).unwrap().1);
+        }
+        let error = admit_title(&relay, id, "over the cap".into()).unwrap_err();
+        assert!(
+            error.to_string().contains("backpressure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.queued_mutation_count()))
+                .unwrap(),
+            NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
+            "a rejected admission enqueues nothing"
+        );
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        let mut rows = owner_driven_rows(&client, read);
+        rows.sort();
+        admitted.sort();
+        assert_eq!(rows, admitted, "every admitted write is applied");
+        client.close().unwrap();
+    }
+
+    // Internal receipt (#3273), as above: a burst admitted inside one owner
+    // turn (no drive turn can interleave) is bounded by inline backpressure.
+    #[test]
+    fn direct_mutation_burst_stays_within_the_queue_cap_and_loses_nothing() {
+        let (_directory, relay, client, _wake) = attached_write_client("cap-burst", 0x63);
+        let id = client.id;
+        let burst = 3 * NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX;
+        let (mut admitted, max_depth) = relay
+            .run(move |worker| {
+                let mut admitted = Vec::new();
+                let mut max_depth = 0;
+                for index in 0..burst {
+                    let (_, row) = worker.direct_foreground_mutation(
+                        id,
+                        ForegroundMutationKind::Insert,
+                        "todos".into(),
+                        None,
+                        encoded_title_cells(&format!("burst-{index}")),
+                        "{}".into(),
+                    )?;
+                    admitted.push(row);
+                    max_depth =
+                        max_depth.max(worker.foreground_client(id)?.db.queued_mutation_count());
+                }
+                Ok((admitted, max_depth))
+            })
+            .unwrap();
+        assert!(
+            max_depth <= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
+            "queue depth {max_depth} exceeded the cap"
+        );
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        let mut rows = owner_driven_rows(&client, read);
+        rows.sort();
+        admitted.sort();
+        assert_eq!(rows.len(), burst);
+        assert_eq!(rows, admitted, "no write is lost or duplicated");
+        client.close().unwrap();
+    }
+
     // Internal receipt: deterministic owner contention is not exposed by the public JS API.
     #[test]
     fn standalone_mutation_queues_behind_a_held_owner() {

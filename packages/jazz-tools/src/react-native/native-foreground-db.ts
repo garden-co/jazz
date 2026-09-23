@@ -241,11 +241,9 @@ export class NativeForegroundDb {
       openTransactionId === undefined
         ? undefined
         : this.openTransaction(openTransactionId, "read").handle;
-    // An attached foreground is an ordinary peer of the native relay. One
-    // bounded relay turn admits already-persisted rows before materializing a
-    // local read; without it a newly opened foreground can only observe rows
-    // after some unrelated caller happens to tick the host.
-    this.tick();
+    // No tick here: the native relay owner applies admitted writes and pumps
+    // on its own thread. The read is fenced natively behind every write
+    // admitted before it, so it resolves (possibly as pending) with them.
     const response = this.execute({
       type: "all",
       query,
@@ -268,7 +266,7 @@ export class NativeForegroundDb {
   }
 
   subscribe(query: Uint8Array, opts: unknown): NativeForegroundSubscription {
-    this.tick();
+    // Fenced natively like `all()`: the first frame reflects earlier writes.
     const response = this.execute({
       type: "subscribe",
       query,

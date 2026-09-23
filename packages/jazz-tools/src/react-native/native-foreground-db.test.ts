@@ -134,10 +134,12 @@ it("keeps an empty native drain ready for the next native wake", () => {
     } as never,
   );
 
+  // #3273: opening a subscription no longer ticks (pumps) the native relay;
+  // the native owner fences and drives it off the JS thread.
   const subscription = db.subscribe(Uint8Array.of(1), { tier: "local" });
-  expect(ticks).toHaveBeenCalledTimes(1);
+  expect(ticks).not.toHaveBeenCalled();
   expect(subscription.readAll()).toEqual([]);
-  expect(ticks).toHaveBeenCalledTimes(1);
+  expect(ticks).not.toHaveBeenCalled();
 });
 
 // Unknown transaction handles must fail before any ordinary read is issued.
