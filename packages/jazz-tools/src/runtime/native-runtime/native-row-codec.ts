@@ -1,4 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
+import { formatUuid, parseUuid } from "../uuid.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -1312,14 +1313,6 @@ export function encodeU32Le(value: number): Uint8Array {
   return bytes;
 }
 
-function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID value ${value}`);
-  }
-  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
-}
-
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   let valueType = storageColumnTypeToValueType(column.column_type, column.name);
   if (column.nullable) valueType = { tag: 15, inner: valueType };
@@ -1554,16 +1547,6 @@ export function decodeNativeTimestamp(bytes: Uint8Array, _columnName?: string): 
 
 function timestampToDate(value: number, _columnName?: string): Date {
   return new Date(value);
-}
-
-function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
-    16,
-    20,
-  )}-${hex.slice(20)}`;
 }
 
 export function nativeFixedValueSize(valueType: ValueType): number | undefined {

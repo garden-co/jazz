@@ -1,4 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
+import { parseUuid } from "../uuid.js";
 import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
@@ -560,7 +561,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   }
   if (value.type === "Uuid") {
     writer.u64(9); // groove::records::Value::Uuid
-    writer.bytes(parseUuidBytes(value.value));
+    writer.bytes(parseUuid(value.value));
     return;
   }
   if (value.type === "Bytea") {
@@ -575,16 +576,6 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   }
   writer.u64(6); // groove::records::Value::String
   writer.string(value.value);
-}
-
-function parseUuidBytes(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
 }
 
 export function encodedCells(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
