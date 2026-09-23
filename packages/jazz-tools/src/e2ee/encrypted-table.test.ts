@@ -36,6 +36,7 @@ it.each([
   "equality-composite-literals",
   "equality-transaction-initial",
   "equality-transaction-existing",
+  "equality-uuid-scope",
   "equality-subscription",
   "equality-subscription-collision",
   "equality-subscription-epoch",
@@ -178,6 +179,7 @@ it.each([
       policy.samples.allowInsert.always();
       policy.readings.allowRead.always();
       policy.readings.allowInsert.always();
+      policy.readings.allowUpdate.always();
       policy.projects.allowInsert.always();
       if (timing === "ordinary-scope-upsert") policy.projects.allowUpdate.always();
       policy.notes.allowRead.always();
@@ -395,7 +397,13 @@ it.each([
       }
       const project = timing.endsWith("scope-upsert")
         ? { id: scopeId, title: "Project" }
-        : tx.insert(app.projects, { title: "Project" });
+        : tx.insert(
+            app.projects,
+            { title: "Project" },
+            timing === "equality-uuid-scope"
+              ? { id: "abcdef01-2345-4678-9abc-def012345678" }
+              : undefined,
+          );
       const note = tx.insert(app.notes, {
         projectId: project.id,
         title: "Private title",
@@ -404,6 +412,15 @@ it.each([
       });
       expect(project).not.toBeInstanceOf(Promise);
       expect(note).not.toBeInstanceOf(Promise);
+      if (timing === "equality-uuid-scope") {
+        for (const identifier of [project.id.toUpperCase(), project.id.replaceAll("-", "")]) {
+          expect(
+            await tx.all(app.notes.where({ projectId: identifier, title: note.title }), {
+              tier: "local",
+            }),
+          ).toEqual([note]);
+        }
+      }
       if (timing === "equality-transaction-initial") {
         expect(
           await tx.all(
@@ -447,6 +464,38 @@ it.each([
         return;
       }
       await committed.wait({ tier: "global" });
+      if (timing === "equality-uuid-scope") {
+        for (const identifier of [project.id.toUpperCase(), project.id.replaceAll("-", "")]) {
+          expect(
+            await db.all(app.notes.where({ projectId: identifier, title: note.title }), {
+              tier: "global",
+            }),
+          ).toEqual([note]);
+        }
+        let snapshot: unknown;
+        let failure: Error | undefined;
+        const stop = db.subscribe(
+          app.notes.where({ projectId: project.id.toUpperCase(), title: note.title }),
+          {
+            onUpdate: (rows) => {
+              snapshot = rows;
+            },
+            onError: (error) => {
+              failure = error;
+            },
+          },
+          { tier: "global" },
+        );
+        try {
+          await expect.poll(() => failure ?? snapshot, { timeout: 10_000 }).toEqual([note]);
+          await db.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
+          await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
+          expect(snapshot).toEqual([note]);
+        } finally {
+          stop();
+        }
+        return;
+      }
       if (timing === "equality-transaction-initial" || timing === "equality-transaction-existing") {
         const reader = db.beginTransaction();
         try {
@@ -885,6 +934,57 @@ it.each([
             { tier: "global" },
           ),
         ).rejects.toThrow("Unsupported encrypted query");
+        let snapshot: unknown;
+        let failure: Error | undefined;
+        const stop = db.subscribe(
+          app.readings.where({
+            projectId: project.id,
+            reading: { match: { type: "measured", where: { value: 0 } } },
+          }),
+          {
+            onUpdate: (rows) => {
+              snapshot = rows;
+            },
+            onError: (error) => {
+              failure = error;
+            },
+          },
+          { tier: "global" },
+        );
+        try {
+          await expect
+            .poll(() => failure ?? snapshot, { timeout: 10_000 })
+            .toEqual([reading.value]);
+          await db
+            .update(app.readings, reading.value.id, {
+              reading: { type: "measured", value: 2 },
+            })
+            .wait({ tier: "global" });
+          await expect.poll(() => failure ?? snapshot, { timeout: 10_000 }).toEqual([]);
+        } finally {
+          stop();
+        }
+        let partialError: Error | undefined;
+        const stopPartial = db.subscribe(
+          app.readings.where({
+            projectId: project.id,
+            reading: { match: { type: "measured" } },
+          }),
+          {
+            onUpdate: () => {},
+            onError: (error) => {
+              partialError = error;
+            },
+          },
+          { tier: "global" },
+        );
+        try {
+          await expect
+            .poll(() => partialError?.message, { timeout: 10_000 })
+            .toContain("Unsupported encrypted query");
+        } finally {
+          stopPartial();
+        }
         return;
       }
       if (timing === "equality-array-zero") {
