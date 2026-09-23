@@ -4819,6 +4819,21 @@ impl SubscriptionPublicationSnapshot {
     }
 }
 
+fn enforce_initial_owner_readiness(event: &mut SubscriptionEvent, owner_result_pending: bool) {
+    if owner_result_pending
+        && let SubscriptionEvent::Delta {
+            settled,
+            requested_ready,
+            attained_settlement,
+            ..
+        } = event
+    {
+        *settled = false;
+        *requested_ready = false;
+        *attained_settlement = QuerySettlementLevel::Unconfirmed;
+    }
+}
+
 impl SubscriptionSender {
     /// Validate only changed roots. Descendant edits do not change a root's
     /// required scalar cells; unchanged roots must not be rescanned here.
@@ -4885,8 +4900,10 @@ impl SubscriptionSender {
         before: Option<SubscriptionPublicationSnapshot>,
         snapshot: &RelationSnapshot,
         index: &RelationSnapshotIndex,
+        owner_result_pending: bool,
         materialized: bool,
     ) -> Result<bool, Error> {
+        enforce_initial_owner_readiness(&mut event, owner_result_pending);
         let SubscriptionEvent::Delta {
             reset,
             publishable,
@@ -4976,6 +4993,7 @@ impl SubscriptionSender {
         publication.opened = true;
         publication.deferred = None;
         publication.reset = false;
+        enforce_initial_owner_readiness(&mut event, owner_result_pending);
         Ok(self.sender.unbounded_send(event).is_ok())
     }
 
@@ -5586,8 +5604,11 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
                     if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
-                        let (requested_ready, attained_settlement) =
-                            subscription_event_metadata(state_ref.read_tier, false, true);
+                        let (requested_ready, attained_settlement) = subscription_event_metadata(
+                            state_ref.read_tier,
+                            false,
+                            !state_ref.pending_initial_owner_result,
+                        );
                         let event = SubscriptionEvent::Delta {
                             reset: false,
                             publishable: true,

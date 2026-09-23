@@ -61,6 +61,7 @@ fn publish(
         before,
         current,
         &RelationSnapshotIndex::from_snapshot(current),
+        false,
         materialized,
     )
 }
@@ -209,6 +210,7 @@ fn subscription_publication_resets_discard_withheld_history() {
             None,
             &replacement,
             &RelationSnapshotIndex::from_snapshot(&replacement),
+            false,
             true,
         )
         .unwrap();
@@ -335,6 +337,7 @@ fn subscription_publication_coalesces_maintained_child_edits() {
             None,
             &initial.snapshot,
             &RelationSnapshotIndex::from_snapshot(&initial.snapshot),
+            false,
             true,
         )
         .unwrap();
@@ -373,7 +376,14 @@ fn subscription_publication_coalesces_maintained_child_edits() {
     {
         let state = stream._state.borrow();
         sender
-            .publish(change, before, &state.snapshot, &state.snapshot_index, true)
+            .publish(
+                change,
+                before,
+                &state.snapshot,
+                &state.snapshot_index,
+                false,
+                true,
+            )
             .unwrap();
         assert!(receiver.try_recv().is_err());
         let empty = subscription_delta_event(
@@ -384,7 +394,14 @@ fn subscription_publication_coalesces_maintained_child_edits() {
             true,
         );
         sender
-            .publish(empty, None, &state.snapshot, &state.snapshot_index, true)
+            .publish(
+                empty,
+                None,
+                &state.snapshot,
+                &state.snapshot_index,
+                false,
+                true,
+            )
             .unwrap();
     }
     let SubscriptionEvent::Delta {

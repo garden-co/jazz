@@ -550,6 +550,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.status).toBe("pending");
       expect(entry.state.data).toEqual(rows);
       expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).toHaveBeenCalledTimes(1);
 
       harness.emit(0, {
         delta: [],
@@ -562,7 +563,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.state.highestSettledAt).toBe("local");
       expect(onfulfilled).toHaveBeenCalledTimes(1);
       expect(onfulfilled).toHaveBeenCalledWith(rows);
-      expect(onDelta).not.toHaveBeenCalled();
+      expect(onDelta).toHaveBeenCalledTimes(1);
       unsubscribe();
     } finally {
       await harness.manager.shutdown();

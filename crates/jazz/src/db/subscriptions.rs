@@ -1291,6 +1291,7 @@ where
                 None,
                 &state.snapshot,
                 &state.snapshot_index,
+                pending_initial_owner_result,
                 materialized,
             )?;
         }

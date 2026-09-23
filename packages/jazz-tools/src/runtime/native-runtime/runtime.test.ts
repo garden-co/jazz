@@ -6492,6 +6492,7 @@ function relationSubscriptionChunk({
   rootUpdated = [],
   rootRemoved = [],
 }: {
+  reset?: boolean;
   requestedReady?: boolean;
   attainedSettlement?: "unconfirmed" | "local" | "remote";
   rootAdded?: EncodedTestRow[];

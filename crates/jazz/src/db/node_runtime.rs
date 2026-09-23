@@ -3868,7 +3868,8 @@ where
                 state.delivery,
             )
         };
-        let awaiting_initial_owner_result = state.borrow().pending_initial_owner_result;
+        let mut owner_result_pending = state.borrow().pending_initial_owner_result;
+        let awaiting_initial_owner_result = owner_result_pending;
         if awaiting_initial_owner_result {
             let owner = node.lock().await;
             let ready = !upstream_subscription_handles.is_empty()
@@ -3884,8 +3885,9 @@ where
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
-            if delivery == SubscriptionDelivery::Progressive && ready {
+            if ready {
                 state.borrow_mut().pending_initial_owner_result = false;
+                owner_result_pending = false;
             }
         }
         let request_claims = state
@@ -4003,7 +4005,7 @@ where
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
                 state_ref.pending_initial_local_snapshot = replacement_is_cold;
-                state_ref.pending_initial_owner_result = false;
+
                 if replacement_is_cold {
                     // Own the replacement before yielding its cold initial batch;
                     // otherwise the next owner turn would retire and reopen it.
@@ -4228,6 +4230,7 @@ where
                 publication_before,
                 &state_ref.snapshot,
                 &state_ref.snapshot_index,
+                owner_result_pending,
                 materialized,
             )? {
                 changed += 1;
@@ -4578,6 +4581,7 @@ where
                         publication_before,
                         &refresh.snapshot,
                         &refresh.snapshot_index,
+                        owner_result_pending,
                         materialized,
                     )? {
                         changed += 1;
@@ -4683,6 +4687,7 @@ where
                                     publication_before,
                                     &refresh.snapshot,
                                     &refresh.snapshot_index,
+                                    owner_result_pending,
                                     materialized,
                                 )? {
                                     changed += 1;
@@ -4783,6 +4788,7 @@ where
                                 publication_before,
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
+                                owner_result_pending,
                                 materialized,
                             )? {
                                 changed += 1;
@@ -4882,6 +4888,7 @@ where
                         publication_before,
                         &refresh.snapshot,
                         &refresh.snapshot_index,
+                        owner_result_pending,
                         materialized,
                     )?;
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -5065,6 +5072,7 @@ where
                 publication_before,
                 &state.snapshot,
                 &state.snapshot_index,
+                owner_result_pending,
                 materialized,
             )? {
                 changed += 1;

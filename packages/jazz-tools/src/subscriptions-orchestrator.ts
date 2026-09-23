@@ -519,7 +519,9 @@ export class SubscriptionsOrchestrator {
             }
 
             const observableChanged =
-              !metadataOnly || previousHighestSettledAt !== entry.highestSettledAt;
+              fulfillsPending ||
+              !metadataOnly ||
+              previousHighestSettledAt !== entry.highestSettledAt;
             if (observableChanged) {
               for (const listener of Array.from(entry.listeners)) {
                 if (fulfillsPending) {
