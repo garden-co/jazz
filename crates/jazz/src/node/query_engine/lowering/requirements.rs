@@ -465,7 +465,8 @@ fn collect_value_requirements(
         }
         NormalizedValueRef::Param(_)
         | NormalizedValueRef::Claim(_)
-        | NormalizedValueRef::Literal(_) => {}
+        | NormalizedValueRef::Literal(_)
+        | NormalizedValueRef::TemplateLiteral(_) => {}
         NormalizedValueRef::FrontierColumn { .. }
         | NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => {}
     }

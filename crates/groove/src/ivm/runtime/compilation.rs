@@ -261,10 +261,38 @@ impl IvmRuntime {
         &mut self,
         graph: &GraphBuilder,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, false)
+    }
+
+    // Only the isolated template compiler accepts unbound scalar arguments.
+    // No runtime/global mode survives the call; normal installation is strict.
+    pub(super) fn add_dedup_template_graph(
+        &mut self,
+        graph: &GraphBuilder,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, true)
+    }
+
+    fn add_dedup_graph_inner(
+        &mut self,
+        graph: &GraphBuilder,
+        template: bool,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
         let mut compiled_memo = HashMap::default();
         for (builder, owner) in compilation_cache::compilation_order(graph) {
+            if !template
+                && match builder {
+                    GraphBuilder::Filter { predicate, .. } => predicate.has_template_arguments(),
+                    GraphBuilder::Project { fields, .. } => fields.iter().any(|field| {
+                        matches!(field.expression, ProjectExpr::TemplateArgument { .. })
+                    }),
+                    _ => false,
+                }
+            {
+                return Err(IvmRuntimeError::UnsupportedOperator);
+            }
             let key = graph_builder_key(builder);
             if let Some((compiled, inferred, logical_nodes)) = owner.and_then(|owner| {
                 self.compilation_cache
@@ -314,6 +342,7 @@ impl IvmRuntime {
                 program,
                 inputs,
                 predicates,
+                scalars,
             } => {
                 let compiled = inputs
                     .iter()
@@ -324,7 +353,7 @@ impl IvmRuntime {
                             .ok_or(IvmRuntimeError::UnsupportedOperator)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                self.install_typed_template(program, &compiled, inputs, predicates)
+                self.install_typed_template(program, &compiled, inputs, predicates, scalars)
             }
             GraphBuilder::TemplateInput { input, output, .. } => {
                 let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
@@ -1912,7 +1941,10 @@ fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }
 fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldRef> {
@@ -1924,6 +1956,9 @@ fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldR
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }

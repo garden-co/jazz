@@ -14,23 +14,15 @@ struct Family {
     markers: Vec<PredicateExpr>,
 }
 
-// Distinct, valid constant predicates keep placeholder Filter nodes distinct
-// even when two real predicates happen to have equal values on the first bind.
-// These never execute: every installed Filter receives its actual argument.
-fn predicate_marker(mut slot: usize) -> PredicateExpr {
-    let mut bits = Vec::new();
-    loop {
-        bits.push(if slot & 1 == 0 {
-            PredicateExpr::And(Vec::new())
-        } else {
-            PredicateExpr::Or(Vec::new())
-        });
-        slot >>= 1;
-        if slot == 0 {
-            break;
-        }
+// Preserve dependency information while distinguishing equal-valued arguments.
+// These are compiler expressions, never valid executable constant predicates.
+fn predicate_marker(slot: usize, predicate: &PredicateExpr) -> PredicateExpr {
+    let mut fields = BTreeSet::new();
+    predicate.referenced_fields(&mut fields);
+    PredicateExpr::TemplateArgument {
+        slot: slot as u32,
+        fields: fields.into_iter().collect(),
     }
-    PredicateExpr::And(bits)
 }
 
 fn family(
@@ -97,7 +89,7 @@ fn family(
         }
         let mut bound = node.map_inputs(|child| rewritten[&(Arc::as_ptr(child) as usize)].clone());
         if let GraphBuilder::Filter { predicate, .. } = &mut bound {
-            let marker = predicate_marker(family.predicates.len());
+            let marker = predicate_marker(family.predicates.len(), predicate);
             family
                 .predicates
                 .push(std::mem::replace(predicate, marker.clone()));
@@ -166,6 +158,7 @@ impl TypedGraphTemplateCache {
             program,
             inputs: family.inputs,
             predicates: family.predicates,
+            scalars: Arc::from([]),
         })
     }
 }
@@ -190,10 +183,11 @@ impl IvmRuntime {
             std::slice::from_ref(&family.graph),
             &replacements,
             true,
+            None,
         )
         .map_err(|_| IvmRuntimeError::GraphOutputMismatch)?
         .remove(0);
-        let compiled = self.add_dedup_graph(&bound)?;
+        let compiled = self.add_dedup_template_graph(&bound)?;
         let mut references = source_nodes
             .into_iter()
             .enumerate()
@@ -258,8 +252,14 @@ impl IvmRuntime {
         inputs: &[CompiledNode],
         graphs: &[Arc<GraphBuilder>],
         predicates: &[PredicateExpr],
+        scalars: &[crate::ivm::TemplateScalarArgument],
     ) -> Result<CompiledNode, IvmRuntimeError> {
         if inputs.len() != program.inputs.len()
+            || program
+                .predicate_markers
+                .iter()
+                .zip(predicates)
+                .any(|(marker, argument)| !marker.accepts_template_argument(argument))
             || predicates.len() != program.predicate_markers.len()
             || inputs
                 .iter()
@@ -275,7 +275,7 @@ impl IvmRuntime {
             .any(|input| input.root_ordering_node.is_some())
         {
             let bound = program
-                .bind_declarative(graphs, predicates)
+                .bind_declarative_with_arguments(graphs, predicates, scalars)
                 .map_err(|_| IvmRuntimeError::GraphOutputMismatch)?;
             return self.add_dedup_graph(&bound);
         }
@@ -295,6 +295,15 @@ impl IvmRuntime {
                 (instruction.predicate, &mut descriptor.operator)
             {
                 filter.predicate = predicates[slot].clone();
+            }
+            if let OpType::MapProject(project) = &mut descriptor.operator {
+                for expression in &mut project.expressions {
+                    crate::ivm::template::arguments::bind_project_expression(
+                        &mut expression.expression,
+                        scalars,
+                    )
+                    .map_err(|_| IvmRuntimeError::GraphOutputMismatch)?;
+                }
             }
             self.logical_nodes_requested += 1;
             let id = self.graph.dedup_node(descriptor, NodeDurability::Ephemeral);

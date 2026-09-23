@@ -71,8 +71,11 @@ fn collect_binding_source_descriptor_fields(
             program,
             inputs,
             predicates,
+            scalars,
         } => collect_binding_source_descriptor_fields(
-            &program.bind_declarative(inputs, predicates).unwrap(),
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
             descriptors_by_shape,
         ),
         GraphBuilder::TemplateInput { input, .. } => {
@@ -139,8 +142,11 @@ fn collect_binding_source_projected_fields(
             program,
             inputs,
             predicates,
+            scalars,
         } => collect_binding_source_projected_fields(
-            &program.bind_declarative(inputs, predicates).unwrap(),
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
             projected_by_shape,
         ),
         GraphBuilder::TemplateInput { input, .. } => {

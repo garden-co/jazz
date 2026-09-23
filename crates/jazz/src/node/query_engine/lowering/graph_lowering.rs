@@ -11,7 +11,7 @@ pub(super) fn lower_plan_steps(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
@@ -51,7 +51,7 @@ fn lower_correlated_path_plan(
     path: &CorrelatedPathPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let parent =
         lower_linear_plan_steps(graph, &path.parent, root_source, resolved_sources, request)?;
@@ -205,7 +205,7 @@ fn lower_required_nested_parent_graph(
     nested: &[CorrelatedPathPlan],
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GraphBuilder, UnsupportedReason> {
     for path in nested {
         if path.requirement == CorrelationRequirement::Optional {
@@ -334,7 +334,7 @@ pub(super) fn lower_correlated_path_relation_graph(
     path: &CorrelatedPathPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let parent = lower_linear_plan_steps(
         root_source.graph.clone(),
@@ -358,7 +358,7 @@ pub(super) fn lower_correlated_path_relation_graph_from_parent(
     parent: GraphBuilder,
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     retain_child_window: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let child_root = path
@@ -495,7 +495,7 @@ pub(super) struct LoweredRelationInput {
 pub(super) fn lower_relation_input(
     plan: &RelationInputPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_relation_input_with_retained_final_fields(plan, resolved_sources, request, false)
 }
@@ -503,7 +503,7 @@ pub(super) fn lower_relation_input(
 fn lower_relation_input_with_retained_final_fields(
     plan: &RelationInputPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     retain_final_project_input_fields: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = BTreeMap::new();
@@ -533,7 +533,7 @@ fn lower_relation_input_with_retained_final_fields(
 pub(super) fn lower_relation_input_for_contributor(
     plan: &RelationInputPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_relation_input_with_retained_final_fields(plan, resolved_sources, request, true)
 }
@@ -588,7 +588,7 @@ fn relation_input_key(plan: &RelationInputPlan) -> usize {
 fn lower_relation_input_cached(
     plan: &RelationInputPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     lowered: &BTreeMap<usize, LoweredRelationInput>,
     retain_final_project_input_fields: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
@@ -641,7 +641,7 @@ fn lower_relation_input_cached(
 fn lower_union_relation_input(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_union_relation_input_with_prefix(union, resolved_sources, request, None)
 }
@@ -649,7 +649,7 @@ fn lower_union_relation_input(
 fn lower_union_relation_input_cached(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     lowered: &BTreeMap<usize, LoweredRelationInput>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_union_relation_input_with_prefix_cached(
@@ -664,7 +664,7 @@ fn lower_union_relation_input_cached(
 fn lower_union_relation_input_with_prefix(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     prefix: Option<&str>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_union_relation_input_with_prefix_cached(union, resolved_sources, request, prefix, None)
@@ -673,7 +673,7 @@ fn lower_union_relation_input_with_prefix(
 fn lower_union_relation_input_with_prefix_cached(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     prefix: Option<&str>,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
@@ -793,7 +793,7 @@ fn lower_union_plan(
     root_graph: Option<GraphBuilder>,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
     for (branch_plan, label) in union_branch_plans_with_labels(union, None) {
@@ -877,7 +877,7 @@ fn lower_union_terminal_steps(
     mut input: LoweredRelationInput,
     steps: &[LinearStep],
     root_source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     if steps.is_empty() {
         return Ok(input);
@@ -946,7 +946,7 @@ fn lower_union_terminal_steps(
 
 fn lower_union_inputs(
     lowered: Vec<LoweredRelationInput>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let union_fields = lowered_union_fields(&lowered);
     let needs_alignment = lowered.iter().any(|branch| branch.fields != union_fields);
@@ -1016,7 +1016,7 @@ fn lowered_union_fields(lowered: &[LoweredRelationInput]) -> BTreeSet<String> {
 fn align_union_route_fields(
     mut branch: LoweredRelationInput,
     fields: &BTreeSet<String>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let route_fields = parameter_domain_for_request(request)?.routing_params;
     let missing = fields
@@ -1088,7 +1088,7 @@ fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
     }
 }
 
-fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
+pub(super) fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
     source
         .row_shape
         .descriptor
@@ -1123,7 +1123,7 @@ fn lower_recursive_relation(
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_recursive_relation_cached(
         root_graph,
@@ -1140,7 +1140,7 @@ pub(super) fn lower_recursive_relation_cached(
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     // A recursive relation is ordinarily reached through relation-input
@@ -1264,7 +1264,7 @@ pub(super) fn lower_linear_plan_steps(
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_linear_plan_steps_cached(
         graph,
@@ -1285,7 +1285,7 @@ pub(super) fn lower_recursive_seed_membership(
     relation: &RecursiveRelationPlan,
     seed_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     lower_linear_plan_steps_cached(
         seed_source.graph.clone(),
@@ -1304,7 +1304,7 @@ fn lower_linear_plan_steps_cached(
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
     cache_plan: Option<&LinearCurrentRoot>,
     retain_final_project_input_fields: bool,
@@ -2064,14 +2064,14 @@ fn lower_linear_plan_steps_cached(
     })
 }
 
-fn uses_policy_value_comparison(request: &QueryProgramRequest) -> bool {
+fn uses_policy_value_comparison(request: &LoweringContext<'_>) -> bool {
     matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
 }
 
 /// Policy-predicate programs reuse relation lowering but do not publish rows.
 /// Their intermediate join values remain available to later predicates, never
 /// becoming occurrence identity that a public terminal must retain.
-fn omits_public_occurrence_carriers(request: &QueryProgramRequest) -> bool {
+fn omits_public_occurrence_carriers(request: &LoweringContext<'_>) -> bool {
     uses_policy_value_comparison(request)
         || request
             .output
@@ -2085,7 +2085,7 @@ pub(super) fn policy_join_if_needed(
     right: GraphBuilder,
     left_on: impl IntoIterator<Item = impl Into<String>>,
     right_on: impl IntoIterator<Item = impl Into<String>>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> GraphBuilder {
     if uses_policy_value_comparison(request) {
         GraphBuilder::policy_join(left, right, left_on, right_on)
@@ -2099,7 +2099,7 @@ fn semi_join_if_needed(
     right: GraphBuilder,
     left_on: impl IntoIterator<Item = impl Into<String>>,
     right_on: impl IntoIterator<Item = impl Into<String>>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> GraphBuilder {
     GraphBuilder::SemiJoin {
         left: std::sync::Arc::new(left),
@@ -2123,7 +2123,7 @@ fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
 }
 
 fn binding_descriptor_params_with_user_params(
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
@@ -2147,13 +2147,13 @@ fn binding_descriptor_params_with_user_params(
 }
 
 fn binding_descriptor_params(
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     binding_descriptor_params_with_user_params(request, [])
 }
 
 fn binding_source_descriptor_with_user_params(
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
 ) -> Result<RecordDescriptor, UnsupportedReason> {
     Ok(RecordDescriptor::new(
@@ -2167,7 +2167,7 @@ fn lower_value_source(
     shape: &str,
     columns: &[ValueSourceColumn],
     mode: &ValueSourceMode,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GraphBuilder, UnsupportedReason> {
     let descriptor = value_source_descriptor(columns);
     match mode {
@@ -2317,7 +2317,7 @@ pub(crate) fn binding_value_source_projection_fields_for_test(
         "test-binding-source",
         columns,
         &ValueSourceMode::Binding,
-        request,
+        &LoweringContext::concrete(request),
     )?;
     graph_declared_output_fields(&graph).ok_or_else(|| {
         UnsupportedReason::Runtime(
@@ -2328,7 +2328,7 @@ pub(crate) fn binding_value_source_projection_fields_for_test(
 
 fn lower_value_source_column(
     column: &ValueSourceColumn,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<Value, UnsupportedReason> {
     match &column.value {
         NormalizedValueRef::Param(name) => request
@@ -2356,7 +2356,7 @@ pub(super) fn lower_path_key_pair(
     parent_source: &ResolvedSource,
     child_source_id: &SourceId,
     child_source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
@@ -2373,7 +2373,7 @@ fn lower_join_key_pair(
     left_source: &ResolvedSource,
     right_source_id: &SourceId,
     right_source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
@@ -2390,7 +2390,7 @@ fn lower_join_key_pairs(
     left_source: &ResolvedSource,
     right_source_id: &SourceId,
     right_source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     // A true join condition is an uncorrelated existence gate. Routing keys
     // are added by the caller, so independent prepared sessions stay isolated.
@@ -2435,7 +2435,7 @@ fn lower_linear_join_key_pair(
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
@@ -2464,7 +2464,7 @@ fn lower_linear_join_key_pairs(
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     // A true join condition is an uncorrelated existence gate. Routing keys
     // are added by the caller, so independent prepared sessions stay isolated.
@@ -2509,7 +2509,7 @@ fn lower_root_to_relation_key_pair(
     root_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
@@ -2525,7 +2525,7 @@ pub(super) fn lower_root_to_relation_key_pairs(
     root_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     // A true join condition is an uncorrelated existence gate. Routing keys
     // are added by the caller, so independent prepared sessions stay isolated.
@@ -2603,7 +2603,7 @@ pub(super) fn lower_relation_key_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
     output: &LoweredRelationInput,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<String, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
@@ -2659,7 +2659,8 @@ fn lower_named_relation_field(
         NormalizedValueRef::RowId(RowIdRef::Source(_))
         | NormalizedValueRef::Claim(_)
         | NormalizedValueRef::Provenance { .. }
-        | NormalizedValueRef::Literal(_) => {
+        | NormalizedValueRef::Literal(_)
+        | NormalizedValueRef::TemplateLiteral(_) => {
             return Err(UnsupportedReason::Operator(
                 "join relation key must be an output field".to_owned(),
             ));
@@ -2678,7 +2679,7 @@ fn lower_linear_root_key_ref(
     value: &NormalizedValueRef,
     root: &LinearRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<String, UnsupportedReason> {
     match root {
         LinearRoot::Source {
@@ -2742,7 +2743,7 @@ fn lower_projection_field(
         BTreeSet<String>,
     )>,
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeMap::new();
     let mut nullable_after_project = None;
@@ -2775,6 +2776,11 @@ fn lower_projection_field(
         ProjectionSource::Literal(value) => {
             ProjectField::literal(column.output.name.clone(), value)
         }
+        ProjectionSource::Argument(expression) => ProjectField {
+            expression,
+            output_name: column.output.name.clone(),
+            output_identity: groove::records::FieldIdentity::Name(column.output.name.clone()),
+        },
     };
     Ok(ProjectionFieldPlan {
         project,
@@ -2786,6 +2792,7 @@ fn lower_projection_field(
 
 #[derive(Clone, Debug)]
 enum ProjectionSource {
+    Argument(groove::ivm::ProjectExpr),
     Field {
         field: String,
         nullable_depth: usize,
@@ -2814,7 +2821,7 @@ fn lower_projection_source(
         BTreeSet<String>,
     )>,
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
         let nullable_depth = field_nullable_depths.get(&field).copied().unwrap_or(0);
@@ -2862,6 +2869,18 @@ fn lower_projection_source(
         }
     }
 
+    if let NormalizedValueRef::Param(param) = value
+        && let Some(ty) = request.input.binding.param_types.get(param)
+        && let Some(expression) = request.scalar_argument(value.clone(), ty.clone(), false)
+    {
+        return Ok(ProjectionSource::Argument(expression));
+    }
+    if let NormalizedValueRef::TemplateLiteral(slot) = value
+        && let Some(ty) = request.literal_type(*slot)
+        && let Some(expression) = request.scalar_argument(value.clone(), ty, false)
+    {
+        return Ok(ProjectionSource::Argument(expression));
+    }
     match lower_literal_projection_value(value, request)? {
         Some(value) => Ok(ProjectionSource::Literal(value)),
         None => Err(UnsupportedReason::Operator(
@@ -2874,7 +2893,7 @@ fn lower_projection_source(
 fn lower_relation_projection_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
-    _request: &QueryProgramRequest,
+    _request: &LoweringContext<'_>,
 ) -> Result<Option<String>, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
@@ -2901,7 +2920,7 @@ fn lower_relation_projection_ref(
                 | NormalizedValueRef::FrontierColumn { field: param, .. } => {
                     Ok(Some(param.clone()))
                 }
-                NormalizedValueRef::Literal(_) => Ok(None),
+                NormalizedValueRef::Literal(_) | NormalizedValueRef::TemplateLiteral(_) => Ok(None),
                 NormalizedValueRef::Claim(_)
                 | NormalizedValueRef::SourceField { .. }
                 | NormalizedValueRef::RowId(_)
@@ -2915,7 +2934,7 @@ fn lower_relation_projection_ref(
                 Ok(Some(field.clone()))
             }
             NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
-            NormalizedValueRef::Literal(_) => Ok(None),
+            NormalizedValueRef::Literal(_) | NormalizedValueRef::TemplateLiteral(_) => Ok(None),
             NormalizedValueRef::Claim(_)
             | NormalizedValueRef::SourceField { .. }
             | NormalizedValueRef::RowId(_)
@@ -2928,6 +2947,7 @@ fn lower_relation_projection_ref(
             | NormalizedValueRef::SourceField { field: param, .. } => Ok(Some(param.clone())),
             NormalizedValueRef::RowId(_) => Ok(Some("row_uuid".to_owned())),
             NormalizedValueRef::Literal(_)
+            | NormalizedValueRef::TemplateLiteral(_)
             | NormalizedValueRef::Claim(_)
             | NormalizedValueRef::Provenance { .. } => Ok(None),
         },
@@ -2940,7 +2960,7 @@ fn lower_equality_param_filter_joins(
     source_id: &SourceId,
     source: &ResolvedSource,
     available_route_fields: &BTreeSet<String>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
     let predicates = match predicate {
         PredicateExpr::And(predicates) => predicates.as_slice(),
@@ -3115,9 +3135,10 @@ fn source_join_field(
 
 fn lower_literal_projection_value(
     value: &NormalizedValueRef,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<Option<LiteralValue>, UnsupportedReason> {
     match value {
+        NormalizedValueRef::TemplateLiteral(slot) => Ok(Some(request.literal(*slot)?.into())),
         NormalizedValueRef::Literal(bytes) => {
             let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
                 UnsupportedReason::Operator(format!("literal value could not be decoded: {err}"))
@@ -3138,7 +3159,7 @@ fn lower_join_key_ref(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<String, UnsupportedReason> {
     match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) => Ok(field),
@@ -3217,7 +3238,7 @@ fn lower_window(
     tie_breaker: &[NormalizedValueRef],
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GraphBuilder, UnsupportedReason> {
     let mut group_cols = partition_by
         .iter()
@@ -3284,7 +3305,7 @@ fn lower_aggregate(
     outputs: &[AggregateExpr],
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let group_cols = group_by
         .iter()
@@ -3339,7 +3360,7 @@ fn lower_aggregate_expr(
     aggregate: &AggregateExpr,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GrooveAggregateExpr, UnsupportedReason> {
     let expression = aggregate
         .input
@@ -3395,7 +3416,7 @@ fn lower_order_key(
     key: &OrderKey,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<TopByOrder, UnsupportedReason> {
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
     let relation_output = request.output.app_rows.as_ref().is_some_and(|output| {
@@ -3430,12 +3451,15 @@ fn lower_order_key(
     })
 }
 
-fn lower_predicate(
+pub(super) fn lower_predicate(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    if let Some(argument) = request.predicate_argument(predicate, source_id, source) {
+        return Ok(argument);
+    }
     let lowered = match lower_predicate_inner(predicate, source_id, source, request) {
         Err(reason) if is_unbound_claim_reason(&reason) => constant_predicate(false),
         other => other?,
@@ -3447,7 +3471,7 @@ fn lower_predicate_inner(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
@@ -3592,7 +3616,7 @@ fn lower_not_predicate(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let lowered = match lower_not_predicate_inner(predicate, source_id, source, request) {
         Err(reason) if is_unbound_claim_reason(&reason) => constant_predicate(false),
@@ -3605,7 +3629,7 @@ fn lower_not_predicate_inner(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::Or(Vec::new()),
@@ -3659,7 +3683,7 @@ fn lower_two_valued_ne(
     right: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
     // predicates are two-valued, so unequal means either exactly one operand is
@@ -3695,7 +3719,7 @@ fn lower_compare(
     right: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let left = lower_value_ref(left, source_id, source, request)?;
     let right = lower_value_ref(right, source_id, source, request)?;
@@ -3732,7 +3756,7 @@ fn lower_contains(
     needle: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let value = lower_value_ref(value, source_id, source, request)?;
     let needle = lower_value_ref(needle, source_id, source, request)?;
@@ -3839,7 +3863,7 @@ fn lower_null_test(
     is_null: bool,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) if is_null => Ok(GroovePredicateExpr::IsNull { field }),
@@ -3889,7 +3913,7 @@ fn lower_field_ref(
     value: &NormalizedValueRef,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     context: &str,
 ) -> Result<String, UnsupportedReason> {
     let source_id = plan.root.source().ok_or_else(|| {
@@ -3907,9 +3931,12 @@ fn lower_value_ref(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<LoweredValueRef, UnsupportedReason> {
     match value {
+        NormalizedValueRef::TemplateLiteral(slot) => {
+            Ok(LoweredValueRef::Literal(request.literal(*slot)?.into()))
+        }
         NormalizedValueRef::SourceField {
             source: value_source,
             field,

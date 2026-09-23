@@ -51,8 +51,11 @@ pub(super) fn collect_binding_source_fingerprint(
             program,
             inputs,
             predicates,
+            scalars,
         } => collect_binding_source_fingerprint(
-            &program.bind_declarative(inputs, predicates).unwrap(),
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
             sources,
         ),
         GraphBuilder::TemplateInput { input, .. } => {
@@ -125,8 +128,11 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
             program,
             inputs,
             predicates,
+            scalars,
         } => graph_any(
-            &program.bind_declarative(inputs, predicates).unwrap(),
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
             predicate,
         ),
         GraphBuilder::TemplateInput { input, .. } => input

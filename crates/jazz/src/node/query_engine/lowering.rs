@@ -1,7 +1,9 @@
 use super::*;
 use crate::protocol::ProgramSourceId;
+mod arguments;
 mod collect_layout;
 mod templates;
+use arguments::{LoweringContext, ProgramArgumentRecipes};
 use collect_layout::*;
 use groove::ivm::{
     AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
@@ -257,6 +259,7 @@ pub(crate) fn lower_resolved_query_program(
         resolved_sources,
         explain,
         &BTreeMap::new(),
+        None,
     )
 }
 
@@ -265,8 +268,13 @@ fn lower_resolved_query_program_with_source_parameters(
     resolved_sources: ResolvedQuerySources,
     mut explain: ExplainPlan,
     source_parameters: &BTreeMap<u32, ParameterDomain>,
+    arguments: Option<&std::cell::RefCell<ProgramArgumentRecipes>>,
 ) -> QueryCompileResult {
     let QueryProgramCompilation { request, plan, .. } = compilation;
+    let context = match arguments {
+        Some(arguments) => LoweringContext::compiling(&request, arguments),
+        None => LoweringContext::concrete(&request),
+    };
     let resolved_root = resolved_sources
         .get(plan.root_source())
         .cloned()
@@ -286,7 +294,7 @@ fn lower_resolved_query_program_with_source_parameters(
         &plan,
         &resolved_root,
         &resolved_sources,
-        &request,
+        &context,
     )
     .map_err(|gap| {
         Box::new(CapabilityReport {
@@ -314,7 +322,7 @@ fn lower_resolved_query_program_with_source_parameters(
     .then(|| lowered.graph.clone());
     let terminals = lowered_terminals(
         lowered.graph,
-        &request,
+        &context,
         &plan,
         &resolved_root,
         &resolved_sources,
@@ -1124,6 +1132,8 @@ pub(crate) fn retained_projection_graph_for_test(
         &mut BTreeSet::new(),
     )
     .unwrap();
-    let lowered = lower_relation_input_for_contributor(&plan, sources, request).unwrap();
+    let lowered =
+        lower_relation_input_for_contributor(&plan, sources, &LoweringContext::concrete(request))
+            .unwrap();
     (lowered.graph, lowered.nullable_field_depths)
 }

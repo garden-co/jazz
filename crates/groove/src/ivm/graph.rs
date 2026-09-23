@@ -155,6 +155,7 @@ pub enum GraphBuilder {
         program: Arc<super::template::TypedGraphTemplate>,
         inputs: Vec<Arc<GraphBuilder>>,
         predicates: Vec<PredicateExpr>,
+        scalars: Arc<[super::template::TemplateScalarArgument]>,
     },
     /// A typed, compilation-only input of an immutable query template. Binding
     /// supplies a descriptor-checked graph, not rows or authority. Compilation
@@ -1503,15 +1504,22 @@ impl ProjectField {
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
             | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
-            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
-                None
-            }
+            ProjectExpr::Literal(_)
+            | ProjectExpr::TypedLiteral { .. }
+            | ProjectExpr::Null(_)
+            | ProjectExpr::TemplateArgument { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
+    /// Process-local scalar argument with its exact output contract.
+    /// Ordinary graph installation rejects unbound arguments.
+    TemplateArgument {
+        slot: u32,
+        value_type: ValueType,
+    },
     Field(FieldRef),
     RecordField {
         source: FieldRef,

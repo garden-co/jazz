@@ -8,6 +8,8 @@ use crate::records::RecordDescriptor;
 use std::{collections::HashMap, sync::Arc};
 mod sources;
 pub use sources::split_template_sources;
+pub(crate) mod arguments;
+pub use arguments::{TemplateScalarArgument, bind_template_arguments};
 
 /// A typed, source-independent installation program. Its identity and contents
 /// are process-local compiler state, never a storage or wire representation.
@@ -62,8 +64,23 @@ impl TypedGraphTemplate {
         inputs: &[Arc<GraphBuilder>],
         predicates: &[super::PredicateExpr],
     ) -> Result<GraphBuilder, TemplateBindingError> {
+        self.bind_declarative_with_arguments(inputs, predicates, &[])
+    }
+
+    pub fn bind_declarative_with_arguments(
+        &self,
+        inputs: &[Arc<GraphBuilder>],
+        predicates: &[super::PredicateExpr],
+        scalars: &[TemplateScalarArgument],
+    ) -> Result<GraphBuilder, TemplateBindingError> {
         if predicates.len() != self.predicate_markers.len() {
             return Err(TemplateBindingError::PredicateArity);
+        }
+        for (slot, (marker, argument)) in self.predicate_markers.iter().zip(predicates).enumerate()
+        {
+            if !marker.accepts_template_argument(argument) {
+                return Err(TemplateBindingError::PredicateArgument(slot as u32));
+            }
         }
         let mut rewritten = HashMap::<usize, Arc<GraphBuilder>>::new();
         for node in self.fallback.postorder() {
@@ -77,6 +94,11 @@ impl TypedGraphTemplate {
             {
                 *predicate = predicates[slot].clone();
             }
+            if let GraphBuilder::Project { fields, .. } = &mut bound {
+                for field in fields {
+                    arguments::bind_project_expression(&mut field.expression, scalars)?;
+                }
+            }
             rewritten.insert(node as *const GraphBuilder as usize, Arc::new(bound));
         }
         let fallback = rewritten[&(&self.fallback as *const GraphBuilder as usize)].clone();
@@ -87,10 +109,13 @@ impl TypedGraphTemplate {
                 TemplateGraphInput::with_output_contract((**graph).clone(), *output)
             })
             .collect::<Vec<_>>();
-        Ok(
-            bind_template_graphs_inner(std::slice::from_ref(fallback.as_ref()), &inputs, true)?
-                .remove(0),
-        )
+        Ok(bind_template_graphs_inner(
+            std::slice::from_ref(fallback.as_ref()),
+            &inputs,
+            true,
+            None,
+        )?
+        .remove(0))
     }
 }
 impl std::hash::Hash for TypedGraphTemplate {
@@ -152,6 +177,10 @@ impl TemplateGraphInput {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TemplateBindingError {
+    #[error("template scalar argument {0} is missing or has a different type")]
+    ScalarArgument(u32),
+    #[error("template predicate argument {0} is missing or remains unbound")]
+    PredicateArgument(u32),
     #[error("template predicate argument count does not match")]
     PredicateArity,
     #[error("template input {0} is missing")]
@@ -169,7 +198,27 @@ pub fn bind_template_graphs(
     graphs: &[GraphBuilder],
     inputs: &[TemplateGraphInput],
 ) -> Result<Vec<GraphBuilder>, TemplateBindingError> {
-    bind_template_graphs_inner(graphs, inputs, false)
+    bind_template_graphs_inner(graphs, inputs, false, None)
+}
+
+/// Bind all source and scalar arguments in one forest pass. Fresh inputs are
+/// attached only after argument substitution; their private namespaces remain
+/// opaque. No execution operators or persistent encodings are introduced.
+pub fn bind_template_program(
+    graphs: &[GraphBuilder],
+    inputs: &[TemplateGraphInput],
+    predicates: &[super::PredicateExpr],
+    scalars: Arc<[TemplateScalarArgument]>,
+) -> Result<Vec<GraphBuilder>, TemplateBindingError> {
+    bind_template_graphs_inner(
+        graphs,
+        inputs,
+        false,
+        Some(arguments::TemplateArguments {
+            predicates,
+            scalars: &scalars,
+        }),
+    )
 }
 
 // Compiler-owned normalized families may contain bound contract wrappers
@@ -179,6 +228,7 @@ pub(crate) fn bind_template_graphs_inner(
     graphs: &[GraphBuilder],
     inputs: &[TemplateGraphInput],
     descend_bound: bool,
+    arguments: Option<arguments::TemplateArguments<'_>>,
 ) -> Result<Vec<GraphBuilder>, TemplateBindingError> {
     let mut rewritten = HashMap::<*const GraphBuilder, Arc<GraphBuilder>>::new();
     for root in graphs {
@@ -221,7 +271,10 @@ pub(crate) fn bind_template_graphs_inner(
                 node.visit_inputs(|child| pending.push((child, false)));
                 continue;
             }
-            let bound = node.map_inputs(|child| rewritten[&Arc::as_ptr(child)].clone());
+            let mut bound = node.map_inputs(|child| rewritten[&Arc::as_ptr(child)].clone());
+            if let Some(arguments) = &arguments {
+                arguments.bind_node(&mut bound)?;
+            }
             rewritten.insert(key, Arc::new(bound));
         }
     }

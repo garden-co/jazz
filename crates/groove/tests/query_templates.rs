@@ -10,8 +10,186 @@ async fn database() -> Database {
         .unwrap()
 }
 
+#[futures_test::test]
+async fn typed_program_arguments_bind_predicates_and_routes_before_execution() {
+    use groove::ivm::{
+        PredicateExpr, ProjectExpr, ProjectField, TemplateScalarArgument, bind_template_arguments,
+        compile_template_graphs,
+    };
+    use groove::records::FieldIdentity;
+    use std::sync::Arc;
+    let mut db = database().await;
+    let source = db.allocate_input_source(descriptor());
+    db.replace_input_sources([InputSourceReplacement {
+        id: source,
+        descriptor: descriptor(),
+        records: [11, 22]
+            .map(|id| descriptor().create(&[Value::U64(id)]).unwrap())
+            .to_vec(),
+    }])
+    .await
+    .unwrap();
+    let graph = template()
+        .filter(PredicateExpr::TemplateArgument {
+            slot: 0,
+            fields: vec!["id".into()],
+        })
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField {
+                expression: ProjectExpr::TemplateArgument {
+                    slot: 0,
+                    value_type: ColumnType::String,
+                },
+                output_name: "route".into(),
+                output_identity: FieldIdentity::Name("route".into()),
+            },
+        ]);
+    let compiled = compile_template_graphs(&[graph.clone()]).unwrap();
+    let inputs = [db
+        .describe_template_input(GraphBuilder::input_source(source, descriptor()))
+        .unwrap()];
+    // Both ordinary and typed installation fail closed even before any rows
+    // could encounter an unbound predicate or scalar.
+    for unbound in [&[graph][..], compiled.as_slice()] {
+        let graph = bind_template_graphs(unbound, &inputs).unwrap().remove(0);
+        assert!(db.subscribe_one_sink(graph).await.is_err());
+    }
+    assert!(TemplateScalarArgument::new(Value::U64(7), ColumnType::String).is_err());
+    let bind = |id: u64, route: &str| {
+        let graphs = bind_template_arguments(
+            &compiled,
+            &[PredicateExpr::eq("id", Value::U64(id))],
+            Arc::from([TemplateScalarArgument::new(
+                Value::String(route.into()),
+                ColumnType::String,
+            )
+            .unwrap()]),
+        )
+        .unwrap();
+        bind_template_graphs(&graphs, &inputs).unwrap().remove(0)
+    };
+    let first = db.subscribe_one_sink(bind(11, "first")).await.unwrap();
+    let second = db.subscribe_one_sink(bind(22, "second")).await.unwrap();
+    for (subscription, id, route) in [(&first, 11, "first"), (&second, 22, "second")] {
+        assert_eq!(
+            db.next_subscription(subscription)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            vec![(vec![Value::U64(id), Value::String(route.into())], 1)]
+        );
+    }
+    db.replace_input_sources([InputSourceReplacement {
+        id: source,
+        descriptor: descriptor(),
+        records: vec![descriptor().create(&[Value::U64(22)]).unwrap()],
+    }])
+    .await
+    .unwrap();
+    assert_eq!(
+        db.next_subscription(&first)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(11), Value::String("first".into())], -1)]
+    );
+    assert_eq!(
+        db.query_graph(bind(22, "third"))
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(22), Value::String("third".into())], 1)]
+    );
+    let missing = bind_template_arguments(
+        &compiled,
+        &[PredicateExpr::eq("id", Value::U64(22))],
+        Arc::from([]),
+    )
+    .unwrap();
+    assert!(
+        db.query_graph(bind_template_graphs(&missing, &inputs).unwrap().remove(0))
+            .await
+            .is_err()
+    );
+    db.unsubscribe(first.id());
+    db.unsubscribe(second.id());
+}
+
 fn descriptor() -> RecordDescriptor {
     RecordDescriptor::new([("id", ColumnType::U64)])
+}
+
+#[futures_test::test]
+async fn scalar_argument_contracts_preserve_nullable_and_enum_registry_types() {
+    use groove::ivm::{
+        ProjectExpr, ProjectField, TemplateScalarArgument, bind_template_program,
+        compile_template_graphs,
+    };
+    use groove::records::{FieldIdentity, ScalarEnumSchema};
+    use std::sync::Arc;
+    let mut db = database().await;
+    let state = ColumnType::EnumTag(ScalarEnumSchema::new("state", ["open", "closed"]).unwrap());
+    let maybe_id = ColumnType::Nullable(Box::new(ColumnType::Uuid));
+    let fields = [("state", state.clone()), ("reader", maybe_id.clone())]
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (name, ty))| ProjectField {
+            expression: ProjectExpr::TemplateArgument {
+                slot: slot as u32,
+                value_type: ty,
+            },
+            output_name: name.into(),
+            output_identity: FieldIdentity::Name(name.into()),
+        });
+    let compiled = compile_template_graphs(&[template().project_fields(fields)]).unwrap();
+    let source = db
+        .describe_template_input(
+            GraphBuilder::values(descriptor(), [vec![Value::U64(11)]]).unwrap(),
+        )
+        .unwrap();
+    for (tag, reader) in [
+        (0, Value::Nullable(None)),
+        (
+            1,
+            Value::Nullable(Some(Box::new(Value::Uuid(uuid::Uuid::from_u128(17))))),
+        ),
+    ] {
+        let graph = bind_template_program(
+            &compiled,
+            std::slice::from_ref(&source),
+            &[],
+            Arc::from([
+                TemplateScalarArgument::new(Value::EnumTag(tag), state.clone()).unwrap(),
+                TemplateScalarArgument::new(reader.clone(), maybe_id.clone()).unwrap(),
+            ]),
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(
+            db.query_graph(graph).await.unwrap().to_values().unwrap(),
+            vec![(vec![Value::EnumTag(tag), reader], 1)]
+        );
+    }
+    let reversed = ColumnType::EnumTag(ScalarEnumSchema::new("state", ["closed", "open"]).unwrap());
+    let wrong = bind_template_program(
+        &compiled,
+        &[source],
+        &[],
+        Arc::from([
+            TemplateScalarArgument::new(Value::EnumTag(0), reversed).unwrap(),
+            TemplateScalarArgument::new(Value::Nullable(None), maybe_id).unwrap(),
+        ]),
+    )
+    .unwrap()
+    .remove(0);
+    assert!(
+        db.query_graph(wrong).await.is_err(),
+        "equal-sized enum tags do not prove matching registries"
+    );
 }
 
 fn template() -> GraphBuilder {

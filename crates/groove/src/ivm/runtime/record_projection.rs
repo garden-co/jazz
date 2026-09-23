@@ -139,7 +139,8 @@ pub(super) fn project_descriptor(
                 ProjectExpr::Literal(value) => value
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
-                ProjectExpr::TypedLiteral { value_type, .. } => value_type.clone(),
+                ProjectExpr::TypedLiteral { value_type, .. }
+                | ProjectExpr::TemplateArgument { value_type, .. } => value_type.clone(),
                 ProjectExpr::Null(value_type) => value_type.clone(),
                 ProjectExpr::Nullable(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -710,7 +711,10 @@ pub(super) fn project_field_expr(
         | ProjectExpr::RecursiveEnumRemap { source, .. } => {
             *source = FieldRef::Resolved(resolve_field_ref(input, source)?);
         }
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {}
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => {}
     }
     Ok(expression)
 }
@@ -765,6 +769,7 @@ pub(super) fn project_field_value(
             .map_err(IvmRuntimeError::RecordEncoding)
     };
     Ok(match &expr.expression {
+        ProjectExpr::TemplateArgument { .. } => return Err(IvmRuntimeError::UnsupportedOperator),
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
             let mut value = resolved(source)?;
@@ -1100,6 +1105,9 @@ pub(super) fn raw_projection_fields(
         .enumerate()
         .map(|(output_idx, expr)| {
             Ok(match &expr.expression {
+                ProjectExpr::TemplateArgument { .. } => {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                }
                 ProjectExpr::Field(field) => {
                     let source_idx = resolve_field_ref(input_desc, field)?;
                     validate_copy(&input_desc.fields()[source_idx].value_type, output_idx)?;

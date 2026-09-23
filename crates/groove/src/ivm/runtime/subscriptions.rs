@@ -498,8 +498,9 @@ impl PredicateExpr {
             .map(Some)
     }
 
-    pub(super) fn referenced_fields(&self, output: &mut BTreeSet<String>) {
+    pub(crate) fn referenced_fields(&self, output: &mut BTreeSet<String>) {
         match self {
+            Self::TemplateArgument { fields, .. } => output.extend(fields.iter().cloned()),
             Self::Eq { field, .. }
             | Self::Neq { field, .. }
             | Self::Contains { field, .. }
@@ -535,6 +536,7 @@ impl PredicateExpr {
         comparison: ValueComparison,
     ) -> Result<bool, IvmRuntimeError> {
         match self {
+            Self::TemplateArgument { .. } => Err(IvmRuntimeError::UnsupportedOperator),
             Self::Eq { field, value } => {
                 compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
             }
@@ -785,9 +787,11 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 program,
                 inputs,
                 predicates,
+                scalars,
             } => {
                 program.hash(&mut hasher);
                 predicates.hash(&mut hasher);
+                scalars.hash(&mut hasher);
                 for input in inputs {
                     child!(input).hash(&mut hasher);
                 }
@@ -994,13 +998,15 @@ pub(super) fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) ->
                     program: a,
                     inputs: b,
                     predicates: c,
+                    scalars: d,
                 },
                 GraphBuilder::TypedTemplate {
                     program: x,
                     inputs: y,
                     predicates: z,
+                    scalars: w,
                 },
-            ) if a == x && b.len() == y.len() && c == z => {
+            ) if a == x && b.len() == y.len() && c == z && d == w => {
                 pending.extend(b.iter().zip(y).map(|(b, y)| (b.as_ref(), y.as_ref())))
             }
             (
@@ -1788,6 +1794,7 @@ fn lift_literal_filter_node(
                 let mut fields = fields
                     .iter()
                     .map(|field| match &field.expression {
+                        ProjectExpr::TemplateArgument { .. } => Ok(field.clone()),
                         ProjectExpr::RecordField { source, path } => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
@@ -2261,6 +2268,7 @@ fn project_fields_against_rewritten_input(
                 }
                 ProjectExpr::Literal(_)
                 | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::TemplateArgument { .. }
                 | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source =
@@ -4057,6 +4065,7 @@ impl IvmRuntime {
                 program,
                 inputs,
                 predicates,
+                ..
             } => {
                 if predicates.len() != program.predicate_markers.len() {
                     return Err(IvmRuntimeError::GraphOutputMismatch);

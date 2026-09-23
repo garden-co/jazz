@@ -19,13 +19,22 @@ pub(crate) struct QueryProgramTemplateCache {
     physical: groove::ivm::TypedGraphTemplateCache,
     #[cfg(any(test, feature = "testing"))]
     pub(crate) hits: usize,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) argument_hits: usize,
 }
 
 #[derive(Clone, Debug)]
 struct TemplateEntry {
     request: QueryProgramRequest,
+    literal_types: Vec<Option<ValueType>>,
     sources: ResolvedQuerySources,
-    program: Option<Arc<QueryProgram>>,
+    program: Option<Arc<ParameterizedProgram>>,
+}
+
+#[derive(Clone, Debug)]
+struct ParameterizedProgram {
+    program: QueryProgram,
+    arguments: ProgramArgumentRecipes,
 }
 
 impl QueryProgramTemplateCache {
@@ -67,16 +76,28 @@ impl QueryProgramTemplateCache {
         explain: ExplainPlan,
         describe: impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
     ) -> QueryCompileResult {
-        // Jazz admission and coercion retain the exact logical request. Physical
-        // families may share across literals because their Filter predicates
-        // and source graphs are explicit per-instance installation arguments.
-        let prepared = compilation.request.input.binding.source_shape.is_some();
-        // Prepared programs may omit values only if unbound lowering succeeds.
-        let mut template_compilation = compilation.clone();
-        if prepared {
-            template_compilation.request.input.binding.values.clear();
-            template_compilation.request.input.binding.id = BindingId(uuid::Uuid::nil());
+        #[cfg(any(test, feature = "testing"))]
+        if std::env::var_os("JAZZ_QUERY_TEMPLATE_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_QUERY_TEMPLATE_REQUEST prepared={} values={}",
+                compilation.request.input.binding.source_shape.is_some(),
+                compilation.request.input.binding.values.len()
+            );
         }
+        // Admission/source preparation used the exact request. Pure lowering
+        // has no access to values: every dynamic use must emit a bind-time
+        // recipe, or fail closed to ordinary concrete lowering.
+        let mut template_request = compilation.request.clone();
+        let literals = match super::arguments::extract_template_literals(&mut template_request) {
+            Ok(literals) => literals,
+            Err(_) => return lower_resolved_query_program(compilation, sources, explain),
+        };
+        let literal_types = literals
+            .iter()
+            .map(|value| LiteralValue::from(value.clone()).value_type())
+            .collect::<Vec<_>>();
+        template_request.input.binding.values.clear();
+        template_request.input.binding.id = BindingId(uuid::Uuid::nil());
         let mut template_sources = sources.clone();
         let mut source_graphs = Vec::new();
         for source in sources.values() {
@@ -109,8 +130,9 @@ impl QueryProgramTemplateCache {
         // unrelated entries before exact request and source-contract equality.
         let template = if let Some(entry) = self.entries.iter().find(|entry| {
             entry.request.input.shape.identity.shape_id
-                == template_compilation.request.input.shape.identity.shape_id
-                && entry.request == template_compilation.request
+                == template_request.input.shape.identity.shape_id
+                && entry.request == template_request
+                && entry.literal_types == literal_types
                 && entry.sources == template_sources
         }) {
             let Some(template) = &entry.program else {
@@ -120,22 +142,36 @@ impl QueryProgramTemplateCache {
             #[cfg(any(test, feature = "testing"))]
             {
                 self.hits += 1;
+                self.argument_hits += usize::from(!template.arguments.is_empty());
             }
             template.clone()
         } else {
-            let template_request = template_compilation.request.clone();
-            let template = lower_resolved_query_program(
-                template_compilation,
-                template_sources.clone(),
-                ExplainPlan::default(),
-            )
-            .ok()
-            .map(|program| Arc::new(self.typed_program(program)));
+            let arguments = std::cell::RefCell::new(ProgramArgumentRecipes::with_literal_types(
+                literal_types.clone(),
+            ));
+            let template = QueryProgramCompilation::analyze(template_request.clone())
+                .and_then(|template_compilation| {
+                    lower_resolved_query_program_with_source_parameters(
+                        template_compilation,
+                        template_sources.clone(),
+                        ExplainPlan::default(),
+                        &BTreeMap::new(),
+                        Some(&arguments),
+                    )
+                })
+                .ok()
+                .map(|program| {
+                    Arc::new(ParameterizedProgram {
+                        program: self.typed_program(program),
+                        arguments: arguments.into_inner(),
+                    })
+                });
             if self.entries.len() == 256 {
                 self.entries.pop_front();
             }
             self.entries.push_back(TemplateEntry {
                 request: template_request,
+                literal_types,
                 sources: template_sources,
                 program: template.clone(),
             });
@@ -152,7 +188,7 @@ impl QueryProgramTemplateCache {
             template
         };
         trace_template("bound");
-        let mut program = (*template).clone();
+        let mut program = template.program.clone();
         let mut graphs = program
             .lowered
             .terminals
@@ -160,8 +196,16 @@ impl QueryProgramTemplateCache {
             .map(|terminal| terminal.graph.clone())
             .collect::<Vec<_>>();
         graphs.extend(program.lowered.internal_app_rows_graph.iter().cloned());
-        let bound = groove::ivm::bind_template_graphs(&graphs, &inputs)
-            .expect("template inputs and slot descriptors are constructed together");
+        let bound = match template
+            .arguments
+            .bind(&graphs, &inputs, &compilation.request, &literals)
+        {
+            Ok(graphs) => graphs,
+            Err(_) => {
+                trace_template("argument_fallback");
+                return lower_resolved_query_program(compilation, sources, explain);
+            }
+        };
         let mut bound = bound.into_iter();
         for terminal in &mut program.lowered.terminals {
             terminal.graph = bound.next().expect("terminal bound");

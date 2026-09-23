@@ -191,7 +191,7 @@ pub(super) fn validate_app_row_publication_schema(rows: &AppRowSchema) -> Capabi
 
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -1239,7 +1239,7 @@ fn collect_correlated_covered_source_members(
     parent_graph: GraphBuilder,
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
     members: &mut BTreeMap<SourceId, GraphBuilder>,
 ) -> CapabilityResult<()> {
@@ -1379,7 +1379,7 @@ fn lower_collect_by_app_rows(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
@@ -1632,7 +1632,7 @@ fn align_collect_join_key_types(
     slots: &mut [CollectSlotLayout],
     plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<()> {
     for slot in slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
@@ -2022,7 +2022,7 @@ pub(super) fn collect_window_source_field<'a>(
 pub(super) fn root_join_occurrence_fields(
     plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<(String, ValueType)>> {
     // Authorization subplans are decision programs, not public row sets. Their
     // joins prove policy predicates and cannot contribute to a result address.
@@ -2134,7 +2134,7 @@ fn find_correlated_path_in_tree<'a>(
 
 fn lowered_aggregate_terminals(
     graph: GraphBuilder,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -2422,7 +2422,7 @@ fn aggregate_input_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<GraphBuilder> {
     let AnalyzedQueryPlan::Linear(mut input_plan) = plan.clone() else {
         return Err(single_gap_report(UnsupportedReason::Runtime(
@@ -2454,7 +2454,7 @@ fn fact_input_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<GraphBuilder> {
     if matches!(
         (plan, key),
@@ -2574,7 +2574,7 @@ fn fact_output(
     source_id: &SourceId,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
     fact_output_with_terminal(
@@ -2596,7 +2596,7 @@ fn fact_output_with_terminal(
     source_id: &SourceId,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
@@ -2729,7 +2729,7 @@ fn result_occurrence_id_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<String>> {
     let mut fields = vec![source.row_shape.row_uuid_field.clone()];
     if &source.row_shape.source != plan.root_source() {
@@ -2759,7 +2759,7 @@ fn result_occurrence_union_arm_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<BTreeMap<usize, String>> {
     if &source.row_shape.source != plan.root_source() {
         return Ok(BTreeMap::new());
@@ -2953,7 +2953,7 @@ fn fact_terminal_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     match key {
@@ -3033,7 +3033,7 @@ fn fact_terminal_graph(
 /// coverage route. Concrete, non-prepared programs retain their literal route.
 /// The multisink terminal removes hidden fields before freezing protocol facts.
 fn program_source_coverage_graph(
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     parameter_domain: &ParameterDomain,
     complete: bool,
     routing_param_fields: &BTreeSet<String>,
@@ -3325,7 +3325,7 @@ mod binding_route_tests {
 
 pub(super) fn route_literal_project_field(
     route_field: &str,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> Result<ProjectField, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
     route_literal_project_field_for_domain(route_field, request, &domain)
@@ -3338,9 +3338,31 @@ pub(super) fn route_literal_project_field(
 /// binding source.
 fn route_literal_project_field_for_domain(
     route_field: &str,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     domain: &ParameterDomain,
 ) -> Result<ProjectField, UnsupportedReason> {
+    let scalar = if let Some(path) = claim_path_from_param_field(route_field) {
+        domain
+            .claim_params
+            .get(route_field)
+            .map(|claim| (NormalizedValueRef::Claim(path), claim.ty.clone()))
+    } else {
+        route_param_from_field(route_field).and_then(|param| {
+            domain
+                .user_params
+                .get(param)
+                .map(|ty| (NormalizedValueRef::Param(param.to_owned()), ty.clone()))
+        })
+    };
+    if let Some((value, ty)) = scalar
+        && let Some(expression) = request.scalar_argument(value, ty, true)
+    {
+        return Ok(ProjectField {
+            expression,
+            output_name: route_field.to_owned(),
+            output_identity: FieldIdentity::Name(route_field.to_owned()),
+        });
+    }
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
         return Ok(match domain.claim_params.get(route_field) {
@@ -3388,7 +3410,7 @@ fn relation_edge_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<GraphBuilder> {
     match plan {
         AnalyzedQueryPlan::CorrelatedPath(path) => {
@@ -3420,7 +3442,7 @@ fn correlated_relation_edge_graphs(
     graph: GraphBuilder,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<GraphBuilder>> {
     let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
         Box::new(CapabilityReport {
@@ -3572,7 +3594,7 @@ fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
 fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
     event_kind: &str,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     parameter_domain: &ParameterDomain,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
@@ -3843,7 +3865,10 @@ fn content_version_witness_graph_from_visible_graph(
             | ProjectExpr::EnumTagRemap { source: key, .. }
             | ProjectExpr::EnumRemap { source: key, .. }
             | ProjectExpr::RecursiveEnumRemap { source: key, .. } => key,
-            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
+            ProjectExpr::Literal(_)
+            | ProjectExpr::TypedLiteral { .. }
+            | ProjectExpr::Null(_)
+            | ProjectExpr::TemplateArgument { .. } => {
                 continue;
             }
         };

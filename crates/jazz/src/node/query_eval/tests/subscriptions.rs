@@ -86,9 +86,12 @@ fn shared_witness_execution_requires_complete_graph_and_schema_equality() {
             program,
             inputs,
             predicates,
+            scalars,
         } = &terminal.graph
         {
-            terminal.graph = program.bind_declarative(inputs, predicates).unwrap();
+            terminal.graph = program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap();
         }
     }
     assert_eq!(
@@ -404,7 +407,12 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
             program,
             inputs,
             predicates,
-        } => graph_contains_point_scan(&program.bind_declarative(inputs, predicates).unwrap()),
+            scalars,
+        } => graph_contains_point_scan(
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
+        ),
         GraphBuilder::TemplateInput { input, .. } => input
             .as_ref()
             .is_some_and(|input| graph_contains_point_scan(input)),
