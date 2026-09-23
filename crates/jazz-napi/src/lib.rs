@@ -5408,7 +5408,8 @@ mod tests {
     use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        MergeableTxOps, Propagation as CorePropagation, QuerySettlementLevel,
+        SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7213,6 +7214,8 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: Vec::new(),
             settled: true,
+            requested_ready: true,
+            attained_settlement: QuerySettlementLevel::Local,
             tier: DurabilityTier::Local,
         })
         .expect("encode terminal delta");
@@ -7282,6 +7285,8 @@ mod tests {
             removed: Vec::new(),
             terminal_operations: operations,
             settled: false,
+            requested_ready: false,
+            attained_settlement: QuerySettlementLevel::Local,
             tier: DurabilityTier::Global,
         })
         .expect("encode terminal operations");
