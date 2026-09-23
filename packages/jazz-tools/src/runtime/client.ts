@@ -28,7 +28,14 @@ import { httpUrlToWs } from "./url.js";
 export type TransactionPreparationIO = Pick<
   JazzClient,
   "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
->;
+> & {
+  /** @internal Authorized query that deliberately excludes the open transaction overlay. */
+  queryGlobal(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]>;
+};
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -905,12 +912,12 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
   }
 }
 
-const transactionAdmission = new WeakMap<JazzClient, () => Promise<void>>();
+const transactionAdmission = new WeakMap<JazzClient, () => void | Promise<void>>();
 
 /** @internal Scope an opening prerequisite without adding a public client method. */
 export function withTransactionAdmission<T>(
   client: JazzClient,
-  prepare: () => Promise<void>,
+  prepare: () => void | Promise<void>,
   begin: () => T,
 ): T {
   const previous = transactionAdmission.get(client);
@@ -1054,7 +1061,8 @@ export class JazzClient {
             throw new Error("Transaction was rolled back before admission");
         };
         assertCurrent();
-        await prerequisite();
+        const admission = prerequisite();
+        if (admission && typeof admission.then === "function") await admission;
         assertCurrent();
         requireTransactionalRuntime(this.runtime).beginTransaction(kind, id, context);
         state.unopened = false;
@@ -1106,6 +1114,10 @@ export class JazzClient {
               { ...options, openTransactionId: id },
               session,
             );
+          },
+          queryGlobal: (query, options, session) => {
+            assertActive();
+            return this.queryWithoutPreparation(query, options, session);
           },
           insertInternal: (table, values, options, session, attribution) => {
             assertActive();

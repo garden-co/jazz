@@ -586,12 +586,17 @@ where
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
-        if self
-            .lock_for_transaction_operation(tx_id)
-            .await?
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
-            .await?
-            .is_none()
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let staged_visible = matches!(
+            node.tx_current_row_state_in_branch(tx_id, table, row, &head)
+                .await?,
+            TransactionBranchRowState::Visible { .. }
+        );
+        if !staged_visible
+            && node
+                .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                .await?
+                .is_none()
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -599,21 +604,19 @@ where
             ));
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.lock_for_transaction_operation(tx_id)
-            .await?
-            .tx_write_mergeable_in_schema_and_branch(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                BTreeMap::new(),
-                Some(DeletionEvent::Deleted),
-                Vec::new(),
-                now_ms,
-                true,
-                head,
-                false,
-            )?;
+        node.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            BTreeMap::new(),
+            Some(DeletionEvent::Deleted),
+            Vec::new(),
+            now_ms,
+            true,
+            head,
+            false,
+        )?;
         Ok(())
     }
 

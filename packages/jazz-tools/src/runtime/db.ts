@@ -27,7 +27,13 @@ import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/con
  * - all/one are async (need storage I/O for queries)
  */
 
-import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  WasmSchema,
+  WasmRow,
+  StorageDriver,
+  Value,
+} from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -1238,6 +1244,41 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
 }
 
+function copyMutableEncryptedValue(value: Value): Value {
+  switch (value.type) {
+    case "Bytea":
+    case "Array":
+    case "Row":
+    case "Enum":
+      return structuredClone(value);
+    default:
+      return value;
+  }
+}
+
+function branchCoordinateKey(branch: BranchView | BranchSelector | undefined): string {
+  const selectorKey = (selector: BranchSelector) =>
+    Object.entries(selector.values)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([column, value]) => [
+        column,
+        value.type === "Uuid" ? { ...value, value: value.value.toLowerCase() } : value,
+      ]);
+  if (!branch) return "default";
+  const head = "head" in branch ? branch.head : branch;
+  return JSON.stringify(selectorKey(head), (_key, value) =>
+    typeof value === "bigint" ? { bigint: value.toString() } : value,
+  );
+}
+
+function encryptedRowScopeKey(
+  table: string,
+  id: string,
+  branch: BranchView | BranchSelector | undefined,
+): string {
+  return JSON.stringify([table, id.toLowerCase(), branchCoordinateKey(branch)]);
+}
+
 /**
  * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
@@ -1256,6 +1297,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
   private cancelled = false;
   private readonly initialSpaceKeys = new Map<string, { secret: Uint8Array; root: SpaceRoot }>();
+  private readonly encryptedScopes = new Map<string, string>();
 
   constructor(
     readonly kind: TKind,
@@ -1263,7 +1305,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     private readonly session?: Session,
     private readonly attribution?: string,
     ownerClient?: JazzClient,
-    private readonly e2ee?: { db: Db; includeRecipients: (ids: readonly string[]) => void },
+    private readonly e2ee?: { db: Db; requestScopeCreation: (ids?: readonly string[]) => void },
   ) {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
@@ -1317,6 +1359,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           } catch {
             // Preserve the original pending read error.
           }
+          this.clearInitialSpaceKeys();
           throw error;
         },
       );
@@ -1364,6 +1407,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private clearInitialSpaceKeys(): void {
     for (const { secret } of this.initialSpaceKeys.values()) secret.fill(0);
     this.initialSpaceKeys.clear();
+    this.encryptedScopes.clear();
+  }
+  private encryptedScopeFor(
+    table: string,
+    id: string,
+    branch: BranchView | BranchSelector | undefined,
+  ): string | undefined {
+    return this.encryptedScopes.get(encryptedRowScopeKey(table, id, branch));
   }
 
   /**
@@ -1418,7 +1469,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private prepareScopeCreation(recipients?: readonly string[]): void {
     if (this.kind !== "exclusive" || !this.e2ee)
       throw new Error("E2EE scope creation requires an authenticated exclusive transaction");
-    if (recipients) this.e2ee.includeRecipients(recipients);
+    this.e2ee.requestScopeCreation(recipients);
   }
 
   private async retainInitialSpaceKey(secret: Uint8Array, root: SpaceRoot): Promise<void> {
@@ -1453,9 +1504,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     const identifier = values[declaration.space];
     if (identifier?.type !== "Uuid") throw new Error("Encrypted writes require a space identifier");
+    const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding(operation);
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeInsertOptions(table._schema, table._table, options);
+    const normalized = normalizeInsertOptions(table._schema, table._table, optionsSnapshot);
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
     const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
     const db = this.e2ee.db;
@@ -1469,17 +1521,30 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           .select(declaration.space);
         const rows = await readTransactionRows<Record<string, unknown>>(
           query,
-          { tier: "global" },
+          {
+            tier: "global",
+            ...(optionsSnapshot?.branch !== undefined && { branch: optionsSnapshot.branch }),
+          },
           false,
           binding,
           io,
+          undefined,
+          optionsSnapshot?.branch !== undefined,
         );
-        if (rows.length !== 1 || typeof rows[0]?.[declaration.space] !== "string")
-          throw new Error("Encrypted restore cannot resolve the stored space");
+        const recorded = this.encryptedScopeFor(table._table, preview.id, normalized?.branch);
         if (
-          (rows[0]![declaration.space] as string).toLowerCase() !== identifier.value.toLowerCase()
+          rows.length > 1 ||
+          (rows.length === 1 && typeof rows[0]?.[declaration.space] !== "string") ||
+          (rows.length === 0 && recorded === undefined)
         )
+          throw new Error("Encrypted restore cannot resolve the stored space");
+        const storedScope = recorded ?? (rows[0]![declaration.space] as string);
+        if (storedScope.toLowerCase() !== identifier.value.toLowerCase())
           throw new Error("The encryption space of a row is immutable");
+        this.encryptedScopes.set(
+          encryptedRowScopeKey(table._table, preview.id, normalized?.branch),
+          storedScope,
+        );
       }
       const initial = this.initialSpaceKeys.size
         ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
@@ -1510,6 +1575,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             attribution,
           );
         }
+        this.encryptedScopes.set(
+          encryptedRowScopeKey(table._table, preview.id, normalized?.branch),
+          identifier.value,
+        );
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
@@ -1520,7 +1589,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       ...preview,
       valuesByColumn: undefined,
       values: logicalTable.columns.map((column, index) =>
-        declaration.columns.includes(column.name) ? values[column.name]! : preview.values[index]!,
+        declaration.columns.includes(column.name)
+          ? copyMutableEncryptedValue(values[column.name]!)
+          : preview.values[index]!,
       ),
     };
     return transformOutputRow(table, transformRow(logicalRow, metadata.logical, table._table));
@@ -1594,9 +1665,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         normalizeUpdateOptions(table._schema, table._table, options),
       );
       const insertOptions = structuredClone(
-        normalizeInsertOptions(table._schema, table._table, { ...options, id }),
+        normalizeInsertOptions(table._schema, table._table, {
+          id,
+          ...(options?.branch !== undefined && { branch: options.branch }),
+        }),
       );
-      const { openTransactionId, session, attribution } = this.requireBinding("upsert");
+      const binding = this.requireBinding("upsert");
+      const { openTransactionId, session, attribution } = binding;
       const preparation = prepareDbTransaction(
         this as Transaction<"exclusive">,
         async (scope, io) => {
@@ -1604,7 +1679,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             .includeDeleted()
             .where({ id })
             .select("id");
-          if (await scope.one(query, { tier: "global" })) {
+          const rows = await readTransactionRows<Record<string, unknown>>(
+            query,
+            { tier: "global", ...(options?.branch !== undefined && { branch: options.branch }) },
+            false,
+            binding,
+            io,
+            undefined,
+            options?.branch !== undefined,
+          );
+          const recorded = this.encryptedScopeFor(table._table, id, updateOptions?.branch);
+          if (rows.length > 1)
+            throw new Error("Encrypted mutation cannot resolve the stored space");
+          if (rows.length || recorded !== undefined) {
             if (recipients)
               throw new Error("initialRecipients cannot change an existing encryption scope");
             io.upsertInternal(
@@ -1615,6 +1702,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
               session,
               attribution,
               openTransactionId,
+            );
+            this.encryptedScopes.set(
+              encryptedRowScopeKey(table._table, id, updateOptions?.branch),
+              id,
             );
             return;
           }
@@ -1635,6 +1726,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             id,
             (secret, root) => this.retainInitialSpaceKey(secret, root),
             recipients,
+          );
+          this.encryptedScopes.set(
+            encryptedRowScopeKey(table._table, id, updateOptions?.branch),
+            id,
           );
         },
       );
@@ -1723,27 +1818,40 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (changed.length && !this.e2ee)
       throw new Error("Encrypted writes require an authenticated E2EE context");
     const updates = structuredClone(toWriteRecord(data, metadata.logical, table._table));
+    const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeUpdateOptions(table._schema, table._table, options);
+    const normalized = normalizeUpdateOptions(table._schema, table._table, optionsSnapshot);
     const query = new TypedTableQueryBuilder<
       AnyTableMeta & { row: { id: string } & Record<string, unknown> }
     >(table._table, table._schema)
+      .includeDeleted()
       .where({ id })
       .select(declaration.space);
     ownerClient.prepareTransaction(openTransactionId, async (io) => {
       const rows = await readTransactionRows<Record<string, unknown>>(
         query,
-        { ...options, tier: operation === "upsert" ? "global" : "local" },
+        {
+          ...optionsSnapshot,
+          tier: operation === "upsert" ? "global" : "local",
+        },
         false,
         binding,
         io,
+        undefined,
+        optionsSnapshot?.branch !== undefined,
       );
       const requested = updates[declaration.space];
-      const creating = operation === "upsert" && rows.length === 0;
-      const identifier =
-        creating && requested?.type === "Uuid" ? requested.value : rows[0]?.[declaration.space];
-      if (typeof identifier !== "string" || rows.length > 1)
+      const recorded = this.encryptedScopeFor(table._table, id, normalized?.branch);
+      if (
+        rows.length > 1 ||
+        (rows.length === 1 && typeof rows[0]?.[declaration.space] !== "string")
+      )
+        throw new Error("Encrypted mutation cannot resolve the stored space");
+      const storedScope = recorded ?? (rows.length ? rows[0]?.[declaration.space] : undefined);
+      const creating = operation === "upsert" && rows.length === 0 && typeof recorded !== "string";
+      const identifier = creating && requested?.type === "Uuid" ? requested.value : storedScope;
+      if (typeof identifier !== "string")
         throw new Error("Encrypted mutation cannot resolve the stored space");
       if (creating) {
         for (const name of declaration.columns) {
@@ -1761,29 +1869,58 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         (requested.type !== "Uuid" || requested.value.toLowerCase() !== identifier.toLowerCase())
       )
         throw new Error("The encryption space of a row is immutable");
-      const write = () =>
-        operation === "upsert"
-          ? io.upsertInternal(
-              table._table,
+      if (typeof storedScope === "string") {
+        this.encryptedScopes.set(
+          encryptedRowScopeKey(table._table, id, normalized?.branch),
+          storedScope,
+        );
+      }
+      const write = () => {
+        if (creating) {
+          return io.insertInternal(
+            table._table,
+            updates,
+            normalizeInsertOptions(table._schema, table._table, {
               id,
-              updates,
-              normalized,
-              session,
-              attribution,
-              openTransactionId,
-            )
-          : io.updateInternal(
-              table._table,
-              id,
-              updates,
-              normalized?.updatedAt,
-              session,
-              attribution,
-              openTransactionId,
-              normalized?.branch,
-            );
+              ...(optionsSnapshot?.updatedAt !== undefined && {
+                updatedAt: optionsSnapshot.updatedAt,
+              }),
+              ...(optionsSnapshot?.branch !== undefined && { branch: optionsSnapshot.branch }),
+            }),
+            session,
+            attribution,
+          );
+        }
+        if (operation === "upsert") {
+          return io.upsertInternal(
+            table._table,
+            id,
+            updates,
+            normalized,
+            session,
+            attribution,
+            openTransactionId,
+          );
+        }
+        return io.updateInternal(
+          table._table,
+          id,
+          updates,
+          normalized?.updatedAt,
+          session,
+          attribution,
+          openTransactionId,
+          normalized?.branch,
+        );
+      };
       if (!changed.length) {
         write();
+        if (creating) {
+          this.encryptedScopes.set(
+            encryptedRowScopeKey(table._table, id, normalized?.branch),
+            identifier,
+          );
+        }
         return;
       }
       if (!this.e2ee) throw new Error("Encrypted writes require an authenticated E2EE context");
@@ -1800,6 +1937,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           };
         }
         write();
+        this.encryptedScopes.set(
+          encryptedRowScopeKey(table._table, id, normalized?.branch),
+          identifier,
+        );
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
@@ -1981,6 +2122,7 @@ function readTransactionRows<T>(
   binding: DbTransactionHandleBinding,
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
+  global?: boolean,
 ): Promise<T[]>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -1989,6 +2131,7 @@ function readTransactionRows<T>(
   binding: DbTransactionHandleBinding,
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
+  global?: boolean,
 ): Promise<RowSettlement[]>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -1997,6 +2140,7 @@ function readTransactionRows<T>(
   binding: DbTransactionHandleBinding,
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
+  global?: boolean,
 ): Promise<SettledRows<T>>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2005,6 +2149,7 @@ function readTransactionRows<T>(
   binding: DbTransactionHandleBinding,
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
+  global?: boolean,
 ): Promise<T[] | SettledRows<T>>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2013,14 +2158,17 @@ function readTransactionRows<T>(
   binding: DbTransactionHandleBinding,
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
+  global?: boolean,
 ): Promise<T[] | RowSettlement[] | SettledRows<T>>;
 async function readTransactionRows<T>(
   query: QueryBuilder<T>,
   options: QueryOptions | undefined,
   settlementMetadata: boolean | "with-rows",
   binding: DbTransactionHandleBinding,
-  client: Pick<JazzClient, "queryInternal">,
+  client: Pick<JazzClient, "queryInternal"> &
+    Partial<Pick<TransactionPreparationIO, "queryGlobal">>,
   decrypt?: TransactionRowDecoder,
+  global = false,
 ): Promise<T[] | RowSettlement[] | SettledRows<T>> {
   const { openTransactionId, session } = binding;
   const builderJson = query._build();
@@ -2038,12 +2186,15 @@ async function readTransactionRows<T>(
     lowerPublicDbQueryOptions(options),
   );
   if (settlementMetadata) queryOptions.settlementMetadata = settlementMetadata;
-  const result = await client.queryInternal(
+  const queryClient = global ? client.queryGlobal : client.queryInternal;
+  if (!queryClient) throw new Error("Global transaction preflight is unavailable");
+  const result = await queryClient.call(
+    client,
     translateQuery(builderJson, planningSchema),
     {
       ...queryOptions,
       localUpdates: "deferred",
-      openTransactionId,
+      ...(!global && { openTransactionId }),
     },
     session,
   );
@@ -2084,7 +2235,7 @@ async function readTransactionRows<T>(
   return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
 }
 
-const transactionAdmission = new WeakMap<Db, () => Promise<void>>();
+const transactionAdmission = new WeakMap<Db, () => void | Promise<void>>();
 
 /** @internal Lifecycle work must not wait for the enrolment it implements. */
 export function exclusiveE2eeTransaction<TResult>(
@@ -3281,24 +3432,29 @@ export class Db {
     }
     const prepareInitialSpace = e2eeInitialPreparationForDb(this);
     const recipients = prepareInitialSpace ? new Set<string>() : undefined;
+    let scopeCreationRequested = false;
     const e2ee = prepareInitialSpace
       ? {
           db: this,
-          includeRecipients: (ids: readonly string[]) => {
-            for (const id of ids) recipients!.add(id);
+          requestScopeCreation: (ids?: readonly string[]) => {
+            scopeCreationRequested = true;
+            for (const id of ids ?? []) recipients!.add(id);
           },
         }
       : undefined;
     const prerequisite =
       transactionAdmission.get(this) ??
       (kind === "exclusive" && prepareInitialSpace
-        ? async () => {
-            await prepareInitialSpace();
-            while (recipients?.size) {
-              const pending = [...recipients];
-              recipients.clear();
-              await prepareInitialSpace(pending);
-            }
+        ? () => {
+            if (!scopeCreationRequested) return;
+            return (async () => {
+              await prepareInitialSpace();
+              while (recipients?.size) {
+                const pending = [...recipients];
+                recipients.clear();
+                await prepareInitialSpace(pending);
+              }
+            })();
           }
         : undefined);
     if (prerequisite && ownerClient)

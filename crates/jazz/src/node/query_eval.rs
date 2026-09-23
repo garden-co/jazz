@@ -1475,6 +1475,31 @@ where
         .await
     }
 
+    pub(crate) async fn query_rows_including_deleted_in_read_view_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut rows = self
+            .query_rows_including_deleted_with_query_engine(
+                shape,
+                binding,
+                tier,
+                identity,
+                authorization_mode,
+                read_view,
+            )
+            .await?;
+        let query = shape.query();
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        Ok(rows)
+    }
+
     async fn query_rows_with_options_for_identity(
         &mut self,
         shape: &ValidatedQuery,
