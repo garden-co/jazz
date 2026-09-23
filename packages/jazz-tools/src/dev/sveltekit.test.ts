@@ -29,15 +29,51 @@ function deployed(hash = "abc123def4567890") {
   };
 }
 
+type CapturedMiddleware = Parameters<NonNullable<ViteDevServer["middlewares"]>["use"]>[0];
+
+function invokeMiddleware(handler: CapturedMiddleware, url: string) {
+  return new Promise<{ statusCode: number; body: string }>((resolve) => {
+    let statusCode = 200;
+    handler(
+      { url },
+      {
+        setHeader() {},
+        get statusCode() {
+          return statusCode;
+        },
+        set statusCode(value: number) {
+          statusCode = value;
+        },
+        end(body?: string | Buffer) {
+          resolve({ statusCode, body: body?.toString() ?? "" });
+        },
+      },
+      () => resolve({ statusCode, body: "" }),
+    );
+  });
+}
+
 function makeViteServer(
   command: "serve" | "build",
   root = "/tmp/jazz-sveltekit-test",
-): ViteDevServer & { restart: ReturnType<typeof vi.fn> } {
+): ViteDevServer & {
+  restart: ReturnType<typeof vi.fn>;
+  middlewareHandlers: CapturedMiddleware[];
+} {
+  const middlewareHandlers: CapturedMiddleware[] = [];
   return {
     config: { root, command, env: {} },
-    httpServer: { once() {} },
+    httpServer: {
+      once() {},
+    },
+    middlewares: {
+      use(handler) {
+        middlewareHandlers.push(handler);
+      },
+    },
     ws: { send() {} },
     restart: vi.fn(() => Promise.resolve()),
+    middlewareHandlers,
   };
 }
 
@@ -93,6 +129,7 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit();
     // Without a serve ConfigEnv the hook returns the merged config synchronously
     // (the async runtime path only runs for `command: "serve"`).
+
     const runConfig = (c: Record<string, unknown>) =>
       plugin.config(c) as { ssr: { external: true | string[] } };
 
@@ -102,6 +139,291 @@ describe("jazzSvelteKit", () => {
 
     const externaliseAll = runConfig({ ssr: { external: true } });
     expect(externaliseAll.ssr.external).toBe(true);
+  });
+  it("serves the embedded inspector route and disposes the runtime on plugin close", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000237",
+      port: 19987,
+      url: "http://127.0.0.1:19987",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-inspector-test-");
+    const plugin = jazzSvelteKit({
+      server: { port: 19987, adminSecret: "bug237-admin" },
+    });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.config.env!.VITE_JAZZ_INSPECTOR).toBe("1");
+    expect(viteServer.middlewareHandlers).toHaveLength(1);
+    const response = await invokeMiddleware(
+      viteServer.middlewareHandlers[0]!,
+      "/__jazz/embedded/embedded.html",
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("<!doctype html>");
+
+    await (plugin.closeBundle as () => Promise<void>)();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("restarts the same plugin after close with a top-level adminSecret", async () => {
+    const firstStop = vi.fn().mockResolvedValue(undefined);
+    const secondStop = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(devServer, "startLocalJazzServer")
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000239",
+        port: 19985,
+        url: "http://127.0.0.1:19985",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: firstStop,
+      })
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000240",
+        port: 19984,
+        url: "http://127.0.0.1:19984",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: secondStop,
+      });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-restart"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-restart-test-");
+    const plugin = jazzSvelteKit({ adminSecret: "top-level-admin" });
+    const configureServer = plugin.configureServer as (s: ViteDevServer) => Promise<void>;
+    await configureServer(makeViteServer("serve", root));
+    await (plugin.closeBundle as () => Promise<void>)();
+    await configureServer(makeViteServer("serve", root));
+
+    expect(devServer.startLocalJazzServer).toHaveBeenCalledTimes(2);
+    expect(firstStop).toHaveBeenCalledOnce();
+    await (plugin.closeBundle as () => Promise<void>)();
+    expect(secondStop).toHaveBeenCalledOnce();
+  });
+
+  it("disposes from closeBundle when Vite is running in middleware mode", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000241",
+      port: 19983,
+      url: "http://127.0.0.1:19983",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-middleware"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-middleware-test-");
+    const plugin = jazzSvelteKit({ server: { adminSecret: "middleware-admin" } });
+    const viteServer = { ...makeViteServer("serve", root), httpServer: null };
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    await (plugin.closeBundle as () => Promise<void>)();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("shares one disposal when closeBundle calls are concurrent", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000242",
+      port: 19982,
+      url: "http://127.0.0.1:19982",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-concurrent"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-concurrent-close-test-");
+    const plugin = jazzSvelteKit({ server: { adminSecret: "concurrent-admin" } });
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      makeViteServer("serve", root),
+    );
+
+    await Promise.all([
+      (plugin.closeBundle as () => Promise<void>)(),
+      (plugin.closeBundle as () => Promise<void>)(),
+    ]);
+
+    expect(stop).toHaveBeenCalledOnce();
+  });
+  it("keeps a new server reference installed when configure races closeBundle disposal", async () => {
+    let resolveFirstStop!: () => void;
+    const firstStopPending = new Promise<void>((resolve) => {
+      resolveFirstStop = resolve;
+    });
+    const firstStop = vi.fn().mockReturnValue(firstStopPending);
+    const secondStop = vi.fn().mockResolvedValue(undefined);
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer");
+    startSpy
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000244",
+        port: 19980,
+        url: "http://127.0.0.1:19980",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: firstStop,
+      })
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000245",
+        port: 19979,
+        url: "http://127.0.0.1:19979",
+        dataDir: undefined as unknown as string,
+        adminSecret: "local-admin",
+        backendSecret: "local-backend",
+        stop: secondStop,
+      });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-race"));
+    let latestOnPush: ((hash: string) => void | Promise<void>) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      latestOnPush = opts.onPush;
+      return { close: vi.fn() };
+    });
+
+    const root = await tempRoots.create("jazz-sveltekit-race-test-");
+    const plugin = jazzSvelteKit({ server: { adminSecret: "race-admin" } });
+    const configureServer = plugin.configureServer as (s: ViteDevServer) => Promise<void>;
+    const firstServer = makeViteServer("serve", root);
+    await configureServer(firstServer);
+
+    const closePromise = (plugin.closeBundle as () => Promise<void>)();
+    expect(firstStop).toHaveBeenCalledOnce();
+
+    const newWsSend = vi.fn();
+    const newServer = {
+      ...makeViteServer("serve", root),
+      ws: { send: newWsSend },
+    };
+    const configurePromise = configureServer(newServer);
+    await Promise.resolve();
+    expect(startSpy).toHaveBeenCalledOnce();
+
+    resolveFirstStop();
+    await closePromise;
+    await configurePromise;
+    expect(startSpy).toHaveBeenCalledTimes(2);
+
+    newWsSend.mockClear();
+    expect(latestOnPush).toBeDefined();
+    await latestOnPush!("b237aaceface");
+    expect(newWsSend).toHaveBeenCalledWith({ type: "full-reload" });
+
+    await (plugin.closeBundle as () => Promise<void>)();
+  });
+
+  it("keeps the runtime alive when Vite restarts and closes the old plugin instance last", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const watcherClose = vi.fn();
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000246",
+      port: 19978,
+      url: "http://127.0.0.1:19978",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-restart-order"));
+    let onPush: ((hash: string) => void | Promise<void>) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      onPush = opts.onPush;
+      return { close: watcherClose };
+    });
+
+    const root = await tempRoots.create("jazz-sveltekit-restart-order-test-");
+    const pluginOptions = { server: { port: 19978, adminSecret: "restart-order-admin" } };
+    const serveEnv = { command: "serve" as const, mode: "development" };
+
+    // Initial start: Vite runs `config`, then `configureServer`.
+    const oldPlugin = jazzSvelteKit(pluginOptions);
+    await oldPlugin.config({ root }, serveEnv);
+    const oldWsSend = vi.fn();
+    await (oldPlugin.configureServer as (s: ViteDevServer) => Promise<void>)({
+      ...makeViteServer("serve", root),
+      ws: { send: oldWsSend },
+    });
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+    expect(process.env.BACKEND_SECRET).toBe("local-backend");
+    const appId = process.env.PUBLIC_JAZZ_APP_ID;
+    expect(appId).toBeTruthy();
+
+    // Restart (.env or vite.config.ts change): Vite's restartServer builds the
+    // new server first — fresh plugin instances run `config` and
+    // `configureServer` — and only then closes the old server, which fires the
+    // old instance's `closeBundle`.
+    const newPlugin = jazzSvelteKit(pluginOptions);
+    await newPlugin.config({ root }, serveEnv);
+    const newWsSend = vi.fn();
+    const newServer = { ...makeViteServer("serve", root), ws: { send: newWsSend } };
+    await (newPlugin.configureServer as (s: ViteDevServer) => Promise<void>)(newServer);
+    await (oldPlugin.closeBundle as () => Promise<void>)();
+
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+    expect(watcherClose).not.toHaveBeenCalled();
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(appId);
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+    expect(process.env.BACKEND_SECRET).toBe("local-backend");
+    expect(newServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+
+    // Schema pushes after the restart reload the browser on the live server.
+    oldWsSend.mockClear();
+    await onPush!("b237aaceface01");
+    expect(newWsSend).toHaveBeenCalledWith({ type: "full-reload" });
+    expect(oldWsSend).not.toHaveBeenCalled();
+
+    // Final shutdown: closing the last active instance disposes everything.
+    await (newPlugin.closeBundle as () => Promise<void>)();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(watcherClose).toHaveBeenCalledOnce();
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+    expect(process.env.BACKEND_SECRET).toBeUndefined();
+  });
+
+  it("reports and rethrows disposal failures from closeBundle", async () => {
+    const disposalError = new Error("dispose failed");
+    const stop = vi.fn().mockRejectedValue(disposalError);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000243",
+      port: 19981,
+      url: "http://127.0.0.1:19981",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-reject"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-disposal-rejection-test-");
+    const plugin = jazzSvelteKit({ server: { adminSecret: "rejection-admin" } });
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      makeViteServer("serve", root),
+    );
+
+    await expect((plugin.closeBundle as () => Promise<void>)()).rejects.toThrow("dispose failed");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[jazz] runtime disposal failed"),
+      disposalError,
+    );
   });
 
   it("starts a local server in dev and injects PUBLIC_JAZZ_* env vars", async () => {
@@ -321,20 +643,52 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19999, adminSecret: "build-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("build"));
+    const viteServer = makeViteServer("build");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
   });
 
   it("does not start a server when server:false", async () => {
     const spy = vi.spyOn(devServer, "startLocalJazzServer");
 
     const plugin = jazzSvelteKit({ server: false });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
+    const viteServer = makeViteServer("serve");
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
+  });
+
+  it("does not install the inspector overlay when inspector:false", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000238",
+      port: 19986,
+      url: "http://127.0.0.1:19986",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug238"));
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzSvelteKit({
+      inspector: false,
+      server: { port: 19986, adminSecret: "bug238-admin" },
+    });
+    const root = await tempRoots.create("jazz-sveltekit-no-inspector-test-");
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.config.env?.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(viteServer.middlewareHandlers).toHaveLength(0);
+    await (plugin.closeBundle as () => Promise<void>)();
   });
 
   it("injects BACKEND_SECRET from the server handle", async () => {

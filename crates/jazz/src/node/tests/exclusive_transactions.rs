@@ -1043,6 +1043,173 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     };
     assert_eq!(fate, Fate::Accepted);
 }
+
+// The local pre-publication check runs inside `commit_exclusive` before any
+// authority sees the unit, and it depends on which versions this node ingested
+// between begin and commit. `JazzClient` cannot pin that interleaving, so
+// these tests drive the node directly and assert the local commit outcome.
+fn watched_title_shape() -> (ValidatedQuery, Binding) {
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    (shape, binding)
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_remote_matching_phantom() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_title_shape();
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    let (_remote, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    assert!(matches!(
+        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_pending_local_matching_insert() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (shape, binding) = watched_title_shape();
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    // No authority exists: the matching insert stays a pending local write.
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        )
+        .unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    assert!(matches!(
+        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_title_shape();
+    register_shape_binding(&mut core, &shape, &binding);
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    let (_remote, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("unrelated remote")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(2), 11).cells(title_cells("unrelated local")),
+        )
+        .unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    // Passing the local check publishes the unit; the authority agrees.
+    let (_committed, unit) = client
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 12)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Accepted);
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
+    for (name, removal) in [
+        (
+            "moved out of the filter",
+            MergeableCommit::new("todos", row(1), 20).cells(title_cells("moved")),
+        ),
+        (
+            "deleted",
+            MergeableCommit::new("todos", row(1), 20).deletion(DeletionEvent::Deleted),
+        ),
+    ] {
+        let (_client_dir, mut client) = open_node_with_uuid(node(1));
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        let (shape, binding) = watched_title_shape();
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        );
+
+        let tx_id = OpenTransactionId::new();
+        client.open_exclusive(tx_id).unwrap();
+        assert_eq!(
+            client.tx_query(tx_id, &shape, &binding).unwrap().len(),
+            1,
+            "{name}"
+        );
+
+        // The authority is offline from here on: the removal stays pending.
+        client.commit_mergeable_settled(removal).unwrap();
+
+        client
+            .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+            .unwrap();
+        assert!(
+            matches!(
+                client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 21),
+                Err(Error::TransactionConflict)
+            ),
+            "{name}"
+        );
+    }
+}
 #[test]
 fn exclusive_shape_predicate_is_binding_sensitive() {
     let author_a = user(0xa1);

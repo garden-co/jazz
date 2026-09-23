@@ -532,6 +532,11 @@ Operators request only evidence needed to decide their own output:
 An operator may discover additional requests after earlier chunks arrive. This
 is progress, not a retry of a visible operation.
 
+JSON pointer reads require a JSON semantic value; arbitrary String values are
+not admitted as JSON documents. Array components use canonical nonnegative
+indices (`0` or a nonzero digit followed by digits); object keys such as `"01"`
+remain literal keys.
+
 JSON validity is enforced when a JSON value is prepared for publication. Reads
 assume that write-admission invariant rather than revalidating every unread
 suffix. A pointer read fails if the demanded source is malformed, but it may

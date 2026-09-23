@@ -74,6 +74,10 @@ pretending that the new identity authored earlier rows.
 `AccountStore.update` must perform an atomic read/transform/write across all
 managers using that store. Browser defaults use Web Locks with localStorage;
 server/native hosts supply the equivalent transaction or process-wide lock.
+Automatic `createJazzSession({ initial: "local-first" })` startup performs its
+first-root ensure inside that transaction, then adopts the durable winner before
+opening a client. Explicit `createLocalFirst`, recovery, and logout operations
+keep their existing selection semantics.
 The shared helper merges retained roots inside that transaction, so a stale
 manager cannot erase another manager's offline key. Selection follows the
 last successful operation; external provider credentials are never persisted.
