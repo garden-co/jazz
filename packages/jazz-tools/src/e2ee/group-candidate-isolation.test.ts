@@ -10,7 +10,7 @@ import { withGroupTopologyPermissions } from "./group-topology.js";
 import { groupMembershipBytes } from "./group-format.js";
 import { createBrowserDeviceSigner } from "./browser.js";
 
-it("ignores a signed add before recipient enrolment without poisoning unrelated groups or granting retroactive access", async () => {
+it("rejects pre-enrolment authors and recipients without poisoning unrelated groups or granting retroactive access", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
@@ -72,6 +72,22 @@ it("ignores a signed add before recipient enrolment without poisoning unrelated 
         tier: "edge",
       }),
     ).toEqual([]);
+    // Ordinary account ownership admits this proposal before E2EE enrolment.
+    // Its later account root must not give the proposal historical authority.
+    const writer = await createDb({ ...future });
+    clients.push(writer);
+    await writer
+      .insert(app.__e2ee_groups, {
+        accountId: future.account.id,
+        deviceId: crypto.randomUUID(),
+        accountEpochId: crypto.randomUUID(),
+        epochId: crypto.randomUUID(),
+        mechanism: root.mechanism,
+        version: root.version,
+        verification: root.verification,
+        signature: new Uint8Array(64),
+      })
+      .wait({ tier: "global" });
     const device = JSON.parse(mallory.stored()).devices[0];
     const signer = await createBrowserDeviceSigner();
     const privateKey = Uint8Array.from(device.signingPrivateKey);
