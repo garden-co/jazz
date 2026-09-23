@@ -2327,6 +2327,11 @@ impl CurrentRow {
     }
     /// Project a source row into an explicit relation output, preserving the
     /// aliases chosen by the relation facade.
+    ///
+    /// Each alias carries the declared type of its source column exactly, so
+    /// nullability comes from the source schema. This is the same logical
+    /// descriptor the one-shot relation terminal emits; maintained and
+    /// one-shot reads of one relation must never disagree on result types.
     pub(crate) fn project_relation(
         &self,
         table: &TableSchema,
@@ -2342,63 +2347,53 @@ impl CurrentRow {
             visibility: CurrentRowResultVisibility::HiddenMetadata,
         }];
         for projection in columns {
-            let (value, column_type, publication) = match &projection.expr {
+            let (value, field_type) = match &projection.expr {
                 crate::query::RelationProjectExpr::RowId(
                     crate::query::RelationRowIdRef::Current,
-                ) => (
-                    Some(Value::Uuid(self.row_uuid().0)),
-                    records::ValueType::Uuid,
-                    CurrentRowPublicationField::ResultField {
-                        name: projection.alias.clone(),
-                        visibility: CurrentRowResultVisibility::ApplicationCell,
-                    },
-                ),
-                crate::query::RelationProjectExpr::Column(reference) => {
-                    if reference.column == "id" {
-                        (
-                            Some(Value::Uuid(self.row_uuid().0)),
-                            records::ValueType::Uuid,
-                            CurrentRowPublicationField::ResultField {
-                                name: projection.alias.clone(),
-                                visibility: CurrentRowResultVisibility::ApplicationCell,
-                            },
-                        )
-                    } else {
-                        let column_position = table
-                            .columns
-                            .iter()
-                            .position(|column| column.name == reference.column)
-                            .ok_or(Error::InvalidStoredValue(
-                                "relation output column is absent from the read schema",
-                            ))?;
-                        let column = &table.columns[column_position];
-                        (
-                            self.cell_at(column_position),
-                            records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                            CurrentRowPublicationField::ResultField {
-                                name: projection.alias.clone(),
-                                visibility: CurrentRowResultVisibility::ApplicationCell,
-                            },
-                        )
-                    }
+                ) => (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid),
+                crate::query::RelationProjectExpr::Column(reference)
+                    if reference.column == "id" =>
+                {
+                    (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid)
                 }
-                _ => {
+                crate::query::RelationProjectExpr::Column(reference) => {
+                    let column_position = table
+                        .columns
+                        .iter()
+                        .position(|column| column.name == reference.column)
+                        .ok_or(Error::InvalidStoredValue(
+                            "relation output column is absent from the read schema",
+                        ))?;
+                    let column_type = table.columns[column_position].column_type.clone();
+                    // `cell_at` strips the physical presence carrier, leaving
+                    // the column's own logical value (itself `Nullable` for a
+                    // nullable column).
+                    let value = match (self.cell_at(column_position), &column_type) {
+                        (Some(value), _) => value,
+                        (None, records::ValueType::Nullable(_)) => Value::Nullable(None),
+                        (None, _) => {
+                            return Err(Error::InvalidStoredValue(
+                                "relation output of a non-nullable column has no value",
+                            ));
+                        }
+                    };
+                    (value, column_type)
+                }
+                crate::query::RelationProjectExpr::RowId(_) => {
                     return Err(Error::InvalidStoredValue(
                         "relation output contains an unsupported expression",
                     ));
                 }
             };
-            let field_type = match column_type {
-                records::ValueType::Nullable(inner) => records::ValueType::Nullable(inner),
-                column_type => records::ValueType::Nullable(Box::new(column_type)),
-            };
-            let value = Value::Nullable(value.map(Box::new));
             values.push(value);
             descriptor_fields.push(
                 records::DescriptorField::new(projection.alias.clone(), field_type)
                     .with_identity(records::FieldIdentity::Name(projection.alias.clone())),
             );
-            publication_fields.push(publication);
+            publication_fields.push(CurrentRowPublicationField::ResultField {
+                name: projection.alias.clone(),
+                visibility: CurrentRowResultVisibility::ApplicationCell,
+            });
         }
         let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let raw = descriptor.create(&values)?;

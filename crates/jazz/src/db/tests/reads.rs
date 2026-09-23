@@ -1220,6 +1220,150 @@ fn relation_union_all_preserves_labeled_same_row_derivations() {
     );
 }
 
+/// One-shot and maintained reads of one projected relation must publish the
+/// same result descriptor: every alias carries its source column's declared
+/// type, so a non-null Text column stays `String`, a nullable FK stays
+/// `Nullable(Uuid)` and `id` is a plain `Uuid`. Relation IR is built directly
+/// because it is the public Rust relation seam used by WASM and NAPI.
+#[test]
+fn relation_query_projection_types_match_between_one_shot_and_maintained_reads() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xd3, AuthorSubject::for_test_bytes([0xd3; 16]), &schema);
+    let parent = row(0x10);
+    let child = row(0x11);
+    db.insert(
+        "teams",
+        BTreeMap::from([("name".to_owned(), Value::String("Parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Child".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(child),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let column = |alias: &str, column: &str| crate::query::RelationProjectColumn {
+        alias: alias.to_owned(),
+        expr: RelationProjectExpr::Column(RelationColumnRef {
+            scope: Some("teams".to_owned()),
+            column: column.to_owned(),
+        }),
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "teams".to_owned(),
+                alias: None,
+            }),
+            columns: vec![
+                column("teamId", "id"),
+                column("label", "name"),
+                column("parent", "parent_id"),
+            ],
+        },
+    };
+    let expected_types = vec![
+        ("teamId".to_owned(), ValueType::Uuid),
+        ("label".to_owned(), ValueType::String),
+        (
+            "parent".to_owned(),
+            ValueType::Nullable(Box::new(ValueType::Uuid)),
+        ),
+    ];
+    // The published descriptor exactly as the native binding encodes it for
+    // hosts, minus fields it tags as hidden metadata (row identity, routes).
+    let field_types = |row: &CurrentRow| {
+        let batches = crate::binding_codec::row_batches(std::slice::from_ref(row)).unwrap();
+        batches[0]
+            .descriptor
+            .iter()
+            .filter_map(|field| match field.name {
+                crate::binding_codec::RowDescriptorFieldName::HiddenMetadata { .. } => None,
+                crate::binding_codec::RowDescriptorFieldName::ResultField { name } => {
+                    Some((name.to_owned(), field.value_type.clone()))
+                }
+                crate::binding_codec::RowDescriptorFieldName::StoredColumn {
+                    output_name, ..
+                } => Some((output_name.to_owned(), field.value_type.clone())),
+            })
+            .collect::<Vec<_>>()
+    };
+    let cells = |row: &CurrentRow| {
+        let (descriptor, raw) = row.encoded_record();
+        let bound = descriptor.bind(raw);
+        ["teamId", "label", "parent"].map(|alias| bound.get(alias).unwrap().clone())
+    };
+    let expected_cells = |id: RowUuid| {
+        if id == parent {
+            [
+                Value::Uuid(parent.0),
+                Value::String("Parent".to_owned()),
+                Value::Nullable(None),
+            ]
+        } else {
+            [
+                Value::Uuid(child.0),
+                Value::String("Child".to_owned()),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ]
+        }
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(snapshot.rows.len(), 2);
+    for returned in &snapshot.rows {
+        assert_eq!(field_types(returned), expected_types);
+        assert_eq!(cells(returned), expected_cells(returned.row_uuid()));
+    }
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(opened.len(), 2);
+    for returned in &opened {
+        assert_eq!(field_types(returned), expected_types);
+        assert_eq!(cells(returned), expected_cells(returned.row_uuid()));
+    }
+    assert_eq!(
+        field_types(&opened[0]),
+        field_types(&snapshot.rows[0]),
+        "one-shot and maintained relation reads must publish one descriptor"
+    );
+
+    db.update(
+        "teams",
+        child,
+        BTreeMap::from([("parent_id".to_owned(), Value::Nullable(None))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, updated, removed) = delta_rows(subscription.try_next_event().expect("update event"));
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&updated), vec![child]);
+    assert_eq!(field_types(&updated[0]), expected_types);
+    assert_eq!(
+        cells(&updated[0]),
+        [
+            Value::Uuid(child.0),
+            Value::String("Child".to_owned()),
+            Value::Nullable(None),
+        ]
+    );
+}
+
 /// Two `users` arms projected to `displayName`, ordered globally by `term`.
 fn users_union_ordered_by(term: RelationColumnRef) -> RelationQuery {
     let arm = |label: &str| crate::query::RelationUnionArm {
@@ -1467,12 +1611,17 @@ fn relation_union_all_maintained_projection_is_selected_by_arm() {
             ],
         },
     };
+    // Exact published type and value: `nickname` and `name` are non-nullable
+    // Text, so both one-shot and maintained reads must publish plain `String`.
     let display_name = |row: &CurrentRow| {
         let (descriptor, raw) = row.encoded_record();
-        match descriptor.bind(raw).get("displayName").unwrap().clone() {
-            Value::Nullable(Some(value)) => *value,
-            value => value,
-        }
+        let field = descriptor
+            .fields()
+            .iter()
+            .find(|field| field.name.as_deref() == Some("displayName"))
+            .expect("displayName field");
+        assert_eq!(field.value_type, ValueType::String);
+        descriptor.bind(raw).get("displayName").unwrap().clone()
     };
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(
