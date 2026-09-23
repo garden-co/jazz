@@ -12,21 +12,40 @@ export const writeContractApp = schema.defineApp({
 
 const notes = writeContractApp.notes;
 
+/** How a binding reports a failure that resident local state already decides. */
+export type ResidentFailureSurface = "sync" | "handle";
+
 /**
- * Synchronous class: a failure that the resident local state already decides
- * is thrown by the write call itself, before any handle exists.
+ * Resident tombstone: update, upsert and delete of a row whose delete has
+ * already been applied locally. The decided RN contract (#3273) throws these
+ * synchronously from the call. NAPI and WASM, observed in CI on this PR,
+ * report the same failure through the write handle instead; each binding's
+ * test pins its own surface with the same calls, so that divergence stays
+ * explicit.
  */
-export async function assertResidentTombstoneThrowsSynchronously(db: Db): Promise<void> {
+export async function assertResidentTombstoneRejects(
+  db: Db,
+  surface: ResidentFailureSurface,
+): Promise<void> {
   const row = await db.insert(notes, { text: "doomed", seq: 0 }).wait({ tier: "local" });
   await db.delete(notes, row.id).wait({ tier: "local" });
-
-  expect(() => db.update(notes, row.id, { text: "revived" })).toThrow(
-    `row already deleted: ${row.id}`,
-  );
-  expect(() => db.upsert(notes, row.id, { text: "revived", seq: 1 })).toThrow(
-    `row already deleted: ${row.id}`,
-  );
-  expect(() => db.delete(notes, row.id)).toThrow(`row already deleted: ${row.id}`);
+  const reason = `row already deleted: ${row.id}`;
+  const writes = [
+    () => db.update(notes, row.id, { text: "revived" }),
+    () => db.upsert(notes, row.id, { text: "revived", seq: 1 }),
+    () => db.delete(notes, row.id),
+  ];
+  for (const write of writes) {
+    if (surface === "sync") {
+      expect(write).toThrow(reason);
+    } else {
+      let handle: ReturnType<typeof write> | undefined;
+      expect(() => {
+        handle = write();
+      }).not.toThrow();
+      await expect(handle!.wait({ tier: "local" })).rejects.toMatchObject({ reason });
+    }
+  }
   expect(await db.all(notes)).toEqual([]);
 }
 
