@@ -165,6 +165,11 @@ paths. Status never repairs a missing delivery or rotates a stale epoch.
 Its results describe the accepted per-path snapshots, not one atomic snapshot
 of all spaces or a guarantee against later changes.
 
+Recovery and device-delivery selection can skip a candidate that cannot be opened
+or whose current key cannot be confirmed. Once that key is confirmed, failures
+while replaying membership or processing predecessor history propagate to the
+caller; they are not reported as a missing or unusable delivery.
+
 ## Space successor transcript
 
 `__e2ee_space_successors` holds immutable UUID `id`, `spaceId`, `predecessor`,
