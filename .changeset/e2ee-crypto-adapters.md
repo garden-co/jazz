@@ -1,0 +1,8 @@
+---
+"jazz-tools": minor
+"jazz-napi": minor
+---
+
+Add versioned E2EE envelope/context formats and independently replaceable browser/native cell, key-envelope, signing, and equality adapters. Include pinned crypto packaging, independent byte fixtures, and fail-closed authentication checks. This layer does not add account lifecycle, encrypted table operations, or encrypted uploads; conformance coverage is not an independent protocol or binding security audit.
+
+Expose the native crypto primitives through both CommonJS and ESM. Reject non-string mechanism IDs and unknown own context fields, including non-enumerable properties and symbol keys.
