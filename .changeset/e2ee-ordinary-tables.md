@@ -28,3 +28,8 @@ subscription and migration paths fail closed until their owning layers.
 
 Native transaction waits no longer spin on queued inbound frames or accumulate
 settlement callbacks while waiting for server acceptance.
+
+Tombstone-inclusive reads retain deletion state when binding session claims.
+After a read grant is restored, the same client can receive fresh readable
+content without discarding its local cache; revoked successor content remains
+withheld.
