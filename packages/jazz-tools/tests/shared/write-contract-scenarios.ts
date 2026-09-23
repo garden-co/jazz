@@ -31,25 +31,36 @@ export async function assertResidentTombstoneThrowsSynchronously(db: Db): Promis
 }
 
 /**
- * Handle class: a failure only discovered when the write is applied (here: a
- * delete admitted earlier in the same turn) is reported by the write handle
- * and the mutation-error listener, not thrown by the call.
+ * Handle class: a failure that admission never decides from resident state
+ * (here: re-inserting a deleted row's caller-supplied id, which only the
+ * apply step checks) is reported by the write handle and the mutation-error
+ * listener, not thrown by the call. This matches the NAPI receipt in
+ * tests/ts-dsl/insert-api.test.ts.
  */
 export async function assertApplyFailureSurfacesThroughHandle(db: Db): Promise<void> {
-  const row = await db.insert(notes, { text: "raced", seq: 0 }).wait({ tier: "local" });
+  const id = crypto.randomUUID();
+  await db.insert(notes, { text: "reserved", seq: 0 }, { id }).wait({ tier: "local" });
+  await db.delete(notes, id).wait({ tier: "local" });
   const errors: unknown[] = [];
   const stop = db.onMutationError((event) => errors.push(event));
   try {
-    db.delete(notes, row.id);
-    let handle: ReturnType<typeof db.update> | undefined;
+    let handle: ReturnType<typeof db.insert> | undefined;
     expect(() => {
-      handle = db.update(notes, row.id, { text: "too late" });
+      handle = db.insert(notes, { text: "reused id", seq: 1 }, { id });
     }).not.toThrow();
     await expect(handle!.wait({ tier: "local" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
       code: "write_rejected",
-      reason: `row already deleted: ${row.id}`,
+      reason: `row already deleted: ${id}`,
     });
+    // Without an active wait(), the same apply-time rejection reaches the
+    // mutation-error listener instead.
+    expect(() => db.insert(notes, { text: "unawaited", seq: 2 }, { id })).not.toThrow();
+    const deadline = Date.now() + 10_000;
+    while (errors.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(errors).toHaveLength(1);
     expect(await db.all(notes)).toEqual([]);
   } finally {
     stop();
@@ -66,7 +77,10 @@ export async function assertBurstBeyondCapLosesNothing(db: Db, burst = 192): Pro
   for (let seq = 0; seq < burst; seq += 1) {
     handles.push(db.insert(notes, { text: `c${seq}`, seq }));
   }
-  const written = await Promise.all(handles.map((handle) => handle.wait({ tier: "local" })));
+  // Await in call order: concurrent waits are themselves bounded pending
+  // operations on native bindings, independent of the write queue.
+  const written = [];
+  for (const handle of handles) written.push(await handle.wait({ tier: "local" }));
   expect(written.map((row) => row.seq)).toEqual([...Array(burst).keys()]);
   const rows = await db.all(notes.orderBy("seq", "asc"));
   expect(rows.map((row) => [row.seq, row.text])).toEqual(
