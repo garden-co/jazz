@@ -111,13 +111,13 @@ it("tells Expo Go and old development builds that a native artifact is required"
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2 + 1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    "Jazz native relay ABI 2 is incompatible with JavaScript ABI 1..=1; install a matching native development or release build.",
+    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V2 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V2}..=${NATIVE_RELAY_ABI_V2}; install a matching native development or release build.`,
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
@@ -215,7 +215,7 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
   for (const factory of [
     undefined,
     {},
-    { abiVersion: 2, openAttached: () => foregroundFixture() },
+    { abiVersion: 1, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
       getAbiVersion: () => NATIVE_RELAY_ABI_V2,
