@@ -1220,6 +1220,109 @@ fn relation_union_all_preserves_labeled_same_row_derivations() {
     );
 }
 
+/// Two `users` arms projected to `displayName`, ordered globally by `term`.
+fn users_union_ordered_by(term: RelationColumnRef) -> RelationQuery {
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    RelationQuery {
+        rel: RelationExpr::OrderBy {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            terms: vec![RelationOrderBy {
+                column: term,
+                direction: OrderDirection::Asc,
+            }],
+        },
+    }
+}
+
+/// Global UNION ordering runs over union output rows, so an order term scoped
+/// to anything but the output table has no meaning. It must be rejected rather
+/// than silently sorting by the output table's same-named column, and author
+/// provenance ordering stays unsupported exactly as for non-union queries.
+/// Relation IR is built directly because it is the public Rust relation seam
+/// used by WASM and NAPI; the assertions are on the public read results.
+#[test]
+fn relation_union_all_order_by_rejects_foreign_scope_and_author_columns() {
+    let schema = relation_schema();
+    let db = open_db(0xd2, AuthorSubject::for_test_bytes([0xd2; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let accepted = users_union_ordered_by(RelationColumnRef {
+        scope: Some("users".to_owned()),
+        column: "name".to_owned(),
+    });
+    let snapshot = block_on(db.all_relation_query(&accepted, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![alice, alice]);
+
+    let foreign_scope = users_union_ordered_by(RelationColumnRef {
+        scope: Some("other".to_owned()),
+        column: "name".to_owned(),
+    });
+    let error = block_on(db.all_relation_query(&foreign_scope, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("union order_by must be scoped to the union output table"),
+        "{}",
+        error.message
+    );
+    let error = block_on(db.subscribe_relation_query(&foreign_scope, ReadOpts::default()))
+        .err()
+        .expect("maintained union with a foreign order scope must be rejected");
+    assert_eq!(error.code, ErrorCode::Query);
+
+    let unknown_column = users_union_ordered_by(RelationColumnRef {
+        scope: Some("users".to_owned()),
+        column: "missing".to_owned(),
+    });
+    let error = block_on(db.all_relation_query(&unknown_column, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("missing"), "{}", error.message);
+
+    for author_column in ["$createdBy", "$updatedBy"] {
+        let author_ordered = users_union_ordered_by(RelationColumnRef {
+            scope: None,
+            column: author_column.to_owned(),
+        });
+        let error =
+            block_on(db.all_relation_query(&author_ordered, ReadOpts::default())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error.message.contains(&format!(
+                "ordering by author provenance column {author_column} is unsupported"
+            )),
+            "{}",
+            error.message
+        );
+    }
+}
+
 /// A maintained root UNION must retain source version metadata after each
 /// arm's public projection narrows the physical row.
 #[test]

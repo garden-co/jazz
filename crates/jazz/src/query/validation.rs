@@ -440,8 +440,31 @@ fn validate_retained_relation_union(
             "union requires at least one input".to_owned(),
         ));
     }
-    let mut labels = BTreeSet::new();
     let output_table_schema = schema_table(schema, output_table)?;
+    // Global UNION ordering runs over the union output rows, which are always
+    // rows of `output_table`. Arm-local scopes do not exist above the union,
+    // so a term naming another scope has no meaning and must not silently
+    // fall back to the output table's same-named column.
+    if let Some(terms) = parts.order_by {
+        for term in terms {
+            if term
+                .column
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope != output_table)
+            {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "union order_by must be scoped to the union output table".to_owned(),
+                ));
+            }
+            reject_author_ordering(&[OrderBy {
+                column: term.column.column.clone(),
+                direction: term.direction,
+            }])?;
+            planner_column_type(&output_table_schema, &term.column.column)?;
+        }
+    }
+    let mut labels = BTreeSet::new();
     let mut output_projection = None::<Vec<(String, ColumnType)>>;
     for arm in inputs {
         if arm.label.is_empty()
