@@ -141,6 +141,8 @@ pub(crate) fn relation_output_projection(
             relation_unification_error("relation query must define an output projection")
         })?;
         validate_relation_projection_aliases(&columns)?;
+        // A UNION always retains its arm projections.
+        reject_reserved_relation_aliases(&columns)?;
         return Ok((scope, columns));
     }
     let mut plan = RelationFacadePlan::default();
@@ -303,12 +305,16 @@ fn relation_projection_from_expr(
     }
 }
 
-/// Engine carrier names and namespaces that a relation projection alias must
-/// not take. Relation aliases are lowered as graph fields beside the source
-/// row's own carriers (`row_uuid`, `_app_<column>` cells, `$` provenance,
-/// `tx_*` version fields, `__`-prefixed engine fields such as the UNION arm and
-/// row carriers, and `left.`/`right.` join-side fields). An alias with one of
-/// these names would replace that carrier instead of adding a public output.
+/// Engine carrier names and namespaces that a *retained* relation projection
+/// alias must not take. Retained aliases are lowered as graph fields beside
+/// the source row's own carriers (`row_uuid`, `_app_<column>` cells, `$`
+/// provenance, `tx_*` version fields, `__`-prefixed engine fields such as the
+/// UNION arm and row carriers, and `left.`/`right.` join-side fields), so such
+/// an alias would replace that carrier instead of adding a public output.
+///
+/// A full identity projection is not retained (it is the ordinary row shape)
+/// and therefore keeps accepting every schema-permitted column name; see #2997
+/// for the general logical-name vs carrier-name ambiguity.
 const RESERVED_RELATION_ALIASES: &[&str] = &["row_uuid", "tx_time", "tx_node_id"];
 const RESERVED_RELATION_ALIAS_PREFIXES: &[&str] = &[
     "$",
@@ -318,6 +324,7 @@ const RESERVED_RELATION_ALIAS_PREFIXES: &[&str] = &[
     "right.",
 ];
 
+/// Structural alias rules shared by every relation projection.
 pub(crate) fn validate_relation_projection_aliases(
     columns: &[RelationProjectColumn],
 ) -> Result<(), QueryError> {
@@ -329,6 +336,17 @@ pub(crate) fn validate_relation_projection_aliases(
                 "relation project aliases must be non-empty, NUL-free, and unique",
             ));
         }
+    }
+    Ok(())
+}
+
+/// Reject aliases of a retained projection that would replace an engine
+/// carrier.
+pub(crate) fn reject_reserved_relation_aliases(
+    columns: &[RelationProjectColumn],
+) -> Result<(), QueryError> {
+    for column in columns {
+        let alias = column.alias.as_str();
         if RESERVED_RELATION_ALIASES.contains(&alias)
             || RESERVED_RELATION_ALIAS_PREFIXES
                 .iter()

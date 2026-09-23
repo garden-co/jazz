@@ -1531,6 +1531,83 @@ fn relation_projection_rejects_reserved_internal_aliases() {
     }
 }
 
+/// Reserved alias names apply only to retained projections. A full identity
+/// projection is the ordinary row shape, so a table whose schema-permitted
+/// column name resembles an engine carrier (`__note`) keeps working through
+/// relation queries exactly as before, on both read paths; a UNION, which
+/// always retains its arm projections, rejects the same alias clearly.
+#[test]
+fn relation_identity_projection_keeps_carrier_like_column_names() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("events")
+                .column("name", PublicColumnType::Text)
+                .column("__note", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xd8, AuthorSubject::for_test_bytes([0xd8; 16]), &schema);
+    let event = row(0xe1);
+    db.insert(
+        "events",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("launch".to_owned())),
+            ("__note".to_owned(), Value::String("noon".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(event),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let identity = || RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "events".to_owned(),
+            alias: None,
+        }),
+        columns: ["id", "name", "__note"]
+            .map(|column| crate::query::RelationProjectColumn {
+                alias: column.to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("events".to_owned()),
+                    column: column.to_owned(),
+                }),
+            })
+            .to_vec(),
+    };
+    let query = RelationQuery { rel: identity() };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![event]);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "__note"),
+        Some(Value::String("noon".to_owned()))
+    );
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), vec![event]);
+    assert_eq!(
+        opened[0].cell(&schema.tables[0], "__note"),
+        Some(Value::String("noon".to_owned()))
+    );
+
+    let union = RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![crate::query::RelationUnionArm {
+                label: "only".to_owned(),
+                input: identity(),
+            }],
+        },
+    };
+    let error = block_on(db.all_relation_query(&union, ReadOpts::default())).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("relation project alias \"__note\" is a reserved internal name"),
+        "{}",
+        error.message
+    );
+}
+
 /// A relation envelope may carry `include` array subqueries, as the TypeScript
 /// adapter sends for `match` predicates: a full identity projection of the
 /// output table plus includes. The identity projection is the ordinary row

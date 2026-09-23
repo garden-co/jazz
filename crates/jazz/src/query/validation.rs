@@ -472,6 +472,7 @@ fn retain_relation_output_projection(
         return Ok(false);
     }
     reject_presentation_over_relation_projection(query)?;
+    crate::query::reject_reserved_relation_aliases(&columns)?;
     Ok(true)
 }
 
