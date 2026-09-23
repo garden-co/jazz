@@ -3061,6 +3061,8 @@ mod catalogue;
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
+#[doc(hidden)]
+pub use mutations::ResidentMutationPrecheck;
 pub use mutations::{
     JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
     StreamingMutationKind, StreamingValueUpload,
@@ -4515,6 +4517,14 @@ where
     /// Generated or caller-supplied row id affected by this write.
     pub fn row_uuid(&self) -> RowUuid {
         self.row_uuid
+    }
+
+    /// Whether this owner-queued write is admitted but not yet applied.
+    #[doc(hidden)]
+    pub fn is_queued_unapplied(&self) -> bool {
+        self.queued_status
+            .as_ref()
+            .is_some_and(|status| matches!(*status.borrow(), QueuedMutationStatus::Pending))
     }
 
     /// Mergeable transaction id backing this write.

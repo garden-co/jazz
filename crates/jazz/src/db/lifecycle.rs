@@ -626,6 +626,14 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Number of admitted owner operations (mutations, fenced reads and
+    /// cleanups) that have not finished yet. Bindings bound their direct
+    /// mutation admission with it.
+    #[doc(hidden)]
+    pub fn queued_mutation_count(&self) -> usize {
+        self.node.queued_mutation_count()
+    }
+
     /// Order a binding read after mutations already admitted on this owner.
     /// This only waits for local command execution, not persistence or sync,
     /// and later writes cannot extend the wait.

@@ -8,6 +8,8 @@ type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
+    /// Admitted direct writes the owner has not applied yet, in FIFO order.
+    unapplied: RefCell<VecDeque<Rc<WriteHandle<MemoryStorage>>>>,
     uploads: Rc<RefCell<BTreeMap<u64, Rc<StreamingUploadSlot>>>>,
     errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
 }
@@ -26,6 +28,7 @@ impl MutationHandles {
         }));
         Self {
             writes: Rc::new(RefCell::new(BTreeMap::new())),
+            unapplied: RefCell::new(VecDeque::new()),
             uploads: Rc::new(RefCell::new(BTreeMap::new())),
             errors,
         }
@@ -38,8 +41,30 @@ impl MutationHandles {
         // published to the persistent relay. Never await a node lock here.
         self.uploads.borrow_mut().clear();
         self.writes.borrow_mut().clear();
+        self.unapplied.borrow_mut().clear();
         self.errors.borrow_mut().clear();
         Ok(())
+    }
+
+    /// Forget admitted writes the owner has applied (or failed).
+    pub(super) fn retire_applied(&self) {
+        self.unapplied
+            .borrow_mut()
+            .retain(|write| write.is_queued_unapplied());
+    }
+
+    /// Whether one of this foreground's own admitted writes to `row` has not
+    /// been applied yet, so the resident row state cannot decide its outcome.
+    fn row_has_unapplied_write(&self, row: RowUuid) -> bool {
+        self.retire_applied();
+        self.unapplied
+            .borrow()
+            .iter()
+            .any(|write| write.row_uuid() == row)
+    }
+
+    pub(super) fn has_errors(&self) -> bool {
+        !self.errors.borrow().is_empty()
     }
 }
 
@@ -138,7 +163,28 @@ impl RelayWorker {
         };
         let updated_at_ms = options.updated_at_ms;
         let row_id = row_id.map(RowUuid::from_bytes);
+        let client_id = client;
         let client = self.foreground_client_mut(client)?;
+        // Synchronous class: failures the resident state already decides.
+        // Everything discovered while applying reaches the write handle.
+        let precheck = match mutation {
+            ForegroundMutationKind::Update => jazz::db::ResidentMutationPrecheck::Update(&cells),
+            ForegroundMutationKind::Upsert => jazz::db::ResidentMutationPrecheck::Upsert,
+            ForegroundMutationKind::Delete => jazz::db::ResidentMutationPrecheck::Delete,
+            ForegroundMutationKind::Insert | ForegroundMutationKind::Restore => {
+                jazz::db::ResidentMutationPrecheck::Other
+            }
+        };
+        let resident_row = row_id.filter(|row| {
+            matches!(target, jazz::db::WriteTarget::Root)
+                && !client.mutations.row_has_unapplied_write(*row)
+        });
+        client
+            .db
+            .precheck_resident_mutation(&table, resident_row, precheck)
+            .map_err(RelayError::Db)?;
+        self.ensure_mutation_operation_capacity(client_id)?;
+        let client = self.foreground_client_mut(client_id)?;
         let write = match mutation {
             ForegroundMutationKind::Insert => client.db.enqueue_insert(
                 table,
@@ -206,26 +252,47 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
-        client.db.drive_queued_mutation_once();
-        if let Some(error) = client
-            .db
-            .take_queued_mutation_failure(write.mergeable_tx_id())
-        {
-            return Err(RelayError::Db(error));
-        }
+        // Applying, IVM and relay pumping happen in the owner drive turn that
+        // follows this command's reply, not while the JS caller waits.
         let row_id = write.row_uuid();
-        Ok((register_write(&client.mutations.writes, write), row_id))
+        let id = register_write(&client.mutations.writes, write);
+        let registered = Rc::clone(&client.mutations.writes.borrow()[&id]);
+        client
+            .mutations
+            .unapplied
+            .borrow_mut()
+            .push_back(registered);
+        self.drive.request(0);
+        Ok((id, row_id))
     }
 
+    /// Bound this foreground's pending mutation work. Streaming operations are
+    /// bounded by their retained futures; direct mutations by the core owner
+    /// queue behind them. At the direct-mutation cap, admission applies
+    /// backpressure by applying queued work inline (the calling JS turn pays
+    /// for the excess of a burst) and rejects, admitting nothing, only when
+    /// the queue cannot make progress.
     fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
-        if self.foreground_client(client)?.pending_operations.len()
-            + self.foreground_client(client)?.mutation_cleanups.len()
+        let client = self.foreground_client(client)?;
+        if client.pending_operations.len() + client.mutation_cleanups.len()
             >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
         {
             return Err(RelayError::ForegroundCommand(
                 "foreground operation capacity exceeded".into(),
             ));
         }
+        let mut polls = 0;
+        while client.db.queued_mutation_count() >= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
+            if polls == NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS {
+                return Err(RelayError::ForegroundCommand(
+                    "backpressure: direct mutation queue is full; retry after the next native turn"
+                        .into(),
+                ));
+            }
+            client.db.drive_queued_mutation_once();
+            polls += 1;
+        }
+        client.mutations.retire_applied();
         Ok(())
     }
 

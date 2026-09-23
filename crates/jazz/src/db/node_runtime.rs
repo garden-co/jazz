@@ -553,6 +553,10 @@ where
         self.enqueue_read_after_mutations(Some(open_tx_id), read)
     }
 
+    pub(super) fn queued_mutation_count(&self) -> usize {
+        self.queued_mutations.borrow().len()
+    }
+
     pub(super) fn queued_mutation_barrier(
         &self,
     ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
