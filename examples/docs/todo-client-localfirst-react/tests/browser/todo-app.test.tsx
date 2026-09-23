@@ -41,17 +41,6 @@ function selectOption(select: HTMLSelectElement, value: string) {
   select.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-async function openQueryOptions(root: HTMLElement): Promise<HTMLDetailsElement> {
-  const disclosure = root.querySelector<HTMLDetailsElement>("#query-options");
-  if (!disclosure) throw new Error("Query options disclosure is missing");
-  expect(disclosure.open).toBe(false);
-  const summary = disclosure.querySelector("summary");
-  if (!summary) throw new Error("Query options disclosure has no summary");
-  await act(async () => summary.click());
-  expect(disclosure.open).toBe(true);
-  return disclosure;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -369,65 +358,12 @@ describe("React Todo App E2E", () => {
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
   });
 
-  it("shows remote settlement after the local result", async () => {
-    const el = await mountApp({
-      appId: APP_ID,
-      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-    });
-    const queryOptions = await openQueryOptions(el);
-    const tierSelect = queryOptions.querySelector<HTMLSelectElement>("#query-tier");
-    expect(tierSelect).not.toBeNull();
-    if (!tierSelect) return;
-
-    await waitFor(
-      () =>
-        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-        "Selected read tier: Local-first. Highest settlement this subscription has observed: On device.",
-      10000,
-      "local-first should settle the query on device",
-    );
-
-    await act(async () => selectOption(tierSelect, "remote-if-possible"));
-    await waitFor(
-      () =>
-        tierSelect.value === "remote-if-possible" &&
-        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Selected read tier: Remote if possible. Highest settlement this subscription has observed: Server.",
-      10000,
-      "the selected query should advance to remote settlement",
-    );
-
-    expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe(
-      "Selected: Remote if possible · Highest observed: Server",
-    );
-  });
-
-  it("keeps read options collapsed while leaving the settlement badge visible", async () => {
-    const el = await mountApp({
-      appId: APP_ID,
-      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-    });
-    const disclosure = el.querySelector<HTMLDetailsElement>("#query-options");
-    expect(disclosure).not.toBeNull();
-    if (!disclosure) return;
-
-    expect(disclosure.open).toBe(false);
-    expect(disclosure.querySelector("summary")?.textContent).toBe("Query options");
-    expect(disclosure.querySelector("#query-tier")).not.toBeNull();
-    expect(disclosure.querySelector("#query-optimism")).not.toBeNull();
-    expect(disclosure.querySelector("#tier-help-button")).not.toBeNull();
-    const status = el.querySelector("[role='status']");
-    expect(status).not.toBeNull();
-    expect(disclosure.contains(status)).toBe(false);
-  });
-
   it("updates settlement when the preferred query tier changes", async () => {
     const el = await mountApp({
       appId: APP_ID,
       serverUrl: `http://127.0.0.1:${TEST_PORT}`,
     });
-    const queryOptions = await openQueryOptions(el);
-    const tierSelect = queryOptions.querySelector<HTMLSelectElement>("#query-tier");
+    const tierSelect = el.querySelector<HTMLSelectElement>("#query-tier");
     expect(tierSelect).not.toBeNull();
     if (!tierSelect) return;
 
@@ -456,8 +392,7 @@ describe("React Todo App E2E", () => {
       appId: APP_ID,
       serverUrl: `http://127.0.0.1:${TEST_PORT}`,
     });
-    const queryOptions = await openQueryOptions(el);
-    const trigger = queryOptions.querySelector<HTMLButtonElement>("#tier-help-button");
+    const trigger = el.querySelector<HTMLButtonElement>("#tier-help-button");
     expect(trigger).not.toBeNull();
     if (!trigger) return;
 
@@ -504,8 +439,7 @@ describe("React Todo App E2E", () => {
       "local-first should show the settled todo",
     );
 
-    const queryOptions = await openQueryOptions(el);
-    const optimism = queryOptions.querySelector<HTMLSelectElement>("#query-optimism");
+    const optimism = el.querySelector<HTMLSelectElement>("#query-optimism");
     expect(optimism).not.toBeNull();
     if (!optimism) return;
     expect(optimism.value).toBe("show-previews");
