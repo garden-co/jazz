@@ -1,6 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import type { Db, TableProxy, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
+import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
@@ -178,7 +179,7 @@ export class Spaces {
       load(): Promise<LocalDevice>;
       release(device: LocalDevice): void;
       readonly keyLifetime: DeviceKeyLifetime;
-      states(tx?: E2eeTransactionScope): Promise<DeviceState>;
+      states(tx?: E2eeHistoryReader): Promise<DeviceState>;
     },
     private readonly groups?: Groups,
   ) {}
@@ -820,7 +821,7 @@ export class Spaces {
   }
 
   private async readSnapshot(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     address: Address,
     id: string,
     extraAccounts: string[] = [],
@@ -841,7 +842,7 @@ export class Spaces {
   }
 
   private async readRecords(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     address: Address,
     id: string,
     ownHistory: PublicMembershipHistory,
@@ -1459,7 +1460,7 @@ export class Spaces {
     return this.explainAddress(address);
   }
 
-  /** Package-internal key access, always backed by a completed authority read. */
+  /** Package-internal key access backed by authority coverage or accepted local history. */
   async withKeys<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
@@ -1478,17 +1479,18 @@ export class Spaces {
   ): Promise<SpaceState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const observed = await this.db.one(
-      this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }),
-      { tier: "global" },
-    );
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    const rootQuery = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
+    const observed = offline
+      ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
+      : await this.db.one(rootQuery, { tier: "global" });
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
-    await this.warm(observed);
+    if (!offline) await this.warm(observed);
     const device = await this.loadDevice();
     let secret: Uint8Array | undefined;
     try {
       const maintenance =
-        !use && !includeHistory
+        !use && !offline && !includeHistory
           ? await this.readMaintenanceSnapshot(address, observed.id, device)
           : undefined;
       let snapshot =
@@ -1511,7 +1513,13 @@ export class Spaces {
       if (!snapshot.roots.rows.length)
         return { state: "unavailable", reason: "space-not-accepted" };
       let state = await this.validate(snapshot, address);
-      if (!state.groupsReady && !state.sealed && state.members.has(this.accountId) && this.groups) {
+      if (
+        !offline &&
+        !state.groupsReady &&
+        !state.sealed &&
+        state.members.has(this.accountId) &&
+        this.groups
+      ) {
         for (const id of state.groupRecipients.keys()) {
           const group = state.graph.get(id);
           if (group?.rotationRequired && !group.sealed && group.members.has(this.accountId))
@@ -1543,12 +1551,13 @@ export class Spaces {
       if (!secret) return { state: "unavailable", reason: "space-key-not-delivered" };
       try {
         if (state.rotationRequired) {
+          if (offline) return { state: "maintenance-required", reason: "recipient-removed" };
           await this.rotate(address, keyRoot, secret, device);
           return this.explainAddress(address, use, includeHistory, conflicts);
         }
         // A verified key read need not wait for envelopes for other devices.
         // Explicit maintenance still delivers and revalidates its changed history.
-        if (!use) {
+        if (!use && !offline) {
           const delivered = await this.deliver(address, keyRoot, secret, device);
           // A read-only delivery transaction already accepted fresh authority.
           // Writes require another snapshot so newly published keys are included.
@@ -1751,6 +1760,8 @@ export class Spaces {
   }
 
   private async readAcceptedSnapshot(address: Address, id: string) {
+    if (await this.db.e2eeIsExplicitlyOffline())
+      return observeE2eeHistory(this.db, (reader) => this.readSnapshot(reader, address, id));
     for (let attempt = 0; ; attempt++) {
       try {
         const read = await exclusiveE2eeTransaction(this.db, (tx) =>
