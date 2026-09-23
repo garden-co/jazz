@@ -13,6 +13,8 @@ Hash with SHA-256, retain the first 16 bytes, set byte 6 to `(byte & 0x0f) | 0x8
 and byte 8 to `(byte & 0x3f) | 0x80`, and render the bytes as a lowercase
 hyphenated UUID. The UUID-v8 value names the root for this portable scope/row pair.
 The random epoch and signed initial grant remain independent IDs.
+Replay recomputes this identity before accepting a root. A different ID is invalid
+even when its signature and initial grant are otherwise consistent.
 
 Independent Python `hashlib` byte corpus (not a runtime qualification receipt):
 
