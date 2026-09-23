@@ -183,7 +183,7 @@ impl RelayWorker {
             .db
             .precheck_resident_mutation(&table, resident_row, precheck)
             .map_err(RelayError::Db)?;
-        self.ensure_mutation_operation_capacity(client_id)?;
+        self.ensure_direct_mutation_capacity(client_id)?;
         let client = self.foreground_client_mut(client_id)?;
         let write = match mutation {
             ForegroundMutationKind::Insert => client.db.enqueue_insert(
@@ -266,21 +266,26 @@ impl RelayWorker {
         Ok((id, row_id))
     }
 
-    /// Bound this foreground's pending mutation work. Streaming operations are
-    /// bounded by their retained futures; direct mutations by the core owner
-    /// queue behind them. At the direct-mutation cap, admission applies
-    /// backpressure by applying queued work inline (the calling JS turn pays
-    /// for the excess of a burst) and rejects, admitting nothing, only when
-    /// the queue cannot make progress.
     fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
-        let client = self.foreground_client(client)?;
-        if client.pending_operations.len() + client.mutation_cleanups.len()
+        if self.foreground_client(client)?.pending_operations.len()
+            + self.foreground_client(client)?.mutation_cleanups.len()
             >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
         {
             return Err(RelayError::ForegroundCommand(
                 "foreground operation capacity exceeded".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// The direct-mutation arm of the foreground capacity policy above.
+    /// Streaming operations are bounded by their retained futures; direct
+    /// mutations by the core owner queue they are admitted into. At the cap,
+    /// admission applies backpressure by applying queued work inline (the
+    /// calling JS turn pays for the excess of a burst), and rejects, admitting
+    /// nothing, only when the queue cannot make progress.
+    fn ensure_direct_mutation_capacity(&self, client: u64) -> Result<(), RelayError> {
+        let client = self.foreground_client(client)?;
         let mut polls = 0;
         while client.db.queued_mutation_count() >= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
             if polls == NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS {

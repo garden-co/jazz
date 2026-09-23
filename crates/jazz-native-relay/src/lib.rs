@@ -92,7 +92,7 @@ const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 /// Admitted-but-unapplied owner operations one foreground may queue behind its
 /// direct mutations. Admission at the cap applies bounded backpressure: it
 /// drives that foreground's queue inline, and rejects without admitting when
-/// the queue cannot make progress. See `ensure_mutation_operation_capacity`.
+/// the queue cannot make progress. See `ensure_direct_mutation_capacity`.
 const NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX: usize = NATIVE_RELAY_FOREGROUND_PENDING_MAX;
 /// Inline queue polls one at-cap admission may spend before it reports
 /// backpressure instead of blocking the calling JS turn further.
