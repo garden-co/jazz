@@ -59,7 +59,15 @@ it.each(["app", "slice"] as const)(
           },
         },
       });
-      expect(await db.e2ee.devices.list()).toEqual([expect.objectContaining({ state: "active" })]);
+      const acceptedIdentity = await db.one(app.__e2ee_account_identities, { tier: "edge" });
+      expect(acceptedIdentity).toMatchObject({
+        id: account.account.id,
+        deviceId: expect.any(String),
+        epochId: expect.any(String),
+      });
+      expect(await db.e2ee.devices.list()).toEqual([
+        expect.objectContaining({ id: acceptedIdentity!.deviceId, state: "active" }),
+      ]);
       const message = db.insert(app.messages, { title: "Ordinary permissions" });
       await message.wait({ tier: "global" });
       expect(await db.all(app.messages, { tier: "global" })).toEqual([message.value]);
