@@ -38,6 +38,11 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     const adapters = await createNativeCrypto();
     let corrupt = false;
     let injected = 0;
+    let failAfterHistory = false;
+    let armed = false;
+    let signerFailures = 0;
+    const sentinel = new Error("Historical verifier unavailable");
+    const openedKeys: Uint8Array[] = [];
     const open = async (
       account: Awaited<ReturnType<typeof localAccountConfig>>,
       inspect = false,
@@ -57,8 +62,33 @@ it("inspects inherited recovery coverage without repairing or staging group keys
           },
           crypto: {
             ...adapters,
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async verify(...args) {
+                if (inspect && armed) {
+                  armed = false;
+                  signerFailures++;
+                  throw sentinel;
+                }
+                return adapters.deviceSigner.verify(...args);
+              },
+            },
             keyEnvelope: {
               ...adapters.keyEnvelope,
+              async unwrap(key, context, envelope) {
+                const result = await adapters.keyEnvelope.unwrap(key, context, envelope);
+                const text = new TextDecoder().decode(context);
+                if (
+                  inspect &&
+                  failAfterHistory &&
+                  text.includes("jazz.e2ee.group-successor.v1") &&
+                  text.includes("history")
+                ) {
+                  openedKeys.push(result);
+                  armed = true;
+                }
+                return result;
+              },
               async open(pair, context, envelope) {
                 if (
                   inspect &&
@@ -68,7 +98,15 @@ it("inspects inherited recovery coverage without repairing or staging group keys
                   injected++;
                   return new Uint8Array(32).fill(9);
                 }
-                return adapters.keyEnvelope.open(pair, context, envelope);
+                const result = await adapters.keyEnvelope.open(pair, context, envelope);
+                if (
+                  inspect &&
+                  failAfterHistory &&
+                  new TextDecoder().decode(context).includes("__e2ee_group_recovery_deliveries")
+                ) {
+                  openedKeys.push(result);
+                }
+                return result;
               },
             },
           },
@@ -160,6 +198,26 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     expect(parentPath.epochId).not.toBe(
       ready.groups.paths.find((path) => path.groupId === parent.id)!.epochId,
     );
+    const fresh = await open(bobAccount, true);
+    failAfterHistory = true;
+    await expect(fresh.db.e2ee.recovery.status(material)).rejects.toBe(sentinel);
+    expect(signerFailures).toBe(1);
+    // Both the recovered epoch key and the predecessor key are owned by inspection.
+    expect(openedKeys.length).toBeGreaterThanOrEqual(2);
+    for (const key of openedKeys) expect(key).toEqual(new Uint8Array(key.length));
+    expect(fresh.saved()).toBeNull();
+    failAfterHistory = false;
+    const retried = await fresh.db.e2ee.recovery.status(material);
+    expect(retried.groups).toMatchObject({
+      validation: "checked",
+      paths: expect.arrayContaining([
+        expect.objectContaining({
+          groupId: parent.id,
+          epochId: parentPath.epochId,
+          validation: "validated",
+        }),
+      ]),
+    });
     await alice.e2ee.groups.remove(parent.id, child.id).wait();
     const removed = await observer.db.e2ee.recovery.status(material);
     if (removed.groups.validation !== "checked") throw new Error("Group coverage was not checked");
