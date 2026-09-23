@@ -147,7 +147,10 @@ impl ActivationCache {
         let plan = Arc::new(ActivationPlan::compile(graph, sources)?);
         cache.builds += 1;
         const MAX_PLANS: usize = 16;
-        const MAX_WEIGHT: usize = 65_536;
+        // A repeated activation over roughly a thousand routed subscriptions
+        // exceeds the former 65K-weight cap. Rebuilding it on every write is
+        // more expensive than retaining a bounded plan for the live graph.
+        const MAX_WEIGHT: usize = 1_000_000;
         let weight = plan.weight();
         if weight <= MAX_WEIGHT {
             while cache.plans.len() >= MAX_PLANS || cache.weight + weight > MAX_WEIGHT {
