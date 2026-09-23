@@ -42,6 +42,20 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
+      - name: Validate workflow_dispatch starter
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          STARTER_FILTER: ${{ github.event.inputs.starter }}
+        run: |
+          case "$STARTER_FILTER" in
+            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid)
+              ;;
+            *)
+              echo "::error::Unknown starter '$STARTER_FILTER'"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

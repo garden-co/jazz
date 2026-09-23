@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -49,6 +50,48 @@ test("release starter gate covers the canonical scaffold catalogue and no ordina
   const matrix = e2e.match(/matrix:\n        starter:\n([\s\S]*?)\n    steps:/)?.[1];
   assert.ok(matrix, "could not find the starter E2E matrix");
   assert.deepEqual(listedStarters(matrix), expected);
+});
+test("manual starter filters reject unknown dispatch values before preparation", () => {
+  const prepare = job("prepare", "e2e");
+  const validation = prepare.match(
+    /- name: Validate workflow_dispatch starter[\s\S]*?(?=\n      - name:|\n  e2e:)/,
+  )?.[0];
+  assert.ok(validation, "missing manual starter validation step");
+  assert.match(validation, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(validation, /STARTER_FILTER: \$\{\{ github\.event\.inputs\.starter \}\}/);
+  assert.match(validation, /\*\)[\s\S]*?exit 1/);
+
+  const shell = validation.match(/^\s{8}run: \|\n(?<body>(?: {10}.*\n?)+)/m)?.groups?.body;
+  assert.ok(shell, "missing manual starter validation shell body");
+  const shellBody = shell.replace(/^ {10}/gm, "");
+  const runValidation = (filter) =>
+    spawnSync("bash", ["-c", shellBody], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, STARTER_FILTER: filter },
+    });
+
+  const unknown = runValidation("not-a-canonical-starter");
+  assert.notEqual(unknown.status, 0, unknown.stderr);
+  assert.equal(runValidation("").status, 0);
+
+  const accepted = validation.match(/^\s+""\|([^)\n]+)\)$/m)?.[1]?.split("|");
+  const canonical = starters.match(/export const KNOWN_STARTERS = \[([\s\S]*?)\] as const;/)?.[1];
+  assert.ok(canonical, "could not find the canonical starter catalogue");
+  const expected = [...canonical.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(expected.length > 0, "canonical starter catalogue is empty");
+  assert.deepEqual(accepted, expected);
+  assert.equal(runValidation(expected[0]).status, 0);
+  assert.ok(
+    prepare.indexOf("- name: Validate workflow_dispatch starter") <
+      prepare.indexOf("pnpm install --frozen-lockfile"),
+    "validate the dispatch filter before installing dependencies",
+  );
+  assert.ok(
+    prepare.indexOf("- name: Validate workflow_dispatch starter") <
+      prepare.indexOf("pnpm run build:core"),
+    "validate the dispatch filter before building the workspace",
+  );
 });
 
 test("release starter gate rejects prefix and unconditional trigger broadening", () => {
