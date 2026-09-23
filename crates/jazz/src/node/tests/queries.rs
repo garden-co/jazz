@@ -2880,6 +2880,31 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
             (row(0x42), true, Some(v("keep"))),
         ]
     );
+
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x42), 15).deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
+    let restored = node
+        .query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            None,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|row| (row.row_uuid(), row.is_deleted(), row.cell(&table, "title")))
+            .collect::<Vec<_>>(),
+        vec![
+            (row(0x41), false, Some(v("keep"))),
+            (row(0x42), false, Some(v("keep"))),
+        ]
+    );
 }
 
 #[test]
