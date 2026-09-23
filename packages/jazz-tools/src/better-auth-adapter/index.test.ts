@@ -115,7 +115,7 @@ describe("jazzAdapter", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
         [],
       );
       await expect(
@@ -127,7 +127,7 @@ describe("jazzAdapter", () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
     } finally {
       await context.shutdown();
@@ -230,19 +230,19 @@ describe("jazzAdapter", () => {
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
         [],
       );
       await expect(
-        sessionDb.all(fixtureApp.better_auth_session, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_session, { tier: "global" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_account, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_account, { tier: "global" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_verification, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_verification, { tier: "global" }),
       ).resolves.toEqual([]);
-      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "global" })).resolves.toEqual(
         [],
       );
 
@@ -255,20 +255,20 @@ describe("jazzAdapter", () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
       await expect(
         Promise.resolve().then(() =>
           sessionDb
             .update(fixtureApp.better_auth_session, session.id, { userAgent: "changed" })
-            .wait({ tier: "edge" }),
+            .wait({ tier: "global" }),
         ),
       ).rejects.toThrow(
         /AuthorizationDenied|Write rejected by server authorization|read policy denied/,
       );
       await expect(
         Promise.resolve().then(() =>
-          sessionDb.delete(fixtureApp.better_auth_account, account.id).wait({ tier: "edge" }),
+          sessionDb.delete(fixtureApp.better_auth_account, account.id).wait({ tier: "global" }),
         ),
       ).rejects.toThrow(
         /AuthorizationDenied|Write rejected by server authorization|read policy denied/,

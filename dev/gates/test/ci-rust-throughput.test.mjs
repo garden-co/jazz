@@ -1910,17 +1910,6 @@ test("React Native CI has a separate bridge-enabled producer and real Vitest adm
   assert.match(localCi, /JAZZ_RN_TEST_BRIDGE: "1"/);
 });
 
-test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {
-  const inspectorPackage = JSON.parse(
-    fs.readFileSync(path.join(root, "packages/inspector/package.json"), "utf8"),
-  );
-  const browserCommand = inspectorPackage.scripts["test:browser"];
-
-  assert.match(browserCommand, /run-correctness-consumer\.mjs --/);
-  assert.match(browserCommand, /pnpm run build:embedded/);
-  assert.match(browserCommand, /playwright test --config playwright\.config\.ts/);
-});
-
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-sealed-tools-dist-"));
   const marker = path.join(fixture, "testing", "index.js");
@@ -2072,7 +2061,7 @@ test("the Jazz Tools preflight derives public exports and keeps test-only entryp
   }
 });
 
-test("missing public root or framework exports prevent both TypeScript suites from starting", () => {
+test("missing public exports or inspector assets prevent both TypeScript suites from starting", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
   const write = (relative, contents = "export {};") => {
     const target = path.join(fixture, relative);
@@ -2121,6 +2110,8 @@ test("missing public root or framework exports prevent both TypeScript suites fr
         encoding: "utf8",
         env: {
           ...process.env,
+          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
           JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
           JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
           JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
@@ -2138,6 +2129,39 @@ test("missing public root or framework exports prevent both TypeScript suites fr
       );
       write(`packages/jazz-tools/${relative}`);
     }
+
+    const nodeMarker = path.join(fixture, "node-inspector.html");
+    const browserMarker = path.join(fixture, "browser-inspector.html");
+    const run = () =>
+      spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+        cwd: fixture,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(nodeMarker)}`,
+          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(browserMarker)}`,
+        },
+      });
+    const missing = run();
+    assert.notEqual(missing.status, 0, missing.stdout);
+    assert.equal(fs.existsSync(nodeMarker), false, "node suite started without inspector assets");
+    assert.equal(
+      fs.existsSync(browserMarker),
+      false,
+      "browser suite started without inspector assets",
+    );
+
+    write("packages/inspector/dist-embedded/embedded.html", "prepared inspector");
+    const prepared = run();
+    assert.equal(prepared.status, 0, `${prepared.stdout}\n${prepared.stderr}`);
+    assert.equal(fs.readFileSync(nodeMarker, "utf8"), "prepared inspector");
+    assert.equal(fs.readFileSync(browserMarker, "utf8"), "prepared inspector");
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

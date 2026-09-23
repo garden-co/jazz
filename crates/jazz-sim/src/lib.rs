@@ -131,8 +131,6 @@ pub enum NodeRole {
     Writer,
     /// Workload reader.
     Reader,
-    /// Edge node that terminates a client identity and relays to core.
-    Edge,
     /// Store-and-forward relay.
     Relay,
     /// Fate authority.
@@ -192,24 +190,6 @@ impl Topology {
             profile,
         });
         self
-    }
-
-    /// Add a bidirectional client↔edge↔core line.
-    pub fn client_edge_core_line(
-        self,
-        client: impl Into<String>,
-        edge: impl Into<String>,
-        core: impl Into<String>,
-        client_edge_profile: PeerProfile,
-        edge_core_profile: PeerProfile,
-    ) -> Self {
-        let client = client.into();
-        let edge = edge.into();
-        let core = core.into();
-        self.link(client.clone(), edge.clone(), client_edge_profile.clone())
-            .link(edge.clone(), client, client_edge_profile)
-            .link(edge.clone(), core.clone(), edge_core_profile.clone())
-            .link(core, edge, edge_core_profile)
     }
 
     fn link_profile(&self, from: &str, to: &str) -> Option<&PeerProfile> {
@@ -534,6 +514,7 @@ pub struct DeterministicDriver {
     queue: BinaryHeap<ScheduledEvent>,
     inboxes: BTreeMap<NodeName, VecDeque<DeliveredMessage>>,
     paused_links: BTreeMap<(NodeName, NodeName), PausedLink>,
+    effective_deadlines: BTreeMap<NodeName, BTreeMap<NodeName, u64>>,
     transport_codec: SimulatorTransportCodec,
     metrics: Metrics,
 }
@@ -549,6 +530,7 @@ impl DeterministicDriver {
             queue: BinaryHeap::new(),
             inboxes: BTreeMap::new(),
             paused_links: BTreeMap::new(),
+            effective_deadlines: BTreeMap::new(),
             transport_codec: SimulatorTransportCodec::default(),
             metrics: Metrics::default(),
         }
@@ -662,7 +644,27 @@ impl DeterministicDriver {
     }
 
     fn schedule_delivered_with_profile(&mut self, profile: PeerProfile, message: DeliveredMessage) {
-        let deliver_at_ms = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let nominal_deadline = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let deliver_at_ms = match self.effective_deadlines.get_mut(message.from.as_str()) {
+            Some(destinations) => match destinations.get_mut(message.to.as_str()) {
+                Some(previous_deadline) => {
+                    let deliver_at_ms = nominal_deadline.max(*previous_deadline);
+                    *previous_deadline = deliver_at_ms;
+                    deliver_at_ms
+                }
+                None => {
+                    destinations.insert(message.to.clone(), nominal_deadline);
+                    nominal_deadline
+                }
+            },
+            None => {
+                let mut destinations = BTreeMap::new();
+                destinations.insert(message.to.clone(), nominal_deadline);
+                self.effective_deadlines
+                    .insert(message.from.clone(), destinations);
+                nominal_deadline
+            }
+        };
         let event = ScheduledEvent {
             deliver_at_ms,
             event_id: self.next_event_id,
@@ -1424,6 +1426,147 @@ mod tests {
             driver.metrics.counters["transport_codec_encoded_frame_bytes"]
                 > driver.metrics.counters["transport_codec_encoded_bytes"]
         );
+    }
+    #[test]
+    fn deterministic_jitter_preserves_per_link_fifo() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("adversarial", 0, 1, 0)),
+            1,
+        );
+        let first = register_shape_message("first");
+        let second = register_shape_message("second");
+
+        driver.send("a", "b", first.clone());
+        driver.send("a", "b", second.clone());
+
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+    }
+
+    #[test]
+    fn deterministic_jitter_preserves_fifo_across_pause_resume() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("adversarial", 0, 1, 0)),
+            1,
+        );
+        let first = register_shape_message("active-first");
+        let second = register_shape_message("queued-second");
+        let third = register_shape_message("active-third");
+
+        driver.send("a", "b", first.clone());
+        driver.pause_link("a", "b", PauseMode::Queue);
+        driver.send("a", "b", second.clone());
+        driver.resume_link("a", "b");
+        driver.send("a", "b", third.clone());
+
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+        assert_eq!(driver.recv("b").message, third);
+    }
+
+    #[test]
+    fn deterministic_jitter_equal_deadlines_keep_event_id_order_without_extra_delay() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("equal", 0, 0, 0)),
+            1,
+        );
+        let first = register_shape_message("equal-first");
+        let second = register_shape_message("equal-second");
+        let third = register_shape_message("equal-third");
+
+        driver.send("a", "b", first.clone());
+        driver.send("a", "b", second.clone());
+        driver.send("a", "b", third.clone());
+
+        assert_eq!(
+            driver.queued_schedule(),
+            vec![
+                (0, 0, "a".into(), "b".into()),
+                (0, 1, "a".into(), "b".into()),
+                (0, 2, "a".into(), "b".into()),
+            ]
+        );
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+        assert_eq!(driver.recv("b").message, third);
+        assert_eq!(driver.now_ms(), 0);
+    }
+
+    #[test]
+    fn deterministic_jitter_keeps_directed_links_independent() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .node("c", empty_schema(), NodeRole::Writer)
+                .link("a", "b", PeerProfile::new("a-to-b", 0, 1, 0))
+                .link("c", "b", PeerProfile::new("c-to-b", 0, 1, 0))
+                .link("b", "a", PeerProfile::new("b-to-a", 0, 1, 0)),
+            1,
+        );
+        let a_to_b = register_shape_message("a-to-b");
+        let c_to_b = register_shape_message("c-to-b");
+        let b_to_a = register_shape_message("b-to-a");
+
+        driver.send("a", "b", a_to_b.clone());
+        driver.send("c", "b", c_to_b.clone());
+        driver.send("b", "a", b_to_a.clone());
+
+        assert_eq!(driver.recv("b").message, c_to_b);
+        assert_eq!(driver.recv("b").message, a_to_b);
+        assert_eq!(driver.recv("a").message, b_to_a);
+    }
+
+    #[test]
+    fn deterministic_jitter_schedule_is_repeatable_across_boundaries() {
+        fn run() -> (
+            Vec<(u64, u64, String, String)>,
+            Vec<SyncMessage>,
+            Vec<SyncMessage>,
+        ) {
+            let mut driver = DeterministicDriver::new(
+                Topology::default()
+                    .node("a", empty_schema(), NodeRole::Writer)
+                    .node("b", empty_schema(), NodeRole::Reader)
+                    .node("c", empty_schema(), NodeRole::Writer)
+                    .link("a", "b", PeerProfile::new("a-to-b", 0, 1, 0))
+                    .link("c", "b", PeerProfile::new("c-to-b", 1, 1, 0)),
+                7,
+            );
+            let first = register_shape_message("repeat-first");
+            let second = register_shape_message("repeat-second");
+            let third = register_shape_message("repeat-third");
+            let fourth = register_shape_message("repeat-fourth");
+
+            driver.send("a", "b", first.clone());
+            driver.pause_link("a", "b", PauseMode::Queue);
+            driver.send("a", "b", second.clone());
+            driver.send("c", "b", third.clone());
+            driver.resume_link("a", "b");
+            driver.send("a", "b", fourth.clone());
+            let schedule = driver.queued_schedule();
+
+            let first_at_b = driver.recv("b").message;
+            let second_at_b = driver.recv("b").message;
+            let third_at_b = driver.recv("b").message;
+            let fourth_at_b = driver.recv("b").message;
+            (
+                schedule,
+                vec![first_at_b, second_at_b],
+                vec![third_at_b, fourth_at_b],
+            )
+        }
+
+        assert_eq!(run(), run());
     }
 }
 

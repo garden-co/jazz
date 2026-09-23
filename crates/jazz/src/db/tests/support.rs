@@ -725,7 +725,7 @@ pub(super) fn global_subscribe_opts() -> ReadOpts {
 
 pub(super) fn edge_subscribe_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
         include_deleted: false,

@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { constants } from "node:fs";
+import { constants, mkdtempSync } from "node:fs";
 import {
   access,
   chmod,
@@ -16,7 +16,7 @@ import {
 import { dirname, join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { afterEach, assert, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import {
   createMigration as createCatalogueMigration,
@@ -47,7 +47,8 @@ const bootstrapVerifierPath = fileURLToPath(
 );
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
-const tmpBase = join(tmpdir(), "jazz-tools-cli-tests");
+const tmpBase = mkdtempSync(join(tmpdir(), "jazz-tools-cli-tests-"));
+afterAll(() => rm(tmpBase, { recursive: true, force: true }));
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
 

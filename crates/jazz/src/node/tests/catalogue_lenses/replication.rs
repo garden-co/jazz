@@ -230,7 +230,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     for tier in [
         DurabilityTier::Local,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         DurabilityTier::Global,
     ] {
         assert_eq!(

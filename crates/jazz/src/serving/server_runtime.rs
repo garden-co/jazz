@@ -15,7 +15,6 @@ use crate::db::{
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
-use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
 use crate::serving::{
@@ -1129,137 +1128,6 @@ async fn drive_upstream_wire(
 }
 
 impl ServerRuntimeHandle {
-    /// Reopen an already bootstrapped dynamic edge. A blank store returns
-    /// `None` so its owner can run the authenticated bootstrap exchange.
-    pub fn try_start_dynamic_edge_from_storage(
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-    ) -> Result<Option<Self>, String> {
-        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
-        let (started_tx, started_rx) = std_mpsc::channel();
-        let (activity_tx, _) = watch::channel(0_u64);
-        let io_wakers = Arc::new(Mutex::new(Vec::new()));
-        let owner_io_wakers = Arc::clone(&io_wakers);
-        let owner_jobs = jobs.clone();
-        let owner_activity_tx = activity_tx.clone();
-        let join = thread::Builder::new()
-            .name("jazz-server-shell".to_owned())
-            .spawn(move || {
-                let shell = match InMemoryServerShell::try_start_dynamic_edge_from_storage(
-                    DbIdentity {
-                        node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorSubject::SYSTEM,
-                    },
-                    storage_config,
-                    storage_factory,
-                    edge_cache_budget,
-                ) {
-                    Ok(Some(shell)) => {
-                        let _ = started_tx.send(Ok(true));
-                        shell
-                    }
-                    Ok(None) => {
-                        let _ = started_tx.send(Ok(false));
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error.to_string()));
-                        return;
-                    }
-                };
-                run_server_shell_owner(
-                    shell,
-                    receiver,
-                    owner_jobs,
-                    owner_activity_tx,
-                    owner_io_wakers,
-                );
-            })
-            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
-        let started = started_rx
-            .recv()
-            .map_err(|_| "server shell thread exited before dynamic reopen".to_owned())??;
-        Ok(started.then_some(Self {
-            inner: Arc::new(ServerShellInner {
-                jobs: Mutex::new(Some(jobs)),
-                join: Mutex::new(Some(join)),
-                shutdown: Mutex::new(ShutdownState::Running),
-                shutdown_changed: Condvar::new(),
-                ingress_bytes: Mutex::new(HashMap::new()),
-                wire_streams: Mutex::new(HashMap::new()),
-                activity_tx,
-                io_wakers,
-            }),
-        }))
-    }
-
-    /// Construct a ready edge shell only after an authenticated bootstrap
-    /// snapshot has been durably adopted. The owner thread is not published to
-    /// downstream routes until this returns successfully.
-    pub fn start_dynamic_edge_with_catalogue_snapshot(
-        storage_config: StorageConfig,
-        storage_factory: Option<Arc<dyn StorageFactory>>,
-        edge_cache_budget: Option<EdgeCacheBudget>,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
-        let (started_tx, started_rx) = std_mpsc::channel();
-        let (activity_tx, _) = watch::channel(0_u64);
-        let io_wakers = Arc::new(Mutex::new(Vec::new()));
-        let owner_io_wakers = Arc::clone(&io_wakers);
-        let owner_jobs = jobs.clone();
-        let owner_activity_tx = activity_tx.clone();
-
-        let join = thread::Builder::new()
-            .name("jazz-server-shell".to_owned())
-            .spawn(move || {
-                let shell = match InMemoryServerShell::start_dynamic_edge_with_catalogue_snapshot(
-                    DbIdentity {
-                        node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorSubject::SYSTEM,
-                    },
-                    storage_config,
-                    storage_factory,
-                    edge_cache_budget,
-                    snapshot,
-                ) {
-                    Ok(shell) => {
-                        let _ = started_tx.send(Ok(()));
-                        shell
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error.to_string()));
-                        return;
-                    }
-                };
-                run_server_shell_owner(
-                    shell,
-                    receiver,
-                    owner_jobs,
-                    owner_activity_tx,
-                    owner_io_wakers,
-                );
-            })
-            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
-
-        started_rx
-            .recv()
-            .map_err(|_| "server shell thread exited before dynamic bootstrap".to_owned())??;
-        Ok(Self {
-            inner: Arc::new(ServerShellInner {
-                jobs: Mutex::new(Some(jobs)),
-                join: Mutex::new(Some(join)),
-                shutdown: Mutex::new(ShutdownState::Running),
-                shutdown_changed: Condvar::new(),
-                ingress_bytes: Mutex::new(HashMap::new()),
-                wire_streams: Mutex::new(HashMap::new()),
-                activity_tx,
-                io_wakers,
-            }),
-        })
-    }
-
     /// Read the owned authority snapshot for an authenticated bootstrap socket.
     /// The socket retains its live adapter until credit-driven delivery ends.
     pub async fn trusted_catalogue_snapshot(
@@ -1344,25 +1212,22 @@ impl ServerRuntimeHandle {
             storage_config,
             storage_factory,
             NodeRole::Core,
-            None,
             false,
         )
     }
 
-    /// Start a runtime with an explicit role and optional Edge cache budget.
+    /// Start a runtime with an explicit Core or local-relay role.
     pub fn start_with_storage_config(
         schema: JazzSchema,
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
-        edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
             storage_factory,
             role,
-            edge_cache_budget,
             true,
         )
     }
@@ -1372,7 +1237,6 @@ impl ServerRuntimeHandle {
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
-        edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
     ) -> Result<Self, String> {
         let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
@@ -1398,10 +1262,6 @@ impl ServerRuntimeHandle {
                 .with_role(role);
                 let config = match storage_factory {
                     Some(factory) => config.with_storage_factory(factory),
-                    None => config,
-                };
-                let config = match edge_cache_budget {
-                    Some(budget) => config.with_edge_cache_budget(budget),
                     None => config,
                 };
                 let shell = match InMemoryServerShell::start_with_storage(config, storage_config) {
@@ -1969,7 +1829,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
-        SyncMessage::AuthorityPublication(_) => "AuthorityPublication",
+        SyncMessage::Reserved30(retired) => match *retired {},
         SyncMessage::FateUpdate { .. } => "FateUpdate",
         SyncMessage::RegisterShape { .. } => "RegisterShape",
         SyncMessage::Subscribe(_) => "Subscribe",

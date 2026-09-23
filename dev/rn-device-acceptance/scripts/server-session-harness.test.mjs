@@ -8,10 +8,10 @@ import test from "node:test";
 import {
   assertCoreObservation,
   boundedHarnessOutput,
-  startLocalEdgeSessionHarness,
+  startLocalServerSessionHarness,
   stopForOfflineRestart,
   terminateHarness,
-} from "./edge-session-harness.mjs";
+} from "./server-session-harness.mjs";
 
 const nonce = "12345678-1234-4234-9234-123456789abc";
 const valid = {
@@ -47,7 +47,7 @@ test("shared harness requires a child-produced run-bound observation and handles
         join(directory, "cargo"),
         `#!${process.execPath}
 if (process.argv[2] === "build") process.exit(0);
-const line = 'JAZZ_RN_EDGE_SESSION ' + JSON.stringify(${JSON.stringify(planted === "legacy-readiness" ? { edge_port: 12345, bearer_a: "synthetic-retired-input" } : { edge_port: 12345 })}) + '\\n';
+const line = 'JAZZ_RN_SERVER_SESSION ' + JSON.stringify(${JSON.stringify(planted === "legacy-readiness" ? { server_port: 12345, bearer_a: "synthetic-retired-input" } : { server_port: 12345 })}) + '\\n';
 process.stdout.write(line.slice(0, 25));
 setTimeout(() => {
   process.stdout.write(line.slice(25));
@@ -60,7 +60,7 @@ setInterval(() => {}, 1000);
       );
       process.env.PATH = `${directory}:${oldPath}`;
       const start = () =>
-        startLocalEdgeSessionHarness({
+        startLocalServerSessionHarness({
           device: "contract-device",
           runNonce: nonce,
           host: "127.0.0.1",
@@ -90,7 +90,9 @@ setInterval(() => {}, 1000);
 
 test("ephemeral session lines and JWTs stay out of failure diagnostics", () => {
   const secret = "eyJabc.eyJdef.signature";
-  const safe = boundedHarnessOutput(`JAZZ_RN_EDGE_SESSION {"bearer":"${secret}"}\nerror ${secret}`);
+  const safe = boundedHarnessOutput(
+    `JAZZ_RN_SERVER_SESSION {"bearer":"${secret}"}\nerror ${secret}`,
+  );
   assert.ok(!safe.includes(secret));
   assert.ok(safe.includes("[redacted]"));
 });
@@ -225,22 +227,24 @@ function assertCoreObserverContract(source) {
   assert.match(source, /wait_for_transaction\([\s\S]*DurabilityTier::GlobalServer/);
   assert.match(source, /wait_for_query\(\s*&observer,/);
   assert.match(source, /values\.contains\(&Value::Text\(title\.clone\(\)\)\)/);
-  const recovery = source.slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'));
-  const healthAssertion =
-    /assert_eq!\(\s*edge\.server_state\(\)\.edge_upstream_health\(\),\s*EdgeUpstreamHealth::Connected\s*\);/.exec(
-      recovery,
-    );
-  assert.ok(healthAssertion, "recovered Edge must be confirmed healthy");
+  const recovery = source.slice(source.indexOf('assert_eq!(line.trim(), "recover-server")'));
+  assert.match(
+    recovery,
+    /with_data_dir\(server_storage\.path\(\)\)/,
+    "Core reopens its original store",
+  );
+  assert.match(recovery, /with_storage_factory/, "Core restart retains persistent storage");
+  const ready = recovery.indexOf('.expect("reopen persistent Core before the recovery write")');
   assert.ok(
-    healthAssertion.index < recovery.indexOf("core_writer\n        .insert"),
-    "recovery writer must wait for Edge health before writing",
+    ready >= 0 && ready < recovery.indexOf("let core_writer"),
+    "Core startup completes before recovery writes",
   );
 }
 
-test("Core observer cannot seed the device marker and a separate Core writer waits for recovered Edge", () => {
+test("Core observer cannot seed the device marker and a separate Core writer waits for reopened Core", () => {
   const source = readFileSync(
     new URL(
-      "../../../crates/jazz-native-relay/examples/rn_edge_session_harness.rs",
+      "../../../crates/jazz-native-relay/examples/rn_server_session_harness.rs",
       import.meta.url,
     ),
     "utf8",
@@ -264,15 +268,22 @@ test("Core observer cannot seed the device marker and a separate Core writer wai
   assert.throws(
     () =>
       assertCoreObserverContract(
-        source.slice(0, source.indexOf('assert_eq!(line.trim(), "recover-edge")')) +
-          source
-            .slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'))
-            .replace(
-              /assert_eq!\(\n        edge\.server_state\(\)\.edge_upstream_health\(\),\n        EdgeUpstreamHealth::Connected\n    \);/,
-              "",
-            ),
+        source.replaceAll(
+          "with_data_dir(server_storage.path())",
+          'with_data_dir("new-empty-store")',
+        ),
       ),
-    /recovered Edge must be confirmed healthy|recovery writer must wait for Edge health/,
+    /Core reopens its original store/,
+  );
+  assert.throws(
+    () =>
+      assertCoreObserverContract(
+        source.replaceAll(
+          "reopen persistent Core before the recovery write",
+          "startup-not-awaited",
+        ),
+      ),
+    /Core startup completes/,
   );
 });
 

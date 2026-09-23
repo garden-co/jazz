@@ -1,16 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Check,
-  Cloud,
-  Loader2,
-  Plane,
-  Plus,
-  Server,
-  Smartphone,
-  type LucideIcon,
-} from "lucide-react";
+import { Check, Cloud, Loader2, Plane, Plus, Smartphone, type LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import {
@@ -32,33 +23,30 @@ import {
 import { PhoneChrome } from "./diagram/phone-chrome";
 import { INITIAL_COLOR, pickNextColor } from "./colour";
 
-type Tier = "local" | "edge" | "global";
-const TIERS: Tier[] = ["local", "edge", "global"];
+type Tier = "local" | "global";
+const TIERS: Tier[] = ["local", "global"];
 
 const TIER_LABEL: Record<Tier, string> = {
   local: "Local",
-  edge: "Edge",
-  global: "Global",
+  global: "Core",
 };
 
 const TIER_DESCRIPTION: Record<Tier, string> = {
   local: "Durable on this device. No network round-trip required.",
-  edge: "Durable on a regional sync server. Survives the device going offline.",
-  global: "Durable in the global core. Replicated across regions.",
+  global: "Authorized and durably accepted by Core.",
 };
 
-type NodeKey = "phone" | "edge" | "global" | "receiver";
-// The three cards stacked on the right, each driven off the edge.
-type CardKey = "global" | "edge" | "receiver";
+type NodeKey = "phone" | "global" | "receiver";
+// Core and the receiving device are stacked on the right.
+type CardKey = "global" | "receiver";
 const CARD_META: Record<CardKey, { icon: LucideIcon; title: string; subtitle: string }> = {
-  global: { icon: Cloud, title: "Global", subtitle: "global core" },
-  edge: { icon: Server, title: "Edge", subtitle: "regional sync server" },
+  global: { icon: Cloud, title: "Core", subtitle: "accepts writes" },
   receiver: { icon: Smartphone, title: "Other device", subtitle: "receives updates" },
 };
 
 // hop key ⇒ the routed segment it animates along (built in connectorPaths).
-type Hop = "edge" | "global" | "receiver";
-const HOPS: Hop[] = ["edge", "global", "receiver"];
+type Hop = "global" | "receiver";
+const HOPS: Hop[] = ["global", "receiver"];
 
 type EventPhase = "writing" | "settled";
 type WriteEvent = {
@@ -70,9 +58,9 @@ type WriteEvent = {
   // When non-null, the event is parked: no animation runs until the device
   // reconnects and queuedSince is cleared.
   queuedSince: number | null;
-  // Flipped to true the moment the wave reaches the edge tier — at that
+  // Flipped to true the moment the wave reaches Core — at that
   // point the write is no longer durable only on the device.
-  reachedEdge: boolean;
+  reachedCore: boolean;
 };
 
 type Status =
@@ -88,14 +76,14 @@ const FADE_MS = 600;
 // Gap between consecutive queued writes when the device reconnects, so the
 // user sees the propagation waves separated rather than blurred together.
 const RECONNECT_STAGGER_MS = 280;
-// Where the other-device branch leaves the edge's bottom edge, as a fraction
+// Where the other-device branch leaves Core's bottom edge, as a fraction
 // of its half-width right of centre — far enough off the trunk to read as a
 // fork, but inside the card so nothing leaves the measured layout.
 const BRANCH_OFFSET = 0.6;
 
 // Bespoke connector over the engine-measured node geometry: an L-shaped arm
-// from the phone into the edge tier, a riser up to the global tier, and a
-// riser down to the other device. The three hops animate along these paths.
+// from the phone into Core and a branch down to the other device.
+// The two hops animate along these paths.
 // (Same pattern as LensDiagram, which also draws its own connector from
 // `ctx.anchors`.)
 function connectorPaths(
@@ -103,33 +91,23 @@ function connectorPaths(
   branchDx: number,
 ): Record<Hop, string> | null {
   const phone = anchors.phone;
-  const edge = anchors.edge;
-  const global = anchors.global;
+  const core = anchors.global;
   const receiver = anchors.receiver;
-  if (!phone || !edge || !global || !receiver) return null;
-  const armX = (phone.right + edge.left) / 2;
-  // Trunk (phone → edge → global) runs up the column centreline. The other
-  // device sits `branchDx` to the right (the card is shifted by the same
-  // amount), so the branch is one clean side-step off the trunk into it. On
-  // mobile branchDx is 0 ⇒ a straight riser, nothing leaves the layout.
-  const branchY = (edge.bottom + receiver.top) / 2;
+  if (!phone || !core || !receiver) return null;
+  const armX = (phone.right + core.left) / 2;
+  const branchY = (core.bottom + receiver.top) / 2;
   const branchX = receiver.midX + branchDx;
-  // Rounded elbows, matching the engine's own routed edges.
   const route = (pts: Point[]) => roundedPath(pts, DEFAULT_CORNER_RADIUS);
   return {
-    edge: route([
+    global: route([
       { x: phone.right, y: phone.midY },
       { x: armX, y: phone.midY },
-      { x: armX, y: edge.midY },
-      { x: edge.left, y: edge.midY },
-    ]),
-    global: route([
-      { x: edge.midX, y: edge.top },
-      { x: edge.midX, y: global.bottom },
+      { x: armX, y: core.midY },
+      { x: core.left, y: core.midY },
     ]),
     receiver: route([
-      { x: edge.midX, y: edge.bottom },
-      { x: edge.midX, y: branchY },
+      { x: core.midX, y: core.bottom },
+      { x: core.midX, y: branchY },
       { x: branchX, y: branchY },
       { x: branchX, y: receiver.top },
     ]),
@@ -342,7 +320,7 @@ function PhoneScreen({
   );
 }
 
-// Edge / global / receiver card on the engine's node kit, showing the colour
+// Core / receiver card on the engine's node kit, showing the colour
 // it currently holds. The pulse is dim-aware (a write past the awaited tier
 // still lands, just faintly).
 function Card({ k, pulse, colour }: { k: CardKey; pulse: PulseState; colour: string | null }) {
@@ -397,19 +375,17 @@ function Card({ k, pulse, colour }: { k: CardKey; pulse: PulseState; colour: str
 }
 
 export function WriteTierDiagram() {
-  const [tier, setTier] = useState<Tier>("edge");
+  const [tier, setTier] = useState<Tier>("global");
   const [offline, setOffline] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [events, setEvents] = useState<WriteEvent[]>([]);
   const [colours, setColours] = useState<Record<NodeKey, string | null>>({
     phone: INITIAL_COLOR,
-    edge: INITIAL_COLOR,
     global: INITIAL_COLOR,
     receiver: INITIAL_COLOR,
   });
   const [pulse, setPulse] = useState<Record<NodeKey, PulseState>>({
     phone: { key: 0 },
-    edge: { key: 0 },
     global: { key: 0 },
     receiver: { key: 0 },
   });
@@ -418,7 +394,7 @@ export function WriteTierDiagram() {
   const geomRef = useRef<GraphOverlayCtx | null>(null);
   const [geomReady, setGeomReady] = useState(false);
   // Desktop offset (px) of the other-device card off the trunk centreline,
-  // measured from the edge card. Dropped to 0 on narrow screens so the shifted
+  // measured from the Core card. Dropped to 0 on narrow screens so the shifted
   // card never leaves the layout (a transform isn't seen by the engine's
   // measurement, so an offset card overflows the frame on mobile).
   const [branchBase, setBranchBase] = useState(0);
@@ -442,13 +418,11 @@ export function WriteTierDiagram() {
   // applied (last-write-wins: an older queued write never clobbers a newer).
   const coloursRef = useRef<Record<NodeKey, string | null>>({
     phone: INITIAL_COLOR,
-    edge: INITIAL_COLOR,
     global: INITIAL_COLOR,
     receiver: INITIAL_COLOR,
   });
   const lastSeenRef = useRef<Record<NodeKey, number>>({
     phone: 0,
-    edge: 0,
     global: 0,
     receiver: 0,
   });
@@ -520,23 +494,12 @@ export function WriteTierDiagram() {
           onArrive,
         });
 
-      // Hop 1: phone → edge. The dot's arrival is the moment the write
-      // becomes durable on the sync server.
-      playHop("edge", () => {
-        applyColour("edge", event);
-        pulseNode("edge");
-        setEvents((evts) => evts.map((e) => (e.id === event.id ? { ...e, reachedEdge: true } : e)));
-        if (event.tier === "edge") markSettled(event);
-      });
-
-      // One stage later the edge fans out: up to the global core, and across
-      // to the other device — concurrently.
-      after(STAGE_MS, () => {
-        playHop("global", () => {
-          applyColour("global", event);
-          pulseNode("global");
-          if (event.tier === "global") markSettled(event);
-        });
+      // Core accepts the write before another client receives it.
+      playHop("global", () => {
+        applyColour("global", event);
+        pulseNode("global");
+        setEvents((evts) => evts.map((e) => (e.id === event.id ? { ...e, reachedCore: true } : e)));
+        if (event.tier === "global") markSettled(event);
         playHop("receiver", () => {
           applyColour("receiver", event);
           pulseNode("receiver");
@@ -592,7 +555,7 @@ export function WriteTierDiagram() {
 
     // Local is durable on the device itself — its promise resolves even
     // without the network, so the tick fires straight away. The propagation
-    // to edge / global / the other device is what gets queued when offline.
+    // to Core / the other device is what gets queued when offline.
     if (isLocal) {
       setStatus({ kind: "settled", tier, eventId: id });
       after(TICK_LINGER_MS, () => {
@@ -611,7 +574,7 @@ export function WriteTierDiagram() {
         phase: isLocal ? "settled" : "writing",
         startedAt: performance.now(),
         queuedSince,
-        reachedEdge: false,
+        reachedCore: false,
       },
     ]);
   }
@@ -637,7 +600,7 @@ export function WriteTierDiagram() {
   const onGeometry = useCallback((ctx: GraphOverlayCtx) => {
     geomRef.current = ctx;
     setGeomReady(true);
-    const e = ctx.anchors.edge;
+    const e = ctx.anchors.global;
     if (e) {
       const base = (e.right - e.midX) * BRANCH_OFFSET;
       setBranchBase((p) => (Math.abs(p - base) < 0.5 ? p : base));
@@ -653,17 +616,17 @@ export function WriteTierDiagram() {
         <>
           {conn && (
             <>
-              {/* Authoritative durability spine: device → edge → global core,
+              {/* Authoritative durability spine: device → Core,
                   drawn solid as the trunk. */}
               <path
-                d={`${conn.edge} ${conn.global}`}
+                d={conn.global}
                 fill="none"
                 stroke="var(--diagram-edge, #9ca3af)"
                 strokeWidth={1.5}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
-              {/* The other device hangs off the edge as a leaf — a replicated
+              {/* The other device hangs off Core as a leaf — a replicated
                   copy, not part of the durability chain. Dashed + faded so the
                   hierarchy reads as a tree, not a symmetric fan-out. */}
               <path
@@ -726,13 +689,12 @@ export function WriteTierDiagram() {
     [events, traces, branchDx],
   );
 
-  // Phone on the left spanning all three rows; global (top), edge (middle)
-  // and the other device (bottom) stacked on the right. No structural edges —
+  // Phone on the left; Core and the receiving device stacked on the right. No structural edges —
   // the overlay draws the connector itself from the measured anchors.
   const nodes: GraphNode[] = [
     {
       id: "phone",
-      slot: { row: "1 / 4", col: 1 },
+      slot: { row: "1 / 3", col: 1 },
       content: (
         <PhoneChrome
           className="w-[clamp(13rem,46vw,17rem)]"
@@ -746,7 +708,7 @@ export function WriteTierDiagram() {
             onWrite={runWrite}
             offline={offline}
             onToggleOffline={toggleOffline}
-            unsynced={events.filter((e) => !e.reachedEdge).length}
+            unsynced={events.filter((e) => !e.reachedCore).length}
             colour={colours.phone}
           />
         </PhoneChrome>
@@ -758,13 +720,8 @@ export function WriteTierDiagram() {
       content: <Card k="global" pulse={pulse.global} colour={colours.global} />,
     },
     {
-      id: "edge",
-      slot: { row: 2, col: 2 },
-      content: <Card k="edge" pulse={pulse.edge} colour={colours.edge} />,
-    },
-    {
       id: "receiver",
-      slot: { row: 3, col: 2 },
+      slot: { row: 2, col: 2 },
       // Shifted to sit under its branch endpoint (branchDx). Visual only — the
       // engine measures the wrapper (still column-centred), and connectorPaths
       // routes to receiver.midX + branchDx, so card and branch stay locked.
@@ -782,10 +739,10 @@ export function WriteTierDiagram() {
       description={
         <>
           Each write picks a fresh colour. Choose how durable it must be before it's confirmed — it
-          lands on this device at once, then syncs up through the tiers and across to the other
-          device whenever the network is available; the promise resolves once it reaches the tier
-          you picked. Turn on aeroplane mode to watch writes queue on the device and flush when you
-          reconnect. Local always confirms instantly, even offline.
+          lands on this device at once, then syncs to Core and then to the other device whenever the
+          network is available; the promise resolves once it reaches the tier you picked. Turn on
+          aeroplane mode to watch writes queue on the device and flush when you reconnect. Local
+          confirms after local persistence, even offline.
         </>
       }
       direction="LR"
@@ -793,7 +750,7 @@ export function WriteTierDiagram() {
       edges={[]}
       grid={{
         columns: "auto auto",
-        rows: "auto auto auto",
+        rows: "auto auto",
         // Row gap fixed; column gap tightens on narrow screens so the phone +
         // tier column don't get pushed apart (and off-screen) on mobile.
         gap: "2rem clamp(0.75rem, 5vw, 3.5rem)",

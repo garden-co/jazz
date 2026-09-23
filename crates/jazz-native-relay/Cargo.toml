@@ -28,3 +28,5 @@ tempfile = "3.27.0"
 base64 = "0.22"
 jazz-server = { path = "../jazz-server", features = ["test"] }
 jazz-testkit = { path = "../jazz-testkit", default-features = false, features = ["scenarios"] }
+
+jazz-storage-rocksdb.workspace = true

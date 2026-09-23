@@ -69,7 +69,7 @@ fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
     ]);
     for tier in [
         DurabilityTier::Local,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         DurabilityTier::Global,
     ] {
         assert_eq!(
@@ -159,7 +159,7 @@ fn assert_current_winner_copied_enum_remap(
     )]);
     for tier in [
         DurabilityTier::Local,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         DurabilityTier::Global,
     ] {
         assert_eq!(
@@ -205,7 +205,7 @@ fn assert_current_winner_copied_enum_remap(
     );
     for tier in [
         DurabilityTier::Local,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         DurabilityTier::Global,
     ] {
         assert_eq!(

@@ -1,6 +1,5 @@
-import { expect } from "@playwright/test";
 import { fetchSchemaHashes } from "jazz-tools";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import type { LocalJazzServerHandle } from "jazz-tools/testing";
 import runServer from "../../scripts/dev-sync-server.js";
 import { createServer } from "vite";
 import { fileURLToPath } from "node:url";
@@ -27,26 +26,13 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   try {
     const { serverHandle: overlay } = await runServer({ port: 0 });
     servers.push(overlay);
-    // Seed only Core. Standalone Inspector must retrieve protected remote rows
-    // through Edge, while the embedded host keeps its public-read application.
+    // Standalone Inspector retrieves protected rows directly from Core, while
+    // the embedded host keeps its public-read application.
     const { serverHandle: core } = await runServer({
       port: 0,
       serverPermissions: standalonePermissions,
     });
     servers.push(core);
-    const edge = await startLocalJazzServer({
-      appId: core.appId,
-      port: 0,
-      adminSecret: core.adminSecret,
-      backendSecret: core.backendSecret,
-      upstreamUrl: core.url,
-    });
-    servers.push(edge);
-    // Binding a listener does not mean Edge has installed Core's catalogue yet.
-    await expect
-      .poll(async () => (await fetch(`${edge.url}/health`)).status, { timeout: 15_000 })
-      .toBe(200);
-
     webServer = await createServer({
       root: fileURLToPath(new URL("../..", import.meta.url)),
       // Vite treats port 0 as its default port; Node owns the actual listener.
@@ -66,16 +52,16 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     }
     process.env.JAZZ_INSPECTOR_TEST_WEB_URL = `http://127.0.0.1:${address.port}`;
     process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = overlay.url;
-    process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL = edge.url;
+    process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL = core.url;
     console.log("Inspector browser endpoints", {
       web: process.env.JAZZ_INSPECTOR_TEST_WEB_URL,
       sync: overlay.url,
-      standalone: edge.url,
+      standalone: core.url,
     });
 
-    const { hashes } = await fetchSchemaHashes(edge.url, {
-      appId: edge.appId,
-      adminSecret: edge.adminSecret,
+    const { hashes } = await fetchSchemaHashes(core.url, {
+      appId: core.appId,
+      adminSecret: core.adminSecret,
     });
 
     const publishedSchemaHash = hashes.at(-1);

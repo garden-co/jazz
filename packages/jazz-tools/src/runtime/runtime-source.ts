@@ -108,7 +108,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   /** Client hosts can select local-first reads independently of DOM globals. */
-  get defaultDurabilityTier(): "local" | "edge" | "global" | undefined {
+  get defaultDurabilityTier(): "local" | "global" | undefined {
     return undefined;
   }
 

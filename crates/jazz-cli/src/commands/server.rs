@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use jazz::node::EdgeCacheBudget;
 use jazz_server::AuthConfig;
 
 /// Run the Jazz server.
@@ -13,8 +12,6 @@ pub async fn run(
     data_dir: &str,
     in_memory: bool,
     auth_config: AuthConfig,
-    upstream_url: Option<String>,
-    edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -24,11 +21,8 @@ pub async fn run(
         data_dir,
         in_memory,
         auth_config,
-        upstream_url,
-        edge_cache_budget,
         bound_port_file,
         shutdown_timeout,
-        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
     )
     .await
 }

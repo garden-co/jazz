@@ -5,8 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz::query::Query;
 use jazz::tools::native_transport_connector::{
-    NativeCatalogueBootstrapFuture, NativeTransportConnector, NativeTransportError,
-    NativeTransportFuture, NativeTransportRequest,
+    NativeTransportConnector, NativeTransportFuture, NativeTransportRequest,
 };
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
@@ -25,15 +24,6 @@ struct RetryLaterConnector {
 }
 
 impl NativeTransportConnector for RetryLaterConnector {
-    fn validate_catalogue_bootstrap_url(
-        &self,
-        server_url: &str,
-        app_id: jazz::tools::AppId,
-    ) -> Result<(), NativeTransportError> {
-        jazz_native_transport::NativeWebSocketConnector
-            .validate_catalogue_bootstrap_url(server_url, app_id)
-    }
-
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         let deadline = self.deadline;
         Box::pin(async move {
@@ -51,13 +41,6 @@ impl NativeTransportConnector for RetryLaterConnector {
                 }
             }
         })
-    }
-
-    fn bootstrap_catalogue(
-        &self,
-        request: NativeTransportRequest,
-    ) -> NativeCatalogueBootstrapFuture {
-        jazz_native_transport::NativeWebSocketConnector.bootstrap_catalogue(request)
     }
 }
 
@@ -543,7 +526,7 @@ mod tests {
 }
 
 #[allow(dead_code)]
-/// Waits until a trivial EdgeServer query against `table` succeeds.
+/// Waits until a trivial GlobalServer query against `table` succeeds.
 ///
 /// Tests use this after connecting a client so subscription and query checks do
 /// not race the initial schema/catalogue sync.
@@ -553,7 +536,7 @@ pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout
         Query::from(table),
         jazz::tools::ReadTier::Remote,
         timeout,
-        format!("EdgeServer query readiness for {table}"),
+        format!("GlobalServer query readiness for {table}"),
         |_| Some(()),
     )
     .await;
@@ -564,7 +547,7 @@ pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[Transacti
     for &transaction_id in transaction_ids {
         tokio::time::timeout(
             Duration::from_secs(15),
-            client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
+            client.wait_for_transaction(transaction_id, DurabilityTier::GlobalServer),
         )
         .await
         .unwrap_or_else(|_| {
@@ -579,7 +562,7 @@ pub async fn wait_for_edge_txs(client: &JazzClient, transaction_ids: &[Transacti
 }
 
 #[allow(dead_code)]
-/// Re-runs an EdgeServer query until its rows satisfy the matcher, using the
+/// Re-runs a GlobalServer query until its rows satisfy the matcher, using the
 /// module's default row timeout.
 pub async fn wait_for_rows<T, F>(
     client: &JazzClient,

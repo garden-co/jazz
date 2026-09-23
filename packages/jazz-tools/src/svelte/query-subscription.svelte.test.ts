@@ -213,11 +213,11 @@ describe("svelte/QuerySubscription", () => {
     const query = makeQuery("inbox");
 
     const cleanup = $effect.root(() => {
-      new QuerySubscription(query, () => ({ tier: "edge" as const }));
+      new QuerySubscription(query, () => ({ tier: "global" as const }));
     });
     await settle();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
 
     cleanup();
   });
@@ -227,7 +227,7 @@ describe("svelte/QuerySubscription", () => {
     let withTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
     const cleanup = $effect.root(() => {
       withoutTier = new QuerySubscription(makeQuery());
-      withTier = new QuerySubscription(makeQuery(), { tier: "edge" as const });
+      withTier = new QuerySubscription(makeQuery(), { tier: "global" as const });
     });
 
     expect(withoutTier.current).toBeUndefined();
@@ -248,7 +248,7 @@ describe("svelte/QuerySubscription", () => {
     } as any);
 
     const query = makeQuery("one") as QueryBuilder<Todo>;
-    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "edge" });
+    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "global" });
     let subscription!: ReturnType<typeof createSubscription>;
     const cleanup = $effect.root(() => {
       subscription = createSubscription();
@@ -259,7 +259,7 @@ describe("svelte/QuerySubscription", () => {
     expect(subscription.current).toBeNull();
     const [limitedQuery, queryOptions] = mocks.makeQueryKey.mock.calls.at(-1)!;
     expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
-    expect(queryOptions).toEqual({ tier: "edge" });
+    expect(queryOptions).toEqual({ tier: "global" });
 
     onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
     expect(subscription.current).toEqual({ id: "1", title: "first" });
@@ -272,11 +272,11 @@ describe("svelte/QuerySubscription", () => {
   it("QuerySubscriptionOne accepts reactive query options", async () => {
     const query = makeQuery("one") as QueryBuilder<{ id: string }>;
     const cleanup = $effect.root(() => {
-      new QuerySubscriptionOne(query, () => ({ tier: "edge" as const }));
+      new QuerySubscriptionOne(query, () => ({ tier: "global" as const }));
     });
     await settle();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "edge" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "global" });
     cleanup();
   });
 

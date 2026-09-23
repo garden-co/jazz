@@ -261,7 +261,7 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
     permissions,
     driver: { type: "persistent", dataPath },
     env: "test",
-    tier: "edge",
+    tier: "global",
   });
   onTestFinished(async () => {
     context.flush();
@@ -275,7 +275,7 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
 
 async function createServerBackedReproContext(
   defineCasePermissions: ReproPermissions,
-  tier: "local" | "edge" | "global" = "edge",
+  tier: "local" | "global" = "global",
 ): Promise<JazzContext> {
   const appId = randomUUID();
   const backendSecret = `permissions-repro-backend-${appId}`;
@@ -340,12 +340,12 @@ describe("runtime permission repros for recursive gather and qualified predicate
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        tier: "edge",
+        tier: "global",
       });
       const backend = context.asBackend(relatedWriteApp);
       const playlist = await backend
         .insert(relatedWriteApp.playlists, { name: "access" })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       await backend
         .insert(relatedWriteApp.invitations, {
           playlist_id: playlist.id,
@@ -353,7 +353,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           role: "listener",
           status: "accepted",
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       await backend
         .insert(relatedWriteApp.invitations, {
           playlist_id: playlist.id,
@@ -361,7 +361,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           role: "editor",
           status: "accepted",
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
 
       const reader = context.forSession(
         {
@@ -386,19 +386,19 @@ describe("runtime permission repros for recursive gather and qualified predicate
       await expect(
         reader
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 1 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
       await expect(
         reader
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 2 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
       expect(await reader.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
       expect(await backend.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
       await expect(
         editor
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 3 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).resolves.toMatchObject({ position: 3 });
     } finally {
       await context?.shutdown();
@@ -441,7 +441,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           policy.team_access_edges.allowRead.where(allowedTo.read("target_team", { maxDepth: 32 })),
         ];
       },
-      "edge",
+      "global",
     );
 
     const db = context.asBackend(reproApp);
@@ -455,7 +455,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         system_owned: false,
         archived: false,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await db
       .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
@@ -463,7 +463,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         grant_role: "viewer",
         administrator: false,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await db
       .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
@@ -471,7 +471,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         grant_role: "manager",
         administrator: true,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const bobDb = context.forSession(
       {
@@ -622,7 +622,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       permissions,
       driver: { type: "persistent", dataPath },
       env: "test",
-      tier: "edge",
+      tier: "global",
     });
     onTestFinished(async () => {
       context.flush();

@@ -547,7 +547,7 @@ mod relay_topology {
     /// ```
     #[test]
     fn detaching_the_upstream_keeps_subscription_held_until_reconnected_authority_confirms() {
-        for tier in [DurabilityTier::Edge, DurabilityTier::Global] {
+        for tier in [DurabilityTier::Global, DurabilityTier::Global] {
             assert_detached_subscription_waits_for_authority(tier);
         }
     }

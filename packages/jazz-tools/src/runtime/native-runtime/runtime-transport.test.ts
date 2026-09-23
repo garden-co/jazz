@@ -339,7 +339,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
-  it("reconnects after a negotiated Edge reports its account registry temporarily unavailable", async () => {
+  it("reconnects after a negotiated Core reports its account registry temporarily unavailable", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -474,7 +474,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "00000000-0000-0000-0000-000000000009",
       ),
     );
-    const pending = runtime.waitForTransaction(txId, "edge");
+    const pending = runtime.waitForTransaction(txId, "global");
     const rejected = expect(pending).rejects.toThrow("websocket closed");
     await armed.promise;
     sockets[0]!.emitServerClose();
@@ -1156,7 +1156,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "00000000-0000-0000-0000-000000000013",
       ),
     );
-    const remoteWait = runtime.waitForTransaction(txId, "edge");
+    const remoteWait = runtime.waitForTransaction(txId, "global");
     const progress = runtime.progressPeerTransport();
     try {
       await vi.waitFor(() => expect(oldTickStarted).toBe(true));
@@ -1245,7 +1245,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "00000000-0000-0000-0000-000000000013",
       ),
     );
-    const remoteWait = runtime.waitForTransaction(txId, "edge");
+    const remoteWait = runtime.waitForTransaction(txId, "global");
     const progress = runtime.progressPeerTransport();
     try {
       await vi.waitFor(() => expect(oldTickStarted).toBe(true));
@@ -1322,7 +1322,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       entered.resolve();
       return hasUpstream();
     };
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
     const result =
       action === "disconnect"
         ? expect(read).rejects.toThrow("server transport disconnected")
@@ -1569,7 +1569,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(isWireHello(decodeWebSocketFrameBatch(received[0]!)[0]!)).toBe(true);
   });
 
-  it("settles an existing edge wait when a websocket frame arrives without a native callback", async () => {
+  it("settles an existing remote wait when a websocket frame arrives without a native callback", async () => {
     let settle!: () => void;
     const settlement = new Promise<void>((resolve) => {
       settle = resolve;
@@ -1625,7 +1625,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000007",
     );
 
-    const wait = runtime.waitForTransaction(await committedTxId(inserted), "edge");
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "global");
     await Promise.resolve();
     await Promise.resolve();
     expect(transportTicks).toBe(1);
@@ -1634,10 +1634,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
-    expect(write.wait).toHaveBeenCalledExactlyOnceWith("edge");
+    expect(write.wait).toHaveBeenCalledExactlyOnceWith("global");
   });
 
-  it("rejects active Edge and Global waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
+  it("rejects active concurrent Global waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
     const remoteSettlement = new Promise<void>(() => {});
     const localSubscription = {
       closed: false,
@@ -1647,7 +1647,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         return true;
       },
     };
-    const edgeSubscription = {
+    const otherRemoteSubscription = {
       closed: false,
       readAll: () => [],
       close() {
@@ -1663,7 +1663,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         return true;
       },
     };
-    const subscriptions = [localSubscription, edgeSubscription, globalSubscription];
+    const subscriptions = [localSubscription, otherRemoteSubscription, globalSubscription];
     let nativeMutationError: ((event: unknown) => void) | undefined;
     const write = {
       txId: "00000000000070008000000000000008",
@@ -1729,31 +1729,35 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
       "local",
     );
-    const edgeHandle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const otherRemoteHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "global",
+    );
     const globalHandle = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
       "global",
     );
     const localUpdates = vi.fn();
-    const edgeUpdates = vi.fn();
+    const otherRemoteUpdates = vi.fn();
     const globalUpdates = vi.fn();
     runtime.executeSubscription(localHandle, localUpdates);
-    runtime.executeSubscription(edgeHandle, edgeUpdates);
+    runtime.executeSubscription(otherRemoteHandle, otherRemoteUpdates);
     runtime.executeSubscription(globalHandle, globalUpdates);
-    const edgeWait = runtime.waitForTransaction(txId, "edge");
+    const otherRemoteWait = runtime.waitForTransaction(txId, "global");
     const globalWait = runtime.waitForTransaction(txId, "global");
     await Promise.resolve();
 
     runtime.reportRemoteServerTransportError(new Error("Protocol: terminal upstream failure"));
 
-    await expect(edgeWait).rejects.toThrow("Protocol: terminal upstream failure");
+    await expect(otherRemoteWait).rejects.toThrow("Protocol: terminal upstream failure");
     await expect(globalWait).rejects.toThrow("Protocol: terminal upstream failure");
     expect(localSubscription.closed).toBe(false);
     expect(localUpdates).not.toHaveBeenCalled();
-    expect(edgeSubscription.closed).toBe(true);
+    expect(otherRemoteSubscription.closed).toBe(true);
     expect(globalSubscription.closed).toBe(true);
-    for (const updates of [edgeUpdates, globalUpdates]) {
+    for (const updates of [otherRemoteUpdates, globalUpdates]) {
       expect(updates).toHaveBeenCalledWith(expect.any(Error));
       const firstUpdate = updates.mock.calls[0];
       if (!firstUpdate) throw new Error("terminal transport error did not wake subscription");
@@ -1764,7 +1768,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(mutationErrors).not.toHaveBeenCalled();
   });
 
-  it("delivers a terminal error to armed Edge and Global waits before reconnect clears transport state", async () => {
+  it("delivers a terminal error to armed concurrent Global waits before reconnect clears transport state", async () => {
     const remoteSettlement = deferred<void>();
     const remoteWaitsArmed = deferred<void>();
     let remoteWaits = 0;
@@ -1804,7 +1808,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000009",
     );
     const txId = await committedTxId(inserted);
-    const edgeWait = runtime.waitForTransaction(txId, "edge");
+    const otherRemoteWait = runtime.waitForTransaction(txId, "global");
     const globalWait = runtime.waitForTransaction(txId, "global");
 
     // This event barrier proves both remote waits reached the terminal waiter
@@ -1820,11 +1824,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     remoteSettlement.resolve();
     await replacement;
 
-    await expect(edgeWait).rejects.toThrow("Protocol: terminal before reconnect");
+    await expect(otherRemoteWait).rejects.toThrow("Protocol: terminal before reconnect");
     await expect(globalWait).rejects.toThrow("Protocol: terminal before reconnect");
   });
 
-  it("settles an existing edge wait without a native write-state callback", async () => {
+  it("settles an existing remote wait without a native write-state callback", async () => {
     let settle!: () => void;
     const settlement = new Promise<void>((resolve) => {
       settle = resolve;
@@ -1881,7 +1885,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000007",
     );
 
-    const wait = runtime.waitForTransaction(await committedTxId(inserted), "edge");
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "global");
     await Promise.resolve();
     await Promise.resolve();
     expect(transportTicks).toBe(1);
@@ -1890,7 +1894,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
-    expect(write.wait).toHaveBeenCalledExactlyOnceWith("edge");
+    expect(write.wait).toHaveBeenCalledExactlyOnceWith("global");
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {

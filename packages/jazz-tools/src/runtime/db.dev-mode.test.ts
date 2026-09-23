@@ -102,10 +102,10 @@ describe("Db devMode active query tracing", () => {
   it("records explicit public tier overrides", async () => {
     const db = await makeDb(true);
     const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
-      tier: "edge",
+      tier: "global",
     });
 
-    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");
+    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("global");
     expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("full");
 
     unsubscribe();

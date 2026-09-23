@@ -63,7 +63,7 @@ describe("Node shared backend session", () => {
       );
       const rows = await Promise.all(
         scopes.map((db, index) =>
-          db.insert(app.posts, { text: `request-${index}` }).wait({ tier: "edge" }),
+          db.insert(app.posts, { text: `request-${index}` }).wait({ tier: "global" }),
         ),
       );
       const authors = await Promise.all(
@@ -224,7 +224,9 @@ describe("Node shared backend session", () => {
       await transition;
       expect(owner.getSnapshot().account?.identity.issuer).toBe("urn:jazz:local-first");
       expect(
-        await owner.getSnapshot().client!.db.one(app.posts.where({ id: row.id }), { tier: "edge" }),
+        await owner
+          .getSnapshot()
+          .client!.db.one(app.posts.where({ id: row.id }), { tier: "global" }),
       ).toMatchObject({ text: "pending scope" });
     } finally {
       await owner.close();
@@ -266,7 +268,7 @@ describe("Node shared backend session", () => {
       });
       const initial = await backend.db
         .insert(app.notes, { text: "service" })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: initial.id })),
       ).toMatchObject({ $createdBy: backend.session?.user });
@@ -279,18 +281,20 @@ describe("Node shared backend session", () => {
       );
       await expect(user.client!.forRequest({ headers: {} })).rejects.toThrow("backend account");
       expect(
-        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "edge" }),
+        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "global" }),
       ).toMatchObject({ text: "service" });
-      await user.client!.db.insert(app.posts, { text: "ordinary positive" }).wait({ tier: "edge" });
+      await user
+        .client!.db.insert(app.posts, { text: "ordinary positive" })
+        .wait({ tier: "global" });
       await expect(async () => {
-        await user.client!.db.insert(app.notes, { text: "denied user" }).wait({ tier: "edge" });
+        await user.client!.db.insert(app.notes, { text: "denied user" }).wait({ tier: "global" });
       }).rejects.toThrow(/permission|denied|policy/i);
 
       await session.becomeBackend({ backendSecret });
       const current = session.getSnapshot().client!;
       const scoped = await current.forAccount(user.account!);
       await expect(async () => {
-        await scoped.insert(app.notes, { text: "denied scoped user" }).wait({ tier: "edge" });
+        await scoped.insert(app.notes, { text: "denied scoped user" }).wait({ tier: "global" });
       }).rejects.toThrow(/permission|denied|policy/i);
       const other = await createJazzSession({
         appId,
@@ -304,8 +308,8 @@ describe("Node shared backend session", () => {
         const otherAccount = other.getSnapshot().account!;
         const otherScope = await current.forAccount(otherAccount);
         const rows = await Promise.all([
-          scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "edge" }),
-          otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "edge" }),
+          scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "global" }),
+          otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "global" }),
         ]);
         for (const [index, expected] of [user.account!, otherAccount].entries()) {
           expect(
@@ -318,7 +322,7 @@ describe("Node shared backend session", () => {
       const attributed = await current.withAttribution(user.account!);
       const row = await attributed
         .insert(app.notes, { text: "attributed service" })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       expect(
         await current.db.one(app.notes.select("$createdBy").where({ id: row.id })),
       ).toMatchObject({

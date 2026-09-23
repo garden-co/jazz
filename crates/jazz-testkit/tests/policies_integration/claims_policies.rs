@@ -393,12 +393,12 @@ async fn admin_role_claims_reject_member_mutations_inner() {
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after rejected member update");
+        .expect("GlobalServer query after rejected member update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
             *id == admin_doc && *values == title_document_values("admin created")
         }),
-        "rejected member update must not persist at EdgeServer: rows={rows_after_rejected_update:?}"
+        "rejected member update must not persist at GlobalServer: rows={rows_after_rejected_update:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -414,7 +414,7 @@ async fn admin_role_claims_reject_member_mutations_inner() {
         .query(query, jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after rejected member delete");
+        .expect("GlobalServer query after rejected member delete");
     assert!(
         rows_after_rejected_delete.iter().any(|(id, values)| {
             *id == admin_doc && *values == title_document_values("admin created")
@@ -596,7 +596,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .expect("blocked update has a transaction");
     let blocked_error = tokio::time::timeout(
         QUERY_TIMEOUT,
-        alice.wait_for_transaction(blocked_tx, DurabilityTier::EdgeServer),
+        alice.wait_for_transaction(blocked_tx, DurabilityTier::GlobalServer),
     )
     .await
     .expect("blocked update settles within timeout")
@@ -611,7 +611,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
-        .expect("EdgeServer query after rejected blocked-row update");
+        .expect("GlobalServer query after rejected blocked-row update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
             *id == allowed_doc && *values == title_document_values("allowed updated")

@@ -367,7 +367,7 @@ fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
             &shape,
             &binding,
             alice,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             &ReadViewSpec::default(),
             None,
             QueryAuthorizationMode::ClientLocal,
@@ -1029,10 +1029,10 @@ fn local_edit_after_confirmed_unavailable_retains_optimistic_visibility() {
     assert_eq!(parent_ids(&mut node, &schema, author(2)).len(), 2);
 }
 
-/// Edge-accepted versions can remain in Ahead storage. They are settled cache,
+/// Core-confirmed versions are settled cache,
 /// while a distinct pending successor must still participate normally.
 #[test]
-fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
+fn local_unavailable_confirmed_row_keeps_pending_successor() {
     let (_dir, mut node, schema) = fixture();
     let alice = author(1);
     let parent = node
@@ -1046,12 +1046,34 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
                 .parents(vec![parent])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
-                    Value::String("edge accepted".to_owned()),
+                    Value::String("core confirmed".to_owned()),
                 )])),
         )
         .unwrap();
-    node.apply_fate_update(accepted, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    // Model interruption after confirmation persists but before Ahead cleanup.
+    // The public confirmation path normally performs both together.
+    let stored = node.query_transaction(accepted).unwrap().unwrap();
+    let global_time = node.allocate_global_time_for_test();
+    let version = node.query_versions_for_tx(accepted).unwrap().remove(0);
+    let mut batch = node.database.open_batch();
+    batch.update(
+        "jazz_transactions",
+        transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            Fate::Accepted,
+            Some(global_time),
+            DurabilityTier::Global,
+            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::db::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
     let scope = node.local_read_policy_binding(alice).unwrap();
     let table = node
         .local_availability_table_id(schema.version_id(), "parents")
@@ -1068,7 +1090,7 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
     assert_eq!(
         parent_ids(&mut node, &schema, alice),
         BTreeSet::from([row(2)]),
-        "Edge-accepted Ahead content is still subject to the settled exclusion"
+        "Core-confirmed content is still subject to the settled exclusion"
     );
     let pending = node
         .commit_mergeable_settled(
@@ -1095,7 +1117,7 @@ fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
     assert_eq!(
         parent_ids(&mut node, &schema, alice),
         BTreeSet::from([row(2)]),
-        "rejection cannot resurrect the Edge-accepted predecessor"
+        "rejection cannot resurrect the Core-confirmed predecessor"
     );
 }
 
@@ -1146,135 +1168,4 @@ fn local_availability_readmission_after_restart_uses_incarnation_not_epoch_order
             .unwrap()
     );
     assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
-}
-
-/// Internal lifecycle control retains live graphs while closing hundreds of
-/// siblings. Results and subsequent live updates detect premature retirement.
-#[test]
-fn edge_serving_scope_churn_reclaims_closed_inputs_without_retiring_live_siblings() {
-    let (_dir, mut node, schema) = fixture();
-    node.enable_edge_query_serving();
-    let alice = author(1);
-    let scope = node.local_read_policy_binding(alice).unwrap();
-    node.set_local_row_unavailable(&scope, "parents", row(1), true)
-        .unwrap();
-    let shape = Query::from("parents").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (mut live, initial) = node
-        .open_maintained_view_subscription_in_authorization_mode(
-            &shape,
-            &binding,
-            alice,
-            DurabilityTier::Global,
-            &ReadViewSpec::default(),
-            None,
-            QueryAuthorizationMode::EdgeServing,
-        )
-        .unwrap();
-    assert_eq!(initial.root_count, 1);
-    let bob = author(2);
-    let (mut local_live, initial) = node
-        .open_maintained_view_subscription_in_authorization_mode(
-            &shape,
-            &binding,
-            bob,
-            DurabilityTier::Local,
-            &ReadViewSpec::default(),
-            None,
-            QueryAuthorizationMode::ClientLocal,
-        )
-        .unwrap();
-    assert_eq!(initial.root_count, 2);
-    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
-        let mut bytes = [0x9a; 16];
-        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-        let reader = AuthorSubject::for_test_bytes(bytes);
-        let (temporary, initial) = node
-            .open_maintained_view_subscription_in_authorization_mode(
-                &shape,
-                &binding,
-                reader,
-                DurabilityTier::Global,
-                &ReadViewSpec::default(),
-                None,
-                QueryAuthorizationMode::EdgeServing,
-            )
-            .unwrap();
-        assert_eq!(initial.root_count, 2, "reader {index}");
-        node.database.unsubscribe(temporary.subscription.id());
-        drop(temporary);
-    }
-    assert!(
-        node.query.local_unavailable_inputs.len() < 8,
-        "closed empty scopes must not accumulate"
-    );
-    node.set_local_row_unavailable(&scope, "parents", row(1), false)
-        .unwrap();
-    assert!(
-        node.drain_local_maintained_view_subscription(&mut live, None)
-            .unwrap()
-            .is_some()
-    );
-    let bob_scope = node.local_read_policy_binding(bob).unwrap();
-    node.set_local_row_unavailable(&bob_scope, "parents", row(1), true)
-        .unwrap();
-    assert!(
-        node.drain_local_maintained_view_subscription(&mut local_live, None)
-            .unwrap()
-            .is_some()
-    );
-    node.database.unsubscribe(live.subscription.id());
-    node.database.unsubscribe(local_live.subscription.id());
-}
-
-/// Capability checks can be abandoned before Subscribe opens its evaluator.
-#[test]
-fn edge_serving_preflight_churn_reclaims_unowned_inputs() {
-    let (_dir, mut node, schema) = fixture();
-    let shape = Query::from("parents").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
-        let mut bytes = [0x9b; 16];
-        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-        node.ensure_peer_maintained_subscription_view_supported(
-            &shape,
-            &binding,
-            DurabilityTier::Global,
-            AuthorSubject::for_test_bytes(bytes),
-            &ReadViewSpec::default(),
-            QueryAuthorizationMode::EdgeServing,
-        )
-        .unwrap();
-    }
-    assert!(node.query.local_unavailable_inputs.len() < 4);
-}
-
-/// The advice cache's fixed request quota must not cap live Edge readers.
-#[test]
-fn edge_serving_more_than_advice_quota_live_readers_remain_independent() {
-    let (_dir, mut node, schema) = fixture();
-    let shape = Query::from("parents").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut readers = Vec::new();
-    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
-        let mut bytes = [0x9c; 16];
-        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-        let reader = AuthorSubject::for_test_bytes(bytes);
-        let (live, initial) = node
-            .open_maintained_view_subscription_in_authorization_mode(
-                &shape,
-                &binding,
-                reader,
-                DurabilityTier::Global,
-                &ReadViewSpec::default(),
-                None,
-                QueryAuthorizationMode::EdgeServing,
-            )
-            .unwrap();
-        assert_eq!(initial.root_count, 2, "reader {index}");
-        readers.push(live);
-    }
-    for live in readers {
-        node.database.unsubscribe(live.subscription.id());
-    }
 }

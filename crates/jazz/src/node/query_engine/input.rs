@@ -28,8 +28,6 @@ pub(crate) struct QueryProgramRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueryAuthorizationMode {
     TrustedServing,
-    /// Evaluate policy locally, additionally honoring verified upstream denials.
-    EdgeServing,
     ClientLocal,
 }
 

@@ -881,7 +881,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
             tx_id,
             fate: Fate::Accepted,
             global_time: Some(GlobalTime(7)),
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
     }));
     assert!(
@@ -962,7 +962,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     versions: Vec::new(),
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(7)),
-                    durability: DurabilityTier::Edge,
+                    durability: DurabilityTier::Local,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     opening_pending: false,
@@ -1027,7 +1027,7 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
             tx_id,
             Fate::Accepted,
             Some(GlobalTime(7)),
-            Some(DurabilityTier::Edge),
+            Some(DurabilityTier::Local),
         )
         .resolve()
     }));
