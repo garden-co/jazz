@@ -1888,6 +1888,142 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
 }
 
 #[test]
+fn include_deleted_reads_select_the_requested_live_branch_view() {
+    let (db, _schema) = open_db();
+    let base = selector(0x31);
+    let head = selector(0x32);
+    let other = selector(0x33);
+    let inherited_deleted = RowUuid::from_bytes([0x34; 16]);
+    let inherited_visible = RowUuid::from_bytes([0x35; 16]);
+    let head_deleted = RowUuid::from_bytes([0x36; 16]);
+    let other_deleted = RowUuid::from_bytes([0x37; 16]);
+
+    for (row, branch, title) in [
+        (inherited_deleted, base.clone(), "deleted from head"),
+        (inherited_visible, base.clone(), "visible from base"),
+        (other_deleted, other.clone(), "other branch"),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    db.insert(
+        "todos",
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("deleted on head".to_owned()),
+        )]),
+        jazz::db::InsertOptions {
+            row_id: Some(head_deleted),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete(
+        "todos",
+        head_deleted,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete(
+        "todos",
+        inherited_deleted,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete(
+        "todos",
+        other_deleted,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: other.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let head_opts = ReadOpts {
+        include_deleted: true,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::BranchView {
+                head: head.clone(),
+                base: None,
+            },
+        },
+        ..ReadOpts::default()
+    };
+    let current_base_opts = ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base)),
+            },
+        },
+        ..head_opts.clone()
+    };
+    let head_rows = block_on(db.all(&prepared, head_opts.clone())).unwrap();
+    assert_eq!(
+        head_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![inherited_deleted, head_deleted],
+        "an exact head read includes head tombstones, not another branch's tombstones"
+    );
+    let base_rows = block_on(db.all(&prepared, current_base_opts)).unwrap();
+    assert_eq!(
+        base_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![inherited_deleted, inherited_visible, head_deleted],
+        "the current base is covered while a head tombstone remains the winner"
+    );
+
+    let unsupported_snapshot_base = ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::BranchView {
+                head,
+                base: Some(BranchViewBase::Snapshot {
+                    branch: other,
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x37; 16]),
+                        global_base: GlobalTime(0),
+                        local_base: jazz::time::TxTime(0),
+                        dots: Vec::new(),
+                    },
+                }),
+            },
+        },
+        ..head_opts
+    };
+    assert!(block_on(db.all(&prepared, unsupported_snapshot_base)).is_err());
+}
+
+#[test]
 fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct() {
     let (_template, schema) = open_db();
     let directory = tempfile::tempdir().unwrap();
