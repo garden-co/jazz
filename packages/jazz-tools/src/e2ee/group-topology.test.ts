@@ -4,9 +4,12 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
-import { groupSchema } from "./groups.js";
-import { withGroupTopologyPermissions } from "./group-topology.js";
+import {
+  deviceRequestSchema,
+  deviceRequestPermissions,
+  groupSchema,
+  withGroupTopologyPermissions,
+} from "./index.js";
 
 it("makes topology readable outside group membership without granting administration or private data access", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
