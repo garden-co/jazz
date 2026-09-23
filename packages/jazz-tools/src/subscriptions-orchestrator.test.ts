@@ -533,6 +533,42 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-P03 notifies listeners when same-rank readiness fulfills a pending entry", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onfulfilled = vi.fn();
+      const onDelta = vi.fn();
+      const unsubscribe = entry.subscribe({ onfulfilled, onDelta });
+      const rows = [makeTodo("preview")];
+
+      harness.emit(0, {
+        ...makeDelta(rows),
+        requestedReady: false,
+        attainedSettlement: "local",
+      });
+      expect(entry.status).toBe("pending");
+      expect(entry.state.data).toEqual(rows);
+      expect(onfulfilled).not.toHaveBeenCalled();
+
+      harness.emit(0, {
+        delta: [],
+        requestedReady: true,
+        attainedSettlement: "local",
+      });
+
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state.data).toEqual(rows);
+      expect(entry.state.highestSettledAt).toBe("local");
+      expect(onfulfilled).toHaveBeenCalledTimes(1);
+      expect(onfulfilled).toHaveBeenCalledWith(rows);
+      expect(onDelta).not.toHaveBeenCalled();
+      unsubscribe();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-P02 preserves rows while metadata-only settlement advances monotonically", async () => {
     const harness = createUnitHarness();
     try {

@@ -157,6 +157,123 @@ fn foreground_initial_subscription_completes_empty_owner_answer() {
     assert_foreground_initial_owner_snapshot(false);
 }
 
+#[test]
+fn progressive_foreground_preview_stays_unready_until_owner_answers() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let owner = open_db(0xc1, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let authoritative_row = row(0xc2);
+    owner
+        .insert(
+            "todos",
+            cells("authoritative", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(authoritative_row),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    owner.tick().unwrap();
+
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let mut stream = block_on(foreground.subscribe_serialized_query(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+        None,
+        SerializedSubscriptionAuthorization::ClientLocal,
+        SubscriptionDelivery::Progressive,
+    ))
+    .unwrap();
+
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        requested_ready,
+        attained_settlement,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("expected the progressive local preview");
+    };
+    assert!(added.is_empty());
+    assert!(!requested_ready);
+    assert_eq!(attained_settlement, QuerySettlementLevel::Unconfirmed);
+
+    let local_preview = row(0xc3);
+    foreground
+        .insert(
+            "todos",
+            cells("local preview", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(local_preview),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    foreground.tick().unwrap();
+    let Some(SubscriptionEvent::Delta {
+        added,
+        requested_ready,
+        attained_settlement,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("expected a local preview update before the owner response");
+    };
+    assert!(
+        added
+            .iter()
+            .any(|output| output.row_uuid() == local_preview)
+    );
+    assert!(!requested_ready);
+    assert_eq!(attained_settlement, QuerySettlementLevel::Unconfirmed);
+
+    let mut ready_event = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            if matches!(
+                &event,
+                SubscriptionEvent::Delta {
+                    requested_ready: true,
+                    ..
+                }
+            ) {
+                ready_event = Some(event);
+                break;
+            }
+        }
+        if ready_event.is_some() {
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        requested_ready: true,
+        attained_settlement: QuerySettlementLevel::Local,
+        added,
+        ..
+    }) = ready_event
+    else {
+        panic!("owner response must eventually mark the local query ready");
+    };
+    assert!(
+        added
+            .iter()
+            .any(|output| output.row_uuid() == authoritative_row)
+    );
+}
+
 // Internal topology receipt: ordinary single-Db subscriptions do not enter
 // the foreground owner's initial reset path. Observe only public stream output.
 #[test]
