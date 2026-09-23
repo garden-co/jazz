@@ -327,6 +327,76 @@ describe("jazzSvelteKit", () => {
     await (plugin.closeBundle as () => Promise<void>)();
   });
 
+  it("keeps the runtime alive when Vite restarts and closes the old plugin instance last", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const watcherClose = vi.fn();
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000246",
+      port: 19978,
+      url: "http://127.0.0.1:19978",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("bug237-restart-order"));
+    let onPush: ((hash: string) => void | Promise<void>) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      onPush = opts.onPush;
+      return { close: watcherClose };
+    });
+
+    const root = await tempRoots.create("jazz-sveltekit-restart-order-test-");
+    const pluginOptions = { server: { port: 19978, adminSecret: "restart-order-admin" } };
+    const serveEnv = { command: "serve" as const, mode: "development" };
+
+    // Initial start: Vite runs `config`, then `configureServer`.
+    const oldPlugin = jazzSvelteKit(pluginOptions);
+    await oldPlugin.config({ root }, serveEnv);
+    const oldWsSend = vi.fn();
+    await (oldPlugin.configureServer as (s: ViteDevServer) => Promise<void>)({
+      ...makeViteServer("serve", root),
+      ws: { send: oldWsSend },
+    });
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+    expect(process.env.BACKEND_SECRET).toBe("local-backend");
+    const appId = process.env.PUBLIC_JAZZ_APP_ID;
+    expect(appId).toBeTruthy();
+
+    // Restart (.env or vite.config.ts change): Vite's restartServer builds the
+    // new server first — fresh plugin instances run `config` and
+    // `configureServer` — and only then closes the old server, which fires the
+    // old instance's `closeBundle`.
+    const newPlugin = jazzSvelteKit(pluginOptions);
+    await newPlugin.config({ root }, serveEnv);
+    const newWsSend = vi.fn();
+    const newServer = { ...makeViteServer("serve", root), ws: { send: newWsSend } };
+    await (newPlugin.configureServer as (s: ViteDevServer) => Promise<void>)(newServer);
+    await (oldPlugin.closeBundle as () => Promise<void>)();
+
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+    expect(watcherClose).not.toHaveBeenCalled();
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(appId);
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+    expect(process.env.BACKEND_SECRET).toBe("local-backend");
+    expect(newServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19978");
+
+    // Schema pushes after the restart reload the browser on the live server.
+    oldWsSend.mockClear();
+    await onPush!("b237aaceface01");
+    expect(newWsSend).toHaveBeenCalledWith({ type: "full-reload" });
+    expect(oldWsSend).not.toHaveBeenCalled();
+
+    // Final shutdown: closing the last active instance disposes everything.
+    await (newPlugin.closeBundle as () => Promise<void>)();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(watcherClose).toHaveBeenCalledOnce();
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+    expect(process.env.BACKEND_SECRET).toBeUndefined();
+  });
+
   it("reports and rethrows disposal failures from closeBundle", async () => {
     const disposalError = new Error("dispose failed");
     const stop = vi.fn().mockRejectedValue(disposalError);
