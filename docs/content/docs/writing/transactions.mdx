@@ -35,13 +35,13 @@ authority runs locally instead.
 
 ## Choose a transaction type
 
-| Use                 | Mergeable transaction                           | Exclusive transaction                                                  |
-| ------------------- | ----------------------------------------------- | ---------------------------------------------------------------------- |
-| Best for            | Grouping normal local-first writes              | Enforcing an invariant across reads and writes                         |
-| Concurrent work     | Merges using Jazz's normal conflict rules       | The authority validates the transaction as one serialisable unit       |
-| TypeScript callback | `db.transaction(...)`                           | `db.exclusiveTransaction(...)`                                         |
-| TypeScript wait     | `wait({ tier: "local" \| "edge" \| "global" })` | `wait()`                                                               |
-| Offline             | Can commit locally and sync later               | Can be staged, but cannot be accepted until the authority is reachable |
+| Use                 | Mergeable transaction                     | Exclusive transaction                                                  |
+| ------------------- | ----------------------------------------- | ---------------------------------------------------------------------- |
+| Best for            | Grouping normal local-first writes        | Enforcing an invariant across reads and writes                         |
+| Concurrent work     | Merges using Jazz's normal conflict rules | The authority validates the transaction as one serialisable unit       |
+| TypeScript callback | `db.transaction(...)`                     | `db.exclusiveTransaction(...)`                                         |
+| TypeScript wait     | `wait({ tier: "local" \| "global" })`     | `wait()`                                                               |
+| Offline             | Can commit locally and sync later         | Can be staged, but cannot be accepted until the authority is reachable |
 
 You do not need a transaction for every write. `insert`, `update`, `upsert`, `delete` and `restore`
 already apply locally first and sync in the background.
@@ -103,8 +103,7 @@ In TypeScript, committing and waiting for durability are separate steps:
 If your next action depends on server acceptance, keep the result and call `wait(...)`. Awaiting
 `db.transaction(...)` by itself is not enough.
 
-See [Durability Tiers](/docs/reference/durability-tiers) for the meaning of `local`, `edge` and
-`global`.
+See [Durability Tiers](/docs/reference/durability-tiers) for the meaning of `local` and `global`.
 
 ## Handle errors
 

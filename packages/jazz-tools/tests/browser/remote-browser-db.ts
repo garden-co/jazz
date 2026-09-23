@@ -27,7 +27,7 @@ declare module "vitest/internal/browser" {
     queryRemoteBrowserDbRows: (
       id: string,
       tabIndex: number,
-      tier?: "local" | "edge",
+      tier?: "local" | "global",
     ) => Promise<Record<string, unknown>[]>;
     restartRemoteBrowserDb: (id: string) => Promise<void>;
     deleteRemoteBrowserIndexedDbAndWaitForReload: (id: string, dbName: string) => Promise<void>;
@@ -70,7 +70,7 @@ export function updateRemoteBrowserDbRow(
 export function queryRemoteBrowserDbRows(
   id: string,
   tabIndex: number,
-  tier?: "local" | "edge",
+  tier?: "local" | "global",
 ): Promise<Record<string, unknown>[]> {
   return commands.queryRemoteBrowserDbRows(id, tabIndex, tier);
 }

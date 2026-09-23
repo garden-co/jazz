@@ -68,7 +68,7 @@ mod tests {
     use jazz::binding_codec::decode_named_cells;
     use jazz::tools::{AppContext, ClientStorage, Value};
     use jazz_server::{JazzServer, TestJwtIssuer};
-    use jazz_testkit::{connect, enroll_test_context, native_connector, wait_for_query};
+    use jazz_testkit::{connect, enroll_test_context, wait_for_query};
     use std::time::Duration;
 
     #[test]
@@ -120,7 +120,6 @@ mod tests {
                     let server = JazzServer::builder()
                         .with_schema(schema.clone())
                         .with_jwks_url(issuer.endpoint())
-                        .with_native_transport_connector(native_connector())
                         .start()
                         .await
                         .expect("start test server");

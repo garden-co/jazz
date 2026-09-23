@@ -63,7 +63,7 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
-/// Complete edge-authority publications, reconciled as a group at core.
+/// Reserved legacy edge-publication bit. Never advertised by current peers.
 pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
@@ -172,16 +172,48 @@ impl std::fmt::Debug for WireMessageFragment {
 
 /// Link role advertised during handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "WirePeerRoleEncoding", into = "WirePeerRoleEncoding")]
 pub enum WirePeerRole {
     /// End-user or local application runtime.
     Client,
     /// Durable server or authority runtime.
     Core,
-    /// Edge runtime terminating client identity and policy composition.
+    /// Local relay/cache runtime without independent fate authority.
+    Relay = 3,
+}
+
+// Preserve the declared postcard role tags; the removed server role is never
+// constructible by callers and is rejected when decoding old handshakes.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WirePeerRoleEncoding {
+    Client,
+    Core,
     Edge,
-    /// Relay/cache runtime without a terminated end-user identity.
     Relay,
+}
+
+impl From<WirePeerRole> for WirePeerRoleEncoding {
+    fn from(role: WirePeerRole) -> Self {
+        match role {
+            WirePeerRole::Client => Self::Client,
+            WirePeerRole::Core => Self::Core,
+            WirePeerRole::Relay => Self::Relay,
+        }
+    }
+}
+
+impl TryFrom<WirePeerRoleEncoding> for WirePeerRole {
+    type Error = &'static str;
+
+    fn try_from(role: WirePeerRoleEncoding) -> Result<Self, Self::Error> {
+        match role {
+            WirePeerRoleEncoding::Client => Ok(Self::Client),
+            WirePeerRoleEncoding::Core => Ok(Self::Core),
+            WirePeerRoleEncoding::Relay => Ok(Self::Relay),
+            WirePeerRoleEncoding::Edge => Err("server edge role is no longer supported"),
+        }
+    }
 }
 
 /// Handshake payload used to negotiate a common wire version and feature set.
@@ -926,7 +958,6 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-        | FEATURE_AUTHORITY_PUBLICATIONS
         | runtime_transport_compression_features()
 }
 
@@ -1198,6 +1229,25 @@ mod tests {
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+
+    /// Wire layout is tested internally because enum tags are not a query API.
+    #[test]
+    fn peer_role_tags_preserve_relay_and_reject_retired_edge() {
+        for (role, tag, name) in [
+            (WirePeerRole::Client, 0, "client"),
+            (WirePeerRole::Core, 1, "core"),
+            (WirePeerRole::Relay, 3, "relay"),
+        ] {
+            assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
+            assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
+            assert_eq!(serde_json::to_value(role).unwrap(), name);
+        }
+        assert!(postcard::from_bytes::<WirePeerRole>(&[2]).is_err());
+        assert!(serde_json::from_str::<WirePeerRole>(r#""edge""#).is_err());
+        // Complete former Edge Hello, not merely an isolated enum decoder.
+        assert!(decode_frame(&[0, 3, 3, 32, 2, 0]).is_err());
+        assert_eq!(current_wire_features() & FEATURE_AUTHORITY_PUBLICATIONS, 0);
+    }
 
     #[test]
     fn hello_json_shape_is_stable() {
@@ -1513,16 +1563,18 @@ mod tests {
         assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
 
         // Sensitivity plant: the final enum tag is durability.  A receiver
-        // must not silently retain Global when a payload says Edge.
+        // must decode the legacy Edge tag as Local, never as Global.
         let mut edge = fixture.clone();
         *edge.last_mut().expect("non-empty fixture") = 2;
+        // The untrusted boundary also rejects this sequenced Local receipt.
+        assert!(decode_sync_message(&edge).is_err());
         assert_eq!(
-            decode_sync_message(&edge).unwrap(),
+            decode_sync_message_trusted(&edge).unwrap(),
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
-                durability: Some(DurabilityTier::Edge),
+                durability: Some(DurabilityTier::Local),
             }
         );
     }

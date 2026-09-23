@@ -57,7 +57,7 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /** Optional node durability tier identity. */
-  tier?: "local" | "edge" | "global";
+  tier?: "local" | "global";
   /**
    * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
    * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
@@ -163,7 +163,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "edge";
+    const nodeTier = this.config.tier ?? "global";
     const env = this.config.env ?? "dev";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,

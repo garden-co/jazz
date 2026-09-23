@@ -32,6 +32,18 @@ Jazz chapter and therefore have no record yet. A record is created only when a
 chapter cites the invariant; this avoids treating deliberate numbering gaps as
 dangling references.
 
+The IDs `INV-SYNC-18` and `INV-SYNC-22` are retired with server-edge admission.
+They must not be reused for unrelated behavior.
+
+The removed server-edge acceptance and topology contracts `INV-EDGE-8` and
+`INV-EDGE-12` are retired; their identifiers must not be reused. Core now
+authorizes every ordinary client write as specified in chapter 9.
+
 ## Open Questions
 
 None.
+
+Retired with removal of server-edge admission: `INV-EDGE-4`, `INV-EDGE-5`,
+`INV-EDGE-9`, `INV-EDGE-10`, `INV-EDGE-17`, and `INV-EDGE-18`. Their IDs must
+not be reused. Core authorizes writes directly; there are no edge permission
+subscriptions, stale-scope acceptance, or deferred edge-fate gates.

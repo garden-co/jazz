@@ -131,7 +131,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
         .expect("Bob can stage an optimistic update to an observed row")
         .expect("ordinary update commits immediately");
     let error = bob
-        .wait_for_transaction(transaction_id, jazz::tools::DurabilityTier::EdgeServer)
+        .wait_for_transaction(transaction_id, jazz::tools::DurabilityTier::GlobalServer)
         .await
         .expect_err("the server must reject Bob's update under UPDATE USING");
     assert!(
@@ -241,7 +241,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
     let bob_delete = bob
         .wait_for_transaction(
             bob_delete_transaction.expect("permissive delete should commit immediately"),
-            jazz::tools::DurabilityTier::EdgeServer,
+            jazz::tools::DurabilityTier::GlobalServer,
         )
         .await;
     assert!(

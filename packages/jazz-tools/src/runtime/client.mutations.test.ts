@@ -130,12 +130,12 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "local" | "edge" | "global",
+      defaultDurabilityTier: "local" | "global",
     ): JazzClient;
   };
 
   return {
-    client: new JazzClientCtor(runtime, context, "edge"),
+    client: new JazzClientCtor(runtime, context, "global"),
     runtime,
     insertCalls,
     restoreCalls,

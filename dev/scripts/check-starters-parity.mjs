@@ -274,7 +274,7 @@ function checkSaveLifecycleContracts() {
       }
       if (framework === "ts") {
         for (const [description, pattern] of [
-          ["an edge durability wait after local acknowledgement", /wait\(\{ tier: "edge" \}\)/],
+          ["a Core durability wait after local acknowledgement", /wait\(\{ tier: "global" \}\)/],
           ["an edge failure acknowledgement", /Saved locally; sync failed/],
           ["a generation-guarded reset", /generation === latestSaveGeneration\) form\.reset/],
         ]) {

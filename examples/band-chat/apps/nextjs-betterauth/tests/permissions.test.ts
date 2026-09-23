@@ -34,17 +34,17 @@ describe("BandChat room admission and authorship", () => {
     });
     const ownerProfile = await owner
       .insert(app.profiles, { author: ownerAuthor, displayName: "Owner" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const guestProfile = await guest
       .insert(app.profiles, { author: guestAuthor, displayName: "Guest" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const room = await owner
       .insert(app.rooms, { name: "Private rehearsal" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await owner
       .insert(app.roomMembers, { roomId: room.id, memberAuthor: ownerAuthor })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const sameSubjectFromAnotherIssuer = testApp.as({
       issuer: "https://other-provider.example",
       user_id: ownerId,
@@ -72,10 +72,10 @@ describe("BandChat room admission and authorship", () => {
     );
     const membership = await owner
       .insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const guestMessage = await guest
       .insert(app.messages, { roomId: room.id, senderId: guestProfile.id, text: "legitimate" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await guest
       .insert(app.reactions, {
         roomId: room.id,
@@ -83,11 +83,11 @@ describe("BandChat room admission and authorship", () => {
         author: guestAuthor,
         emoji: "🎸",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await guest.expectDenied((db) =>
       db.insert(app.messages, { roomId: room.id, senderId: ownerProfile.id, text: "forged" }),
     );
-    await owner.delete(app.roomMembers, membership.id).wait({ tier: "edge" });
+    await owner.delete(app.roomMembers, membership.id).wait({ tier: "global" });
     await guest.expectDenied((db) =>
       db.insert(app.messages, {
         roomId: room.id,

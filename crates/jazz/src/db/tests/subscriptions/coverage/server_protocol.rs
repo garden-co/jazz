@@ -921,29 +921,29 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 
     // Internal sync-loop coverage: public APIs normalize local subscriptions to
     // global upstream coverage. Malformed/direct peers must not install an
-    // unsupported edge-tier subscription.
+    // unsupported local-tier subscription.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
-    let edge_opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+    let local_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
         read_view: ReadViewSpec::default(),
         ..RegisterShapeOptions::default()
     };
-    let rejected_read_view = edge_opts.read_view_key();
+    let rejected_read_view = local_opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
             ast: ShapeAst::from_validated(&shape),
-            opts: edge_opts,
+            opts: local_opts,
         })
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
         try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected edge-tier registration rejection"),
+            .expect("expected local-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: BindingId(uuid::Uuid::nil()),

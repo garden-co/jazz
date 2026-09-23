@@ -206,7 +206,7 @@ async fn create_team_edge(
         QUERY_TIMEOUT,
         client.wait_for_transaction(
             transaction_id.expect("team edge insert must commit immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         ),
     )
     .await

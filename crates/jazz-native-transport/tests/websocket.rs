@@ -11,7 +11,7 @@ use jazz::tools::native_transport_connector::{
     NativeTransportConnector as _, NativeTransportRequest, NativeTransportTerminal,
 };
 use jazz::tools::{AppContext, ClientStorage, JazzClient};
-use jazz::wire::{WireErrorCode, WireRetry, WireTransport as _};
+use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
 use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;
@@ -54,10 +54,6 @@ fn transport_auth(secret: &str) -> jazz::tools::websocket_prelude_auth::AuthConf
         admin_secret: Some(secret.to_owned()),
         ..Default::default()
     }
-}
-
-fn native_connector() -> Arc<NativeWebSocketConnector> {
-    Arc::new(NativeWebSocketConnector)
 }
 
 /// Accept the TCP connection but never answer its HTTP upgrade request.
@@ -201,25 +197,6 @@ async fn refused_tcp_connection_remains_connect_error() {
     assert!(
         matches!(error, WebSocketClientError::Connect(_)),
         "immediate TCP refusal must retain its connect classification: {error}"
-    );
-}
-
-#[tokio::test]
-async fn edge_builder_uses_adapter_bootstrap_url_validation() {
-    let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
-        .with_storage(StorageBackend::InMemory)
-        .with_auth_config(auth("admin-secret"))
-        .with_native_transport_connector(native_connector())
-        .with_upstream_url("http://core.example.test")
-        .build()
-        .await;
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
-    };
-    assert!(
-        error.contains("plaintext ws:// bootstrap"),
-        "error: {error}"
     );
 }
 
@@ -390,7 +367,7 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
                     backend_secret: None,
                     admin_secret: Some("secret".to_owned()),
                 },
-                native_connector(),
+                Arc::new(NativeWebSocketConnector),
             )
             .await
             .expect("public client connect retains online WebSocket compatibility");
@@ -398,290 +375,4 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
             task.abort();
         })
         .await;
-}
-
-/// The native socket pump may observe the server's close before its owner
-/// decodes the queued catalogue. The real connector must retain the credit
-/// path through that decode, including the last physical consumption grant.
-#[tokio::test]
-async fn native_catalogue_bootstrap_retains_credit_path_until_snapshot_is_decoded() {
-    let app_id = AppId::from_name("native-bootstrap-credit-lifetime");
-    let core = ServerBuilder::new(app_id)
-        .with_schema(schema())
-        .with_auth_config(auth("bootstrap-secret"))
-        .with_storage(StorageBackend::InMemory)
-        .build()
-        .await
-        .expect("build authority core");
-    let (url, state, task) = serve_built(core).await;
-    let expected = state
-        .trusted_catalogue_snapshot_for_test()
-        .await
-        .expect("read authority catalogue");
-    for _ in 0..3 {
-        let snapshot = tokio::time::timeout(
-            Duration::from_secs(3),
-            WebSocketTransport::connect_catalogue_bootstrap(
-                &url,
-                app_id,
-                jazz::ids::AuthorSubject::SYSTEM,
-                transport_auth("bootstrap-secret"),
-            ),
-        )
-        .await
-        .expect("native bootstrap remains bounded")
-        .expect("complete snapshot survives its consumption-credit send");
-        assert_eq!(
-            snapshot, expected,
-            "bootstrap preserves the complete catalogue"
-        );
-    }
-    task.abort();
-}
-
-/// A core authority bootstraps the edge's complete catalogue before Alice's
-/// first ordinary client websocket is admitted.
-///
-/// authority ──snapshot bootstrap──► edge ──ordinary websocket──► alice
-#[tokio::test]
-async fn dynamic_edge_bootstraps_authenticated_catalogue_before_first_client() {
-    let app_id = AppId::from_name("dynamic-edge-bootstrap-first-client");
-    let auth = auth("bootstrap-secret");
-    let core = ServerBuilder::new(app_id)
-        .with_schema(schema())
-        .with_auth_config(auth.clone())
-        .with_storage(StorageBackend::InMemory)
-        .build()
-        .await
-        .expect("build authority core");
-    let (core_url, core_state, core_task) = serve_built(core).await;
-    let expected = core_state
-        .trusted_catalogue_snapshot_for_test()
-        .await
-        .expect("read authority catalogue");
-
-    let edge = ServerBuilder::new(app_id)
-        .with_auth_config(auth.clone())
-        .with_storage(StorageBackend::InMemory)
-        .with_upstream_url(core_url)
-        .with_native_transport_connector(native_connector())
-        .build()
-        .await
-        .expect("build blank dynamic edge");
-    assert!(
-        !edge.state.has_core_server_shell_for_test(),
-        "edge starts blank before its authenticated bootstrap"
-    );
-    let (edge_url, edge_state, edge_task) = serve_built(edge).await;
-
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !edge_state.has_core_server_shell_for_client_for_test() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "edge becomes ready from idle bootstrap: {error}; health: {:?}",
-            edge_state.edge_upstream_health()
-        )
-    });
-    assert_eq!(
-        edge_state
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read adopted edge catalogue"),
-        expected,
-        "edge adopts the authority genesis, lineage, and policy-bearing schema exactly"
-    );
-
-    let client = WebSocketTransport::connect(
-        &edge_url,
-        app_id,
-        jazz::ids::AuthorSubject::for_test_bytes([0x44; 16]),
-        transport_auth("bootstrap-secret"),
-    )
-    .await;
-    assert!(
-        client.is_ok(),
-        "ready edge admits first normal client: {client:?}"
-    );
-
-    edge_task.abort();
-    core_task.abort();
-}
-
-/// After Alice's catalogue has been installed but before the edge's normal
-/// upstream session attaches, Bob receives an explicit retry-later rejection.
-///
-/// authority ──snapshot──► edge ──✗ normal upstream
-/// bob ──websocket──► edge ──RetryLater──► bob
-#[tokio::test]
-async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached() {
-    let app_id = AppId::from_name("dynamic-edge-client-before-upstream");
-    let auth = auth("bootstrap-secret");
-    let core = ServerBuilder::new(app_id)
-        .with_schema(schema())
-        .with_auth_config(auth.clone())
-        .with_storage(StorageBackend::InMemory)
-        .build()
-        .await
-        .expect("build authority core");
-    let (_core_url, core_state, core_task) = serve_built(core).await;
-    let snapshot = core_state
-        .trusted_catalogue_snapshot_for_test()
-        .await
-        .expect("read authority catalogue");
-
-    let edge = ServerBuilder::new(app_id)
-        .with_auth_config(auth)
-        .with_storage(StorageBackend::InMemory)
-        .with_upstream_url("http://127.0.0.1:9")
-        .with_native_transport_connector(native_connector())
-        .build()
-        .await
-        .expect("build blank dynamic edge");
-    edge.state
-        .start_dynamic_edge_shell_for_test(snapshot, None)
-        .expect("adopt dynamic edge catalogue");
-    assert!(edge.state.has_core_server_shell_for_test());
-    assert!(
-        !edge.state.has_core_server_shell_for_client_for_test(),
-        "raw adopted shell is not externally Ready before normal upstream admission"
-    );
-    let (edge_url, _edge_state, edge_task) = serve_built(edge).await;
-
-    let error = WebSocketTransport::connect(
-        edge_url,
-        app_id,
-        jazz::ids::AuthorSubject::for_test_bytes([0x44; 16]),
-        transport_auth("bootstrap-secret"),
-    )
-    .await
-    .expect_err("downstream admission waits for the normal upstream route");
-    assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later),
-        "unready dynamic edge must give retryable admission failure: {error}"
-    );
-
-    edge_task.abort();
-    core_task.abort();
-}
-
-/// Mallory cannot use an incorrect authority credential to read a catalogue
-/// through the snapshot-only bootstrap websocket.
-#[tokio::test]
-async fn dynamic_catalogue_bootstrap_rejects_wrong_authority_credential() {
-    let app_id = AppId::from_name("dynamic-edge-bootstrap-auth-denial");
-    let (core_url, task) = serve(
-        ServerBuilder::new(app_id)
-            .with_schema(schema())
-            .with_auth_config(auth("right-secret")),
-    )
-    .await;
-    let error = WebSocketTransport::connect_catalogue_bootstrap(
-        core_url,
-        app_id,
-        jazz::ids::AuthorSubject::SYSTEM,
-        transport_auth("wrong-secret"),
-    )
-    .await
-    .expect_err("wrong bootstrap credential must not obtain a catalogue");
-    assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
-        "unexpected bootstrap auth result: {error}"
-    );
-    task.abort();
-}
-
-/// Mallory cannot use an ordinary privileged identity to request the edge-only
-/// snapshot bootstrap exchange.
-#[tokio::test]
-async fn dynamic_catalogue_bootstrap_requires_the_reserved_edge_identity() {
-    let app_id = AppId::from_name("dynamic-edge-bootstrap-identity-denial");
-    let (core_url, task) = serve(
-        ServerBuilder::new(app_id)
-            .with_schema(schema())
-            .with_auth_config(auth("bootstrap-secret")),
-    )
-    .await;
-    let error = WebSocketTransport::connect_catalogue_bootstrap(
-        core_url,
-        app_id,
-        jazz::ids::AuthorSubject::for_test_bytes([0x46; 16]),
-        transport_auth("bootstrap-secret"),
-    )
-    .await
-    .expect_err("normal privileged client identity must not request bootstrap");
-    assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
-        "bootstrap identity boundary returned {error}"
-    );
-    task.abort();
-}
-
-/// Mallory cannot substitute a generic backend credential for the dedicated
-/// authority credential on the snapshot bootstrap exchange.
-#[tokio::test]
-async fn dynamic_catalogue_bootstrap_rejects_generic_backend_credential() {
-    let app_id = AppId::from_name("dynamic-edge-bootstrap-backend-denial");
-    let (core_url, task) = serve(
-        ServerBuilder::new(app_id)
-            .with_schema(schema())
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("bootstrap-admin-secret".to_owned()),
-                backend_secret: Some("ordinary-backend-secret".to_owned()),
-                ..Default::default()
-            }),
-    )
-    .await;
-    let error = WebSocketTransport::connect_catalogue_bootstrap(
-        core_url,
-        app_id,
-        jazz::ids::AuthorSubject::SYSTEM,
-        jazz::tools::websocket_prelude_auth::AuthConfig {
-            backend_secret: Some("ordinary-backend-secret".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect_err("backend credential must not read an authority catalogue");
-    assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
-        "generic backend credential crossed bootstrap boundary: {error}"
-    );
-    task.abort();
-}
-
-/// Bob receives a blank retry-later rejection while Alice's newly started edge
-/// has no authenticated catalogue or normal upstream route yet.
-#[tokio::test]
-async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
-    let app_id = AppId::from_name("dynamic-edge-unready-downstream");
-    let edge = ServerBuilder::new(app_id)
-        .with_auth_config(auth("edge-secret"))
-        .with_storage(StorageBackend::InMemory)
-        .with_upstream_url("ws://127.0.0.1:9")
-        .with_native_transport_connector(native_connector())
-        .build()
-        .await
-        .expect("build blank edge");
-    assert!(
-        !edge.state.has_core_server_shell_for_test(),
-        "blank edge has no downstream runtime"
-    );
-    let (edge_url, _edge_state, task) = serve_built(edge).await;
-    let error = WebSocketTransport::connect(
-        edge_url,
-        app_id,
-        jazz::ids::AuthorSubject::for_test_bytes([0x45; 16]),
-        transport_auth("edge-secret"),
-    )
-    .await
-    .expect_err("unready edge must not admit a downstream session");
-    assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later),
-        "unready edge must return an explicit retry-later diagnosis: {error}"
-    );
-    task.abort();
 }

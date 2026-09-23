@@ -47,24 +47,24 @@ it("allows an admin to bootstrap a canvas and an editor to add same-canvas shape
   });
   const canvas = await owner
     .insert(app.canvases, { title: "Poster", width: 1080, height: 1350 })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   await owner
     .insert(app.canvasMembers, {
       canvasId: canvas.id,
       memberAuthor: authorFor(ownerId),
       role: "admin",
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   const membership = await owner
     .insert(app.canvasMembers, {
       canvasId: canvas.id,
       memberAuthor: authorFor(editorId),
       role: "editor",
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   const layer = await owner
     .insert(app.layers, { canvasId: canvas.id, name: "Art", zIndex: 0, visible: true })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   await sameSubjectOtherIssuer.expectDenied((db) =>
     db.insert(app.shapes, {
       canvasId: canvas.id,
@@ -92,10 +92,10 @@ it("allows an admin to bootstrap a canvas and an editor to add same-canvas shape
       zIndex: 0,
       fill: "#fff",
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   expect(shape.layerId).toBe(layer.id);
   expect(shape.canvasId).toBe(canvas.id);
-  await owner.delete(app.canvasMembers, membership.id).wait({ tier: "edge" });
+  await owner.delete(app.canvasMembers, membership.id).wait({ tier: "global" });
   await editor.expectDenied((db) =>
     db.insert(app.shapes, {
       canvasId: canvas.id,
@@ -139,7 +139,7 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   });
   const canvas = await owner
     .insert(app.canvases, { title: "Deterministic canvas", width: 1080, height: 1350 })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   for (const [userId, role] of [
     [ownerId, "admin"],
     [editorId, "editor"],
@@ -147,20 +147,20 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   ] as const) {
     await owner
       .insert(app.canvasMembers, { canvasId: canvas.id, memberAuthor: authorFor(userId), role })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
   }
   const [back, front] = await Promise.all([
     editor
       .insert(app.layers, { canvasId: canvas.id, name: "Back", zIndex: 0, visible: true })
-      .wait({ tier: "edge" }),
+      .wait({ tier: "global" }),
     editor
       .insert(app.layers, { canvasId: canvas.id, name: "Front", zIndex: 1, visible: true })
-      .wait({ tier: "edge" }),
+      .wait({ tier: "global" }),
   ]);
   const ordered = await viewer.all(
     app.layers.where({ canvasId: canvas.id }).orderBy("zIndex", "asc"),
     {
-      tier: "edge",
+      tier: "global",
     },
   );
   expect(ordered.map((layer) => [layer.id, layer.zIndex])).toEqual([
@@ -172,7 +172,7 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   );
   const checkpoint = await owner
     .insert(app.checkpoints, { canvasId: canvas.id, label: "Approved poster", branch: "main" })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   await editor.expectDenied((db) =>
     db.update(app.checkpoints, checkpoint.id, { label: "rewritten" }),
   );
@@ -214,20 +214,20 @@ it("denies cross-canvas shapes even for an admin of both canvases", async () => 
   const createCanvas = async (title: string) => {
     const canvas = await owner
       .insert(app.canvases, { title, width: 1080, height: 1350 })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await owner
       .insert(app.canvasMembers, {
         canvasId: canvas.id,
         memberAuthor: authorFor(ownerId),
         role: "admin",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     return canvas;
   };
   const [left, right] = await Promise.all([createCanvas("Left"), createCanvas("Right")]);
   const foreignLayer = await owner
     .insert(app.layers, { canvasId: right.id, name: "Foreign", zIndex: 0, visible: true })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   await owner.expectDenied((db) =>
     db.insert(app.shapes, {
       canvasId: left.id,
@@ -263,14 +263,14 @@ it("keeps cursor creation default-deny until its ownership semantics are specifi
   });
   const canvas = await owner
     .insert(app.canvases, { title: "Presence", width: 1, height: 1 })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   for (const [userId, role] of [
     [ownerId, "admin"],
     [editorId, "editor"],
   ] as const) {
     await owner
       .insert(app.canvasMembers, { canvasId: canvas.id, memberAuthor: authorFor(userId), role })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
   }
   await editor.expectDenied((db) =>
     db.insert(app.cursors, {

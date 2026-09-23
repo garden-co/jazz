@@ -276,7 +276,7 @@ fn run_loopback_websocket_schema(
 
 fn print_usage(program: &str) {
     println!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
     print_server_usage(program);
     print_serve_usage(program, "serve");
@@ -284,13 +284,13 @@ fn print_usage(program: &str) {
     print_serve_usage(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage(program);
     println!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
     );
 }
 
 fn print_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
     print_server_usage_stderr(program);
     print_serve_usage_stderr(program, "serve");
@@ -298,7 +298,7 @@ fn print_usage_stderr(program: &str) {
     print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage_stderr(program);
     eprintln!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
     );
 }
 
@@ -306,39 +306,39 @@ const SERVER_STORAGE_HELP: &str = "storage_default=./data/apps/<canonical-app-uu
 
 fn print_server_usage(program: &str) {
     println!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
     println!("{SERVER_STORAGE_HELP}");
 }
 
 fn print_server_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
     eprintln!("{SERVER_STORAGE_HELP}");
 }
 
 fn print_serve_usage(program: &str, command: &str) {
     println!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
 }
 
 fn print_serve_usage_stderr(program: &str, command: &str) {
     eprintln!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
 }
 
 fn print_serve_data_dir_usage(program: &str) {
     println!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
 }
 
 fn print_serve_data_dir_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
     );
 }
 
@@ -457,7 +457,6 @@ fn print_storage_report(storage: &StorageConfig) {
 fn role_name(role: NodeRole) -> &'static str {
     match role {
         NodeRole::Relay => "relay",
-        NodeRole::Edge => "edge",
         NodeRole::Core => "core",
     }
 }
@@ -780,10 +779,10 @@ impl CliOptions {
     }
 
     fn reject_unsupported_upstream_url(&self) -> Result<(), String> {
-        if let Some(url) = self.upstream_url.as_deref() {
-            return Err(format!(
-                "unsupported_upstream_url={url}: this jazz-server mode is local-only and does not relay to an upstream server"
-            ));
+        if self.upstream_url.is_some() {
+            return Err(
+                "unsupported_upstream_url: server edges are no longer supported; remove --upstream-url/JAZZ_UPSTREAM_URL and connect clients directly to Core".to_owned()
+            );
         }
         Ok(())
     }

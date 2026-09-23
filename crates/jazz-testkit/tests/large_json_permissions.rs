@@ -98,7 +98,7 @@ async fn run_matrix(private_reads: bool) {
                         Ok(Some(tx)) => {
                             let error = tokio::time::timeout(
                                 Duration::from_secs(15),
-                                bob.wait_for_transaction(tx, DurabilityTier::EdgeServer),
+                                bob.wait_for_transaction(tx, DurabilityTier::GlobalServer),
                             )
                             .await
                             .unwrap()
@@ -124,7 +124,7 @@ async fn run_matrix(private_reads: bool) {
                             .unwrap();
                         let error = tokio::time::timeout(
                             Duration::from_secs(15),
-                            alice.wait_for_transaction(tx, DurabilityTier::EdgeServer),
+                            alice.wait_for_transaction(tx, DurabilityTier::GlobalServer),
                         )
                         .await
                         .unwrap()
@@ -143,7 +143,7 @@ async fn run_matrix(private_reads: bool) {
                     .unwrap();
                 let error = tokio::time::timeout(
                     Duration::from_secs(15),
-                    bob.wait_for_transaction(tx.unwrap(), DurabilityTier::EdgeServer),
+                    bob.wait_for_transaction(tx.unwrap(), DurabilityTier::GlobalServer),
                 )
                 .await
                 .unwrap()

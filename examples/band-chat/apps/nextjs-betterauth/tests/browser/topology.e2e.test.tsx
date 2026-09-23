@@ -69,7 +69,7 @@ describe("BandChat cross-topology recovery", () => {
                     author: owner!.author,
                     emoji: "forged",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/permission_denied/i);
             },
           },
@@ -93,22 +93,22 @@ describe("BandChat cross-topology recovery", () => {
               owner = await openMember(server, "owner", ownerToken);
               peer = await openMember(server, "peer", peerToken);
               const room = await owner.db.insert(app.rooms, { name: "Topology rehearsal" }).wait({
-                tier: "edge",
+                tier: "global",
               });
               roomId = room.id;
               await owner.db
                 .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               await owner.db
                 .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               await waitForQuery(
                 peer.db,
                 app.rooms.where({ id: roomId }),
                 (rooms) => rooms.length === 1,
                 "peer receives owner invitation",
                 15_000,
-                "edge",
+                "global",
               );
             },
           },
@@ -122,14 +122,14 @@ describe("BandChat cross-topology recovery", () => {
                     senderId: owner!.profileId,
                     text: "owner concurrent",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
                 peer!.db
                   .insert(app.messages, {
                     roomId: roomId!,
                     senderId: peer!.profileId,
                     text: "peer concurrent",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
                 owner!.db
                   .insert(app.messages, {
                     roomId: roomId!,
@@ -138,7 +138,7 @@ describe("BandChat cross-topology recovery", () => {
                     attachment: new Uint8Array([1, 2, 3]),
                     attachmentName: "setlist.txt",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ]);
               ownerMessageId = ownerMessage.id;
               peerMessageId = peerMessage.id;
@@ -149,7 +149,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 1,
                 "peer observes the message before reacting to it",
                 15_000,
-                "edge",
+                "global",
               );
               await Promise.all([
                 owner!.db
@@ -159,7 +159,7 @@ describe("BandChat cross-topology recovery", () => {
                     author: owner!.author,
                     emoji: "🎸",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
                 peer!.db
                   .insert(app.reactions, {
                     roomId: roomId!,
@@ -167,7 +167,7 @@ describe("BandChat cross-topology recovery", () => {
                     author: peer!.author,
                     emoji: "🔥",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ]);
             },
             faultsAfter: [
@@ -202,7 +202,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 4,
                 "peer receives concurrent and replayed messages exactly once",
                 20_000,
-                "edge",
+                "global",
               );
               expect(new Set(messages.map((message) => message.id))).toEqual(
                 new Set([ownerMessageId, peerMessageId, attachmentMessageId, offlineMessageId]),
@@ -217,7 +217,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 2,
                 "peer receives both member reactions",
                 15_000,
-                "edge",
+                "global",
               );
               expect(reactions.map((reaction) => reaction.emoji).sort()).toEqual(["🎸", "🔥"]);
             },
@@ -367,15 +367,15 @@ describe("BandChat cross-topology recovery", () => {
               owner = await openMember(server, "window-owner", ownerToken);
               peer = await openMember(server, "window-peer", peerToken);
               const room = await owner.db.insert(app.rooms, { name: "Bounded window" }).wait({
-                tier: "edge",
+                tier: "global",
               });
               roomId = room.id;
               await owner.db
                 .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               const membership = await owner.db
                 .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               peerMembershipId = membership.id;
             },
           },
@@ -385,7 +385,7 @@ describe("BandChat cross-topology recovery", () => {
               for (const text of ["first", "second", "third"]) {
                 const message = await owner!.db
                   .insert(app.messages, { roomId: roomId!, senderId: owner!.profileId, text })
-                  .wait({ tier: "edge" });
+                  .wait({ tier: "global" });
                 if (text === "third") reactionMessageId = message.id;
               }
               const rows = await waitForQuery(
@@ -394,7 +394,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2,
                 "peer receives two newest projected messages",
                 15_000,
-                "edge",
+                "global",
               );
               expect(rows.map((message) => message.text)).toEqual(["third", "second"]);
               const reaction = await peer!.db
@@ -404,7 +404,7 @@ describe("BandChat cross-topology recovery", () => {
                   author: peer!.author,
                   emoji: "🎵",
                 })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               peerReactionId = reaction.id;
             },
             faultsAfter: [{ kind: "disconnect", target: "peer" }],
@@ -418,7 +418,7 @@ describe("BandChat cross-topology recovery", () => {
                   senderId: owner!.profileId,
                   text: "z after reconnect",
                 })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               expect(
                 (await peer!.db.all(window(), { tier: "local" })).map((row) => row.text),
               ).toEqual(["third", "second"]);
@@ -434,10 +434,10 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2 && messages[0]?.text === "z after reconnect",
                 "peer reconnects with its exact bounded projection",
                 15_000,
-                "edge",
+                "global",
               );
               expect(rows.map((message) => message.text)).toEqual(["z after reconnect", "third"]);
-              await owner!.db.delete(app.roomMembers, peerMembershipId!).wait({ tier: "edge" });
+              await owner!.db.delete(app.roomMembers, peerMembershipId!).wait({ tier: "global" });
               await expect(
                 peer!.db
                   .insert(app.messages, {
@@ -445,7 +445,7 @@ describe("BandChat cross-topology recovery", () => {
                     senderId: peer!.profileId,
                     text: "rejected after revocation",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/permission_denied/i);
               await expect(
                 peer!.db
@@ -455,10 +455,10 @@ describe("BandChat cross-topology recovery", () => {
                     author: peer!.author,
                     emoji: "revoked reaction",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/permission_denied/i);
               await expect(
-                peer!.db.delete(app.reactions, peerReactionId!).wait({ tier: "edge" }),
+                peer!.db.delete(app.reactions, peerReactionId!).wait({ tier: "global" }),
               ).rejects.toThrow(/permission_denied/i);
             },
           },
@@ -499,6 +499,6 @@ async function openMember(
   const { db, author } = await openMemberDb(server, userId, jwtToken);
   const profile = await db
     .insert(app.profiles, { author, displayName: userId })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
   return { db, author, profileId: profile.id };
 }

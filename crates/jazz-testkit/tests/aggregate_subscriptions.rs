@@ -1306,8 +1306,8 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
                 .sum("score")
                 .group_by("bucket");
 
-            insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::EdgeServer).await;
-            insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::EdgeServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::GlobalServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::GlobalServer).await;
             let mut stream = ObservedSubscription::new(
                 client
                     .subscribe(query.clone())
@@ -1326,7 +1326,7 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
                 )
                 .await;
 
-            insert_bigint_metric_at_tier(&writer, "same", 3, DurabilityTier::EdgeServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", 3, DurabilityTier::GlobalServer).await;
             stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::BigInt(-1)]],
@@ -1363,8 +1363,9 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                 .avg("score")
                 .group_by("bucket");
 
-            insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::EdgeServer).await;
-            insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::EdgeServer).await;
+            insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::GlobalServer).await;
+            insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::GlobalServer)
+                .await;
             let mut sum_stream = ObservedSubscription::new(
                 client
                     .subscribe(sum_query.clone())
@@ -1401,7 +1402,7 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                 )
                 .await;
 
-            insert_double_metric_at_tier(&writer, "same", 0.5, DurabilityTier::EdgeServer).await;
+            insert_double_metric_at_tier(&writer, "same", 0.5, DurabilityTier::GlobalServer).await;
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Double(1.75)]],
@@ -1440,8 +1441,8 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             )
             .await
             .expect("connect client");
-            insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&writer, "same", 10, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&writer, "same", 4, DurabilityTier::GlobalServer).await;
             let min_query = jazz::query::Query::from("metrics")
                 .min("score")
                 .group_by("bucket");
@@ -1482,7 +1483,7 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
                     "initial multi-row max",
                 )
                 .await;
-            insert_metric_at_tier(&writer, "same", 1, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&writer, "same", 1, DurabilityTier::GlobalServer).await;
             min_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Integer(1)]],
@@ -1513,12 +1514,12 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
             .await
             .expect("connect client");
 
-            insert_metric_at_tier(&client, "positive", 10, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "positive", 7, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "negative", -4, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "negative", -6, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "mixed", -5, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "mixed", 8, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "positive", 10, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "positive", 7, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "negative", -4, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "negative", -6, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "mixed", -5, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "mixed", 8, DurabilityTier::GlobalServer).await;
 
             wait_for_values(
                 &client,

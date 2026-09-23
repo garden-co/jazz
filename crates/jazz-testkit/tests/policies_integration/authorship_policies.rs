@@ -293,7 +293,7 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
             let error = bob
                 .wait_for_transaction(
                     transaction_id.expect("ordinary mutation has a transaction"),
-                    jazz::tools::DurabilityTier::EdgeServer,
+                    jazz::tools::DurabilityTier::GlobalServer,
                 )
                 .await
                 .expect_err("Bob must not mutate Alice's note");

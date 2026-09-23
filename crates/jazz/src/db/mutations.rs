@@ -2986,7 +2986,6 @@ where
                         Some(CommitUnitIngestContext {
                             identity: AuthorSubject::SYSTEM,
                             trust: CommitUnitTrust::TrustedBackend,
-                            edge_authority: false,
                             admitted_write_authorization: false,
                         }),
                     )
@@ -3078,7 +3077,7 @@ where
         if !self.requires_open_schema_admission {
             return Ok(());
         }
-        if effective_read_tier(opts) < DurabilityTier::Edge
+        if effective_read_tier(opts) < DurabilityTier::Global
             || opts.propagation == Propagation::LocalOnly
         {
             return self.ensure_open_schema_admitted();

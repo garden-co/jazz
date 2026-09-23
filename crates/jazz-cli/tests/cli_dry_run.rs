@@ -1162,7 +1162,8 @@ fn help_lists_dev_server_commands() {
             .iter()
             .any(|line| line.contains("JAZZ_ALLOW_LOCAL_FIRST_AUTH"))
     );
-    assert!(lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("--upstream-url")));
 }
 
 #[test]
@@ -2466,7 +2467,7 @@ fn bug_306_rejects_privileged_secret_aliases_with_actionable_replacements() {
 }
 
 #[test]
-fn dry_run_rejects_upstream_url_for_local_server_mode() {
+fn dry_run_rejects_removed_upstream_url() {
     let output = jazz_server_command()
         .args(["dry-run", "--upstream-url", "wss://example.invalid/sync"])
         .output()
@@ -2476,8 +2477,9 @@ fn dry_run_rejects_upstream_url_for_local_server_mode() {
     assert!(output.stdout.is_empty());
 
     let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
-    assert!(stderr.contains("error=unsupported_upstream_url=wss://example.invalid/sync"));
-    assert!(stderr.contains("local-only"));
+    assert!(stderr.contains("error=unsupported_upstream_url:"));
+    assert!(stderr.contains("connect clients directly to Core"));
+    assert!(!stderr.contains("wss://example.invalid/sync"));
 }
 
 #[test]

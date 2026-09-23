@@ -158,7 +158,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
   });
 
-  it("keeps explicit Local subscriptions propagating without changing connected Edge", async () => {
+  it("keeps explicit Local subscriptions propagating without changing connected remote subscriptions", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -202,7 +202,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "local" });
   });
 
-  it("does not fall back to local when an edge read fails or times out", async () => {
+  it("does not fall back to local when an remote read fails or times out", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -216,7 +216,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const connection = (
       db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
     ).connection;
-    const timeout = new Error("edge transport timed out");
+    const timeout = new Error("remote transport timed out");
     vi.spyOn(connection, "ensureReady").mockRejectedValue(timeout);
 
     await expect(db.all(query(), { tier: ReadTier.RemoteIfPossible })).rejects.toBe(timeout);
@@ -443,7 +443,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     unsubscribe();
   });
 
-  it("replaces an explicitly-offline local subscription with edge exactly on reconnect", async () => {
+  it("replaces an explicitly-offline local subscription with remote exactly on reconnect", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -493,14 +493,14 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       { tier: ReadTier.RemoteIfPossible },
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
-    const edgeReady = deferred<void>();
+    const remoteReady = deferred<void>();
     localCallback({ added: [], removed: [], updated: [], reset: true });
     const connection = (
       db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
     ).connection;
     const originalEnsureReady = connection.ensureReady.bind(connection);
     vi.spyOn(connection, "ensureReady").mockImplementation(async (tier?: string) => {
-      if (tier === "edge") await edgeReady.promise;
+      if (tier === "global") await remoteReady.promise;
       return originalEnsureReady(tier);
     });
 
@@ -512,7 +512,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     localCallback(added("during", "during handoff"));
     expect(publications.at(-1)).toEqual([]);
 
-    edgeReady.resolve();
+    remoteReady.resolve();
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     const publicationCount = publications.length;
@@ -592,9 +592,9 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     };
     const connection = connectionInternals.connection;
     const originalEnsureReady = connection.ensureReady.bind(connection);
-    const failure = new Error("edge handoff readiness failed");
+    const failure = new Error("remote handoff readiness failed");
     vi.spyOn(connection, "ensureReady").mockImplementation(async (tier?: string) => {
-      if (tier === "edge") throw failure;
+      if (tier === "global") throw failure;
       return originalEnsureReady(tier);
     });
 
@@ -649,7 +649,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(onDelta).not.toHaveBeenCalled();
     expect(errors).toEqual([]);
 
-    const activeFailure = new Error("active edge stream failed");
+    const activeFailure = new Error("active remote stream failed");
     activeOnError(activeFailure);
     activeOnDelta(added("late", "late active delta"));
     activeOnError(new Error("active stream failed again"));

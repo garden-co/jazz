@@ -424,7 +424,7 @@ describe("db exclusive transaction reads browser integration", () => {
       const inserted = writer.insert(app.todos, { title: "remote", done: false });
       await inserted.wait({ tier: "global" });
       await reader.all(app.todos.where({ id: "00000000-0000-4000-8000-000000000000" }), {
-        tier: "edge",
+        tier: "global",
       });
 
       const transaction = reader.beginExclusiveTransaction();
@@ -432,7 +432,7 @@ describe("db exclusive transaction reads browser integration", () => {
         const transactionRowsBeforeUpdate = await transaction.all(
           app.todos.where({ id: inserted.value.id }),
           {
-            tier: "edge",
+            tier: "global",
           },
         );
 
@@ -441,12 +441,12 @@ describe("db exclusive transaction reads browser integration", () => {
           .wait({ tier: "global" });
 
         const directRows = await reader.all(app.todos.where({ id: inserted.value.id }), {
-          tier: "edge",
+          tier: "global",
         });
         const transactionRowsAfterUpdate = await transaction.all(
           app.todos.where({ id: inserted.value.id }),
           {
-            tier: "edge",
+            tier: "global",
           },
         );
 

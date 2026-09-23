@@ -497,7 +497,7 @@ impl MaintainedSubscriptionViewSubscription {
         );
         let (_subscription, maintained, _schemas, _transitions, _tables, received, _inputs) = self
             .receiver
-            .open_seeded_relay_edge_subscription_view(
+            .open_seeded_relay_subscription_view(
                 shape,
                 binding,
                 identity,

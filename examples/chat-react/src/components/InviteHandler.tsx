@@ -17,7 +17,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const { navigate } = useRouter();
   const handled = useRef(false);
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
-    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    () => ({ tier: db.getConfig().serverUrl ? "global" : "local" }),
     [db],
   );
 

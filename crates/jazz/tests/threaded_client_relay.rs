@@ -241,15 +241,15 @@ fn finish_node(
 
 fn core_thread(
     schema: JazzSchema,
-    from_edge: Receiver<Wire>,
-    to_edge: Sender<Wire>,
+    from_worker: Receiver<Wire>,
+    to_worker: Sender<Wire>,
 ) -> ThreadResult {
     let (_dir, mut core) = open_node(node(4), schema);
     let mut peer = PeerState::new();
     let mut ingests = 0_usize;
     let mut tx_ids = Vec::new();
     loop {
-        match from_edge.recv().unwrap() {
+        match from_worker.recv().unwrap() {
             message @ (Wire::Sync(_) | Wire::Frame(_)) => {
                 let sync = message.into_sync().unwrap();
                 let SyncMessage::CommitUnit { tx, versions } = *sync else {
@@ -267,16 +267,16 @@ fn core_thread(
                     core.persist_and_settle_outcome(outcome).await.unwrap()
                 });
                 for update in updates {
-                    send_sync(&to_edge, update);
+                    send_sync(&to_worker, update);
                 }
                 ingests += 1;
                 if ingests.is_multiple_of(REFRESH_EVERY) {
-                    send_view(&mut core, &mut peer, &to_edge);
+                    send_view(&mut core, &mut peer, &to_worker);
                 }
             }
             Wire::Stop => {
-                send_view(&mut core, &mut peer, &to_edge);
-                to_edge.send(Wire::Stop).unwrap();
+                send_view(&mut core, &mut peer, &to_worker);
+                to_worker.send(Wire::Stop).unwrap();
                 break;
             }
         }
@@ -501,41 +501,27 @@ fn assert_link_dedup(summary: LinkSummary) {
 }
 
 #[test]
-fn threaded_four_tier_converges_with_fifo_links() {
+fn threaded_client_relay_core_converges_with_fifo_links() {
     let schema = schema();
     let ui_author = AuthorSubject::for_test_bytes([7; 16]);
     let ui_owner = ui_author;
 
     let (ui_to_worker_tx, ui_to_worker_rx) = mpsc::channel::<Wire>();
     let (worker_to_ui_tx, worker_to_ui_rx) = mpsc::channel::<Wire>();
-    let (worker_to_edge_tx, worker_to_edge_rx) = mpsc::channel::<Wire>();
-    let (edge_to_worker_tx, edge_to_worker_rx) = mpsc::channel::<Wire>();
-    let (edge_to_core_tx, edge_to_core_rx) = mpsc::channel::<Wire>();
-    let (core_to_edge_tx, core_to_edge_rx) = mpsc::channel::<Wire>();
+    let (worker_to_core_tx, worker_to_core_rx) = mpsc::channel::<Wire>();
+    let (core_to_worker_tx, core_to_worker_rx) = mpsc::channel::<Wire>();
 
     let core_schema = schema.clone();
     let core_handle =
-        thread::spawn(move || core_thread(core_schema, edge_to_core_rx, core_to_edge_tx));
-    let edge_schema = schema.clone();
-    let edge_handle = thread::spawn(move || {
-        relay_thread(
-            3,
-            edge_schema,
-            worker_to_edge_rx,
-            edge_to_core_tx,
-            core_to_edge_rx,
-            edge_to_worker_tx,
-            PeerState::new(),
-        )
-    });
+        thread::spawn(move || core_thread(core_schema, worker_to_core_rx, core_to_worker_tx));
     let worker_schema = schema.clone();
     let worker_handle = thread::spawn(move || {
         relay_thread(
             2,
             worker_schema,
             ui_to_worker_rx,
-            worker_to_edge_tx,
-            edge_to_worker_rx,
+            worker_to_core_tx,
+            core_to_worker_rx,
             worker_to_ui_tx,
             PeerState::client_link(ui_author),
         )
@@ -552,19 +538,15 @@ fn threaded_four_tier_converges_with_fifo_links() {
 
     let ui_result = ui_handle.join().unwrap();
     let worker_result = worker_handle.join().unwrap();
-    let edge_result = edge_handle.join().unwrap();
     let core_result = core_handle.join().unwrap();
 
     let core_global = &core_result.global_rows;
-    let edge_global = &edge_result.global_rows;
     let worker_global = &worker_result.global_rows;
     let ui_global = &ui_result.receipt.global_rows;
-    assert_eq!(edge_global, core_global);
     assert_eq!(worker_global, core_global);
     assert_eq!(ui_global, core_global);
 
     assert_eq!(&core_result.local_rows, core_global);
-    assert_eq!(&edge_result.local_rows, core_global);
     assert_eq!(&worker_result.local_rows, core_global);
     assert_eq!(&ui_result.receipt.local_rows, core_global);
 
@@ -577,10 +559,6 @@ fn threaded_four_tier_converges_with_fifo_links() {
     for tx_id in ui_result.tx_ids {
         let core_fact = core_result.transaction_states.get(&tx_id).unwrap();
         assert_eq!(
-            edge_result.transaction_states.get(&tx_id).unwrap(),
-            core_fact
-        );
-        assert_eq!(
             worker_result.transaction_states.get(&tx_id).unwrap(),
             core_fact
         );
@@ -592,13 +570,8 @@ fn threaded_four_tier_converges_with_fifo_links() {
     }
 
     assert_link_dedup(core_result.downstream_peer.unwrap());
-    assert_link_dedup(edge_result.downstream_peer.unwrap());
     assert_link_dedup(worker_result.downstream_peer.unwrap());
 
-    assert_eq!(
-        edge_result.sync_metrics.parked_orphans,
-        edge_result.sync_metrics.parked_orphans_resolved
-    );
     assert_eq!(
         worker_result.sync_metrics.parked_orphans,
         worker_result.sync_metrics.parked_orphans_resolved

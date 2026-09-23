@@ -165,14 +165,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Upstream server URL. When set, this server runs as an edge.
-        #[arg(long, env = "JAZZ_UPSTREAM_URL")]
-        upstream_url: Option<String>,
-
-        /// Edge cache eviction byte budget. Absent disables automatic edge eviction.
-        #[arg(long, env = "JAZZ_EDGE_CACHE_BUDGET_BYTES")]
-        edge_cache_budget_bytes: Option<u64>,
-
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
             long,
@@ -230,8 +222,6 @@ async fn main() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
-            upstream_url,
-            edge_cache_budget_bytes,
             shutdown_timeout_secs,
             bound_port_file,
         } => {
@@ -272,15 +262,12 @@ async fn main() {
                 admin_secret,
                 ..Default::default()
             };
-            let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
             if let Err(e) = commands::server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
                 auth_config,
-                upstream_url,
-                edge_cache_budget,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
             )
@@ -295,10 +282,18 @@ async fn main() {
     }
 }
 
+fn validate_removed_edge_environment(
+    upstream_configured: bool,
+    cache_configured: bool,
+) -> Result<(), String> {
+    if upstream_configured || cache_configured {
+        return Err("Semantic edge servers are no longer supported. Remove JAZZ_UPSTREAM_URL and JAZZ_EDGE_CACHE_BUDGET_BYTES only if this process is intended to be Core; otherwise connect clients directly to the existing Core server.".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
-        upstream_url,
-        admin_secret,
         jwks_url,
         jwt_public_key,
         jwt_issuer,
@@ -309,9 +304,10 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
         return Ok(());
     };
 
-    if upstream_url.is_some() && admin_secret.is_none() {
-        return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
-    }
+    validate_removed_edge_environment(
+        std::env::var_os("JAZZ_UPSTREAM_URL").is_some(),
+        std::env::var_os("JAZZ_EDGE_CACHE_BUDGET_BYTES").is_some(),
+    )?;
 
     let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
     if external_jwt_key_configured {
@@ -662,67 +658,30 @@ mod tests {
     }
 
     #[test]
-    fn server_command_parses_upstream_url_and_admin_secret() {
+    fn server_command_rejects_removed_edge_flags() {
         let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-            "--admin-secret",
-            "admin-secret",
-        ])
-        .expect("server command should parse");
-
-        match cli.command {
-            Commands::Server {
-                upstream_url,
-                admin_secret,
-                ..
-            } => {
-                assert_eq!(upstream_url.as_deref(), Some("https://core.example.com"));
-                assert_eq!(admin_secret.as_deref(), Some("admin-secret"));
-            }
-            _ => panic!("expected server command"),
+        for flag in ["--upstream-url", "--edge-cache-budget-bytes"] {
+            let error = Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "00000000-0000-0000-0000-000000000001",
+                flag,
+                "unused",
+            ])
+            .err()
+            .expect("removed server roles must not silently become Core");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
     }
 
     #[test]
-    fn server_cli_validation_allows_admin_secret_only_in_edge_mode() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-            "--admin-secret",
-            "admin-secret",
-        ])
-        .expect("server command should parse");
-
-        validate_server_cli_options(&cli.command)
-            .expect("edge mode should only require admin secret");
-    }
-
-    #[test]
-    fn server_cli_validation_requires_admin_secret_in_edge_mode() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-        ])
-        .expect("server command should parse");
-
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("edge mode without admin secret should fail validation");
-
-        assert!(error.contains("--admin-secret"));
-        assert!(error.contains("--upstream-url"));
+    fn obsolete_edge_environment_cannot_silently_start_core() {
+        assert!(validate_removed_edge_environment(false, false).is_ok());
+        for configured in [(true, false), (false, true), (true, true)] {
+            let error = validate_removed_edge_environment(configured.0, configured.1).unwrap_err();
+            assert!(error.contains("no longer supported"));
+            assert!(error.contains("existing Core"));
+        }
     }
 
     #[test]

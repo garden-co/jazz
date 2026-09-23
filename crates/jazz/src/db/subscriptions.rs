@@ -121,7 +121,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        let mode = if effective_read_tier(&opts) >= DurabilityTier::Edge {
+        let mode = if effective_read_tier(&opts) >= DurabilityTier::Global {
             QueryAuthorizationMode::ClientLocal
         } else {
             QueryAuthorizationMode::TrustedServing
@@ -180,7 +180,7 @@ where
             upstream_opts,
             self.identity.author,
             prepared.request_policy_binding(self.identity.author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -237,7 +237,7 @@ where
             upstream_opts,
             author,
             prepared.request_policy_binding(author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -357,7 +357,7 @@ where
             upstream_opts,
             author.unwrap_or(self.identity.author),
             prepared.request_policy_binding(author.unwrap_or(self.identity.author))?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -954,7 +954,7 @@ where
         let read_tier = requested_read_tier;
         let pending_overlay = allow_pending_overlay
             && authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && opts.local_updates == LocalUpdates::Immediate;
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
@@ -1043,7 +1043,7 @@ where
             // Edge/Global cache possession is never a settlement receipt,
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
-            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
+            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Global;
             let opened = self
                 .open_subscription_upstream_coverage(
                     prepared,
@@ -1058,7 +1058,7 @@ where
             *opening_upstream.borrow_mut() = upstream_subscription_handles.clone();
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
-                && requested_read_tier >= DurabilityTier::Edge
+                && requested_read_tier >= DurabilityTier::Global
                 && opened.awaits_initial_authority_response
                 && snapshot.root_count == 0
                 && snapshot.edges.is_empty();
@@ -1160,7 +1160,7 @@ where
         // known while opening a fresh upstream handle, but an already-open
         // link has the same receipt requirement.
         suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && remote_read_tier.is_some()
             && !settled
             && snapshot.root_count == 0
@@ -1206,7 +1206,7 @@ where
         let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
-        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
+        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Global
             && remote_read_tier.is_some()
             && remote_propagate_upstream
             && opts.read_view.is_default()
