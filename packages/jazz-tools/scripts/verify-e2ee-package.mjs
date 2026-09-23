@@ -45,10 +45,11 @@ try {
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
     import type { DeviceInfo } from "jazz-tools";
     import { schema as s } from "jazz-tools";
-    import { deviceRequestSchema, deviceRequestPermissions, groupSchema, withGroupTopologyPermissions } from "jazz-tools/e2ee";
+    import { deviceRequestSchema, deviceRequestPermissions, groupSchema, spaceSchema, withGroupTopologyPermissions } from "jazz-tools/e2ee";
     export const app = s.defineApp({
       ...deviceRequestSchema,
       ...groupSchema,
+      ...spaceSchema,
       notes: s.table({ body: s.string() }, {}),
     });
     const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
@@ -112,11 +113,12 @@ try {
       "-e",
       `
     import { strict as assert } from "node:assert";
-    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, groupSchema, withGroupTopologyPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
+    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, groupSchema, spaceSchema, withGroupTopologyPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
     import { schema as s } from "jazz-tools";
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...groupSchema,
+      ...spaceSchema,
       notes: s.table({ body: s.string() }, {}),
     });
     const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {

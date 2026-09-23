@@ -39,6 +39,7 @@ it("inspects recovery registration without enrolling a device or claiming recove
         validation: "not-checked",
       },
       groups: { validation: "not-checked" },
+      spaces: { validation: "not-checked" },
     });
     expect(await untouched.read()).toBeNull();
     expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
@@ -59,6 +60,7 @@ it("inspects recovery registration without enrolling a device or claiming recove
       configured: true,
       account: { validation: "validated", validatedRootId: rootId },
       groups: { validation: "not-checked" },
+      spaces: { validation: "not-checked" },
     });
     await expect(observer.e2ee.recovery.status("not recovery material")).rejects.toMatchObject({
       code: "recovery-material-unusable",
@@ -81,6 +83,7 @@ it("inspects recovery registration without enrolling a device or claiming recove
         validatedRootId: rootId,
       },
       groups: { validation: "not-checked" },
+      spaces: { validation: "not-checked" },
     });
     const roots = await observer.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" });
     expect(configured.account.recoveryRootIds).toEqual(roots.map((root) => root.id));
