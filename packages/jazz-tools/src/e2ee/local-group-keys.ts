@@ -57,7 +57,15 @@ export async function stageGroupKey(
       assertOpen();
       const { state, entries } = decode(current);
       const existing = entries.find((entry) => entry.scope === scope && entry.groupId === groupId);
-      if (encoded && existing) throw new Error("E2EE group key is already staged");
+      if (encoded && existing) {
+        if (
+          existing.epochId !== epochId ||
+          existing.payload.some((byte, index) => byte !== encoded[index])
+        )
+          throw new Error("E2EE group key is already staged");
+        updated = true;
+        return current!;
+      }
       if (existing && existing.epochId !== epochId)
         throw new Error("Staged E2EE group epoch does not match");
       state.stagedGroupKeysV1 = entries.filter((entry) => entry !== existing);

@@ -95,6 +95,9 @@ row is accepted. If rotation is required, the same denial leaves the group
 The read-only recovered-device regression reproduced the missing distinction
 as a rejected recovery wait, and now checks readiness alongside the absence of
 any accepted delivery to that device.
+If recovery stops after staging one of several groups, retrying the same material
+can reuse that authenticated key and continue with the remaining groups. A
+different retained epoch or key still rejects recovery without being overwritten.
 
 Malformed delivery transcripts are rejected as candidates rather than aborting
 the search for a usable envelope. The regression inserts a UUID-v1 proposal
@@ -132,9 +135,13 @@ path and the selected recovery root. `unavailable` has one of three reasons:
 `maintenance-required`. A bad opened key cannot become a validated path, and
 a missing inherited delivery cannot disappear from the coverage list. Removed
 memberships are excluded. Authority/coverage failures reject the inspection;
-they are not interpreted as an empty group set. A changed account epoch during
-inspection requires retry. Status does not guarantee that state remains current
-after the reported snapshots or that another registered root was checked.
+they are not interpreted as an empty group set or an unusable delivery. This
+includes signer failures while replaying predecessor history. Candidate key
+opening, unwrapping and key-confirmation failures instead make that delivery
+unusable. The key-envelope interface does not distinguish authentication failures
+from other rejected adapter reads. A changed account epoch during inspection
+requires retry. Status does not guarantee that state remains current after the
+reported snapshots or that another registered root was checked.
 
 ## Qualification and open questions
 
