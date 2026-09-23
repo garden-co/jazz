@@ -8,11 +8,15 @@ use tokio::net::{TcpListener, TcpStream};
 pub(crate) fn low_latency_listener(
     listener: TcpListener,
 ) -> impl Listener<Io = TcpStream, Addr = SocketAddr> {
-    listener.tap_io(|stream| {
-        if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!(%error, "failed to disable TCP buffering on accepted connection");
-        }
-    })
+    listener.tap_io(|stream| disable_nagle(stream))
+}
+
+/// Shared by every server accept path, including the loopback WebSocket server
+/// that does not go through `axum::serve`.
+pub(crate) fn disable_nagle(stream: &TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::warn!(%error, "failed to disable TCP buffering on accepted connection");
+    }
 }
 
 #[cfg(test)]
@@ -32,5 +36,17 @@ mod tests {
             client.unwrap();
             assert!(server.nodelay().unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn loopback_accepted_connections_disable_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        client.unwrap();
+        let (server, _) = accepted.unwrap();
+        assert!(!server.nodelay().unwrap());
+        disable_nagle(&server);
+        assert!(server.nodelay().unwrap());
     }
 }
