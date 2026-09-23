@@ -13495,7 +13495,13 @@ mod tests {
         };
         for (request, expected) in [
             (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+            (
+                request(
+                    NATIVE_RELAY_ABI_V2.saturating_add(1),
+                    NATIVE_RELAY_ABI_V2.saturating_add(1),
+                ),
+                JazzNativeRelayStatus::IncompatibleAbi,
+            ),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {
