@@ -1,7 +1,7 @@
 ---
 title: Queries
 description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
-reviewedAt: "b29b48d1a"
+reviewedAt: "88c207be5d"
 ---
 
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
@@ -175,10 +175,10 @@ milestone, not a promise that every currently displayed row has reached that lev
   </Tab>
 </Tabs>
 
-You're unlikely to see `data: undefined` in practice unless you're awaiting a more [durable
-tier](#read-durability). A local preview can still be available while a stronger tier is
-loading; local storage reads are effectively instant and resolve to `[]` if no data exists yet.
-
+<Callout type="info">
+  You're unlikely to see `data: undefined` in practice unless you're awaiting a more [durable
+  tier](#read-durability). A local preview can still be available while a stronger tier is loading;
+  local storage reads are effectively instant and resolve to `[]` if no data exists yet.
 </Callout>
 
 ### Fine-grained updates
@@ -189,8 +189,8 @@ In practice this means:
 
 - Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
 - Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
-- Vue's `useAll` returns `{ data, isLoading, error }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
-- React and Solid return `{ data, isLoading, error }`; React returns a fresh `data` array each tick, while Solid's store keeps fine-grained dependency tracking for fields that changed.
+- Vue's `useAll` returns `{ data, isLoading, error, highestSettledAt }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+- React and Solid return `{ data, isLoading, error, highestSettledAt }`; React returns a fresh `data` array each tick, while Solid's store keeps fine-grained dependency tracking for fields that changed.
 
 React's granularity benefit comes from React's diffing, not from in-place reconciliation.
 
