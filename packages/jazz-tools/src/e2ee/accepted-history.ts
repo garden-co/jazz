@@ -1,5 +1,6 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
+import type { Db, QueryBuilder } from "../runtime/db.js";
+import type { E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { SpaceRoot, SpaceGrant } from "./spaces.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
@@ -150,7 +151,7 @@ async function persist(
 async function restore<T>(
   db: Db,
   key: string,
-  read: (tx: E2eeTransactionScope, initialRecipients?: string[]) => Promise<T>,
+  read: (reader: E2eeHistoryReader, initialRecipients?: string[]) => Promise<T>,
 ) {
   const storage = stores.get(db);
   if (!storage) return undefined;
@@ -218,8 +219,8 @@ export async function prepareInitialHistory<
   T extends { roots: Read["snapshot"]; grants: Read["snapshot"] },
 >(
   db: Db,
-  tx: E2eeTransactionScope,
-  read: (tx: E2eeTransactionScope) => Promise<T>,
+  tx: E2eeHistoryReader,
+  read: (reader: E2eeHistoryReader) => Promise<T>,
   root: SpaceRoot,
   grants: SpaceGrant[],
 ): Promise<void> {
@@ -269,7 +270,7 @@ export async function acceptInitialHistory(
 export async function readAcceptedHistory<T>(
   db: Db,
   key: string,
-  read: (tx: E2eeTransactionScope, initialRecipients?: string[]) => Promise<T>,
+  read: (reader: E2eeHistoryReader, initialRecipients?: string[]) => Promise<T>,
   localOnly = false,
 ): Promise<T> {
   const entries = histories.get(db) ?? new Map<string, Retained>();
@@ -321,27 +322,9 @@ export async function readAcceptedHistory<T>(
   return bundle.result;
 }
 
-async function capture<T>(
-  tx: Pick<E2eeTransactionScope, "allSettledForE2ee">,
-  read: (tx: E2eeTransactionScope) => Promise<T>,
-) {
+async function capture<T>(tx: E2eeHistoryReader, read: (reader: E2eeHistoryReader) => Promise<T>) {
   const reads: Read[] = [];
-  const scope: E2eeTransactionScope = {
-    kind: "exclusive",
-    insert() {
-      throw new Error("Accepted E2EE history reads cannot write");
-    },
-    upsert() {
-      throw new Error("Accepted E2EE history reads cannot write");
-    },
-    async all<T>(query: QueryBuilder<T>) {
-      const snapshot = await scope.allSettledForE2ee(query as QueryBuilder<T & { id: string }>);
-      return snapshot.rows;
-    },
-    async one(query) {
-      const rows = await scope.all(query);
-      return rows[0] ?? null;
-    },
+  const scope: E2eeHistoryReader = {
     async allSettledForE2ee(query) {
       if (!query._table.startsWith("__e2ee_")) throw new Error("Expected E2EE metadata query");
       const snapshot = await tx.allSettledForE2ee(query);
