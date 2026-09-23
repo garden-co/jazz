@@ -1655,18 +1655,57 @@ impl IvmGraph {
     }
 
     pub fn dedup_node(&mut self, descriptor: NodeDescriptor, durability: NodeDurability) -> NodeId {
-        self.validate_node(&descriptor)
-            .expect("invalid IVM graph node descriptor");
-
         let id = descriptor.node_id();
         if let Some(existing) = self.nodes.get(&id) {
+            // An existing node was validated when inserted, against the same
+            // input ids; node outputs are immutable per id, so validation of
+            // an equal descriptor cannot differ.
             assert_eq!(
                 existing.descriptor, descriptor,
                 "IVM node id collision for incompatible descriptors"
             );
             return id;
         }
+        self.validate_node(&descriptor)
+            .expect("invalid IVM graph node descriptor");
+        self.insert_new_node(id, descriptor, durability)
+    }
 
+    /// [`Self::dedup_node`] from borrowed parts: the owned descriptor is only
+    /// built when the node is new. Identity and collision checks are the same.
+    pub(crate) fn dedup_node_parts(
+        &mut self,
+        operator: &OpType,
+        inputs: Vec<NodeId>,
+        output: NodeOutput,
+        durability: NodeDurability,
+    ) -> NodeId {
+        let id = NodeDescriptor::node_id_of(operator, &inputs, &output);
+        if let Some(existing) = self.nodes.get(&id) {
+            assert!(
+                existing.descriptor.operator == *operator
+                    && existing.descriptor.inputs == inputs
+                    && existing.descriptor.output == output,
+                "IVM node id collision for incompatible descriptors"
+            );
+            return id;
+        }
+        let descriptor = NodeDescriptor {
+            operator: operator.clone(),
+            inputs,
+            output,
+        };
+        self.validate_node(&descriptor)
+            .expect("invalid IVM graph node descriptor");
+        self.insert_new_node(id, descriptor, durability)
+    }
+
+    fn insert_new_node(
+        &mut self,
+        id: NodeId,
+        descriptor: NodeDescriptor,
+        durability: NodeDurability,
+    ) -> NodeId {
         self.activations.added(&descriptor.inputs);
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
@@ -1917,10 +1956,18 @@ impl NodeDescriptor {
     }
 
     pub fn node_id(&self) -> NodeId {
+        Self::node_id_of(&self.operator, &self.inputs, &self.output)
+    }
+
+    /// The identity of a descriptor with these fields, hashed exactly as the
+    /// derived `Hash` does (fields in declaration order), without owning one.
+    pub(crate) fn node_id_of(operator: &OpType, inputs: &[NodeId], output: &NodeOutput) -> NodeId {
         // Keep node ids deterministic across runs. They are still guarded by a
         // descriptor equality check on deduplication, so collisions fail loudly.
         let mut hasher = StableNodeHasher::default();
-        self.hash(&mut hasher);
+        operator.hash(&mut hasher);
+        inputs.hash(&mut hasher);
+        output.hash(&mut hasher);
         NodeId(hasher.finish())
     }
 
@@ -2641,6 +2688,36 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    // Internal: node identity must stay byte-identical to the derived descriptor
+    // hash, because ids are stable across runs; not observable via public APIs.
+    fn borrowed_part_identity_matches_the_derived_descriptor_hash() {
+        use std::hash::{Hash, Hasher};
+        let source = NodeDescriptor::new(
+            OpType::TableSource(TableSourceOp {
+                table: "albums".to_owned(),
+                scan: None,
+                variant_projection: None,
+            }),
+            [],
+            output(),
+        );
+        let parent = NodeDescriptor::new(source.operator.clone(), [source.node_id()], output());
+        for descriptor in [source, parent] {
+            let mut hasher = StableNodeHasher::default();
+            descriptor.hash(&mut hasher);
+            assert_eq!(descriptor.node_id(), NodeId(hasher.finish()));
+            assert_eq!(
+                NodeDescriptor::node_id_of(
+                    &descriptor.operator,
+                    &descriptor.inputs,
+                    &descriptor.output
+                ),
+                descriptor.node_id()
+            );
+        }
     }
 
     #[test]

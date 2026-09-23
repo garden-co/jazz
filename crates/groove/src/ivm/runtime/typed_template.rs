@@ -461,28 +461,47 @@ impl IvmRuntime {
             TemplateNodeRef::Node(i) => installed[i],
         };
         for instruction in &program.nodes {
-            let mut descriptor = instruction.descriptor.clone();
-            descriptor.inputs = instruction
+            let inputs = instruction
                 .inputs
                 .iter()
                 .map(|r| resolve(*r, &installed))
                 .collect();
-            if let (Some(slot), OpType::Filter(filter)) =
-                (instruction.predicate, &mut descriptor.operator)
-            {
-                filter.predicate = predicates[slot].clone();
-            }
-            if let OpType::MapProject(project) = &mut descriptor.operator {
-                for expression in &mut project.expressions {
-                    crate::ivm::template::arguments::bind_project_expression(
-                        &mut expression.expression,
-                        scalars,
-                    )
-                    .map_err(|_| IvmRuntimeError::GraphOutputMismatch)?;
+            // Only argument-consuming operators need an instance copy; every
+            // other node is hashed and compared from the program itself.
+            let binds_scalars = matches!(
+                &instruction.descriptor.operator,
+                OpType::MapProject(project) if project.expressions.iter().any(|expression| {
+                    matches!(expression.expression, ProjectExpr::TemplateArgument { .. })
+                })
+            );
+            let bound;
+            let operator = if instruction.predicate.is_some() || binds_scalars {
+                let mut operator = instruction.descriptor.operator.clone();
+                if let (Some(slot), OpType::Filter(filter)) = (instruction.predicate, &mut operator)
+                {
+                    filter.predicate = predicates[slot].clone();
                 }
-            }
+                if let OpType::MapProject(project) = &mut operator {
+                    for expression in &mut project.expressions {
+                        crate::ivm::template::arguments::bind_project_expression(
+                            &mut expression.expression,
+                            scalars,
+                        )
+                        .map_err(|_| IvmRuntimeError::GraphOutputMismatch)?;
+                    }
+                }
+                bound = operator;
+                &bound
+            } else {
+                &instruction.descriptor.operator
+            };
             self.logical_nodes_requested += 1;
-            let id = self.graph.dedup_node(descriptor, NodeDurability::Ephemeral);
+            let id = self.graph.dedup_node_parts(
+                operator,
+                inputs,
+                instruction.descriptor.output,
+                NodeDurability::Ephemeral,
+            );
             self.initialize_node_runtime(id);
             installed.push(id);
         }
