@@ -29,7 +29,10 @@ function deployed(hash = "abc123def4567890") {
   };
 }
 
-async function makeViteServer(command: "serve" | "build", root?: string) {
+async function makeViteServer(
+  command: "serve" | "build",
+  root?: string,
+): Promise<ViteDevServer & { restart: () => Promise<void> }> {
   const viteRoot = root ?? (await tempRoots.create("jazz-sveltekit-vite-"));
   return {
     config: { root: viteRoot, command, env: {} },
