@@ -950,7 +950,7 @@ fn relation_query_one_shot_project_selects_alias_without_unselected_columns() {
         None,
         "an unselected source column must not be visible in the relation result"
     );
-    assert_eq!(returned.raw_field("user_secret"), None);
+    assert_eq!(returned.raw_field("secret"), None);
 }
 /// Relation ordering must use source-bound fields before the terminal projection
 /// narrows rows to their public aliases.

@@ -666,7 +666,14 @@ pub(super) fn lowered_terminals(
                                             .iter()
                                             .find(|column| column.name == reference.column)
                                             .map(|column| column.column_type.clone())
-                                            .unwrap_or(ColumnType::String);
+                                            .ok_or_else(|| {
+                                                single_gap_report(UnsupportedReason::Operator(
+                                                    format!(
+                                                        "relation output column {:?} is absent from the source schema",
+                                                        reference.column
+                                                    ),
+                                                ))
+                                            })?;
                                         (
                                             ty,
                                             NormalizedValueRef::SourceField {
