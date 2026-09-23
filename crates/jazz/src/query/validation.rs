@@ -281,8 +281,8 @@ fn validate_query_canonical_parts(
             resolved.array_subqueries = query.array_subqueries.clone();
             resolved.relation = None;
             resolved.select = query.select.clone();
-            let retain_relation = crate::query::relation_output_projection_if_present(relation)?
-                .is_some();
+            let retain_relation =
+                retain_relation_output_projection(query, relation, &root)?;
             let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
             if retain_relation {
                 normalized.relation = Some(relation.clone());
@@ -291,6 +291,7 @@ fn validate_query_canonical_parts(
             return Ok((normalized, params, canonical));
         }
         validate_retained_relation_outer_query(query)?;
+        reject_presentation_over_relation_projection(query)?;
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
         validate_array_subqueries(
             schema,
@@ -393,6 +394,79 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+/// Whether a single (non-UNION) relation keeps its explicit output
+/// projection as the result shape.
+///
+/// The relation terminal publishes exactly its aliases, so it cannot also
+/// honour envelope presentation (`include` array subqueries or `select`).
+/// When the envelope carries such presentation:
+/// - a full identity projection (every output-table column exactly once under
+///   its own name, optionally `id`) is the ordinary row shape, so the
+///   projection is dropped and the ordinary path serves includes and select;
+/// - any renaming or narrowing projection is rejected rather than silently
+///   discarding the presentation.
+fn retain_relation_output_projection(
+    query: &Query,
+    relation: &RelationQuery,
+    output_table: &TableSchema,
+) -> Result<bool, QueryError> {
+    if crate::query::relation_output_projection_if_present(relation)?.is_none() {
+        return Ok(false);
+    }
+    if query.array_subqueries.is_empty() && query.select.is_none() {
+        return Ok(true);
+    }
+    let (output_scope, columns) = relation_output_projection(relation)?;
+    if is_full_identity_projection(output_table, &output_scope, &columns) {
+        return Ok(false);
+    }
+    reject_presentation_over_relation_projection(query)?;
+    Ok(true)
+}
+
+fn is_full_identity_projection(
+    table: &TableSchema,
+    output_scope: &str,
+    columns: &[RelationProjectColumn],
+) -> bool {
+    let mut projected = BTreeSet::new();
+    for column in columns {
+        let identity = match &column.expr {
+            RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
+            RelationProjectExpr::Column(reference) => {
+                reference.scope.as_deref() == Some(output_scope)
+                    && reference.column == column.alias
+            }
+            RelationProjectExpr::RowId(_) => false,
+        };
+        if !identity {
+            return false;
+        }
+        if column.alias != "id" {
+            projected.insert(column.alias.as_str());
+        }
+    }
+    projected.len() == table.columns.len()
+        && table
+            .columns
+            .iter()
+            .all(|column| projected.contains(column.name.as_str()))
+}
+
+fn reject_presentation_over_relation_projection(query: &Query) -> Result<(), QueryError> {
+    if !query.array_subqueries.is_empty() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "include(...) is not supported on a relation query whose projection renames or narrows its output columns".to_owned(),
+        ));
+    }
+    if query.select.is_some() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "select(...) is not supported on a relation query whose projection renames or narrows its output columns".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Relation syntax owns row membership and its terminal ordering/window. The

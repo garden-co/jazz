@@ -1531,6 +1531,118 @@ fn relation_projection_rejects_reserved_internal_aliases() {
     }
 }
 
+/// A relation envelope may carry `include` array subqueries, as the TypeScript
+/// adapter sends for `match` predicates: a full identity projection of the
+/// output table plus includes. The identity projection is the ordinary row
+/// shape, so includes must still arrive on one-shot and maintained reads. A
+/// renaming or narrowing projection cannot also carry include or select
+/// presentation and is rejected explicitly instead of dropping it.
+/// `Query::relation` is the public envelope field the native bindings fill.
+#[test]
+fn relation_query_projection_includes_are_served_or_rejected() {
+    let schema = relation_schema();
+    let db = open_db(0xd7, AuthorSubject::for_test_bytes([0xd7; 16]), &schema);
+    let alice = row(0xa1);
+    let todo = row(0xb1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("write tests".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(todo),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let relation_query = |columns: Vec<(&str, &str)>| {
+        let mut query = Query::from("users").array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").select(["title"]),
+        );
+        query.relation = Some(RelationQuery {
+            rel: RelationExpr::Project {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                columns: columns
+                    .into_iter()
+                    .map(|(alias, column)| crate::query::RelationProjectColumn {
+                        alias: alias.to_owned(),
+                        expr: RelationProjectExpr::Column(RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: column.to_owned(),
+                        }),
+                    })
+                    .collect(),
+            },
+        });
+        query
+    };
+
+    let identity = relation_query(vec![("id", "id"), ("name", "name")]);
+    let prepared = db.prepare_query(&identity).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows[..snapshot.root_count]), vec![alice]);
+    assert_eq!(
+        snapshot.rows[0].test_cells_by_descriptor().get("name"),
+        Some(&Value::String("alice".to_owned()))
+    );
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, alice, "todosViaOwner", "title"),
+        vec!["write tests".to_owned()]
+    );
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut maintained = RelationSnapshot::default();
+    apply_subscription_event(
+        &mut maintained,
+        subscription.try_next_event().expect("opened event"),
+    );
+    assert_eq!(
+        terminal_nested_text_values(&maintained, alice, "todosViaOwner", "title"),
+        vec!["write tests".to_owned()],
+        "maintained reads must keep includes on an identity relation projection"
+    );
+
+    let renamed = relation_query(vec![("displayName", "name")]);
+    let error = db.prepare_query(&renamed).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains(
+            "include(...) is not supported on a relation query whose projection renames or narrows its output columns"
+        ),
+        "{}",
+        error.message
+    );
+    let narrowed = relation_query(vec![("id", "id")]);
+    assert_eq!(
+        db.prepare_query(&narrowed).unwrap_err().code,
+        ErrorCode::Query
+    );
+
+    let mut selected = relation_query(vec![("displayName", "name")]);
+    selected.array_subqueries.clear();
+    selected.select = Some(vec!["displayName".to_owned()]);
+    let error = db.prepare_query(&selected).unwrap_err();
+    assert!(
+        error.message.contains(
+            "select(...) is not supported on a relation query whose projection renames or narrows its output columns"
+        ),
+        "{}",
+        error.message
+    );
+}
+
 /// Two `users` arms projected to `displayName`, ordered globally by `term`.
 fn users_union_ordered_by(term: RelationColumnRef) -> RelationQuery {
     let arm = |label: &str| crate::query::RelationUnionArm {

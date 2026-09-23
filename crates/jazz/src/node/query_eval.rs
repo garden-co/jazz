@@ -607,7 +607,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -643,7 +643,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -694,7 +694,10 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                shape.query(),
+            )?,
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -762,7 +765,7 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, lowered_shape.query()),
+            output: current_query_output_request(output, lowered_shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -1047,7 +1050,7 @@ where
             )?,
             shape: input_shape,
         };
-        let mut output_request = current_query_output_request(output, shape.query());
+        let mut output_request = current_query_output_request(output, shape.query())?;
         if storage_backed_result_materialization {
             // A simple current root query carries the exact visible content
             // transaction in its result-member terminal.  Keeping every

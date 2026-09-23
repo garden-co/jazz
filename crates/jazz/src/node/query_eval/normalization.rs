@@ -196,7 +196,7 @@ fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) ->
 pub(super) fn current_query_output_request(
     output: CurrentQueryProgramOutput,
     query: &JazzQuery,
-) -> RowSetOutputRequest {
+) -> Result<RowSetOutputRequest, Error> {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::PolicyPredicate => {
             BTreeSet::new()
@@ -236,24 +236,25 @@ pub(super) fn current_query_output_request(
             ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
         ]),
     };
-    RowSetOutputRequest {
-        app_rows: (matches!(
-            output,
-            CurrentQueryProgramOutput::AppRows
-                | CurrentQueryProgramOutput::PolicyPredicate
-                | CurrentQueryProgramOutput::RelationSnapshot
-                | CurrentQueryProgramOutput::MaintainedView
-        ))
-        .then(|| AppRowOutputRequest {
+    let app_rows = if matches!(
+        output,
+        CurrentQueryProgramOutput::AppRows
+            | CurrentQueryProgramOutput::PolicyPredicate
+            | CurrentQueryProgramOutput::RelationSnapshot
+            | CurrentQueryProgramOutput::MaintainedView
+    ) {
+        Some(AppRowOutputRequest {
             public_terminal: !matches!(output, CurrentQueryProgramOutput::PolicyPredicate),
             projection: app_row_payload_projection(
                 query,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
-            ),
-        }),
-        facts,
-    }
+            )?,
+        })
+    } else {
+        None
+    };
+    Ok(RowSetOutputRequest { app_rows, facts })
 }
 
 /// Whether a maintained current-read can retain only its delivered result
@@ -294,11 +295,28 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && normalized.reachable_contributions.is_empty()
 }
 
-fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
-    if let Some(relation) = &query.relation
-        && let Ok((_, columns)) = crate::query::relation_output_projection(relation)
-    {
-        return PayloadProjection::Relation(columns);
+fn app_row_payload_projection(
+    query: &JazzQuery,
+    collect_relations: bool,
+) -> Result<PayloadProjection, Error> {
+    // A retained relation projection is the whole public row shape. Validation
+    // rejects include/select presentation over it (or drops a full identity
+    // projection so the ordinary path serves them); never discard either here.
+    let relation_projection = match &query.relation {
+        Some(relation) if crate::query::relation_union_parts(&relation.rel).is_some() => {
+            Some(crate::query::relation_output_projection(relation)?.1)
+        }
+        Some(relation) => crate::query::relation_output_projection_if_present(relation)?,
+        None => None,
+    };
+    if let Some(columns) = relation_projection {
+        if !query.array_subqueries.is_empty() || query.select.is_some() {
+            return Err(Error::QueryCapability(
+                "a relation output projection cannot carry include or select presentation"
+                    .to_owned(),
+            ));
+        }
+        return Ok(PayloadProjection::Relation(columns));
     }
     let paths = if collect_relations {
         app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
@@ -306,7 +324,7 @@ fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> Pay
         Vec::new()
     };
     if query.select.is_none() && paths.is_empty() {
-        return PayloadProjection::ShapeDefault;
+        return Ok(PayloadProjection::ShapeDefault);
     }
     let fields = query
         .select
@@ -325,7 +343,7 @@ fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> Pay
             FieldProjection::Fields(fields)
         })
         .unwrap_or(FieldProjection::All);
-    PayloadProjection::Tree(AppProjectionTree { fields, paths })
+    Ok(PayloadProjection::Tree(AppProjectionTree { fields, paths }))
 }
 
 fn app_row_path_projections(
