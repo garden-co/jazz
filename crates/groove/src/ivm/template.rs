@@ -6,6 +6,8 @@
 use super::GraphBuilder;
 use crate::records::RecordDescriptor;
 use std::{collections::HashMap, sync::Arc};
+mod sources;
+pub use sources::split_template_sources;
 
 /// A typed, source-independent installation program. Its identity and contents
 /// are process-local compiler state, never a storage or wire representation.

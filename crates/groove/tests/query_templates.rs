@@ -390,3 +390,45 @@ async fn typed_family_preserves_source_projection_context_and_bound_contracts() 
         Err(IvmRuntimeError::GraphOutputMismatch)
     ));
 }
+
+#[futures_test::test]
+async fn source_blueprints_bind_fresh_rows_and_preserve_private_nested_inputs() {
+    use groove::ivm::{ProjectField, split_template_sources};
+    let mut db = database().await;
+    let raw = RecordDescriptor::new([("left", ColumnType::U64), ("right", ColumnType::U64)]);
+    let make_source = |left, right| {
+        GraphBuilder::values(raw, [vec![Value::U64(left), Value::U64(right)]])
+            .unwrap()
+            .project_fields([ProjectField::renamed("right", "id")])
+    };
+    let first = make_source(11, 22);
+    let second = make_source(33, 44);
+    let (blueprints, first_inputs) =
+        split_template_sources(&[&first], |g| db.describe_template_input(g)).unwrap();
+    let (next_blueprints, second_inputs) =
+        split_template_sources(&[&second], |g| db.describe_template_input(g)).unwrap();
+    // The exact-result assertions below must exercise the same blueprint,
+    // rather than retaining the first source's concrete rows in its program.
+    assert_eq!(blueprints, next_blueprints);
+    let typed = groove::ivm::compile_template_graphs(&blueprints).unwrap();
+    for (inputs, expected) in [(first_inputs, 22), (second_inputs, 44)] {
+        let bound = bind_template_graphs(&typed, &inputs).unwrap().remove(0);
+        assert_eq!(
+            db.query_graph(bound).await.unwrap().to_values().unwrap(),
+            vec![(vec![Value::U64(expected)], 1)]
+        );
+    }
+
+    let private = bind(
+        &db,
+        GraphBuilder::values(descriptor(), [vec![Value::U64(55)]]).unwrap(),
+    );
+    let (blueprints, inputs) =
+        split_template_sources(&[&private], |g| db.describe_template_input(g)).unwrap();
+    let typed = groove::ivm::compile_template_graphs(&blueprints).unwrap();
+    let bound = bind_template_graphs(&typed, &inputs).unwrap().remove(0);
+    assert_eq!(
+        db.query_graph(bound).await.unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(55)], 1)]
+    );
+}

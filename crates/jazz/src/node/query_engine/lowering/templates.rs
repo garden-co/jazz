@@ -25,7 +25,6 @@ pub(crate) struct QueryProgramTemplateCache {
 struct TemplateEntry {
     request: QueryProgramRequest,
     sources: ResolvedQuerySources,
-    source_parameters: BTreeMap<u32, ParameterDomain>,
     program: Option<Arc<QueryProgram>>,
 }
 
@@ -35,11 +34,7 @@ impl QueryProgramTemplateCache {
         self.physical.clear();
     }
 
-    fn typed_program(
-        &mut self,
-        mut program: QueryProgram,
-        describe: &impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
-    ) -> QueryProgram {
+    fn typed_program(&mut self, mut program: QueryProgram) -> QueryProgram {
         let mut graphs = program
             .lowered
             .terminals
@@ -47,11 +42,7 @@ impl QueryProgramTemplateCache {
             .map(|terminal| terminal.graph.clone())
             .collect::<Vec<_>>();
         graphs.extend(program.lowered.internal_app_rows_graph.iter().cloned());
-        if let Ok(typed) = self.physical.compile_with_sources(&graphs, |graph| {
-            describe(graph.clone())
-                .map(|input| input.descriptor())
-                .map_err(|_| groove::ivm::IvmRuntimeError::UnsupportedOperator)
-        }) {
+        if let Ok(typed) = self.physical.compile(&graphs) {
             let mut typed = typed.into_iter();
             for terminal in &mut program.lowered.terminals {
                 terminal.graph = typed.next().expect("typed terminal");
@@ -80,51 +71,37 @@ impl QueryProgramTemplateCache {
         // families may share across literals because their Filter predicates
         // and source graphs are explicit per-instance installation arguments.
         let prepared = compilation.request.input.binding.source_shape.is_some();
-        if !prepared {
-            let program = lower_resolved_query_program(compilation, sources, explain)?;
-            return Ok(self.typed_program(program, &describe));
-        }
         // Prepared programs may omit values only if unbound lowering succeeds.
         let mut template_compilation = compilation.clone();
-        template_compilation.request.input.binding.values.clear();
-        template_compilation.request.input.binding.id = BindingId(uuid::Uuid::nil());
+        if prepared {
+            template_compilation.request.input.binding.values.clear();
+            template_compilation.request.input.binding.id = BindingId(uuid::Uuid::nil());
+        }
         let mut template_sources = sources.clone();
-        let mut inputs = Vec::new();
-        let mut source_parameters = BTreeMap::new();
-        let mut make_slot = |graph: &mut GraphBuilder| -> Result<(), groove::db::Error> {
-            let mut parameters = ParameterDomain::default();
-            collect_binding_source_params(graph, &mut parameters);
-            let input = describe(graph.clone())?;
-            let output = input.descriptor();
-            source_parameters.insert(inputs.len() as u32, parameters);
-            let slot = GraphBuilder::TemplateInput {
-                slot: inputs.len() as u32,
-                output,
-                input: None,
-            };
-            *graph = slot;
-            inputs.push(input);
-            Ok(())
+        let mut source_graphs = Vec::new();
+        for source in sources.values() {
+            source_graphs.push(&source.graph);
+            source_graphs.extend(source.content_version.iter().map(|s| &s.graph));
+            source_graphs.extend(source.deletion_register.iter().map(|s| &s.graph));
+            source_graphs.extend(source.authorized_deletion_preimage.iter().map(|s| &s.graph));
+        }
+        let Ok((blueprints, inputs)) =
+            groove::ivm::split_template_sources(&source_graphs, describe)
+        else {
+            trace_template("descriptor_fallback");
+            return lower_resolved_query_program(compilation, sources, explain);
         };
+        let mut blueprints = blueprints.into_iter();
         for source in template_sources.values_mut() {
-            let result = (|| {
-                make_slot(&mut source.graph)?;
-                if let Some(content) = &mut source.content_version {
-                    make_slot(&mut content.graph)?;
-                }
-                if let Some(deletion) = &mut source.deletion_register {
-                    make_slot(&mut deletion.graph)?;
-                }
-                if let Some(preimage) = &mut source.authorized_deletion_preimage {
-                    make_slot(&mut preimage.graph)?;
-                }
-                Ok::<_, groove::db::Error>(())
-            })();
-            if result.is_err() {
-                trace_template("descriptor_fallback");
-                // Source preparation may use a not-yet-installed binding
-                // descriptor. The ordinary compiler retains its admission path.
-                return lower_resolved_query_program(compilation, sources, explain);
+            source.graph = blueprints.next().expect("source blueprint");
+            if let Some(content) = &mut source.content_version {
+                content.graph = blueprints.next().expect("content blueprint");
+            }
+            if let Some(deletion) = &mut source.deletion_register {
+                deletion.graph = blueprints.next().expect("deletion blueprint");
+            }
+            if let Some(preimage) = &mut source.authorized_deletion_preimage {
+                preimage.graph = blueprints.next().expect("preimage blueprint");
             }
         }
         // Compare typed contracts, not recursively formatted descriptors or
@@ -135,7 +112,6 @@ impl QueryProgramTemplateCache {
                 == template_compilation.request.input.shape.identity.shape_id
                 && entry.request == template_compilation.request
                 && entry.sources == template_sources
-                && entry.source_parameters == source_parameters
         }) {
             let Some(template) = &entry.program else {
                 trace_template("unsupported_hit");
@@ -148,21 +124,19 @@ impl QueryProgramTemplateCache {
             template.clone()
         } else {
             let template_request = template_compilation.request.clone();
-            let template = lower_resolved_query_program_with_source_parameters(
+            let template = lower_resolved_query_program(
                 template_compilation,
                 template_sources.clone(),
                 ExplainPlan::default(),
-                &source_parameters,
             )
             .ok()
-            .map(Arc::new);
-            if self.entries.len() == 64 {
+            .map(|program| Arc::new(self.typed_program(program)));
+            if self.entries.len() == 256 {
                 self.entries.pop_front();
             }
             self.entries.push_back(TemplateEntry {
                 request: template_request,
                 sources: template_sources,
-                source_parameters,
                 program: template.clone(),
             });
             trace_template(if template.is_some() {
@@ -199,6 +173,6 @@ impl QueryProgramTemplateCache {
         let capabilities = program.explain.capabilities.clone();
         program.explain = explain_with_request(&program.request, explain);
         program.explain.capabilities.extend(capabilities);
-        Ok(self.typed_program(program, &describe))
+        Ok(program)
     }
 }
