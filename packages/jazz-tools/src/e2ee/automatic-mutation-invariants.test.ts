@@ -253,6 +253,10 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
   const { app, db } = fixture;
   try {
     const cold = await fixture.openOtherAccount();
+    // Advance the creator's known authority coordinate without loading recipient history.
+    await db.insert(app.events, { message: "Recipient enrolment precedes this snapshot" }).wait({
+      tier: "global",
+    });
     const coldTx = db.beginExclusiveTransaction();
     const coldProject = coldTx.insert(
       app.projects,
@@ -265,6 +269,10 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
       bytes: new Uint8Array([1]),
     });
     await coldTx.commit().wait({ tier: "global" });
+    // The initial author completes delivery without becoming a space recipient.
+    expect(
+      await db.e2ee.explain({ scope: app.projects, identifier: coldProject.id }),
+    ).toMatchObject({ state: "refused", reason: "not-a-space-recipient" });
     expect(await cold.client.one(app.notes.where({ id: coldNote.id }), { tier: "global" })).toEqual(
       coldNote,
     );

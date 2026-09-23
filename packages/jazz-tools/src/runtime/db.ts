@@ -5,7 +5,6 @@ import { initialRecipientIds } from "../e2ee/space-lifecycle.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
-  e2eeInitialPreparationForDb,
   prepareInitialSpaceForTransaction,
   prepareInitialSpaceRows,
   withSpaceKeys,
@@ -1333,7 +1332,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly context: DbAccessContext | null = null,
     ownerClient?: JazzClient,
-    private readonly e2ee?: { db: Db; requestScopeCreation: (ids?: readonly string[]) => void },
+    private readonly e2ee?: { db: Db },
   ) {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
@@ -1460,7 +1459,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     const recipients = scopeRecipients(table, options);
     const initialisesSpace = encryptedSchemas.get(table._schema)?.scopes.has(table._table);
-    if (initialisesSpace) this.prepareScopeCreation(recipients);
+    if (initialisesSpace) this.prepareScopeCreation();
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
@@ -1500,10 +1499,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
-  private prepareScopeCreation(recipients?: readonly string[]): void {
+  private prepareScopeCreation(): void {
     if (this.kind !== "exclusive" || !this.e2ee)
       throw new Error("E2EE scope creation requires an authenticated exclusive transaction");
-    this.e2ee.requestScopeCreation(recipients);
   }
 
   private async retainInitialSpaceKey(secret: Uint8Array, root: SpaceRoot): Promise<void> {
@@ -1685,7 +1683,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (encryption?.scopes.has(table._table)) {
       if (encryption.tables.has(table._table))
         throw new Error("Encrypted scope rows require dependent scope preparation");
-      this.prepareScopeCreation(recipients);
+      this.prepareScopeCreation();
       this.bindTable(table);
       const values = structuredClone(
         toWriteRecordForOperation(
@@ -3457,33 +3455,9 @@ export class Db {
         "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    const prepareInitialSpace = e2eeInitialPreparationForDb(this);
-    const recipients = prepareInitialSpace ? new Set<string>() : undefined;
-    let scopeCreationRequested = false;
-    const e2ee = prepareInitialSpace
-      ? {
-          db: this,
-          requestScopeCreation: (ids?: readonly string[]) => {
-            scopeCreationRequested = true;
-            for (const id of ids ?? []) recipients!.add(id);
-          },
-        }
-      : undefined;
-    const prerequisite =
-      transactionAdmission.get(this) ??
-      (kind === "exclusive" && prepareInitialSpace
-        ? () => {
-            if (!scopeCreationRequested) return;
-            return (async () => {
-              await prepareInitialSpace();
-              while (recipients?.size) {
-                const pending = [...recipients];
-                recipients.clear();
-                await prepareInitialSpace(pending);
-              }
-            })();
-          }
-        : undefined);
+    const e2ee =
+      configuredSchema && encryptedSchemas.has(configuredSchema) ? { db: this } : undefined;
+    const prerequisite = transactionAdmission.get(this);
     if (prerequisite && ownerClient)
       return withTransactionAdmission(
         ownerClient,
