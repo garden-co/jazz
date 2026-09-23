@@ -74,6 +74,12 @@ type MembershipSnapshot = {
   histories: Map<string, History>;
 };
 
+class UnavailableGroupKey extends Error {}
+
+function unavailableGroupKey(cause: unknown): never {
+  throw new UnavailableGroupKey("Unable to authenticate E2EE group key", { cause });
+}
+
 // Account and group recipients are UUID row IDs. Retain the guard against
 // malformed historical candidates before issuing account-reference queries.
 function accountMemberId(row: GroupMembership): string | undefined {
@@ -223,17 +229,20 @@ export class Groups {
       if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
       let secret: Uint8Array | undefined;
       try {
-        secret = await this.keys.open(
-          material.recipient,
-          groupRecoveryContext(this.accountContext(root.accountId), row),
-          row.envelope,
-        );
+        secret = await this.keys
+          .open(
+            material.recipient,
+            groupRecoveryContext(this.accountContext(root.accountId), row),
+            row.envelope,
+          )
+          .catch(unavailableGroupKey);
         await this.confirmHistory(root, position, group, secret);
         this.assertOpen();
         return secret;
-      } catch {
+      } catch (error) {
         secret?.fill(0);
         this.assertOpen();
+        if (!(error instanceof UnavailableGroupKey)) throw error;
       }
     }
     return undefined;
@@ -557,16 +566,18 @@ export class Groups {
       let candidateFailure: { error: unknown } | undefined;
       if (successor?.authorAccountId === this.accountId && successor.authorDeviceId === device.id) {
         try {
-          const payload = await this.keys.open(
-            device,
-            groupSuccessorContext(
-              this.accountContext(root.accountId),
-              successor,
-              "author-envelope",
-              device.id,
-            ),
-            successor.authorEnvelope,
-          );
+          const payload = await this.keys
+            .open(
+              device,
+              groupSuccessorContext(
+                this.accountContext(root.accountId),
+                successor,
+                "author-envelope",
+                device.id,
+              ),
+              successor.authorEnvelope,
+            )
+            .catch(unavailableGroupKey);
           try {
             await this.confirmHistory(root, position, snapshot.group, payload);
             try {
@@ -586,6 +597,8 @@ export class Groups {
             payload.fill(0);
           }
         } catch (error) {
+          this.assertOpen();
+          if (!(error instanceof UnavailableGroupKey)) throw error;
           candidateFailure = { error };
         }
       }
@@ -606,11 +619,13 @@ export class Groups {
           continue;
         let usable = false;
         try {
-          const payload = await this.keys.open(
-            device,
-            groupDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
-            delivery.envelope,
-          );
+          const payload = await this.keys
+            .open(
+              device,
+              groupDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
+              delivery.envelope,
+            )
+            .catch(unavailableGroupKey);
           try {
             await this.confirmHistory(root, position, snapshot.group, payload);
             usable = true;
@@ -632,6 +647,8 @@ export class Groups {
             payload.fill(0);
           }
         } catch (error) {
+          this.assertOpen();
+          if (!(error instanceof UnavailableGroupKey)) throw error;
           // One unusable candidate must not hide a later authenticated key.
           candidateFailure ??= { error };
           if (!usable) failedDeliveries.push(delivery.id);
@@ -801,13 +818,17 @@ export class Groups {
         if (row.recipientAccountId === this.accountId && row.recipientDeviceId === device.id) {
           let opened: Uint8Array | undefined;
           try {
-            opened = await this.keys.open(
-              device,
-              groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
-              row.envelope,
-            );
+            opened = await this.keys
+              .open(
+                device,
+                groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
+                row.envelope,
+              )
+              .catch(unavailableGroupKey);
             await this.confirmHistory(root, position, group, opened);
-          } catch {
+          } catch (error) {
+            this.assertOpen();
+            if (!(error instanceof UnavailableGroupKey)) throw error;
             // A signature authenticates the sender, not the enclosed key.
             // Retain the staged key until a usable replacement is accepted.
             continue;
@@ -1239,7 +1260,7 @@ export class Groups {
       {
         root: async (candidate, at) => {
           const history = snapshot.histories.get(candidate.accountId)!;
-          if (!history.roots.rows.length) return false;
+          if (!historyBefore(history, at).roots.rows.length) return false;
           let bytes: Uint8Array;
           try {
             bytes = groupRootBytes(this.accountContext(candidate.accountId), candidate);
@@ -1263,7 +1284,7 @@ export class Groups {
               return false;
           }
           const history = snapshot.histories.get(row.authorAccountId)!;
-          if (!history.roots.rows.length) return false;
+          if (!historyBefore(history, at).roots.rows.length) return false;
           let bytes: Uint8Array;
           try {
             bytes = groupMembershipBytes(this.accountContext(group.accountId), row);
@@ -1279,7 +1300,7 @@ export class Groups {
         },
         successor: async (group, row, at) => {
           const history = snapshot.histories.get(row.authorAccountId)!;
-          if (!history.roots.rows.length) return false;
+          if (!historyBefore(history, at).roots.rows.length) return false;
           let bytes: Uint8Array;
           try {
             bytes = groupSuccessorSigningBytes(this.accountContext(group.accountId), row);
@@ -1380,11 +1401,13 @@ export class Groups {
         await this.confirm(state.keyRoot, secret);
         if (!state.successor) return;
         const successor = state.successor;
-        const previous = await this.keys.unwrap(
-          secret,
-          groupSuccessorContext(this.accountContext(root.accountId), successor, "history"),
-          successor.history,
-        );
+        const previous = await this.keys
+          .unwrap(
+            secret,
+            groupSuccessorContext(this.accountContext(root.accountId), successor, "history"),
+            successor.history,
+          )
+          .catch(unavailableGroupKey);
         owned?.fill(0);
         owned = previous;
         secret = previous;
@@ -1399,16 +1422,18 @@ export class Groups {
 
   private async confirm(root: GroupKey, payload: Uint8Array) {
     if (root.mechanism !== this.keys.mechanism.id || root.version !== this.keys.mechanism.version)
-      throw new Error("Unsupported E2EE group key mechanism");
-    if (payload.length !== 32) throw new Error("Invalid E2EE group key");
-    const confirmation = await this.keys.unwrap(
-      payload,
-      groupContext(this.accountContext(root.accountId), root, "verification"),
-      root.verification,
-    );
+      throw new UnavailableGroupKey("Unsupported E2EE group key mechanism");
+    if (payload.length !== 32) throw new UnavailableGroupKey("Invalid E2EE group key");
+    const confirmation = await this.keys
+      .unwrap(
+        payload,
+        groupContext(this.accountContext(root.accountId), root, "verification"),
+        root.verification,
+      )
+      .catch(unavailableGroupKey);
     try {
       if (confirmation.length !== 32 || confirmation.some((byte) => byte !== 0))
-        throw new Error("Invalid E2EE group key confirmation");
+        throw new UnavailableGroupKey("Invalid E2EE group key confirmation");
     } finally {
       confirmation.fill(0);
     }

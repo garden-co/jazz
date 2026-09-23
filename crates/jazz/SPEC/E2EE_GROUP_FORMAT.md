@@ -38,8 +38,14 @@ A preflight membership check alone is insufficient. Readers validate the
 creator's eligibility before root acceptance and the sender and recipient's
 eligibility before delivery acceptance. A delivery must be accepted strictly
 after the root. The signed root's account epoch must still be current.
-Signatures alone do not establish any of these conditions. Applications compose
-the group tables and supply ordinary Jazz administration policies.
+Signatures alone do not establish any of these conditions. Applications import
+`groupSchema` and `withGroupTopologyPermissions` from `jazz-tools/e2ee` to compose
+the group tables and public topology reads with their own administration policies.
+
+Group roots, membership changes and successors require an accepted author account
+root strictly before the candidate's acceptance position. A covered history with
+no eligible root makes the candidate ineligible; later enrolment cannot give it
+retroactive authority. Missing settlement coverage still rejects graph loading.
 
 `fixtures/e2ee-group.c` independently emits the root and delivery frames used
 by the literal codec test. These fixtures pin framing, not membership validation.
@@ -62,6 +68,9 @@ the staged epoch to match, and authenticates the candidate key against the
 root's verification marker before sealing anything. Its global wait must
 succeed before staging is removed or readiness is reported. Corrupt candidates
 are not replaced with fresh keys; failed attempts retain staging for retry.
+Recovery may stage the same epoch and identical 32-byte key again. The atomic
+store update leaves an exact match unchanged and rejects a different key or epoch.
+This makes interrupted recovery retryable without overwriting a retained secret.
 Before publishing, both creation and resumption open the envelope generated
 for the sending device and check that it recovers the same key. This prevents
 a faulty adapter's unusable output from discarding the only retained secret.
