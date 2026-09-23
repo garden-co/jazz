@@ -363,13 +363,26 @@ describe("React Todo App E2E", () => {
       appId: APP_ID,
       serverUrl: `http://127.0.0.1:${TEST_PORT}`,
     });
+    const tierSelect = el.querySelector<HTMLSelectElement>("#query-tier");
+    expect(tierSelect).not.toBeNull();
+    if (!tierSelect) return;
 
     await waitFor(
       () =>
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-        "Query settlement: remote",
+        "Query settlement: local",
       10000,
-      "the todo query should advance to remote settlement",
+      "local-first should settle the query on device",
+    );
+
+    await act(async () => selectOption(tierSelect, "remote-if-possible"));
+    await waitFor(
+      () =>
+        tierSelect.value === "remote-if-possible" &&
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+          "Query settlement: remote",
+      10000,
+      "the selected query should advance to remote settlement",
     );
 
     expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe("Synced");
@@ -380,19 +393,17 @@ describe("React Todo App E2E", () => {
       appId: APP_ID,
       serverUrl: `http://127.0.0.1:${TEST_PORT}`,
     });
-    const tierSelect = el.querySelector<HTMLSelectElement>('[aria-label="Query read tier"]');
+    const tierSelect = el.querySelector<HTMLSelectElement>("#query-tier");
     expect(tierSelect).not.toBeNull();
     if (!tierSelect) return;
 
-    expect(tierSelect.value).toBe("remote-if-possible");
-    await act(async () => selectOption(tierSelect, "local-first"));
+    expect(tierSelect.value).toBe("local-first");
     await waitFor(
       () =>
-        tierSelect.value === "local-first" &&
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Query settlement: local",
+        "Query settlement: local",
       10000,
-      "local-first should settle the query on device",
+      "the default local-first query should settle on device",
     );
 
     await act(async () => selectOption(tierSelect, "remote"));

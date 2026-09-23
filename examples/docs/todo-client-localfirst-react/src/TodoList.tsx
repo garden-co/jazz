@@ -3,10 +3,17 @@ import { useState } from "react";
 import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema.js";
 
+const queryTierOptions = [
+  { value: "local-first", label: "Local-first" },
+  { value: "remote-if-possible", label: "Remote if possible" },
+  { value: "remote", label: "Remote only" },
+] as const;
+
+type QueryTier = (typeof queryTierOptions)[number]["value"];
+
 export function TodoList() {
   // #region read-write-react
   const db = useDb();
-  const { data: todos = [] } = useAll(app.todos);
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
   const { data: incompleteTodos } = useAll(
@@ -23,8 +30,10 @@ export function TodoList() {
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
-  // This query can show its local preview before authority confirmation.
-  const allTodos = useAll(app.todos, { tier: "remote-if-possible" });
+  // Remote-if-possible may show a local preview before authority confirmation.
+  const [tier, setTier] = useState<"local-first" | "remote-if-possible" | "remote">("local-first");
+  const allTodos = useAll(app.todos, { tier });
+  const todos = allTodos.data ?? [];
   // `allTodos.data` may contain a local preview while `allTodos.isLoading` is `true`.
   // It is `undefined` only when no result is available yet.
   // Once the requested first result is ready, `allTodos.isLoading` is `false`.
@@ -64,17 +73,33 @@ export function TodoList() {
 
   return (
     <>
-      <span
-        className={`settlement-badge settlement-badge--${allTodos.highestSettledAt}`}
-        role="status"
-        aria-label={`Query settlement: ${allTodos.highestSettledAt}`}
-      >
-        {allTodos.highestSettledAt === "unconfirmed"
-          ? "Waiting"
-          : allTodos.highestSettledAt === "local"
-            ? "On device"
-            : "Synced"}
-      </span>
+      <div className="query-controls">
+        <label className="query-tier-control" htmlFor="query-tier">
+          Query read tier
+          <select
+            id="query-tier"
+            value={tier}
+            onChange={(event) => setTier(event.currentTarget.value as QueryTier)}
+          >
+            {queryTierOptions.map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span
+          className={`settlement-badge settlement-badge--${allTodos.highestSettledAt}`}
+          role="status"
+          aria-label={`Query settlement: ${allTodos.highestSettledAt}`}
+        >
+          {allTodos.highestSettledAt === "unconfirmed"
+            ? "Waiting"
+            : allTodos.highestSettledAt === "local"
+              ? "On device"
+              : "Synced"}
+        </span>
+      </div>
       <form onSubmit={handleSubmit}>
         <input
           type="text"
