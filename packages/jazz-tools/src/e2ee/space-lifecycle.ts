@@ -4,7 +4,7 @@ import type { Db, TableProxy, E2eeTransactionScope } from "../runtime/db.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
-import { decodeRecoveryMaterial, decodeRecoveryMaterialForInspection } from "./recovery-format.js";
+import { decodeRecoveryMaterial } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { spaceRecoveryContext, spaceRecoveryBytes } from "./space-recovery-format.js";
 import { loadRecoveredSpaceKey, retainRecoveredSpaceKey } from "./local-space-keys.js";
@@ -140,7 +140,7 @@ export class Spaces {
 
   /** Read-only coverage: no device state, private store, delivery or maintenance writes. */
   async inspectRecovery(value: string, accountEpochId: string): Promise<SpaceRecoveryPath[]> {
-    const material = await decodeRecoveryMaterialForInspection(
+    const material = await decodeRecoveryMaterial(
       value,
       this.accountContext(this.accountId),
       this.keys,
