@@ -9,13 +9,14 @@ import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzClientProvider } from "./provider.js";
 import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
+import type { QuerySettlementLevel } from "../shared/index.js";
 
 type Todo = { id: string; title: string };
 type NoQueryResult = {
   data: undefined;
   isLoading: false;
   error: null;
-  highestSettledAt: "unconfirmed";
+  highestSettledAt: QuerySettlementLevel;
 };
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
