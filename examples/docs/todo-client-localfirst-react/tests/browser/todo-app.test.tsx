@@ -351,6 +351,23 @@ describe("React Todo App E2E", () => {
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
   });
 
+  it("shows remote settlement after the local result", async () => {
+    const el = await mountApp({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+    });
+
+    await waitFor(
+      () =>
+        el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
+        "Query settlement: remote",
+      10000,
+      "the todo query should advance to remote settlement",
+    );
+
+    expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe("Synced");
+  });
+
   // -------------------------------------------------------------------------
   // 8. Server sync between two app instances with memory driver
   // -------------------------------------------------------------------------
