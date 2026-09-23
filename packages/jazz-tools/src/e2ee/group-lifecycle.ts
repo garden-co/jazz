@@ -34,7 +34,7 @@ import {
   groupRepairBytes,
 } from "./group-format.js";
 import { loadStagedGroupKey, stageGroupKey } from "./local-group-keys.js";
-import { decodeRecoveryMaterial, decodeRecoveryMaterialForInspection } from "./recovery-format.js";
+import { decodeRecoveryMaterial } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { groupRecoveryContext, groupRecoveryBytes } from "./group-recovery-format.js";
 import {
@@ -120,12 +120,7 @@ export class Groups {
 
   /** Discover current effective memberships, not just the envelopes that happen to exist. */
   async inspectRecovery(value: string, accountEpochId: string): Promise<GroupRecoveryPath[]> {
-    const material = await decodeRecoveryMaterialForInspection(
-      value,
-      this.application,
-      this.keys,
-      this.signer,
-    );
+    const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
     try {
       const query = this.tables.__e2ee_group_recovery_deliveries.where({
         recipientAccountId: this.accountId,
