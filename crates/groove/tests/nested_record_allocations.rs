@@ -1,3 +1,11 @@
+//! Allocation and canonical-admission regressions for Groove records.
+//!
+//! These tests install a counting global allocator: allocation counts are not
+//! observable through Groove's public results, so a behavioural test cannot pin
+//! them. The counter records allocation requests (not bytes), so the bounds do
+//! not depend on which allocator backs `System`. Inline-scalar borrowing is
+//! covered separately in `inline_scalar_allocations.rs`.
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -29,25 +37,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-#[test]
-fn borrowing_inline_bytes_and_text_does_not_allocate() {
-    for (kind, bytes) in [
-        (LargeValueKind::Bytes, vec![7; 4096]),
-        (
-            LargeValueKind::String,
-            "ordinary text".repeat(256).into_bytes(),
-        ),
-    ] {
-        let encoded = encode_stored_scalar(kind, &StoredScalar::Primitive(bytes.clone())).unwrap();
-        inline_scalar_bytes(kind, &encoded).unwrap(); // Warm immutable descriptors.
-        ALLOCATIONS.with(|count| count.set(Some(0)));
-        let result = inline_scalar_bytes(kind, &encoded);
-        let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
-        assert_eq!(result.unwrap(), bytes);
-        assert_eq!(count, 0, "borrowing {kind:?} should not allocate");
-    }
-}
 
 #[test]
 fn borrowed_inline_scalars_preserve_owned_decoder_admission() {
@@ -102,6 +91,12 @@ fn allocations_for_nested_record(depth: usize) -> usize {
 fn nesting_does_not_multiply_record_construction_allocations() {
     let shallow = allocations_for_nested_record(1);
     let deep = allocations_for_nested_record(4);
+    // Building an owned record always allocates its buffer; a zero here would
+    // make the ratio bound vacuous rather than prove anything.
+    assert!(
+        shallow > 0,
+        "record construction should allocate at least once"
+    );
     assert!(
         deep <= shallow * 4,
         "four levels should cost at most four times one level: shallow={shallow}, deep={deep}"
