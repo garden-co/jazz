@@ -48,7 +48,7 @@ export function TodoList() {
       ? "Not confirmed yet"
       : allTodos.highestSettledAt === "local"
         ? "On device"
-        : "Synced";
+        : "Server";
   const isShowingPreview =
     optimism === "show-previews" && allTodos.isLoading && allTodos.data !== undefined;
   const waitingForTier = optimism === "wait-for-tier" && allTodos.isLoading;
@@ -145,38 +145,39 @@ export function TodoList() {
       >
         <h2 id="tier-help-title">About these query choices</h2>
         <p id="tier-help-intro">
-          The read tier sets which data this query waits for. UI optimism controls whether this list
-          shows available data while it is still loading.
+          The read tier sets how much confirmation the query waits for. UI optimism controls whether
+          this list shows data already available while the query is still loading.
         </p>
         <h3>Read tier</h3>
         <ul>
           <li>
-            <strong>Local-first:</strong> Use locally cached data and pending local writes right
-            away. The query keeps syncing.
+            <strong>Local-first:</strong> Shows locally cached data and pending local writes
+            immediately. It keeps syncing in the background.
           </li>
           <li>
-            <strong>Remote if possible:</strong> When connected, use remote-scope data and eligible
-            pending local changes. Local data is used only after an explicit disconnect.
+            <strong>Remote if possible:</strong> When connected, it reads remote-scope data and may
+            include eligible pending local changes. It uses local data only after an explicit
+            disconnect.
           </li>
           <li>
-            <strong>Remote only:</strong> Wait for server-confirmed results. Pending local writes
-            are excluded, and the query waits while offline. It does not show an early preview.
+            <strong>Remote only:</strong> Waits for server-confirmed results. It excludes pending
+            local writes and waits while offline. It does not show an early preview.
           </li>
         </ul>
         <h3>UI optimism</h3>
         <ul>
           <li>
-            <strong>Show previews:</strong> Show data already available while the query is still
+            <strong>Show previews:</strong> Show any data already available while the query is
             loading.
           </li>
           <li>
-            <strong>Wait for the selected tier:</strong> Hide available data until the requested
-            tier is ready.
+            <strong>Wait for the selected tier:</strong> Hide available data until the selected tier
+            has returned its first result.
           </li>
         </ul>
         <p>
-          The badge shows the tier you selected and the highest settlement this subscription has
-          observed. It does not mean every displayed row reached that level.
+          The badge shows the read tier you selected and the highest settlement this subscription
+          has observed. It does not guarantee that every displayed row has reached that level.
         </p>
         <button id="tier-help-close" type="button" onClick={() => tierHelpDialog.current?.close()}>
           Close
