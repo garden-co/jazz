@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
+import { RuntimeOwners } from "./runtime-owners.js";
 import { wireInspectorOverlay } from "./inspector-overlay/serve.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
@@ -61,79 +62,65 @@ const runtime = new ManagedDevRuntime({
   telemetryCollectorUrl: "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 });
 
-export function jazzSvelteKit(options: JazzPluginOptions = {}) {
-  // Set once configureServer runs. The schema watcher's reload/error callbacks
-  // read it lazily: the runtime is started in the `config` hook (before any
-  // dev server exists), but watch pushes only fire later, by which point this
-  // is populated. Initial-push callbacks during `config` see `null` and no-op,
-  // which is correct — there's no browser to reload yet.
-  let viteServerRef: ViteDevServer | null = null;
-  let disposalPromise: Promise<void> | null = null;
-  let publicEnvBaseline: {
-    appId: string | undefined;
-    serverUrl: string | undefined;
-    telemetryCollectorUrl: string | undefined;
-  } | null = null;
-  let injectedPublicEnv: {
-    appId: string | undefined;
-    serverUrl: string | undefined;
-    telemetryCollectorUrl: string | undefined;
-  } | null = null;
+interface PublicEnvSnapshot {
+  appId: string | undefined;
+  serverUrl: string | undefined;
+  telemetryCollectorUrl: string | undefined;
+}
 
-  function capturePublicEnvBaseline() {
-    publicEnvBaseline = {
-      appId: process.env.PUBLIC_JAZZ_APP_ID,
-      serverUrl: process.env.PUBLIC_JAZZ_SERVER_URL,
-      telemetryCollectorUrl: process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
-    };
-  }
+// Like the runtime, the PUBLIC_JAZZ_* baseline is process-wide: it is captured
+// by the first instance to start the runtime (before anything is injected) and
+// restored only by the final disposal, never by an instance handing over on a
+// Vite restart.
+let publicEnvBaseline: PublicEnvSnapshot | null = null;
+let injectedPublicEnv: PublicEnvSnapshot | null = null;
 
-  function restoreInjectedPublicEnv() {
-    if (!injectedPublicEnv) return;
+function restoreInjectedPublicEnv() {
+  if (!injectedPublicEnv) return;
 
-    const envEntries = [
-      ["PUBLIC_JAZZ_APP_ID", injectedPublicEnv.appId, publicEnvBaseline?.appId],
-      ["PUBLIC_JAZZ_SERVER_URL", injectedPublicEnv.serverUrl, publicEnvBaseline?.serverUrl],
-      [
-        "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
-        injectedPublicEnv.telemetryCollectorUrl,
-        publicEnvBaseline?.telemetryCollectorUrl,
-      ],
-    ] as const;
+  const envEntries = [
+    ["PUBLIC_JAZZ_APP_ID", injectedPublicEnv.appId, publicEnvBaseline?.appId],
+    ["PUBLIC_JAZZ_SERVER_URL", injectedPublicEnv.serverUrl, publicEnvBaseline?.serverUrl],
+    [
+      "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
+      injectedPublicEnv.telemetryCollectorUrl,
+      publicEnvBaseline?.telemetryCollectorUrl,
+    ],
+  ] as const;
 
-    for (const [key, injectedValue, baselineValue] of envEntries) {
-      if (injectedValue === undefined || process.env[key] !== injectedValue) continue;
-      if (baselineValue === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = baselineValue;
-      }
+  for (const [key, injectedValue, baselineValue] of envEntries) {
+    if (injectedValue === undefined || process.env[key] !== injectedValue) continue;
+    if (baselineValue === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = baselineValue;
     }
   }
+}
 
-  async function disposePluginRuntime(): Promise<void> {
-    if (disposalPromise) return disposalPromise;
-
-    const pending = (async () => {
-      try {
-        if (managed) await runtime.dispose();
-      } catch (error) {
-        console.error(`${LOG_PREFIX} runtime disposal failed:`, error);
-        throw error;
-      } finally {
-        restoreInjectedPublicEnv();
-        managed = null;
-        viteServerRef = null;
-        publicEnvBaseline = null;
-        injectedPublicEnv = null;
-        disposalPromise = null;
-      }
-    })();
-    disposalPromise = pending;
-    return pending;
+const owners = new RuntimeOwners<ViteDevServer>(async () => {
+  try {
+    await runtime.dispose();
+  } catch (error) {
+    console.error(`${LOG_PREFIX} runtime disposal failed:`, error);
+    throw error;
+  } finally {
+    restoreInjectedPublicEnv();
+    publicEnvBaseline = null;
+    injectedPublicEnv = null;
   }
+});
 
+export function jazzSvelteKit(options: JazzPluginOptions = {}) {
+  // Identity of this plugin instance in the shared runtime's owner set. Vite
+  // creates fresh instances on every dev-server restart.
+  const holder = {};
   let managed: ManagedRuntime | null = null;
+
+  function releasePluginRuntime(): Promise<void> {
+    managed = null;
+    return owners.release(holder);
+  }
 
   function buildMergedConfig(config: ViteUserConfigLike) {
     const existingSsr = config.ssr?.external;
@@ -171,45 +158,60 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       appId: options.appId,
       telemetry: options.telemetry,
       backendSecret,
+      // The runtime keeps these callbacks across Vite restarts, so they
+      // resolve the live dev servers from the owner set on every call. During
+      // the initial `config` push there is no server yet and they no-op.
       onSchemaError: (error: Error) => {
-        viteServerRef?.ws.send({
-          type: "error",
-          err: {
-            message: `${LOG_PREFIX} schema push failed: ${error.message}`,
-            stack: error.stack,
-          },
-        });
+        for (const server of owners.servers()) {
+          server.ws.send({
+            type: "error",
+            err: {
+              message: `${LOG_PREFIX} schema push failed: ${error.message}`,
+              stack: error.stack,
+            },
+          });
+        }
       },
       onSchemaPush: () => {
-        viteServerRef?.ws.send({ type: "full-reload" });
+        for (const server of owners.servers()) server.ws.send({ type: "full-reload" });
       },
     };
   }
 
-  // Start the managed runtime and populate process.env exactly once. Called
-  // from the `config` hook in real usage (so SvelteKit's later env capture
-  // sees the vars on the first pass — no restart needed); also reachable from
-  // configureServer for direct/programmatic callers that never run `config`.
-  // runtime.initialize() is idempotent, but we additionally cache here so a
-  // second caller does not re-run the env-file backfill or re-resolve jwks.
+  // Start (or adopt) the shared managed runtime and populate process.env.
+  // Called from the `config` hook in real usage (so SvelteKit's later env
+  // capture sees the vars on the first pass — no restart needed); also
+  // reachable from configureServer for direct/programmatic callers that never
+  // run `config`. runtime.initialize() is idempotent, but we additionally cache
+  // here so a second caller does not re-run the env-file backfill or re-resolve
+  // jwks.
   async function ensureInitialised(
     serverConfig: ViteServerConfigLike | undefined,
     root: string,
     envDir: string | false,
     mode: string,
   ): Promise<ManagedRuntime> {
-    const activeDisposal = disposalPromise;
-    if (activeDisposal) await activeDisposal;
     if (managed) return managed;
-    await loadEnvFileIntoProcessEnv(envDir, mode);
-    capturePublicEnvBaseline();
-    managed = await runtime.initialize(buildInitOptions(serverConfig, root));
-    injectedPublicEnv = {
-      appId: managed.appId,
-      serverUrl: managed.serverUrl,
-      telemetryCollectorUrl: managed.telemetryCollectorUrl,
-    };
-    return managed;
+    await owners.acquire(holder);
+    try {
+      await loadEnvFileIntoProcessEnv(envDir, mode);
+      publicEnvBaseline ??= {
+        appId: process.env.PUBLIC_JAZZ_APP_ID,
+        serverUrl: process.env.PUBLIC_JAZZ_SERVER_URL,
+        telemetryCollectorUrl: process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+      };
+      const resolved = await runtime.initialize(buildInitOptions(serverConfig, root));
+      injectedPublicEnv ??= {
+        appId: resolved.appId,
+        serverUrl: resolved.serverUrl,
+        telemetryCollectorUrl: resolved.telemetryCollectorUrl,
+      };
+      managed = resolved;
+      return resolved;
+    } catch (error) {
+      await owners.release(holder).catch(() => undefined);
+      throw error;
+    }
   }
 
   return {
@@ -260,7 +262,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         });
         throw error;
       }
-      viteServerRef = viteServer;
+      owners.attachServer(holder, viteServer);
 
       viteServer.config.env ??= {};
       viteServer.config.env.PUBLIC_JAZZ_APP_ID = resolvedRuntime.appId;
@@ -271,11 +273,14 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       }
       if (options.inspector !== false) wireInspectorOverlay(viteServer);
     },
-    closeBundle: disposePluginRuntime,
+    closeBundle: releasePluginRuntime,
   };
 }
 
 export async function __resetJazzSvelteKitPluginForTests(): Promise<void> {
+  owners.resetForTests();
+  publicEnvBaseline = null;
+  injectedPublicEnv = null;
   await runtime.resetForTests();
 }
 
