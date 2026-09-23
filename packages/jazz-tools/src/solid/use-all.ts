@@ -4,6 +4,7 @@ import { applyDelta } from "../reconcile-array.js";
 import type { QuerySettlementLevel } from "../shared/index.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 export type UseAllResult<T extends { id: string }> = {
