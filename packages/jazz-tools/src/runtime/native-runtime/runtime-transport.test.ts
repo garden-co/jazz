@@ -1824,6 +1824,47 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(globalWait).rejects.toThrow("Protocol: terminal before reconnect");
   });
 
+  it("keeps an active global wait observing errors after remote transport readiness resets", async () => {
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insert: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const inserted = runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "wait across remote readiness" } },
+        null,
+        "00000000-0000-0000-0000-000000000010",
+      );
+      const waiting = runtime.waitForTransaction(await committedTxId(inserted), "global");
+      const rejected = expect(waiting).rejects.toThrow("replacement transport failed");
+      runtime.clearRemoteServerTransportError();
+      // Yield one real host turn so readiness-triggered microtasks can re-arm the wait.
+      const turn = deferred<void>();
+      setTimeout(turn.resolve, 0);
+      await turn.promise;
+      runtime.reportRemoteServerTransportError(new Error("replacement transport failed"));
+      await rejected;
+    } finally {
+      settlement.resolve();
+      await runtime.close();
+    }
+  });
+
   it("settles an existing edge wait without a native write-state callback", async () => {
     let settle!: () => void;
     const settlement = new Promise<void>((resolve) => {

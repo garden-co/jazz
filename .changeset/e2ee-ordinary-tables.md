@@ -13,8 +13,18 @@ new-scope recipients, and authoritative acceptance.
 
 Now scope checks include pending-deleted rows and use the requested branch
 coordinates; a missing upsert inserts rather than overwriting an unobserved
-row. Preview values are isolated from caller buffers, and plaintext-only
-transaction reads avoid key-store admission. Ordinary reads still decrypt
-selected logical values; plaintext operations remain independent of key
-readiness. Unsupported encrypted query/subscription and migration paths fail
-closed until their owning layers.
+row. Preview values are isolated from caller buffers. Applications with encrypted
+tables prepare their device during database startup, rather than delaying the
+snapshot of an exclusive transaction. Plaintext-only applications do not enrol
+a device, and plaintext transaction reads do not repeat key-store setup.
+
+An established device can reopen offline using retained keys and accepted local
+history. Call `disconnect()` after opening to use local encrypted reads without
+waiting for the server. Local readiness does not prove current server approval;
+first-time enrolment still needs a connection.
+
+Ordinary reads decrypt selected logical values. Unsupported encrypted query,
+subscription and migration paths fail closed until their owning layers.
+
+Native transaction waits no longer spin on queued inbound frames or accumulate
+settlement callbacks while waiting for server acceptance.

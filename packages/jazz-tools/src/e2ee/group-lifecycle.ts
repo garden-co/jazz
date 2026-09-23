@@ -1,5 +1,6 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -53,7 +54,7 @@ type GroupDevice = {
   store: AccountStore;
   isKnownRevoked(): boolean;
   load(): Promise<LocalDevice>;
-  states(transaction?: E2eeTransactionScope): Promise<{
+  states(transaction?: E2eeHistoryReader): Promise<{
     active: Set<string>;
     epochId: string;
     publicHistory: History;
@@ -120,7 +121,7 @@ export class Groups {
   private loadDevice(): Promise<LocalDevice> {
     return this.requireDevice().load();
   }
-  private deviceStates(transaction?: E2eeTransactionScope) {
+  private deviceStates(transaction?: E2eeHistoryReader) {
     return this.requireDevice().states(transaction);
   }
 
@@ -500,15 +501,20 @@ export class Groups {
   }> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "edge" });
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    const rootQuery = this.tables.__e2ee_groups.where({ id });
+    const observed = offline
+      ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
+      : await this.db.one(rootQuery, { tier: "edge" });
     if (!observed) return { state: "unavailable", reason: "group-not-found" };
-    await this.warmMembership(observed);
+    if (!offline) await this.warmMembership(observed);
     const device = await this.loadDevice();
     try {
-      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-        tier: "edge",
-      });
-      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      if (!offline)
+        await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+          tier: "edge",
+        });
+      const readSnapshot = async (tx: E2eeHistoryReader) => {
         const state = await this.deviceStates(tx);
         const group = await this.readMembership(tx, observed, state.publicHistory);
         return {
@@ -520,8 +526,10 @@ export class Groups {
           group,
           state,
         };
-      });
-      const snapshot = await read.wait({ tier: "global" });
+      };
+      const snapshot = offline
+        ? await observeE2eeHistory(this.db, readSnapshot)
+        : await (await exclusiveE2eeTransaction(this.db, readSnapshot)).wait({ tier: "global" });
       this.assertOpen();
       // Check the device against this accepted snapshot, before opening any group key.
       const current = snapshot.state;
@@ -536,6 +544,8 @@ export class Groups {
         await this.acceptedMembership(root, position, snapshot.group);
       if (sealed) return { state: "refused", reason: "group-sealed" };
       if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
+      if (offline && rotationRequired)
+        return { state: "maintenance-required", reason: "recipient-removed" };
       const staged = await loadStagedGroupKey(this.store, this.application, id, this.assertOpen);
       if (staged) {
         try {
@@ -547,7 +557,7 @@ export class Groups {
             await this.confirmHistory(root, position, snapshot.group, staged.secret);
             try {
               if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
-              else await this.deliver(keyRoot, staged.secret, device);
+              else if (!offline) await this.deliver(keyRoot, staged.secret, device);
             } catch (error) {
               if (
                 !(error instanceof PersistedWriteRejectedError) ||
@@ -582,7 +592,7 @@ export class Groups {
             await this.confirmHistory(root, position, snapshot.group, payload);
             try {
               if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device);
+              else if (!offline) await this.deliver(keyRoot, payload, device);
             } catch (error) {
               if (
                 !(error instanceof PersistedWriteRejectedError) ||
@@ -631,7 +641,7 @@ export class Groups {
             usable = true;
             try {
               if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device);
+              else if (!offline) await this.deliver(keyRoot, payload, device);
             } catch (error) {
               // An accepted key remains usable when policy denies this member
               // permission to deliver it to somebody else.
@@ -658,7 +668,8 @@ export class Groups {
         return { state: "ready" };
       }
       if (candidateFailure) {
-        if (failedDeliveries.length) await this.requestRepair(keyRoot, device, failedDeliveries);
+        if (!offline && failedDeliveries.length)
+          await this.requestRepair(keyRoot, device, failedDeliveries);
         throw candidateFailure.error;
       }
       return { state: "unavailable", reason: "group-key-pending" };
@@ -1160,9 +1171,9 @@ export class Groups {
     return this.verifySigner(senderHistory, delivery.senderDeviceId, bytes, delivery.signature);
   }
 
-  /** Internal snapshot; its enclosing exclusive transaction must be accepted globally. */
+  /** Coherent history reader; supplied authority transactions must be accepted globally. */
   async readMembership(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     root: Pick<GroupRoot, "id" | "accountId"> | null,
     ownHistory: History,
   ): Promise<MembershipSnapshot> {

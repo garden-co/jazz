@@ -1840,37 +1840,68 @@ export class NativeRuntimeAdapter implements Runtime {
     // Claim the error as soon as the transaction ID is available, before any
     // readiness or transport awaits. Reuse this wait across transport wakes.
     const settlement = options.observeOnly ? write.wait(tier, true) : write.wait(tier);
-    // Readiness can outlive a rejected settlement. Observe it now so the host
-    // never sees an unhandled Promise rejection while readiness is pending.
-    void settlement.catch(() => undefined);
-    if (options.ready) await options.ready;
-    for (;;) {
-      this.throwServerTransportErrorForTier(tier);
-      const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      void this.pumpServerTransport();
-      this.throwServerTransportErrorForTier(tier);
-      const transportError = this.waitForServerTransportError(tier);
-      const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
-      try {
-        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
-          settlement.then(() => "settled" as const),
-        ];
-        if (transportError) wakes.push(transportError.promise);
-        if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
-        if ((await Promise.race(wakes)) === "settled") {
-          this.pumpSubscriptions();
-          return;
+    type SettlementOutcome = { ok: true } | { ok: false; error: unknown };
+    const state: {
+      active: boolean;
+      outcome: SettlementOutcome | null;
+      wake: ((outcome: SettlementOutcome) => void) | null;
+    } = { active: true, outcome: null, wake: null };
+    // Observe both outcomes once, before readiness, without retaining a new
+    // settlement reaction on every transport wake.
+    void settlement.then(
+      () => {
+        if (!state.active) return;
+        state.outcome = { ok: true };
+        state.wake?.(state.outcome);
+      },
+      (error: unknown) => {
+        if (!state.active) return;
+        state.outcome = { ok: false, error };
+        state.wake?.(state.outcome);
+      },
+    );
+    try {
+      if (options.ready) await options.ready;
+      for (;;) {
+        this.throwServerTransportErrorForTier(tier);
+        const observedServerWorkEpoch = this.serverTransportWorkEpoch;
+        type Wake = SettlementOutcome | "work";
+        let wake!: (reason: Wake) => void;
+        const nextWake = new Promise<Wake>((resolve) => {
+          wake = resolve;
+        });
+        state.wake = wake;
+        // Arm before pumping: a synchronous transport event must not fall
+        // between observing the epoch and registering the current waiters.
+        const transportError = this.waitForServerTransportError(tier);
+        const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+        void transportError?.promise.catch((error: unknown) => wake({ ok: false, error }));
+        void transportWork?.promise.then(() => wake("work"));
+        try {
+          void this.pumpServerTransport();
+          this.throwServerTransportErrorForTier(tier);
+          if (state.outcome) wake(state.outcome);
+          try {
+            const reason = await nextWake;
+            if (reason === "work") continue;
+            if (!reason.ok) throw reason.error;
+            this.pumpSubscriptions();
+            return;
+          } catch (error) {
+            throw rejectedWaitError(txId, error) ?? error;
+          }
+        } finally {
+          state.wake = null;
+          transportError?.cancel();
+          transportWork?.cancel();
         }
-      } catch (error) {
-        const rejected = rejectedWaitError(txId, error);
-        if (rejected) {
-          throw rejected;
-        }
-        throw error;
-      } finally {
-        transportError?.cancel();
-        transportWork?.cancel();
       }
+    } finally {
+      // Promise observers cannot detach. Leave only an inactive tiny record
+      // when readiness, transport failure, or shutdown ends this wait first.
+      state.active = false;
+      state.outcome = null;
+      state.wake = null;
     }
   }
 
@@ -2484,6 +2515,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
     this.serverTransportError = null;
     this.clearServerTransportErrorWaiters();
+    this.notifyServerTransportWork();
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -3882,10 +3914,7 @@ export class NativeRuntimeAdapter implements Runtime {
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
     if (tier !== "edge" && tier !== "global") return null;
-    if (
-      this.serverTransportWorkEpoch !== observedEpoch ||
-      this.pendingInboundServerFrames.length > 0
-    ) {
+    if (this.serverTransportWorkEpoch !== observedEpoch) {
       return { promise: Promise.resolve(), cancel: () => {} };
     }
     const waiter: ServerTransportWorkWaiter = {
