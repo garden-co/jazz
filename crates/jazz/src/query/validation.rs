@@ -217,7 +217,46 @@ fn validate_query_with_schema_version(
     schema: &RuntimeSchema,
     schema_version: SchemaVersionId,
 ) -> Result<ValidatedQuery, QueryError> {
-    let (normalized, params, canonical) = validate_query_canonical_parts(query, schema)?;
+    validate_query_with_schema_version_as(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::Result,
+    )
+}
+
+/// Validate one arm of a retained relation UNION. An arm always keeps its
+/// explicit projection: the UNION terminal selects each member's arm-local
+/// projection, so an identity arm must not fall back to the ordinary shape.
+pub(crate) fn validate_union_arm_with_schema_version(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_schema_version_as(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::UnionArm,
+    )
+}
+
+/// Where a single relation's output projection is being validated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationProjectionRole {
+    /// The query's own result shape.
+    Result,
+    /// An arm of a retained relation UNION.
+    UnionArm,
+}
+
+fn validate_query_with_schema_version_as(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQuery, QueryError> {
+    let (normalized, params, canonical) = validate_query_canonical_parts_as(query, schema, role)?;
     let mut shape_identity = canonical.clone();
     shape_identity.extend_from_slice(schema_version.as_bytes());
     let shape_id = ShapeId(uuid::Uuid::new_v5(&QUERY_NAMESPACE, &shape_identity));
@@ -236,11 +275,18 @@ fn validate_query_canonical_parts(
     query: &Query,
     schema: &RuntimeSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_query_canonical_parts_as(query, schema, RelationProjectionRole::Result)
+}
+
+fn validate_query_canonical_parts_as(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
     if let Some(relation) = &query.relation {
-        validate_retained_relation_outer_query(query)?;
         if relation_union_parts(&relation.rel).is_none() {
             let mut resolved = relation_query_to_query(relation)?;
             if resolved.table != query.table {
@@ -248,10 +294,51 @@ fn validate_query_canonical_parts(
                     "relation query output table does not match its Query envelope".to_owned(),
                 ));
             }
+            // A relation facade sent over the public wire carries no ordinary
+            // clauses; an internal caller may already have materialized the
+            // exact clauses generated from the relation. Reject only ordinary
+            // clauses that are neither absent nor canonical.
+            let matches_generated = query.filters == resolved.filters
+                && query.joins == resolved.joins
+                && query.flat_join == resolved.flat_join
+                && query.policy_branches == resolved.policy_branches
+                && query.reachable == resolved.reachable
+                && query.inherits == resolved.inherits
+                && query.includes == resolved.includes
+                && query.order_by == resolved.order_by
+                && query.aggregate == resolved.aggregate
+                && query.limit == resolved.limit
+                && query.offset == resolved.offset;
+            let has_ordinary_clauses = !query.filters.is_empty()
+                || !query.joins.is_empty()
+                || query.flat_join.is_some()
+                || !query.policy_branches.is_empty()
+                || !query.reachable.is_empty()
+                || !query.inherits.is_empty()
+                || !query.includes.is_empty()
+                || !query.order_by.is_empty()
+                || query.aggregate.is_some()
+                || query.limit.is_some()
+                || query.offset != 0;
+            if has_ordinary_clauses && !matches_generated {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "relation query cannot be combined with ordinary query clauses".to_owned(),
+                ));
+            }
             resolved.array_subqueries = query.array_subqueries.clone();
+            resolved.relation = None;
             resolved.select = query.select.clone();
-            return validate_query_canonical_parts(&resolved, schema);
+            let retain_relation =
+                retain_relation_output_projection(query, relation, &root, role)?;
+            let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
+            if retain_relation {
+                normalized.relation = Some(relation.clone());
+            }
+            let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
+            return Ok((normalized, params, canonical));
         }
+        validate_retained_relation_outer_query(query)?;
+        reject_presentation_over_relation_projection(query)?;
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
         validate_array_subqueries(
             schema,
@@ -356,6 +443,82 @@ fn validate_query_canonical_parts(
     Ok((normalized, params, canonical))
 }
 
+/// Whether a single (non-UNION) relation keeps its explicit output
+/// projection as the result shape. UNION arms always keep theirs.
+///
+/// A full identity projection (every output-table column exactly once under
+/// its own name, optionally `id`) is the ordinary row shape. It is not
+/// retained, so it keeps the ordinary query preimage and shape id; the
+/// TypeScript adapter emits exactly this for hop and payload-`match` queries,
+/// and peers recompute shape ids on registration. The ordinary path also
+/// serves envelope presentation (`include` array subqueries and `select`).
+///
+/// Any renaming or narrowing projection is retained and publishes exactly its
+/// aliases, so it cannot also honour envelope presentation; that combination
+/// is rejected rather than silently discarding the presentation.
+fn retain_relation_output_projection(
+    query: &Query,
+    relation: &RelationQuery,
+    output_table: &TableSchema,
+    role: RelationProjectionRole,
+) -> Result<bool, QueryError> {
+    if crate::query::relation_output_projection_if_present(relation)?.is_none() {
+        return Ok(false);
+    }
+    let (output_scope, columns) = relation_output_projection(relation)?;
+    if role == RelationProjectionRole::Result
+        && is_full_identity_projection(output_table, &output_scope, &columns)
+    {
+        return Ok(false);
+    }
+    reject_presentation_over_relation_projection(query)?;
+    crate::query::reject_reserved_relation_aliases(&columns)?;
+    Ok(true)
+}
+
+fn is_full_identity_projection(
+    table: &TableSchema,
+    output_scope: &str,
+    columns: &[RelationProjectColumn],
+) -> bool {
+    let mut projected = BTreeSet::new();
+    for column in columns {
+        let identity = match &column.expr {
+            RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
+            RelationProjectExpr::Column(reference) => {
+                reference.scope.as_deref() == Some(output_scope)
+                    && reference.column == column.alias
+            }
+            RelationProjectExpr::RowId(_) => false,
+        };
+        if !identity {
+            return false;
+        }
+        if column.alias != "id" {
+            projected.insert(column.alias.as_str());
+        }
+    }
+    projected.len() == table.columns.len()
+        && table
+            .columns
+            .iter()
+            .all(|column| projected.contains(column.name.as_str()))
+}
+
+fn reject_presentation_over_relation_projection(query: &Query) -> Result<(), QueryError> {
+    if !query.array_subqueries.is_empty() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "include(...) is not supported on a relation query whose projection renames or narrows its output columns".to_owned(),
+        ));
+    }
+    if query.select.is_some() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "select(...) is not supported on a relation query whose projection renames or narrows its output columns".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Relation syntax owns row membership and its terminal ordering/window. The
 /// outer Query envelope may still describe the returned row shape through
 /// select projections and array subqueries; reject other clauses because they
@@ -401,6 +564,11 @@ fn validate_retained_relation_union(
             "union requires at least one input".to_owned(),
         ));
     }
+    let output_table_schema = schema_table(schema, output_table)?;
+    // Global UNION ordering runs over the union output rows, which are always
+    // rows of `output_table`. Arm-local scopes do not exist above the union,
+    // so a term naming another scope has no meaning and must not silently
+    // fall back to the output table's same-named column.
     if let Some(terms) = parts.order_by {
         for term in terms {
             if term
@@ -413,15 +581,15 @@ fn validate_retained_relation_union(
                     "union order_by must be scoped to the union output table".to_owned(),
                 ));
             }
-            let table = schema_table(schema, output_table)?;
-            planner_column_type(&table, &term.column.column)?;
             reject_author_ordering(&[OrderBy {
-                column: term.column.column,
+                column: term.column.column.clone(),
                 direction: term.direction,
             }])?;
+            planner_column_type(&output_table_schema, &term.column.column)?;
         }
     }
     let mut labels = BTreeSet::new();
+    let mut output_projection = None::<Vec<(String, ColumnType)>>;
     for arm in inputs {
         if arm.label.is_empty()
             || arm.label.len() > 4096
@@ -432,15 +600,30 @@ fn validate_retained_relation_union(
                 "union arm labels must be 1..=4096 bytes, NUL-free, and unique".to_owned(),
             ));
         }
-        let arm_query = relation_query_to_query(&RelationQuery {
+        let arm_relation = RelationQuery {
             rel: arm.input.clone(),
-        })?;
+        };
+        let (_, arm_columns) = relation_output_projection(&arm_relation)?;
+        let arm_contract = relation_projection_contract(&output_table_schema, &arm_columns)?;
+        if let Some(expected) = &output_projection {
+            if expected != &arm_contract {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "union arms must use the same output projection".to_owned(),
+                ));
+            }
+        } else {
+            output_projection = Some(arm_contract);
+        }
+        let arm_query = relation_query_to_query(&arm_relation)?;
         if arm_query.table != output_table {
             return Err(QueryError::UnsupportedRelationQuery(
                 "union inputs must output the same table".to_owned(),
             ));
         }
-        let (_, arm_params, _) = validate_query_canonical_parts(&arm_query, schema)?;
+        let mut arm_query = arm_query;
+        arm_query.relation = Some(arm_relation);
+        let (_, arm_params, _) =
+            validate_query_canonical_parts_as(&arm_query, schema, RelationProjectionRole::UnionArm)?;
         for (name, ty) in arm_params {
             match params.entry(name) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -457,6 +640,30 @@ fn validate_retained_relation_union(
     }
     Ok(())
 }
+
+fn relation_projection_contract(
+    table: &TableSchema,
+    columns: &[RelationProjectColumn],
+) -> Result<Vec<(String, ColumnType)>, QueryError> {
+    columns
+        .iter()
+        .map(|column| {
+            let ty = match &column.expr {
+                RelationProjectExpr::Column(reference) => {
+                    planner_column_type(table, &reference.column)?.clone()
+                }
+                RelationProjectExpr::RowId(RelationRowIdRef::Current) => ColumnType::Uuid,
+                RelationProjectExpr::RowId(_) => {
+                    return Err(QueryError::UnsupportedRelationQuery(
+                        "outer/frontier row-id relation projections are not unified yet".to_owned(),
+                    ));
+                }
+            };
+            Ok((column.alias.clone(), ty))
+        })
+        .collect()
+}
+
 
 fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {
     if let Some(order) = order_by

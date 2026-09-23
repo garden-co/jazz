@@ -25,7 +25,7 @@ use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
-use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
+use groove::records::{self, BorrowedRecord, OwnedRecord, Value, ValueType};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
@@ -2034,7 +2034,27 @@ impl CurrentRow {
     /// Cell value by application column name using the table schema to resolve position.
     pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
         let idx = self.application_column_index(table, column)?;
-        match self.record.borrowed().get_idx(idx).ok()? {
+        let value = self.record.borrowed().get_idx(idx).ok()?;
+        // Relation terminals may emit a selected nullable column directly in
+        // its logical schema, without CurrentRow's additional presence cell.
+        // Preserve that value instead of unwrapping the column's own nullable
+        // representation. Physical current rows and maintained projections
+        // declare one extra nullable carrier and still take the path below.
+        let declared = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        if matches!(declared.column_type, ValueType::Nullable(_))
+            && self
+                .record
+                .descriptor()
+                .fields()
+                .get(idx)
+                .is_some_and(|field| field.value_type == declared.column_type)
+        {
+            return Some(value);
+        }
+        match value {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => Some(*value),
             value => Some(value),
@@ -2304,6 +2324,84 @@ impl CurrentRow {
             }
         }
         Ok(projected)
+    }
+    /// Project a source row into an explicit relation output, preserving the
+    /// aliases chosen by the relation facade.
+    ///
+    /// Each alias carries the declared type of its source column exactly, so
+    /// nullability comes from the source schema. This is the same logical
+    /// descriptor the one-shot relation terminal emits; maintained and
+    /// one-shot reads of one relation must never disagree on result types.
+    pub(crate) fn project_relation(
+        &self,
+        table: &TableSchema,
+        columns: &[crate::query::RelationProjectColumn],
+    ) -> Result<Self, Error> {
+        let mut descriptor_fields = vec![records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        )];
+        let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
+            name: "row_uuid".to_owned(),
+            visibility: CurrentRowResultVisibility::HiddenMetadata,
+        }];
+        for projection in columns {
+            let (value, field_type) = match &projection.expr {
+                crate::query::RelationProjectExpr::RowId(
+                    crate::query::RelationRowIdRef::Current,
+                ) => (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid),
+                crate::query::RelationProjectExpr::Column(reference)
+                    if reference.column == "id" =>
+                {
+                    (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid)
+                }
+                crate::query::RelationProjectExpr::Column(reference) => {
+                    let column_position = table
+                        .columns
+                        .iter()
+                        .position(|column| column.name == reference.column)
+                        .ok_or(Error::InvalidStoredValue(
+                            "relation output column is absent from the read schema",
+                        ))?;
+                    let column_type = table.columns[column_position].column_type.clone();
+                    // `cell_at` strips the physical presence carrier, leaving
+                    // the column's own logical value (itself `Nullable` for a
+                    // nullable column).
+                    let value = match (self.cell_at(column_position), &column_type) {
+                        (Some(value), _) => value,
+                        (None, records::ValueType::Nullable(_)) => Value::Nullable(None),
+                        (None, _) => {
+                            return Err(Error::InvalidStoredValue(
+                                "relation output of a non-nullable column has no value",
+                            ));
+                        }
+                    };
+                    (value, column_type)
+                }
+                crate::query::RelationProjectExpr::RowId(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "relation output contains an unsupported expression",
+                    ));
+                }
+            };
+            values.push(value);
+            descriptor_fields.push(
+                records::DescriptorField::new(projection.alias.clone(), field_type)
+                    .with_identity(records::FieldIdentity::Name(projection.alias.clone())),
+            );
+            publication_fields.push(CurrentRowPublicationField::ResultField {
+                name: projection.alias.clone(),
+                visibility: CurrentRowResultVisibility::ApplicationCell,
+            });
+        }
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
+        let raw = descriptor.create(&values)?;
+        Ok(Self::new_with_publication_fields(
+            table.name.clone(),
+            OwnedRecord::new(raw, descriptor),
+            publication_fields,
+        ))
     }
 
     pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {

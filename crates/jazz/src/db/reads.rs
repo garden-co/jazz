@@ -940,10 +940,9 @@ where
         self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
-        // Output-changing relation queries currently normalize to a single
-        // root row set. They have no array payload edges, so request ordinary
-        // app rows instead of the relation-snapshot fact output (which is
-        // reserved for correlated array/path materialization).
+        // The relation terminal already emits the requested aliases and row
+        // identity. Re-projecting those rows against the physical source
+        // schema would reinterpret alias positions as source columns.
         let rows = self.all(&prepared, opts).await?;
         Ok(RelationSnapshot {
             root_count: rows.len(),
@@ -962,10 +961,9 @@ where
         self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
-        // Output-changing relation queries currently normalize to a single
-        // root row set.  They have no array payload edges, so request ordinary
-        // app rows instead of the relation-snapshot fact output (which is
-        // reserved for correlated array/path materialization).
+        // The relation terminal already emits the requested aliases and row
+        // identity. Re-projecting those rows against the physical source
+        // schema would reinterpret alias positions as source columns.
         let rows = self.all_for_identity(&prepared, opts, author).await?;
         Ok(RelationSnapshot {
             root_count: rows.len(),

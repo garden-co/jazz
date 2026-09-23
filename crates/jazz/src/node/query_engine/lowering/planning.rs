@@ -1401,12 +1401,16 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
     let mut seen_aggregate = false;
     for step in steps {
         match step {
-            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_)
+            LinearStep::Filter(_) | LinearStep::Join { .. }
                 if seen_order || seen_slice || seen_aggregate =>
             {
                 gaps.push(UnsupportedReason::Operator(
-                    "filters/joins/projects after order/slice/aggregate are not lowered yet"
-                        .to_owned(),
+                    "filters/joins after order/slice/aggregate are not lowered yet".to_owned(),
+                ));
+            }
+            LinearStep::Project(_) if seen_aggregate => {
+                gaps.push(UnsupportedReason::Operator(
+                    "projects after aggregate are not lowered yet".to_owned(),
                 ));
             }
             LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}

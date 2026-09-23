@@ -607,7 +607,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -643,7 +643,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -694,7 +694,10 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                shape.query(),
+            )?,
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -762,7 +765,7 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, lowered_shape.query()),
+            output: current_query_output_request(output, lowered_shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -1047,7 +1050,7 @@ where
             )?,
             shape: input_shape,
         };
-        let mut output_request = current_query_output_request(output, shape.query());
+        let mut output_request = current_query_output_request(output, shape.query())?;
         if storage_backed_result_materialization {
             // A simple current root query carries the exact visible content
             // transaction in its result-member terminal.  Keeping every
@@ -1592,13 +1595,16 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        // Tree collectors own relation fields such as `posts` in their public
-        // app-row descriptor. Those fields are not columns of the root
-        // table, so normalizing a structured result against that table would
-        // silently discard the recursive payload before the client can read
-        // it. Flat rows still need this boundary to remove materializer-only
-        // physical fields.
-        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+        // Relation terminals and tree collectors own their public fields in
+        // the app-row descriptor. Those fields are not necessarily columns of
+        // the root table, so normalizing such output against that table would
+        // silently discard aliases or recursive payload before the client can
+        // read it. Flat rows still need this boundary to remove
+        // materializer-only physical fields.
+        if query.relation.is_none()
+            && query.flat_join.is_none()
+            && query.array_subqueries.is_empty()
+        {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
@@ -3368,6 +3374,20 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection_if_present)
+                .transpose()?
+                .flatten(),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
