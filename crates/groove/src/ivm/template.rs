@@ -7,7 +7,7 @@ use super::GraphBuilder;
 use crate::records::RecordDescriptor;
 use std::{collections::HashMap, sync::Arc};
 mod sources;
-pub use sources::split_template_sources;
+pub use sources::{match_template_sources, split_template_sources};
 pub(crate) mod arguments;
 pub use arguments::{TemplateScalarArgument, bind_template_arguments};
 

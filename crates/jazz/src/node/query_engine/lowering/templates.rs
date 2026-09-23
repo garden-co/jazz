@@ -108,43 +108,60 @@ impl QueryProgramTemplateCache {
             .collect::<Vec<_>>();
         template_request.input.binding.values.clear();
         template_request.input.binding.id = BindingId(uuid::Uuid::nil());
-        let mut template_sources = sources.clone();
-        let mut source_graphs = Vec::new();
-        for source in sources.values() {
-            source_graphs.push(&source.graph);
-            source_graphs.extend(source.content_version.iter().map(|s| &s.graph));
-            source_graphs.extend(source.deletion_register.iter().map(|s| &s.graph));
-            source_graphs.extend(source.authorized_deletion_preimage.iter().map(|s| &s.graph));
+        let source_graphs = source_graph_list(&sources);
+        // A family hit matches the fresh sources against the stored
+        // blueprints in place: equal request and literal types, equal source
+        // metadata, and structurally equal graphs whose instance leaves pair
+        // one-to-one with blueprint slots. Only the fresh typed inputs are
+        // built; the blueprints themselves are not rebuilt or cloned.
+        let mut found = None;
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.request.input.shape.identity.shape_id
+                != template_request.input.shape.identity.shape_id
+                || entry.literal_types != literal_types
+                || !source_metadata_equal(&entry.sources, &sources)
+                || entry.request != template_request
+            {
+                continue;
+            }
+            match groove::ivm::match_template_sources(
+                &source_graphs,
+                &source_graph_list(&entry.sources),
+                &describe,
+            ) {
+                Ok(Some(inputs)) => {
+                    found = Some((index, inputs));
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    trace_template("descriptor_fallback");
+                    return lower_resolved_query_program(compilation, sources, explain);
+                }
+            }
         }
-        let Ok((blueprints, inputs)) =
-            groove::ivm::split_template_sources(&source_graphs, describe)
-        else {
-            trace_template("descriptor_fallback");
-            return lower_resolved_query_program(compilation, sources, explain);
-        };
-        let mut blueprints = blueprints.into_iter();
-        for source in template_sources.values_mut() {
-            source.graph = blueprints.next().expect("source blueprint");
-            if let Some(content) = &mut source.content_version {
-                content.graph = blueprints.next().expect("content blueprint");
+        let Some((index, inputs)) = found else {
+            // First sighting: record the family's blueprint and take the
+            // ordinary concrete path.
+            let Ok((blueprints, _)) = groove::ivm::split_template_sources(&source_graphs, describe)
+            else {
+                trace_template("descriptor_fallback");
+                return lower_resolved_query_program(compilation, sources, explain);
+            };
+            let mut template_sources = sources.clone();
+            let mut blueprints = blueprints.into_iter();
+            for source in template_sources.values_mut() {
+                source.graph = blueprints.next().expect("source blueprint");
+                if let Some(content) = &mut source.content_version {
+                    content.graph = blueprints.next().expect("content blueprint");
+                }
+                if let Some(deletion) = &mut source.deletion_register {
+                    deletion.graph = blueprints.next().expect("deletion blueprint");
+                }
+                if let Some(preimage) = &mut source.authorized_deletion_preimage {
+                    preimage.graph = blueprints.next().expect("preimage blueprint");
+                }
             }
-            if let Some(deletion) = &mut source.deletion_register {
-                deletion.graph = blueprints.next().expect("deletion blueprint");
-            }
-            if let Some(preimage) = &mut source.authorized_deletion_preimage {
-                preimage.graph = blueprints.next().expect("preimage blueprint");
-            }
-        }
-        // Compare typed contracts, not recursively formatted descriptors or
-        // per-operator structural hashes. The cheap normalized shape id rejects
-        // unrelated entries before exact request and source-contract equality.
-        let Some(index) = self.entries.iter().position(|entry| {
-            entry.request.input.shape.identity.shape_id
-                == template_request.input.shape.identity.shape_id
-                && entry.request == template_request
-                && entry.literal_types == literal_types
-                && entry.sources == template_sources
-        }) else {
             if self.entries.len() == 256 {
                 self.entries.pop_front();
             }
@@ -171,7 +188,7 @@ impl QueryProgramTemplateCache {
                     .and_then(|template_compilation| {
                         lower_resolved_query_program_with_source_parameters(
                             template_compilation,
-                            template_sources,
+                            self.entries[index].sources.clone(),
                             ExplainPlan::default(),
                             &BTreeMap::new(),
                             Some(&arguments),
@@ -236,4 +253,56 @@ impl QueryProgramTemplateCache {
         program.explain.capabilities.extend(capabilities);
         Ok(program)
     }
+}
+
+/// Source graphs in the fixed order used for blueprint slot numbering.
+fn source_graph_list(sources: &ResolvedQuerySources) -> Vec<&GraphBuilder> {
+    let mut graphs = Vec::new();
+    for source in sources.values() {
+        graphs.push(&source.graph);
+        graphs.extend(source.content_version.iter().map(|s| &s.graph));
+        graphs.extend(source.deletion_register.iter().map(|s| &s.graph));
+        graphs.extend(source.authorized_deletion_preimage.iter().map(|s| &s.graph));
+    }
+    graphs
+}
+
+/// Everything a resolved source contributes to a family key except its
+/// graphs, which are compared structurally against blueprints. Exhaustive
+/// destructuring: a new source field must be classified here explicitly.
+fn source_metadata_equal(left: &ResolvedQuerySources, right: &ResolvedQuerySources) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_id, left), (right_id, right))| {
+                let ResolvedSource {
+                    stored_column_ids,
+                    table_schema,
+                    graph: _,
+                    row_shape,
+                    routing_fields,
+                    requires_result_payload,
+                    content_version,
+                    deletion_register,
+                    authorized_deletion_preimage,
+                } = left;
+                left_id == right_id
+                    && *stored_column_ids == right.stored_column_ids
+                    && *table_schema == right.table_schema
+                    && *row_shape == right.row_shape
+                    && *routing_fields == right.routing_fields
+                    && *requires_result_payload == right.requires_result_payload
+                    && content_version.as_ref().map(|s| &s.row_uuid_field)
+                        == right.content_version.as_ref().map(|s| &s.row_uuid_field)
+                    && deletion_register.as_ref().map(|s| &s.row_uuid_field)
+                        == right.deletion_register.as_ref().map(|s| &s.row_uuid_field)
+                    && authorized_deletion_preimage
+                        .as_ref()
+                        .map(|s| &s.routing_fields)
+                        == right
+                            .authorized_deletion_preimage
+                            .as_ref()
+                            .map(|s| &s.routing_fields)
+            })
 }

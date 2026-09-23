@@ -610,3 +610,70 @@ async fn source_blueprints_bind_fresh_rows_and_preserve_private_nested_inputs() 
         vec![(vec![Value::U64(55)], 1)]
     );
 }
+
+// Matching a cached blueprint in place must accept exactly the fresh sources
+// that splitting would turn into an equal blueprint, and bind the same rows.
+#[futures_test::test]
+async fn source_blueprint_matching_agrees_with_splitting_and_rejects_other_families() {
+    use groove::ivm::{ProjectField, match_template_sources, split_template_sources};
+    use std::sync::Arc;
+    let mut db = database().await;
+    let raw = RecordDescriptor::new([("left", ColumnType::U64), ("right", ColumnType::U64)]);
+    let rows = |left, right| {
+        GraphBuilder::values(raw, [vec![Value::U64(left), Value::U64(right)]]).unwrap()
+    };
+    let union_of = |a: GraphBuilder, b: GraphBuilder, field: &str| {
+        let project = |g: GraphBuilder| g.project_fields([ProjectField::renamed(field, "id")]);
+        GraphBuilder::Union {
+            inputs: vec![Arc::new(project(a)), Arc::new(project(b))],
+        }
+    };
+    let (blueprints, _) =
+        split_template_sources(&[&union_of(rows(1, 2), rows(3, 4), "right")], |g| {
+            db.describe_template_input(g)
+        })
+        .unwrap();
+    let blueprint = [&blueprints[0]];
+
+    // Same family, fresh rows: the matched inputs bind exactly like a split.
+    let fresh = union_of(rows(5, 6), rows(7, 8), "right");
+    let matched = match_template_sources(&[&fresh], &blueprint, |g| db.describe_template_input(g))
+        .unwrap()
+        .expect("same family");
+    let (_, split) = split_template_sources(&[&fresh], |g| db.describe_template_input(g)).unwrap();
+    for inputs in [matched, split] {
+        let bound = bind_template_graphs(&blueprints, &inputs)
+            .unwrap()
+            .remove(0);
+        let mut values = db.query_graph(bound).await.unwrap().to_values().unwrap();
+        values.sort_by_key(|(row, _)| format!("{row:?}"));
+        assert_eq!(
+            values,
+            vec![(vec![Value::U64(6)], 1), (vec![Value::U64(8)], 1)]
+        );
+    }
+
+    // A different projection is a different family.
+    let other = union_of(rows(5, 6), rows(7, 8), "left");
+    assert!(
+        match_template_sources(&[&other], &blueprint, |g| db.describe_template_input(g))
+            .unwrap()
+            .is_none()
+    );
+    // One shared leaf cannot stand for two distinct blueprint slots.
+    let shared = Arc::new(rows(5, 6));
+    let project = |g: &Arc<GraphBuilder>| {
+        Arc::new(GraphBuilder::Project {
+            input: g.clone(),
+            fields: vec![ProjectField::renamed("right", "id")],
+        })
+    };
+    let aliased = GraphBuilder::Union {
+        inputs: vec![project(&shared), project(&shared)],
+    };
+    assert!(
+        match_template_sources(&[&aliased], &blueprint, |g| db.describe_template_input(g))
+            .unwrap()
+            .is_none()
+    );
+}

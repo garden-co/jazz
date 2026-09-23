@@ -13,7 +13,7 @@ mod template;
 pub use template::{
     TemplateBindingError, TemplateGraphInput, TemplateScalarArgument, TypedGraphTemplate,
     TypedGraphTemplateCache, bind_template_arguments, bind_template_graphs, bind_template_program,
-    compile_template_graphs, split_template_sources,
+    compile_template_graphs, match_template_sources, split_template_sources,
 };
 pub mod graph;
 pub mod op_types;

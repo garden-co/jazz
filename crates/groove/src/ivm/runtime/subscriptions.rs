@@ -990,8 +990,24 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
 
 /// Exact, nonrecursive equality check paired with the bounded family hash.
 pub(super) fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
+    graph_builders_equal_with(left, right, |_, _| None)
+}
+
+/// Structural equality with a caller hook consulted before each pair. A hook
+/// result of `Some` decides that pair without descending into its inputs.
+pub(crate) fn graph_builders_equal_with(
+    left: &GraphBuilder,
+    right: &GraphBuilder,
+    mut hook: impl FnMut(&GraphBuilder, &GraphBuilder) -> Option<bool>,
+) -> bool {
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
+        if let Some(equal) = hook(left, right) {
+            if !equal {
+                return false;
+            }
+            continue;
+        }
         match (left, right) {
             (
                 GraphBuilder::TypedTemplate {
