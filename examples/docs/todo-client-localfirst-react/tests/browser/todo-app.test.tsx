@@ -380,13 +380,13 @@ describe("React Todo App E2E", () => {
       () =>
         tierSelect.value === "remote-if-possible" &&
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Selected read tier: Remote if possible. Highest settlement this subscription has observed: Synced.",
+          "Selected read tier: Remote if possible. Highest settlement this subscription has observed: Server.",
       10000,
       "the selected query should advance to remote settlement",
     );
 
     expect(el.querySelector<HTMLElement>("[role='status']")?.textContent).toBe(
-      "Selected: Remote if possible · Highest observed: Synced",
+      "Selected: Remote if possible · Highest observed: Server",
     );
   });
 
@@ -413,7 +413,7 @@ describe("React Todo App E2E", () => {
       () =>
         tierSelect.value === "remote" &&
         el.querySelector<HTMLElement>("[role='status']")?.getAttribute("aria-label") ===
-          "Selected read tier: Remote only. Highest settlement this subscription has observed: Synced.",
+          "Selected read tier: Remote only. Highest settlement this subscription has observed: Server.",
       10000,
       "remote should wait for the server result",
     );
@@ -437,6 +437,16 @@ describe("React Todo App E2E", () => {
     expect(copy).toContain("Remote only");
     expect(copy).toContain("Show previews");
     expect(copy).toContain("Wait for the selected tier");
+    expect(copy).toContain("Show any data already available while the query is loading.");
+    expect(copy).toContain(
+      "Hide available data until the selected tier has returned its first result.",
+    );
+    expect(copy).toContain("pending local writes immediately");
+    expect(copy).toContain("may include eligible pending local changes");
+    expect(copy).toContain("excludes pending local writes");
+    expect(copy).toContain(
+      "The badge shows the read tier you selected and the highest settlement this subscription has observed. It does not guarantee that every displayed row has reached that level.",
+    );
     expect(copy).toContain("highest settlement this subscription has observed");
 
     const close = dialog?.querySelector<HTMLButtonElement>("#tier-help-close");
