@@ -3876,7 +3876,9 @@ export class Db {
     const encryptedEquality =
       encryptedPredicates.length > 0 &&
       encryptedPredicates.every(
-        (condition) => encryptedDeclaration?.indexes?.[condition.column] && condition.op === "eq",
+        (condition) =>
+          encryptedDeclaration?.indexes?.[condition.column] &&
+          (condition.op === "eq" || condition.op === "match"),
       );
     const wasmQuery = encryptedEquality ? builderJson : translateQuery(builderJson, planningSchema);
 
