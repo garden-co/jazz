@@ -24,12 +24,12 @@ Invariant digest:
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
-- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
+- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: Every omitted operation is denied at the serving authority, including when the table has no policy clauses; anonymous permission subjects remain structurally read-only.
-- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
+- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a Core Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
   reader only when its target row exists as a current row AND satisfies the target
@@ -315,9 +315,9 @@ result-row add/remove, version bundle, rehydrate output, or query update
 not a user query that can be policy-composed. A scope-isolated client relay
 instead forwards an upstream
 request with a topology-assigned immutable delegated foreground-session binding;
-the edge/core authority narrows under that admitted binding, not under SYSTEM
-and not under claims supplied by the relay. An edge-client link similarly
-narrows under its terminated `AuthorSubject` (`INV-RLS-11`, ch. 9).
+Core narrows under that admitted binding, not under SYSTEM
+and not under claims supplied by the relay. A direct client connection
+is narrowed under its admitted `AuthorSubject` (`INV-RLS-11`, ch. 9).
 
 Include modes participate in this narrowing rather than sitting outside it. A
 required include — an `Include` with `JoinMode::Inner` or `require: true` — counts
@@ -338,21 +338,13 @@ already received data: revocation is forward-looking sync narrowing.
 
 A client relay does not become an authority by retaining an authority-selected
 result. A scope-isolated relay may publish retained rows and repair payloads to
-an exactly same-scope foreground without re-running policy. For Edge/Global
+an exactly same-scope foreground without re-running policy. For Global
 results it must use the exact policy-scoped membership emitted by the authority;
 for Local results it uses retained knowledge, including previously delivered
 rows that a later authority result removes. A multiplexed relay must keep each
 policy binding's authoritative membership separate and may not treat possession
 of a cached row as permission to reveal it to another scope (ch. 9,
 `INV-EDGE-21..24`).
-
-A server Edge remains a serving authority: its ordinary query graph composes
-read policies locally. Verified upstream current-unavailable decisions add an
-exclusion for the exact admitted reader and claims. This excludes app/serving
-inputs only; raw policy-proof subplans and fresh permission probes must not
-consume it, or an old denial could prevent its own later readmission. SYSTEM
-and another reader's scope do not inherit the exclusion. Explicit extra-row and
-missing-body repair continue to obtain current Core authorization.
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
@@ -510,9 +502,10 @@ ordinary optimistic pending versions. A draft created before or after the
 receipt remains visible through that same pending source; applying denial does
 not wait for the draft or start edit-specific retries. The durable denial stays
 in place, so rejecting or removing the draft cannot resurrect the settled row.
-Settled-only reads still exclude the row. Ahead storage can also contain
-Edge-accepted versions; those settled versions are excluded by exact version
-identity while distinct pending versions continue to participate.
+Settled-only reads still exclude the row. Ahead storage can also contain confirmed versions awaiting cleanup; those
+settled versions are excluded by exact version identity while distinct pending
+versions continue to participate. Legacy edge receipts without Core acceptance
+are reopened as pending local writes, not as confirmed versions.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
 snapshots, and non-default branch views do not consume the marker. Stored row
 content remains intact. A fresh verified `Readable` evaluation readmits the row;
@@ -566,7 +559,7 @@ verified route/request correlation precede this internal receipt application.
   explicit account/user/session/default identity terminology. Define how
   anonymous/local sessions, authenticated users, trusted backends, system links,
   and attribution-only writes map to `AuthorSubject`, claims, and link roles.
-- **Admission API.** Server and edge shells need an admission hook that turns
+- **Admission API.** Server shells need an admission hook that turns
   connection credentials into a link identity, claims, role, expiry, and optional
   backend trust. This hook must be the only source for policy claim bindings;
   client-supplied query bindings must never widen claims (ch. 8, ch. 13).
@@ -597,12 +590,8 @@ verified route/request correlation precede this internal receipt application.
 - **History visibility rule.** Decide whether current-row readability should
   imply visibility for all historical versions of that row, or whether history
   sync/read must evaluate read policy per historical cut.
-- **Permission subscriptions and TTL.** Edge mergeable authorization uses
-  upstream permission-scope subscriptions (ch. 9). The current contract is
-  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
-  future policy for cache lifetime, not a source of permission truth here.
 - **Write-denial surfacing to clients.** A permission-denied write currently
-  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
+  never reaches global durability and `AsyncWriteHandle.wait({ tier })` hangs
   instead of rejecting. Clients need a deterministic rejection signal (analogous
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
@@ -679,15 +668,15 @@ coordinate requires a content-layer witness; deletion-only carriers cannot clear
 an unavailable marker. Receivers expose typed
 outcomes only after that ingestion succeeds.
 
-An Edge trusted by its client may proxy the exchange. It retains a bounded
-mapping from downstream nonce/connection to fresh upstream nonce, selected
-admitted upstream link and immutable client policy binding. A delegated client
-binding remains client-scoped over a trusted backend link; SYSTEM is not a
-fallback. Receipts are admitted only against the still-selected live upstream
-mapping. Disconnect, cancellation and authority handoff invalidate requests;
-backpressure preserves unsent ownership. This is a trusted Edge forwarding
-contract, not an end-to-end signature protocol. An Edge's cached policy query
-never mints a definitive outcome.
+A local persistence relay may forward the exchange for its foreground. It
+retains a bounded mapping from downstream nonce/connection to fresh upstream
+nonce, selected admitted Core link and immutable client policy binding. A
+delegated client binding remains client-scoped; SYSTEM is not a fallback.
+Receipts are admitted only against the still-selected live upstream mapping.
+Disconnect, cancellation and authority handoff invalidate requests;
+backpressure preserves unsent ownership. This is a local relay forwarding
+contract, not an end-to-end signature protocol. Cached data never authorizes a
+relay to mint a definitive outcome.
 
 Raw admitted claims are the wire correlation key. After validation, the owner
 installs that immutable claims snapshot and derives the effective local policy

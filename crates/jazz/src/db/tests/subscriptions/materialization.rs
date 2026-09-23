@@ -695,15 +695,15 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         node.apply_fate_update(
             published_tx,
             Fate::Accepted,
-            None,
-            Some(DurabilityTier::Edge),
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
         )
         .unwrap();
         node.apply_fate_update(
             overemitted_tx,
             Fate::Accepted,
-            None,
-            Some(DurabilityTier::Edge),
+            Some(GlobalTime(2)),
+            Some(DurabilityTier::Global),
         )
         .unwrap();
     }

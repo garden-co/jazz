@@ -271,7 +271,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
         .insert("todos", todo_values("remember this", false))
         .expect("create todo");
 
-    // Let the row settle at EdgeServer so we can verify the server recognized
+    // Let the row settle at GlobalServer so we can verify the server recognized
     // our principal on the first connect.
     wait_for_rows(
         &first,
@@ -301,7 +301,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
         "reconnected client should see its own persisted row locally"
     );
 
-    // Server still recognizes the same principal: an EdgeServer query
+    // Server still recognizes the same principal: an GlobalServer query
     // (which requires successful server auth) succeeds and returns the row.
     wait_for_rows(
         &reconnected,
@@ -579,7 +579,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     wait_for_rows(
         &client,
         jazz::query::Query::from("todos"),
-        "pre-expiry todo settles at edge server",
+        "pre-expiry todo settles at Core",
         |rows| has_row(&rows, pre_id, &pre_values).then_some(()),
     )
     .await;

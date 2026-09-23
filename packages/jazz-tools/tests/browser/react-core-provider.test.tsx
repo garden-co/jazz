@@ -354,14 +354,14 @@ describe("react-core provider/hooks browser coverage", () => {
       error: null,
     });
     manager.register(BASE_QUERY, entry, {
-      tier: "edge",
+      tier: "global",
       branch: "draft",
     });
     const client = makeClient({ manager });
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ tier: "edge", branch: "draft" }} />
+        <UseAllView query={BASE_QUERY} options={{ tier: "global", branch: "draft" }} />
       </JazzProvider>,
     );
 

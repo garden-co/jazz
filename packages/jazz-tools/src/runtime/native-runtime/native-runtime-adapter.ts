@@ -2797,7 +2797,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
-    if (tier !== "edge" && tier !== "global") return;
+    if (tier !== "global") return;
     const initialIntent = this.serverReplacementIntent;
     const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
     const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
@@ -2867,12 +2867,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed || this.ownerRuntime.closed) return;
-      const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      await this.waitForStrictRemoteQueryTransport("edge");
+      const remoteOptionsJson = JSON.stringify({ propagation: "full" });
+      await this.waitForStrictRemoteQueryTransport("global");
       if (this.closed || this.ownerRuntime.closed) return;
       await this.readRowsForContextAsync(
         query,
-        readOptions("edge", false, edgeOptionsJson),
+        readOptions("global", false, remoteOptionsJson),
         this.nativeReadContext(session),
       );
     };
@@ -3713,7 +3713,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      if (subscription.tier !== "edge" && subscription.tier !== "global") continue;
+      if (subscription.tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -3766,7 +3766,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
-    if ((tier === "edge" || tier === "global") && this.serverTransportError) {
+    if (tier === "global" && this.serverTransportError) {
       throw this.serverTransportError;
     }
   }
@@ -3774,7 +3774,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (this.serverTransportError) {
       return {
         promise: Promise.reject(this.serverTransportError),
@@ -3818,7 +3818,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (
       this.serverTransportWorkEpoch !== observedEpoch ||
       this.pendingInboundServerFrames.length > 0
@@ -4163,7 +4163,7 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "edge", "global"].includes(tier)) {
+  if (tier != null && !["local", "global"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);

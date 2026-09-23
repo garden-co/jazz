@@ -21,7 +21,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *
  * ```svelte
  * <script lang="ts">
- *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "edge" });
+ *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "global" });
  * </script>
  *
  * {#if todos.isLoading}

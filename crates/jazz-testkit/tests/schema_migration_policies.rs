@@ -454,7 +454,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
             let settled = mallory
                 .wait_for_transaction(
                     transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
+                    DurabilityTier::GlobalServer,
                 )
                 .await;
             assert!(

@@ -212,10 +212,10 @@ describe("solid/useAll", () => {
 
       expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
 
-      setOptions({ tier: "edge" });
+      setOptions({ tier: "global" });
       await flushMicrotasks();
 
-      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
       expect(unsubscribeA).toHaveBeenCalledTimes(1);
       dispose();
       expect(unsubscribeB).toHaveBeenCalledTimes(1);

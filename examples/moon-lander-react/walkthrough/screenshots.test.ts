@@ -31,7 +31,7 @@ test("capture walkthrough screenshots", async ({ page }) => {
   await page.waitForSelector('[data-testid="game-canvas"]', { timeout: 30_000 });
 
   // ── 2. Wait for Jazz edge subscription to settle ───────────────────────────
-  // data-sync-settled="true" is set by GameWithSync once useAll(…,"edge") has
+  // data-sync-settled="true" is set by GameWithSync once the remote subscription has
   // received its first response from the server.
   await page.waitForSelector('[data-sync-settled="true"]', { timeout: 30_000 });
 

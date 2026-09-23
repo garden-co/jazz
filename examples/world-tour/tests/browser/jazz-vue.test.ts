@@ -65,9 +65,9 @@ function scope(label: string): Scope {
  */
 async function inserted<T>(handle: {
   readonly value: T;
-  wait(options: { tier: "local" | "edge" | "global" }): Promise<unknown>;
+  wait(options: { tier: "local" | "global" }): Promise<unknown>;
 }): Promise<T> {
-  await handle.wait({ tier: "edge" });
+  await handle.wait({ tier: "global" });
   return handle.value;
 }
 

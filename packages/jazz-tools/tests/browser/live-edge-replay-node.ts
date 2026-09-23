@@ -15,7 +15,7 @@ export async function liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdg
     app,
     permissions: liveEdgePermissions,
     driver: { type: "memory" },
-    tier: "edge",
+    tier: "global",
     defaultDurabilityTier: "global",
   });
   sessions.set(info.appId, session);

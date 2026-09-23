@@ -450,7 +450,7 @@ export class NativeForegroundDb {
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string, observeOnly = false): Promise<void> {
-    if (!["local", "edge", "global"].includes(tier)) {
+    if (!["local", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
     let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });

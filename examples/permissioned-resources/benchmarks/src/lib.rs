@@ -966,7 +966,7 @@ impl SyncCapture {
                 view.supporting_rows.added_rows().len() + view.supporting_rows.removed_rows().len(),
             ),
             SyncMessage::CurrentRowsReceipt(receipt) => (&receipt.version_carriers, 0),
-            SyncMessage::CommitUnit { .. } | SyncMessage::AuthorityPublication(_) => panic!(
+            SyncMessage::CommitUnit { .. } => panic!(
                 "extend SQL capture for non-view version delivery before comparing this fixture"
             ),
             _ => return,

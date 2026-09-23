@@ -491,7 +491,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     let _subscription = block_on(foreground.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -984,7 +984,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let mut edge_subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -1301,7 +1301,7 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
         .attach_query_with_opts(
             &todos,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         )
@@ -2267,7 +2267,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
         .prepare_query(&Query::from("documents"))
         .expect("prepare documents");
     let opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..Default::default()
     }
     .branch_view(main.clone(), None);
@@ -2533,7 +2533,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
     }
 
     let opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..ReadOpts::default()
     };
     for (table, expected_row) in [("todos", todo), ("checks", check), ("notes", note)] {
@@ -2708,7 +2708,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -2805,7 +2805,7 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     let mut subscription = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -2919,7 +2919,7 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     let mut strict = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             // Public `remote` lowers to Deferred. Immediate deliberately
             // includes local pending writes (the remote-if-possible overlay).
             local_updates: jazz::db::LocalUpdates::Deferred,
@@ -3101,7 +3101,7 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     let mut owner_subscription = block_on(owner_foreground.subscribe(
         &messages,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3332,7 +3332,7 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
 #[test]
 fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
     assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
     );
 }
 
@@ -3395,7 +3395,7 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let mut first_subscription = block_on(first_tab.subscribe(
         &first_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3448,7 +3448,7 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let mut reopened_subscription = block_on(reopened_tab.subscribe(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3532,7 +3532,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         .attach_query_with_opts(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         )
@@ -3552,7 +3552,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         block_on(first_tab.all(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         ))
@@ -3625,7 +3625,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         .attach_query_with_opts(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         )
@@ -3664,7 +3664,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         block_on(reopened_tab.all(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         ))
@@ -3704,7 +3704,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let regranted_rows = block_on(reopened_tab.all(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3751,7 +3751,7 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3884,7 +3884,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3902,7 +3902,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let edge_rows = block_on(main_thread.all(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3956,7 +3956,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut narrower_subscription = block_on(main_thread.subscribe(
         &narrower,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3976,7 +3976,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             ))
@@ -4005,7 +4005,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             ))
@@ -4019,7 +4019,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             ))
@@ -4088,7 +4088,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         .attach_query_with_opts(
             &same_offset_one_shot,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         )
@@ -4120,7 +4120,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &same_offset_one_shot,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             ))
@@ -4198,7 +4198,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             )
@@ -4221,7 +4221,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: DurabilityTier::Global,
                     ..ReadOpts::default()
                 },
             ))
@@ -4286,7 +4286,7 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -4368,7 +4368,7 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
         .prepare_query(&bob_main.table("todos"))
         .expect("prepare Bob empty Edge query");
     let edge_opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..ReadOpts::default()
     };
     let mut alice_subscription = block_on(alice_main.subscribe(&alice_todos, edge_opts.clone()))
@@ -5028,7 +5028,7 @@ fn settled_subscription_does_not_reschedule_idle_authority_ticks() {
     let mut subscription = block_on(client.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))

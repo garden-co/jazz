@@ -2984,7 +2984,7 @@ export class Db {
         if (offline) {
           startNativeSubscription(replacement, replacementOptions);
         } else {
-          void this.ensureReady("edge", readyAbort.signal)
+          void this.ensureReady("global", readyAbort.signal)
             .then(() => startNativeSubscription(replacement, replacementOptions))
             .catch((error: unknown) => terminalizeSubscription(replacement, error));
         }

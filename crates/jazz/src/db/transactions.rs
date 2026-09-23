@@ -1219,7 +1219,7 @@ where
                 )
                 .await
                 .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => node
+            QueryAuthorizationMode::TrustedServing => node
                 .tx_relation_snapshot_for_identity_with_options(
                     tx_id,
                     &prepared.shape,
@@ -1255,7 +1255,7 @@ where
                 )
                 .await
                 .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => node
+            QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
                     tx_id,
                     &prepared.shape,

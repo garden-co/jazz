@@ -266,7 +266,7 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
                 table,
                 identity,
                 ParamBindingMode::RetainAllParams,
-                DurabilityTier::Edge,
+                DurabilityTier::Global,
                 Some(source_shape.clone()),
                 BTreeMap::new(),
                 outer_claims.clone(),

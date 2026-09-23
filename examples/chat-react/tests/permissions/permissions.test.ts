@@ -270,7 +270,7 @@ describe("chat permissions", () => {
         userId: bob,
         joinCode: "synthetic-secret-invite",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await expect(bobDb.all(app.chats.where({ id: chat.id }))).resolves.toEqual([
       expect.objectContaining({ id: chat.id }),
     ]);
@@ -280,7 +280,7 @@ describe("chat permissions", () => {
     const aliceDb = testApp.as(externalSession("alice"));
     const profile = await aliceDb
       .insert(app.profiles, { userId: alice, name: "Alice" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const linked = testApp.as({
       issuer: "https://linked.example",
       user_id: "different-subject",
@@ -288,7 +288,9 @@ describe("chat permissions", () => {
       claims: {},
       authMode: "external",
     });
-    await linked.update(app.profiles, profile.id, { name: "Linked Alice" }).wait({ tier: "edge" });
+    await linked
+      .update(app.profiles, profile.id, { name: "Linked Alice" })
+      .wait({ tier: "global" });
     await expect(linked.all(app.profiles.where({ id: profile.id }))).resolves.toEqual([
       expect.objectContaining({ name: "Linked Alice", userId: alice }),
     ]);

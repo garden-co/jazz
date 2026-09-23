@@ -98,8 +98,8 @@ export function useSync(playerId: string): SyncResult {
   }, [remotePlayers, localFuelType]);
 
   // Uncollected deposits — what the game renders on the surface.
-  // "edge" tier: loading until the edge subscription connects, which drives settled detection.
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
+  // Wait for a Core-confirmed snapshot before treating the initial load as settled.
+  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "global" });
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).

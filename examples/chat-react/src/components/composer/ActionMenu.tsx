@@ -22,7 +22,7 @@ export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
   const session = useSession();
   const userId = session?.user.account;
   const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
+    tier: db.getConfig().serverUrl ? "global" : "local",
   };
   const myProfile = useMyProfile();
 

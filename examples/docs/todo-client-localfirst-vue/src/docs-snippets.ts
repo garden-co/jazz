@@ -82,8 +82,8 @@ export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
 export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
   const { id } = await db
     .insert(app.todos, { title: todoTitle, done: false })
-    .wait({ tier: "edge" });
-  await db.update(app.todos, id, { done: true }).wait({ tier: "edge" });
+    .wait({ tier: "global" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
   await db.delete(app.todos, id).wait({ tier: "global" });
 }
 // #endregion writing-durability-vue

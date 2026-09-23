@@ -322,7 +322,7 @@ describe("$state callback patterns", () => {
 
 describe("initial value semantics", () => {
   it("with tier → undefined (awaiting settlement)", () => {
-    const options = { tier: "edge" as const };
+    const options = { tier: "global" as const };
     const initial = options?.tier ? undefined : [];
     expect(initial).toBeUndefined();
   });

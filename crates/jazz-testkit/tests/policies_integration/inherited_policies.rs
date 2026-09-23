@@ -2851,7 +2851,7 @@ async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner()
         .expect("submit update to Bob's readable child")
         .expect("ordinary update has a transaction");
     let update_err = bob
-        .wait_for_transaction(update_tx, DurabilityTier::EdgeServer)
+        .wait_for_transaction(update_tx, DurabilityTier::GlobalServer)
         .await
         .expect_err("authority should reject inherited WITH CHECK");
     assert!(

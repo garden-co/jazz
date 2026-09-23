@@ -231,15 +231,12 @@ fn indexed_read_policy_matches_local_scan_for_allowed_and_denied_identities() {
         query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, owner);
     let (local_allowed, local_allowed_metrics) =
         query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Local, owner);
-    let (edge_allowed, edge_allowed_metrics) =
-        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Edge, owner);
     let (global_denied, global_denied_metrics) =
         query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, denied);
     let (local_denied, _) =
         query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, denied);
 
     assert_eq!(global_allowed, local_allowed);
-    assert_eq!(global_allowed, edge_allowed);
     assert_eq!(global_allowed, vec![first]);
     assert_eq!(global_denied, local_denied);
     assert!(global_denied.is_empty());
@@ -249,8 +246,6 @@ fn indexed_read_policy_matches_local_scan_for_allowed_and_denied_identities() {
     assert_eq!(global_allowed_metrics.source_index_probes, 0);
     assert!(global_allowed_metrics.source_full_scans >= 1);
     assert!(local_allowed_metrics.source_full_scans >= 1);
-    assert_eq!(edge_allowed_metrics.source_index_probes, 0);
-    assert!(edge_allowed_metrics.source_full_scans >= 1);
     assert_eq!(global_denied_metrics.source_index_probes, 0);
 
     // Exercise the reverse cache population order too: a denied identity must
