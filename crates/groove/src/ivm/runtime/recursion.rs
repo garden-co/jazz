@@ -448,7 +448,8 @@ impl HydrationTraversal {
                         }
                     }
                     HydrationTraversalFrame::Evaluate(node) => {
-                        debug_assert!(self.visiting.remove(&node));
+                        let removed = self.visiting.remove(&node);
+                        debug_assert!(removed);
                         self.order.push(node);
                     }
                 }

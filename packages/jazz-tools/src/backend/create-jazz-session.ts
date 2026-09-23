@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { E2eeConfig } from "../e2ee/lifecycle.js";
+import { createNativeCrypto } from "../e2ee/native.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
@@ -54,6 +56,8 @@ export type JazzSessionConfig = Omit<
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
+  /** Account-device keys stay in this dedicated host store, outside the native runtime config. */
+  e2ee?: E2eeConfig;
 };
 
 export interface JazzClient extends SharedJazzClient {
@@ -206,6 +210,9 @@ export async function createJazzSession(
             env: config.env,
             driver: { type: config.driver.type },
             account,
+            e2ee: config.e2ee
+              ? { ...config.e2ee, crypto: await createNativeCrypto(config.e2ee.crypto) }
+              : undefined,
           },
           source,
         );

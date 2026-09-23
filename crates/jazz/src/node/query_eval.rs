@@ -50,7 +50,7 @@ use super::query_engine::{
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
     authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
     left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
-    route_param_field, user_column_field,
+    route_param_field, route_param_from_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -577,6 +577,37 @@ where
             .await
     }
 
+    // Prepared source names identify both the complete descriptor and the
+    // authenticated claim scope. Equal author identities can own independent
+    // sessions; retiring one must not replace another session's binding.
+    fn query_binding_source_shape_for_identity(
+        &self,
+        param_types: &BTreeMap<String, ColumnType>,
+        claim_params: &BTreeMap<String, ProgramClaimParam>,
+        identity: AuthorSubject,
+    ) -> Option<String> {
+        let source = query_binding_source_shape_for_parts_if_needed(param_types, claim_params)?;
+        if identity == AuthorSubject::SYSTEM {
+            return Some(source);
+        }
+        // Payload claims cannot distinguish rows through scalar route joins.
+        // Even without an active serving scope, their source must identify
+        // the admitted claim values; scalar-only domains can remain shared.
+        let scope = if claim_params
+            .values()
+            .any(|claim| !groove::records::collect_by_ordered_scalar(&claim.ty))
+        {
+            Some(self.effective_session_claim_scope_key(identity))
+        } else {
+            self.active_session_claim_scope_key(identity)
+        };
+        Some(
+            scope
+                .map(|scope| format!("{source}:session:{scope}"))
+                .unwrap_or(source),
+        )
+    }
+
     async fn compile_historical_query_program(
         &mut self,
         shape: &ValidatedQuery,
@@ -590,23 +621,27 @@ where
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let reads = historical_query_read_set(&input_shape, shape.schema_version(), position);
+        let policy = self.query_program_policy_context(identity);
+        let claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                query_binding_source_shape_for_parts_if_needed(
+                self.query_binding_source_shape_for_identity(
                     shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, shape.params()),
+                    &claim_params,
+                    identity,
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, shape.params()),
+                claim_params,
             ),
             shape: input_shape,
         };
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
-            policy: self.query_program_policy_context(identity),
+            reads,
+            policy,
             input,
             output: current_query_output_request(output, shape.query()),
         };
@@ -626,23 +661,27 @@ where
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let reads = snapshot_query_read_set(&input_shape, shape.schema_version(), snapshot.clone());
+        let policy = self.query_program_policy_context(identity);
+        let claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                query_binding_source_shape_for_parts_if_needed(
+                self.query_binding_source_shape_for_identity(
                     shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, shape.params()),
+                    &claim_params,
+                    identity,
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, shape.params()),
+                claim_params,
             ),
             shape: input_shape,
         };
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
-            reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
-            policy: self.query_program_policy_context(identity),
+            reads,
+            policy,
             input,
             output: current_query_output_request(output, shape.query()),
         };
@@ -694,42 +733,71 @@ where
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
         physical_row: Option<RowUuid>,
+        use_prepared_binding_source: bool,
     ) -> Result<QueryProgram, Error> {
         self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-        let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
+        let mut input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
+        let reads = query_read_set_for_read_view(
+            &input_shape,
+            shape.schema_version(),
+            self.read_policy_schema_for_table_name(
+                &shape.query().table,
+                shape.schema_version(),
+                &input_shape,
+            ),
+            tier,
+            read_view,
+            None,
+            None,
+            &self.catalogue.schema,
+        )?;
+        let policy = self.query_program_policy_context(identity);
+        let mut claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
+        if (use_prepared_binding_source
+            && authorization_mode != QueryAuthorizationMode::ClientLocal)
+            || matches!(policy, PolicyContext::System)
+        {
+            self.collect_policy_dependency_claim_params(
+                &reads.primary,
+                &policy,
+                &input_shape,
+                &mut claim_params,
+            )?;
+        }
+        let source_shape =
+            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
+        if let Some(source_shape) = &source_shape {
+            if use_prepared_binding_source
+                && !input_shape.reachable_contributions.is_empty()
+                && claim_params
+                    .iter()
+                    .any(|(name, claim)| shape.params().get(name) != Some(&claim.ty))
+            {
+                input_shape = self.normalized_include_deleted_row_set_shape_with_claim_params(
+                    shape,
+                    binding,
+                    &claim_params,
+                )?;
+            }
+            retarget_binding_value_sources(&mut input_shape, source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, shape.params()),
-                ),
+                source_shape,
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, shape.params()),
+                claim_params,
             ),
             shape: input_shape,
         };
         let request = QueryProgramRequest {
             authorization_mode,
-            reads: query_read_set_for_read_view(
-                &input.shape,
-                shape.schema_version(),
-                self.read_policy_schema_for_table_name(
-                    &shape.query().table,
-                    shape.schema_version(),
-                    &input.shape,
-                ),
-                tier,
-                read_view,
-                None,
-                None,
-                &self.catalogue.schema,
-            )?,
-            policy: self.query_program_policy_context(identity),
+            reads,
+            policy,
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
@@ -776,28 +844,32 @@ where
         } else {
             self.normalized_row_set_shape(&lowered_shape, &binding)?
         };
+        let reads = tx_query_read_set(
+            &input_shape,
+            lowered_shape.schema_version(),
+            tx_id,
+            snapshot,
+        );
+        let policy = self.query_program_policy_context(identity);
+        let claim_params = binding_claim_params_for_shape(&input_shape, lowered_shape.params());
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 &lowered_shape,
                 &binding,
-                query_binding_source_shape_for_parts_if_needed(
+                self.query_binding_source_shape_for_identity(
                     lowered_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
+                    &claim_params,
+                    identity,
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
+                claim_params,
             ),
             shape: input_shape,
         };
         let request = QueryProgramRequest {
             authorization_mode,
-            reads: tx_query_read_set(
-                &input.shape,
-                lowered_shape.schema_version(),
-                tx_id,
-                snapshot,
-            ),
-            policy: self.query_program_policy_context(identity),
+            reads,
+            policy,
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
@@ -985,17 +1057,30 @@ where
             shape.schema_version(),
             &input_shape,
         );
-        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
-        if use_prepared_binding_source {
-            let policy_schema = self
+        let query_schema = if shape.schema_version() == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else {
+            &self
                 .catalogue
                 .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?;
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema
+        };
+        let reads = query_read_set_for_read_view(
+            &input_shape,
+            shape.schema_version(),
+            policy_schema_version,
+            tier,
+            read_view,
+            settled_binding_view,
+            None,
+            query_schema,
+        )?;
+        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
+        if use_prepared_binding_source {
             self.collect_policy_dependency_claim_params(
-                &policy_schema.schema,
+                &reads.primary,
                 &policy,
                 &input_shape,
                 &mut binding_claim_params,
@@ -1009,22 +1094,27 @@ where
         }
         let source_shape = use_prepared_binding_source
             .then(|| {
-                query_binding_source_shape_for_parts_if_needed(
+                self.query_binding_source_shape_for_identity(
                     shape.params(),
                     &binding_claim_params,
+                    identity,
                 )
             })
             .flatten();
-        // Prepared binding-source names are runtime identities.  Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions.  Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
-        let source_shape = source_shape.map(|source_shape| {
-            self.active_session_claim_scope_key(identity)
-                .map(|scope| format!("{source_shape}:session:{scope}"))
-                .unwrap_or(source_shape)
-        });
+        if let Some(source_shape) = &source_shape {
+            if !input_shape.reachable_contributions.is_empty()
+                && binding_claim_params
+                    .iter()
+                    .any(|(name, claim)| shape.params().get(name) != Some(&claim.ty))
+            {
+                input_shape = self.normalized_row_set_shape_with_claim_params(
+                    shape,
+                    binding,
+                    &binding_claim_params,
+                )?;
+            }
+            retarget_binding_value_sources(&mut input_shape, source_shape);
+        }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
@@ -1032,16 +1122,6 @@ where
                 shape.query().includes.len(),
             );
         }
-        let query_schema = if shape.schema_version() == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-                .schema
-        };
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .read_policy
@@ -1100,16 +1180,7 @@ where
         }
         Ok(QueryProgramRequest {
             authorization_mode,
-            reads: query_read_set_for_read_view(
-                &input.shape,
-                shape.schema_version(),
-                policy_schema_version,
-                tier,
-                read_view,
-                settled_binding_view,
-                None,
-                query_schema,
-            )?,
+            reads,
             policy,
             input,
             output: output_request,
@@ -2054,6 +2125,7 @@ where
                 authorization_mode,
                 read_view,
                 None,
+                false,
             )
             .await?;
         let deltas = self
@@ -2677,6 +2749,7 @@ where
                 QueryAuthorizationMode::TrustedServing,
                 &ReadViewSpec::default(),
                 Some(row_uuid),
+                true,
             )
             .await?;
         // A policy can introduce claim parameters even though this physical
