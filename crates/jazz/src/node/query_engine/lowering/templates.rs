@@ -28,7 +28,17 @@ struct TemplateEntry {
     request: QueryProgramRequest,
     literal_types: Vec<Option<ValueType>>,
     sources: ResolvedQuerySources,
-    program: Option<Arc<ParameterizedProgram>>,
+    program: TemplateState,
+}
+
+/// A family is promoted on its second sighting. The first request takes the
+/// ordinary concrete path, so single-use queries never pay for building a
+/// reusable program next to the one they install.
+#[derive(Clone, Debug)]
+enum TemplateState {
+    Seen,
+    Unsupported,
+    Ready(Arc<ParameterizedProgram>),
 }
 
 #[derive(Clone, Debug)]
@@ -128,44 +138,13 @@ impl QueryProgramTemplateCache {
         // Compare typed contracts, not recursively formatted descriptors or
         // per-operator structural hashes. The cheap normalized shape id rejects
         // unrelated entries before exact request and source-contract equality.
-        let template = if let Some(entry) = self.entries.iter().find(|entry| {
+        let Some(index) = self.entries.iter().position(|entry| {
             entry.request.input.shape.identity.shape_id
                 == template_request.input.shape.identity.shape_id
                 && entry.request == template_request
                 && entry.literal_types == literal_types
                 && entry.sources == template_sources
-        }) {
-            let Some(template) = &entry.program else {
-                trace_template("unsupported_hit");
-                return lower_resolved_query_program(compilation, sources, explain);
-            };
-            #[cfg(any(test, feature = "testing"))]
-            {
-                self.hits += 1;
-                self.argument_hits += usize::from(!template.arguments.is_empty());
-            }
-            template.clone()
-        } else {
-            let arguments = std::cell::RefCell::new(ProgramArgumentRecipes::with_literal_types(
-                literal_types.clone(),
-            ));
-            let template = QueryProgramCompilation::analyze(template_request.clone())
-                .and_then(|template_compilation| {
-                    lower_resolved_query_program_with_source_parameters(
-                        template_compilation,
-                        template_sources.clone(),
-                        ExplainPlan::default(),
-                        &BTreeMap::new(),
-                        Some(&arguments),
-                    )
-                })
-                .ok()
-                .map(|program| {
-                    Arc::new(ParameterizedProgram {
-                        program: self.typed_program(program),
-                        arguments: arguments.into_inner(),
-                    })
-                });
+        }) else {
             if self.entries.len() == 256 {
                 self.entries.pop_front();
             }
@@ -173,20 +152,58 @@ impl QueryProgramTemplateCache {
                 request: template_request,
                 literal_types,
                 sources: template_sources,
-                program: template.clone(),
+                program: TemplateState::Seen,
             });
-            trace_template(if template.is_some() {
-                "compiled"
-            } else {
-                "unsupported"
-            });
-            let Some(template) = template else {
-                // Some projections and predicates still require a concrete
-                // scalar. Never pretend such a product is binding-independent.
-                return lower_resolved_query_program(compilation, sources, explain);
-            };
-            template
+            trace_template("seen");
+            return lower_resolved_query_program(compilation, sources, explain);
         };
+        let template = match &self.entries[index].program {
+            TemplateState::Ready(template) => template.clone(),
+            TemplateState::Unsupported => {
+                trace_template("unsupported_hit");
+                return lower_resolved_query_program(compilation, sources, explain);
+            }
+            TemplateState::Seen => {
+                let arguments = std::cell::RefCell::new(
+                    ProgramArgumentRecipes::with_literal_types(literal_types),
+                );
+                let template = QueryProgramCompilation::analyze(template_request)
+                    .and_then(|template_compilation| {
+                        lower_resolved_query_program_with_source_parameters(
+                            template_compilation,
+                            template_sources,
+                            ExplainPlan::default(),
+                            &BTreeMap::new(),
+                            Some(&arguments),
+                        )
+                    })
+                    .ok()
+                    .map(|program| {
+                        Arc::new(ParameterizedProgram {
+                            program: self.typed_program(program),
+                            arguments: arguments.into_inner(),
+                        })
+                    });
+                trace_template(if template.is_some() {
+                    "compiled"
+                } else {
+                    "unsupported"
+                });
+                let Some(template) = template else {
+                    // Some projections and predicates still require a concrete
+                    // scalar. Never pretend such a product is binding-independent.
+                    self.entries[index].program = TemplateState::Unsupported;
+                    return lower_resolved_query_program(compilation, sources, explain);
+                };
+                self.entries[index].program = TemplateState::Ready(template.clone());
+                template
+            }
+        };
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.hits += 1;
+            self.argument_hits += usize::from(!template.arguments.is_empty());
+        }
         trace_template("bound");
         let mut program = template.program.clone();
         let mut graphs = program

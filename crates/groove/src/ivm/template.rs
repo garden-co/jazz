@@ -26,11 +26,21 @@ pub struct TypedGraphTemplate {
     pub(crate) predicate_markers: Vec<super::PredicateExpr>,
 }
 
+/// One terminal's program plus the forest argument slots it consumes, in local
+/// slot order. Slot numbering is structural, never value-dependent.
+#[derive(Clone, Debug)]
+pub(crate) struct TemplateSlice {
+    pub(crate) inputs: Vec<usize>,
+    pub(crate) predicates: Vec<usize>,
+}
+
+pub(crate) type CompiledForest = Arc<[(Arc<TypedGraphTemplate>, TemplateSlice)]>;
+
 /// Bounded whole-graph compiler cache. Keys contain source contracts and
 /// operator structure, not actual sources, rows or predicate argument values.
 #[derive(Clone, Debug, Default)]
 pub struct TypedGraphTemplateCache {
-    pub(crate) entries: std::collections::VecDeque<(u64, GraphBuilder, Arc<TypedGraphTemplate>)>,
+    pub(crate) entries: std::collections::VecDeque<(u64, Vec<GraphBuilder>, CompiledForest)>,
     pub(crate) compilations: u64,
     pub(crate) reuses: u64,
 }
