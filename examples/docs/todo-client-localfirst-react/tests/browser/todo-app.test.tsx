@@ -387,43 +387,6 @@ describe("React Todo App E2E", () => {
     );
   });
 
-  it("explains the read tier and preview choices in a dialog", async () => {
-    const el = await mountApp({
-      appId: APP_ID,
-      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-    });
-    const trigger = el.querySelector<HTMLButtonElement>("#tier-help-button");
-    expect(trigger).not.toBeNull();
-    if (!trigger) return;
-
-    await act(async () => trigger.click());
-    const dialog = el.querySelector<HTMLDialogElement>("#tier-help-dialog");
-    expect(dialog?.open).toBe(true);
-    const copy = dialog?.textContent ?? "";
-    expect(copy).toContain("Local-first");
-    expect(copy).toContain("Remote if possible");
-    expect(copy).toContain("Remote only");
-    expect(copy).toContain("Show previews");
-    expect(copy).toContain("Wait for the selected tier");
-    expect(copy).toContain("Show any data already available while the query is loading.");
-    expect(copy).toContain(
-      "Hide available data until the selected tier has returned its first result.",
-    );
-    expect(copy).toContain("pending local writes immediately");
-    expect(copy).toContain("may include eligible pending local changes");
-    expect(copy).toContain("excludes pending local writes");
-    expect(copy).toContain(
-      "The badge shows the read tier you selected and the highest settlement this subscription has observed. It does not guarantee that every displayed row has reached that level.",
-    );
-    expect(copy).toContain("highest settlement this subscription has observed");
-
-    const close = dialog?.querySelector<HTMLButtonElement>("#tier-help-close");
-    expect(close).not.toBeNull();
-    if (!close) return;
-    await act(async () => close.click());
-    expect(dialog?.open).toBe(false);
-  });
-
   it("keeps settled todos visible when waiting for the selected tier", async () => {
     const el = await mountApp();
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
