@@ -303,19 +303,43 @@ fn relation_projection_from_expr(
     }
 }
 
-fn validate_relation_projection_aliases(
+/// Engine carrier names and namespaces that a relation projection alias must
+/// not take. Relation aliases are lowered as graph fields beside the source
+/// row's own carriers (`row_uuid`, `_app_<column>` cells, `$` provenance,
+/// `tx_*` version fields, `__`-prefixed engine fields such as the UNION arm and
+/// row carriers, and `left.`/`right.` join-side fields). An alias with one of
+/// these names would replace that carrier instead of adding a public output.
+const RESERVED_RELATION_ALIASES: &[&str] = &["row_uuid", "tx_time", "tx_node_id"];
+const RESERVED_RELATION_ALIAS_PREFIXES: &[&str] = &[
+    "$",
+    crate::schema::APP_COLUMN_PREFIX,
+    "__",
+    "left.",
+    "right.",
+];
+
+pub(crate) fn validate_relation_projection_aliases(
     columns: &[RelationProjectColumn],
 ) -> Result<(), QueryError> {
     let mut aliases = BTreeSet::new();
-    if columns.iter().any(|column| {
-        column.alias == "row_uuid"
-            || !aliases.insert(column.alias.clone())
-            || column.alias.is_empty()
-            || column.alias.contains('\0')
-    }) {
-        return Err(relation_unification_error(
-            "relation project aliases must be non-empty, NUL-free, unique, and not row_uuid",
-        ));
+    for column in columns {
+        let alias = column.alias.as_str();
+        if alias.is_empty() || alias.contains('\0') || !aliases.insert(alias) {
+            return Err(relation_unification_error(
+                "relation project aliases must be non-empty, NUL-free, and unique",
+            ));
+        }
+        if RESERVED_RELATION_ALIASES.contains(&alias)
+            || RESERVED_RELATION_ALIAS_PREFIXES
+                .iter()
+                .any(|prefix| alias.starts_with(prefix))
+        {
+            return Err(QueryError::UnsupportedRelationQuery(format!(
+                "relation project alias {alias:?} is a reserved internal name; aliases must not \
+                 be row_uuid, tx_time or tx_node_id, or start with \"$\", \"{}\", \"__\", \"left.\" or \"right.\"",
+                crate::schema::APP_COLUMN_PREFIX
+            )));
+        }
     }
     Ok(())
 }
@@ -960,17 +984,8 @@ fn collect_relation_facade(
         RelationExpr::Project { input, columns } => {
             collect_relation_facade(input, plan)?;
             let mut output_scope = None::<String>;
-            let mut aliases = BTreeSet::new();
+            validate_relation_projection_aliases(columns)?;
             for column in columns {
-                if column.alias == "row_uuid"
-                    || !aliases.insert(column.alias.clone())
-                    || column.alias.is_empty()
-                    || column.alias.contains('\0')
-                {
-                    return Err(relation_unification_error(
-                        "relation project aliases must be non-empty, NUL-free, unique, and not row_uuid",
-                    ));
-                }
                 let scope = match &column.expr {
                     RelationProjectExpr::Column(column) => relation_scope(column)?,
                     RelationProjectExpr::RowId(RelationRowIdRef::Current) => continue,

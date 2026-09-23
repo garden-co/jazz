@@ -1806,6 +1806,35 @@ fn lower_linear_plan_steps_cached(
                         )
                     })
                     .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+                if let Some(retained_fields) = &retained_contributor_fields {
+                    // Retained source fields keep their pre-projection meaning
+                    // for later global order/window and contributor encoding.
+                    // An output may reuse such a name only as an identity copy;
+                    // anything else would silently replace the source value
+                    // (e.g. a UNION ordered by a source column sorting by an
+                    // alias of another column). Relation validation reserves
+                    // the carrier namespaces, so this is defense in depth.
+                    let retained_prefix = last_join_right
+                        .as_ref()
+                        .map(|_| LEFT_JOIN_PREFIX)
+                        .unwrap_or("");
+                    for field in &field_plans {
+                        let output = &field.project.output_name;
+                        let is_identity =
+                            field
+                                .source_nullability
+                                .as_ref()
+                                .is_some_and(|(source, _)| {
+                                    source == output
+                                        || *source == format!("{retained_prefix}{output}")
+                                });
+                        if retained_fields.contains(output) && !is_identity {
+                            return Err(UnsupportedReason::Operator(format!(
+                                "projection output {output:?} would replace the retained source field of the same name"
+                            )));
+                        }
+                    }
+                }
                 for field in &field_plans {
                     for (source, depth) in &field.unwrap_before_project {
                         unwrap_fields

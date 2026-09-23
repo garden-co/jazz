@@ -1364,6 +1364,173 @@ fn relation_query_projection_types_match_between_one_shot_and_maintained_reads()
     );
 }
 
+/// A relation alias may reuse a source column name for a different column.
+/// Global UNION ordering by `users.name` must still sort by the source `name`
+/// column, never by an arm's `name := users.nickname` alias, in both one-shot
+/// and maintained reads, including across a global window. Relation IR is
+/// built directly because it is the public Rust relation seam used by WASM
+/// and NAPI.
+#[test]
+fn relation_union_all_order_by_source_column_is_not_shadowed_by_alias() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("users")
+                .column("name", PublicColumnType::Text)
+                .column("nickname", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
+    // Source-name order is (first, second); nickname order is the reverse.
+    let first = row(0xa1);
+    let second = row(0xb2);
+    for (row_id, name, nickname) in [(first, "a", "z"), (second, "b", "y")] {
+        db.insert(
+            "users",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(name.to_owned())),
+                ("nickname".to_owned(), Value::String(nickname.to_owned())),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let arm = |label: &str, column: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: column.to_owned(),
+                }),
+            }],
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::OrderBy {
+                input: Box::new(RelationExpr::Union {
+                    inputs: vec![arm("first", "name"), arm("second", "nickname")],
+                }),
+                terms: vec![RelationOrderBy {
+                    column: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    direction: OrderDirection::Asc,
+                }],
+            }),
+            limit: 3,
+        },
+    };
+    let published = |row: &CurrentRow| {
+        let (descriptor, raw) = row.encoded_record();
+        (
+            row.row_uuid(),
+            descriptor.bind(raw).get("name").unwrap().clone(),
+        )
+    };
+    // Ordered by source name, then row id, then arm label. Ordering by the
+    // alias instead would yield a, b, y.
+    let expected = vec![
+        (first, Value::String("a".to_owned())),
+        (first, Value::String("z".to_owned())),
+        (second, Value::String("b".to_owned())),
+    ];
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        snapshot.rows.iter().map(published).collect::<Vec<_>>(),
+        expected
+    );
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } =
+        subscription.try_next_event().expect("opened event")
+    else {
+        panic!("subscription opening must be a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| published(&output.row))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+/// Relation aliases share the lowered graph with the engine's own carriers
+/// (row identity, `_app_` cells, `$` provenance, `tx_*` versions, `__` engine
+/// fields such as UNION arm/row carriers, `left.`/`right.` join sides). An alias
+/// taking one of those names would replace the carrier, so it is rejected with
+/// a clear error for single-relation and UNION queries on both read paths.
+#[test]
+fn relation_projection_rejects_reserved_internal_aliases() {
+    let schema = relation_schema();
+    let db = open_db(0xd6, AuthorSubject::for_test_bytes([0xd6; 16]), &schema);
+    let project = |alias: &str| RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "users".to_owned(),
+            alias: None,
+        }),
+        columns: vec![crate::query::RelationProjectColumn {
+            alias: alias.to_owned(),
+            expr: RelationProjectExpr::Column(RelationColumnRef {
+                scope: Some("users".to_owned()),
+                column: "name".to_owned(),
+            }),
+        }],
+    };
+    for alias in [
+        "row_uuid",
+        "tx_time",
+        "tx_node_id",
+        "$createdAt",
+        "_app_name",
+        "__root_union_arm",
+        "__root_union_row",
+        "left.name",
+        "right.name",
+    ] {
+        let single = RelationQuery {
+            rel: project(alias),
+        };
+        let union = RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: ["first", "second"]
+                    .map(|label| crate::query::RelationUnionArm {
+                        label: label.to_owned(),
+                        input: project(alias),
+                    })
+                    .to_vec(),
+            },
+        };
+        for query in [&single, &union] {
+            let error = block_on(db.all_relation_query(query, ReadOpts::default())).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Query, "{alias}");
+            assert!(
+                error.message.contains(&format!(
+                    "relation project alias {alias:?} is a reserved internal name"
+                )),
+                "{alias}: {}",
+                error.message
+            );
+            let error = block_on(db.subscribe_relation_query(query, ReadOpts::default()))
+                .err()
+                .unwrap_or_else(|| panic!("maintained read must reject alias {alias}"));
+            assert_eq!(error.code, ErrorCode::Query, "{alias}");
+        }
+    }
+}
+
 /// Two `users` arms projected to `displayName`, ordered globally by `term`.
 fn users_union_ordered_by(term: RelationColumnRef) -> RelationQuery {
     let arm = |label: &str| crate::query::RelationUnionArm {
