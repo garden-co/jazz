@@ -4,6 +4,7 @@ import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
+import { measureTypingComposer, type TypingComposerMetrics } from "./typing-composer.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }, {}),
@@ -155,6 +156,51 @@ export async function proveHighLevelForegroundRestart(
       rows.map((row) => row.title),
       runNonce,
     );
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
+  }
+}
+
+/**
+ * Type into one composer row through the public API while a maintained
+ * subscription watches it (#3273). The measurement and its correctness
+ * checks live in `typing-composer.ts`; this only binds them to a real
+ * `createJazzClient` foreground on the admitted relay.
+ */
+export async function proveTypingComposer(admitted: {
+  capability: Uint8Array;
+  account: JazzClientConfig["account"];
+}): Promise<TypingComposerMetrics> {
+  const client = await createJazzClient(clientConfig(admitted));
+  let unsubscribe = () => {},
+    failed = false;
+  try {
+    let composerId: string | undefined;
+    const observed: string[] = [];
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      const composer = todos.find((todo) => todo.id === composerId);
+      if (composer && observed.at(-1) !== composer.title) observed.push(composer.title);
+    });
+    return await measureTypingComposer({
+      async open() {
+        const { value } = client.db.insert(app.todos, { title: "" });
+        composerId = value.id;
+        if (!(await waitForPublication(() => observed.length > 0))) {
+          throw new Error("typing composer row never reached its subscription");
+        }
+        observed.length = 0;
+        return value.id;
+      },
+      type(id, text) {
+        client.db.update(app.todos, id, { title: text });
+      },
+      observedTexts: () => observed,
+      now: () => performance.now(),
+      yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+    });
   } catch (error) {
     failed = true;
     throw error;

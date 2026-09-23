@@ -4,7 +4,7 @@ import { startCoreObservationControl } from "./core-observation-control.mjs";
 import { startLocalServerSessionHarness } from "./server-session-harness.mjs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { assertDeviceReceipt } from "./device-driver.mjs";
+import { assertDeviceReceipt, deviceMetricsLines } from "./device-driver.mjs";
 import { captureAndroidFailure } from "./android-postmortem.mjs";
 import { androidAcceptanceFailure } from "./android-diagnostics.mjs";
 import { verifyAndroidOfflineRestarts } from "./android-offline-restarts.mjs";
@@ -111,7 +111,9 @@ try {
       output = acceptanceLogcat();
       if (output.includes("JAZZ_DEVICE_RESULT ")) {
         try {
-          return assertDeviceReceipt(output, expected);
+          const results = assertDeviceReceipt(output, expected);
+          for (const line of deviceMetricsLines(results)) console.log(line);
+          return results;
         } catch {
           throw new Error(androidAcceptanceFailure("invalid-receipt", phase, output));
         }
