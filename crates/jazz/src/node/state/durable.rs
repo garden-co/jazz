@@ -231,6 +231,54 @@ where
         self.catalogue.active_catalogue_seq
     }
 
+    pub(crate) fn catalogue_table_identity(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+    ) -> Result<Option<crate::ids::GlobalPhysicalTableId>, Error> {
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema) {
+            return Ok(None);
+        }
+        let mapping =
+            self.catalogue
+                .physical_mappings
+                .get(&schema)
+                .ok_or(Error::InvalidStoredValue(
+                    "accepted schema physical identities missing",
+                ))?;
+        Ok(mapping
+            .identities
+            .tables
+            .get(table)
+            .map(|identity| identity.id))
+    }
+
+    pub(crate) fn catalogue_column_identity(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<crate::ids::GlobalPhysicalColumnId>, Error> {
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema) {
+            return Ok(None);
+        }
+        let mapping =
+            self.catalogue
+                .physical_mappings
+                .get(&schema)
+                .ok_or(Error::InvalidStoredValue(
+                    "accepted schema physical identities missing",
+                ))?;
+        Ok(mapping
+            .identities
+            .tables
+            .get(table)
+            .and_then(|identity| identity.columns.get(column))
+            .map(|identity| identity.id))
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &mut self,

@@ -41,6 +41,19 @@ where
             .map_err(Into::into)
     }
 
+    /// Prepare an accepted-only local snapshot for internal E2EE observation.
+    #[doc(hidden)]
+    pub async fn restrict_e2ee_observation_snapshot_for_binding(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        self.lock_for_transaction_operation(tx_id)
+            .await?
+            .restrict_e2ee_observation_snapshot(tx_id)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();

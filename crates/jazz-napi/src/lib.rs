@@ -2715,6 +2715,79 @@ impl NapiDb {
         })
     }
 
+    /// Read an accepted table UUID without blocking pending native storage.
+    #[napi(js_name = "tableIdentity")]
+    pub fn table_identity(
+        &self,
+        table: String,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.inner.borrow();
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match inner {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.table_identity(&table)
+                        .await
+                        .map(|id| {
+                            Uint8Array::new(id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+                        })
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.table_identity(&table)
+                        .await
+                        .map(|id| {
+                            Uint8Array::new(id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+                        })
+                        .map_err(napi_error)
+                }))
+            }
+        }
+    }
+
+    /// Read an accepted column UUID without blocking pending native storage.
+    #[napi(js_name = "columnIdentity")]
+    pub fn column_identity(
+        &self,
+        table: String,
+        column: String,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.inner.borrow();
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match inner {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.column_identity(&table, &column)
+                        .await
+                        .map(|id| {
+                            Uint8Array::new(id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+                        })
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.column_identity(&table, &column)
+                        .await
+                        .map(|id| {
+                            Uint8Array::new(id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+                        })
+                        .map_err(napi_error)
+                }))
+            }
+        }
+    }
+
     /// Register and return a typed view backed by this same runtime owner.
     #[napi(js_name = "registerSchema")]
     pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
@@ -3018,6 +3091,95 @@ impl NapiDb {
                 } else {
                     native_covered_read_or_pending(future, Box::new(|| {}))
                 }
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => read!(db),
+            NapiDbInnerStorage::Persistent(db) => read!(db),
+        }
+    }
+
+    /// Opt-in transaction settlement sidecar for E2EE; ordinary rows and their
+    /// codec remain unchanged. The caller still needs global snapshot acceptance.
+    #[napi(js_name = "allSettlementMetadata")]
+    pub fn all_settlement_metadata(
+        &self,
+        query: Uint8Array,
+        opts: Option<JsonValue>,
+        open_transaction_id: String,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+        include_rows: Option<bool>,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
+            .map_err(napi::Error::from_reason)?;
+        let explicit_author = author
+            .map(|author| self.author_admissions.resolve(&author))
+            .transpose()?;
+        let admission = explicit_author
+            .map(|author| Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?)))
+            .transpose()?;
+        let non_durable_client = self.non_durable_client.get();
+        let author = match explicit_author {
+            Some(author) => Some(author),
+            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
+            None => None,
+        };
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! read {
+            ($db:expr) => {{
+                let drive_read = matches!(db, NapiDbInnerStorage::Memory(_));
+                let db = Rc::clone($db);
+                let release_db = Rc::clone(&db);
+                let owner = Rc::clone(&db);
+                let read = db.enqueue_transaction_read(open_tx, async move {
+                    if opts.propagation == CorePropagation::LocalOnly {
+                        owner.restrict_e2ee_observation_snapshot_for_binding(open_tx).await?;
+                    }
+                    let requires_coverage = non_durable_client || (opts.tier >= jazz::tx::DurabilityTier::Edge && opts.propagation == CorePropagation::Full);
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    owner.all_serialized_query(&query, opts, Some(open_tx), admission, author, requires_coverage,
+                        || Instant::now() >= deadline, move |attachment| release_db.detach_query(attachment)).await
+                });
+                if drive_read { db.drive_queued_mutation_once(); }
+                native_read_or_pending(Box::pin(async move {
+                    let result = read.await
+                        .map_err(|_| napi::Error::from_reason("transaction read owner operation was cancelled"))?
+                        .map_err(napi_error)?;
+                    let CoreSerializedReadResult::Rows(rows) = result else {
+                        return Err(napi::Error::from_reason("E2EE settlement reads require ordinary stored rows"));
+                    };
+                    let mut metadata = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        let (tx, position) = db.row_settlement_for_binding(row).await
+                            .map_err(napi_error)?
+                            .ok_or_else(|| napi::Error::from_reason("Authority settlement unavailable"))?;
+                        metadata.push(serde_json::json!({
+                            "rowId": row.row_uuid().0.to_string(),
+                            "transactionId": TransactionId::from_committed_tx(tx).to_string(),
+                            "position": position.0.to_string(),
+                        }));
+                    }
+                    let metadata = serde_json::to_vec(&metadata)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    if include_rows != Some(true) {
+                        return Ok(Uint8Array::new(metadata));
+                    }
+                    // Binding-only frame: u32 LE JSON length, JSON settlements, existing row codec.
+                    // Both parts describe the same covered read; global acceptance is still required.
+                    let length = u32::try_from(metadata.len())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    let mut payload = length.to_le_bytes().to_vec();
+                    payload.extend_from_slice(&metadata);
+                    payload.extend_from_slice(&encode_core_rows(&rows)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?);
+                    Ok(Uint8Array::new(payload))
+                }))
             }};
         }
         match db {

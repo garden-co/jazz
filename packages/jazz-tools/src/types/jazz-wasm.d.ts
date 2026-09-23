@@ -131,6 +131,10 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
+    /** Empty bytes mean no accepted table identity; otherwise a 16-byte UUID. */
+    tableIdentity(table: string): Promise<Uint8Array>;
+    /** Empty bytes mean no accepted column identity; otherwise a 16-byte UUID. */
+    columnIdentity(table: string, column: string): Promise<Uint8Array>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
@@ -149,6 +153,15 @@ declare module "jazz-wasm" {
       openTransactionId?: string,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
+    ): Uint8Array | PendingNativeRead;
+    /** Binding-only authority sidecar; still requires separate snapshot acceptance. */
+    allSettlementMetadata(
+      query: Uint8Array,
+      opts: unknown,
+      openTransactionId: string,
+      author?: Uint8Array,
+      claims?: Record<string, unknown>,
+      includeRows?: boolean,
     ): Uint8Array | PendingNativeRead;
     subscribe(
       query: Uint8Array,
