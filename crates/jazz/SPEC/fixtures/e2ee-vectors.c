@@ -1,5 +1,5 @@
 /* Independent protocol fixture generator; no Jazz TypeScript helpers.
- * Link against the pinned libsodium archive. Sealed-box output is random;
+ * Link against the pinned libsodium archive. Sealed-box and stream output are random;
  * all other fields are deterministic. Test keys only, never production keys.
  */
 #ifdef NDEBUG
@@ -83,6 +83,32 @@ int main(void) {
     field("equalityDerived", derived, 32);
     assert(crypto_generichash(equality + h, 32, plaintext, 5, derived, 32) == 0);
     field("equality", equality, h + 32);
+    unsigned char stream[256];
+    h = header(stream, "jazz.sodium.stream");
+    memset(input, 0, 4); input[3] = (unsigned char)h;
+    memcpy(input + 4, stream, h);
+    memset(input + 4 + h, 0, 4); input[7 + h] = sizeof context;
+    memcpy(input + 8 + h, context, sizeof context);
+    a = 8 + h + sizeof context;
+    assert(crypto_generichash(derived, 32, input, a, root, 32) == 0);
+    field("streamDerived", derived, 32);
+    crypto_secretstream_xchacha20poly1305_state state;
+    assert(crypto_secretstream_xchacha20poly1305_init_push(&state, stream + h, derived) == 0);
+    size_t position = h + crypto_secretstream_xchacha20poly1305_HEADERBYTES;
+    unsigned long long written;
+    /* Two authenticated data records, followed by a separate empty final record. */
+    for (size_t i = 0; i < 3; i++) {
+        size_t size = i == 2 ? 0 : 5;
+        size_t cipher_size = size + crypto_secretstream_xchacha20poly1305_ABYTES;
+        memset(stream + position, 0, 4); stream[position + 3] = (unsigned char)cipher_size;
+        assert(crypto_secretstream_xchacha20poly1305_push(&state, stream + position + 4,
+            &written, plaintext, size, input, a,
+            i == 2 ? crypto_secretstream_xchacha20poly1305_TAG_FINAL : crypto_secretstream_xchacha20poly1305_TAG_MESSAGE) == 0);
+        assert(written == cipher_size);
+        position += 4 + cipher_size;
+    }
+    field("stream", stream, position);
+    sodium_memzero(&state, sizeof state);
     sodium_memzero(derived, sizeof derived);
     puts("}");
     return 0;
