@@ -4,7 +4,7 @@ import { TestCleanup, createBrowserTestDb, uniqueDbName } from "./support.js";
 import {
   assertApplyFailureSurfacesThroughHandle,
   assertBurstBeyondCapLosesNothing,
-  assertResidentTombstoneRejects,
+  assertResidentTombstoneRejectsThroughHandle,
   assertSameTurnReadAndSubscriptionSeeWrite,
 } from "../shared/write-contract-scenarios.js";
 
@@ -27,7 +27,7 @@ async function openDb(label: string) {
 // Same scenarios as tests/react-native (RN) and tests/ts-dsl (NAPI): #3273 parity.
 describe("WASM write contract", () => {
   it("reports a resident tombstone through the write handle", async () =>
-    assertResidentTombstoneRejects(await openDb("tombstone"), "handle"));
+    assertResidentTombstoneRejectsThroughHandle(await openDb("tombstone")));
   it("reports an apply-time failure through the write handle", async () =>
     assertApplyFailureSurfacesThroughHandle(await openDb("handle")));
   it("accepts a burst beyond the RN queue cap without losing writes", async () =>

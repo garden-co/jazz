@@ -2,19 +2,18 @@ import { describe, it } from "vitest";
 import {
   assertApplyFailureSurfacesThroughHandle,
   assertBurstBeyondCapLosesNothing,
-  assertResidentTombstoneRejects,
+  assertResidentTombstoneRejectsThroughHandle,
   assertSameTurnReadAndSubscriptionSeeWrite,
   writeContractApp,
 } from "../shared/write-contract-scenarios.js";
-import type { Db } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 // Same scenarios as tests/ts-dsl (NAPI) and tests/browser (WASM): #3273 parity.
 describe("RN foreground write contract through the real native relay", () => {
   for (const [name, scenario] of [
     [
-      "throws synchronously for a resident tombstone",
-      (db: Db) => assertResidentTombstoneRejects(db, "sync"),
+      "reports a resident tombstone through the write handle",
+      assertResidentTombstoneRejectsThroughHandle,
     ],
     [
       "reports an apply-time failure through the write handle",

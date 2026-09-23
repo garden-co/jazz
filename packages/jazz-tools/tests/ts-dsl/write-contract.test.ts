@@ -5,7 +5,7 @@ import type { Db } from "../../src/runtime/db.js";
 import {
   assertApplyFailureSurfacesThroughHandle,
   assertBurstBeyondCapLosesNothing,
-  assertResidentTombstoneRejects,
+  assertResidentTombstoneRejectsThroughHandle,
   assertSameTurnReadAndSubscriptionSeeWrite,
 } from "../shared/write-contract-scenarios.js";
 
@@ -25,7 +25,7 @@ describe("NAPI write contract", () => {
   });
 
   it("reports a resident tombstone through the write handle", () =>
-    assertResidentTombstoneRejects(db, "handle"));
+    assertResidentTombstoneRejectsThroughHandle(db));
   it("reports an apply-time failure through the write handle", () =>
     assertApplyFailureSurfacesThroughHandle(db));
   it("accepts a burst beyond the RN queue cap without losing writes", () =>

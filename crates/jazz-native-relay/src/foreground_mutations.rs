@@ -8,8 +8,6 @@ type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
-    /// Admitted direct writes the owner has not applied yet, in FIFO order.
-    unapplied: RefCell<VecDeque<Rc<WriteHandle<MemoryStorage>>>>,
     uploads: Rc<RefCell<BTreeMap<u64, Rc<StreamingUploadSlot>>>>,
     errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
 }
@@ -28,7 +26,6 @@ impl MutationHandles {
         }));
         Self {
             writes: Rc::new(RefCell::new(BTreeMap::new())),
-            unapplied: RefCell::new(VecDeque::new()),
             uploads: Rc::new(RefCell::new(BTreeMap::new())),
             errors,
         }
@@ -41,26 +38,8 @@ impl MutationHandles {
         // published to the persistent relay. Never await a node lock here.
         self.uploads.borrow_mut().clear();
         self.writes.borrow_mut().clear();
-        self.unapplied.borrow_mut().clear();
         self.errors.borrow_mut().clear();
         Ok(())
-    }
-
-    /// Forget admitted writes the owner has applied (or failed).
-    pub(super) fn retire_applied(&self) {
-        self.unapplied
-            .borrow_mut()
-            .retain(|write| write.is_queued_unapplied());
-    }
-
-    /// Whether one of this foreground's own admitted writes to `row` has not
-    /// been applied yet, so the resident row state cannot decide its outcome.
-    fn row_has_unapplied_write(&self, row: RowUuid) -> bool {
-        self.retire_applied();
-        self.unapplied
-            .borrow()
-            .iter()
-            .any(|write| write.row_uuid() == row)
     }
 
     pub(super) fn has_errors(&self) -> bool {
@@ -165,23 +144,12 @@ impl RelayWorker {
         let row_id = row_id.map(RowUuid::from_bytes);
         let client_id = client;
         let client = self.foreground_client_mut(client)?;
-        // Synchronous class: failures the resident state already decides.
-        // Everything discovered while applying reaches the write handle.
-        let precheck = match mutation {
-            ForegroundMutationKind::Update => jazz::db::ResidentMutationPrecheck::Update(&cells),
-            ForegroundMutationKind::Upsert => jazz::db::ResidentMutationPrecheck::Upsert,
-            ForegroundMutationKind::Delete => jazz::db::ResidentMutationPrecheck::Delete,
-            ForegroundMutationKind::Insert | ForegroundMutationKind::Restore => {
-                jazz::db::ResidentMutationPrecheck::Other
-            }
-        };
-        let resident_row = row_id.filter(|row| {
-            matches!(target, jazz::db::WriteTarget::Root)
-                && !client.mutations.row_has_unapplied_write(*row)
-        });
+        // Synchronous class, as on NAPI and WASM: a closed Db and an unknown
+        // table. Everything decided by row state (including a resident
+        // tombstone) is discovered while applying and reaches the write handle.
         client
             .db
-            .precheck_resident_mutation(&table, resident_row, precheck)
+            .precheck_mutation_admission(&table)
             .map_err(RelayError::Db)?;
         self.ensure_direct_mutation_capacity(client_id)?;
         let client = self.foreground_client_mut(client_id)?;
@@ -256,12 +224,6 @@ impl RelayWorker {
         // follows this command's reply, not while the JS caller waits.
         let row_id = write.row_uuid();
         let id = register_write(&client.mutations.writes, write);
-        let registered = Rc::clone(&client.mutations.writes.borrow()[&id]);
-        client
-            .mutations
-            .unapplied
-            .borrow_mut()
-            .push_back(registered);
         self.drive.request(0);
         Ok((id, row_id))
     }
@@ -297,7 +259,6 @@ impl RelayWorker {
             client.db.drive_queued_mutation_once();
             polls += 1;
         }
-        client.mutations.retire_applied();
         Ok(())
     }
 

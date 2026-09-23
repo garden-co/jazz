@@ -476,21 +476,6 @@ fn preserve_nullable(value: Value, nullable: bool) -> Value {
     }
 }
 
-/// The root mutation whose resident target
-/// [`Db::precheck_resident_mutation`] checks at admission.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
-pub enum ResidentMutationPrecheck<'a> {
-    /// A root update with its patch cells.
-    Update(&'a RowCells),
-    /// A root upsert.
-    Upsert,
-    /// A root delete.
-    Delete,
-    /// Any other mutation; only table and admission state are checked.
-    Other,
-}
-
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -3361,82 +3346,14 @@ where
     }
 
     /// Decide, without applying anything, the admission failures of a queued
-    /// root mutation that the locally resident state already determines.
-    ///
-    /// Bindings that admit a write and apply it later on an owner turn use
-    /// this to keep the synchronous error class of an immediately applied
-    /// write: an unknown table, a closed Db, and a tombstoned (or, for a
-    /// patch, absent) target row. The errors are the ones the apply path
-    /// returns. It never waits: when the node is busy or a lookup would need
-    /// cold storage it returns `Ok(())` and the queued apply reports the
-    /// outcome through its write handle instead. Callers must skip it for a
-    /// row touched by one of their own admitted-but-unapplied writes.
+    /// mutation that NAPI and WASM also report synchronously: a closed or
+    /// non-admitting Db and an unknown table. Row-state failures, such as a
+    /// resident tombstone, are left to the queued apply and its write handle.
     #[doc(hidden)]
-    pub fn precheck_resident_mutation(
-        &self,
-        table: &str,
-        row: Option<RowUuid>,
-        mutation: ResidentMutationPrecheck<'_>,
-    ) -> Result<(), Error> {
+    pub fn precheck_mutation_admission(&self, table: &str) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
-        let table_schema = self.table_schema(table)?;
-        let Some(row) = row else {
-            return Ok(());
-        };
-        let Some(mut node) = self.node.node.try_lock() else {
-            return Ok(());
-        };
-        let schema_version_id = self.schema_version_id;
-        let resident = async {
-            let deletion = node
-                .local_deletion_winner_tx_id_in_schema(schema_version_id, table, row)
-                .await?;
-            let current = node
-                .local_current_row_in_schema(table, row, schema_version_id)
-                .await?;
-            Ok::<_, Error>((deletion.is_some(), current.is_some()))
-        };
-        let mut resident = std::pin::pin!(resident);
-        let (tombstoned, present) = match resident
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-        {
-            std::task::Poll::Ready(result) => result?,
-            std::task::Poll::Pending => return Ok(()),
-        };
-        if tombstoned && !present {
-            return match mutation {
-                ResidentMutationPrecheck::Update(patch) if !patch.is_empty() => {
-                    Err(row_already_deleted(row))
-                }
-                ResidentMutationPrecheck::Upsert | ResidentMutationPrecheck::Delete => {
-                    Err(row_already_deleted(row))
-                }
-                _ => Ok(()),
-            };
-        }
-        match mutation {
-            ResidentMutationPrecheck::Update(patch) if !present && !patch.is_empty() => {
-                // Mirrors `merge_existing_cells_for_client_identity`: a partial
-                // patch on an unconditionally visible table reads the physical
-                // winner, every other patch reads the policy-filtered row.
-                let partial = table_schema
-                    .columns
-                    .iter()
-                    .any(|column| !patch.contains_key(&column.name));
-                let unconditional = self.identity.author == AuthorSubject::SYSTEM
-                    || table_schema.read_policy.is_none();
-                Err(read_for_write_denied(
-                    if partial && unconditional {
-                        "partial UPDATE"
-                    } else {
-                        "UPDATE"
-                    },
-                    table,
-                ))
-            }
-            _ => Ok(()),
-        }
+        self.table_schema(table)?;
+        Ok(())
     }
 
     pub(super) async fn ensure_branch_view_row_not_deleted(

@@ -5640,7 +5640,6 @@ impl RelayWorker {
                 }
                 applied.insert(*id);
             }
-            client.mutations.retire_applied();
             more |= applied.contains(id) && client.db.queued_mutation_count() > 0;
         }
         if let Err(error) = self.pump() {
