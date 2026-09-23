@@ -23,7 +23,7 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
           query: "{}",
           table: "todos",
           branches: [],
-          tier: "edge",
+          tier: "global",
           propagation: "full",
           createdAt: "2026-06-30T00:00:00.000Z",
           stack: "Error\n at X",

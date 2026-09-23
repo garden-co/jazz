@@ -155,13 +155,13 @@ function mockDb() {
       insert: vi.fn((table: unknown, data: Record<string, unknown>) => ({
         wait: vi.fn(async (options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
-          inserts.push({ table, data, tier: options?.tier ?? "edge" });
+          inserts.push({ table, data, tier: options?.tier ?? "global" });
           return { id, ...data };
         }),
       })),
       update: vi.fn((table: unknown, id: string, data: Record<string, unknown>) => ({
         wait: vi.fn(async (options?: { tier?: string }) => {
-          updates.push({ table, id, data, tier: options?.tier ?? "edge" });
+          updates.push({ table, id, data, tier: options?.tier ?? "global" });
         }),
       })),
     } as any,
@@ -232,7 +232,7 @@ describe("reconcileDeposits", () => {
     for (const ins of inserts) {
       expect(ins.data.collected).toBe(false);
       expect(ins.data.collectedBy).toBe("");
-      expect(ins.tier).toBe("edge");
+      expect(ins.tier).toBe("global");
     }
   });
 
@@ -313,7 +313,7 @@ describe("reconcileDeposits", () => {
     for (const upd of updates) {
       expect(upd.data.collected).toBe(true);
       expect(upd.data.collectedBy).toBe("__trimmed__");
-      expect(upd.tier).toBe("edge");
+      expect(upd.tier).toBe("global");
     }
   });
 

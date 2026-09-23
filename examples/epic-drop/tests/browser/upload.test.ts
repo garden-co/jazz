@@ -124,9 +124,9 @@ describe("EpicDrop streamed upload foundation", () => {
     const aliceId = sessionUser(alice);
     const bobId = sessionUser(bob);
     const aliceFolder = alice.insert(app.folders, { name: "Alice", owner_id: aliceId });
-    await aliceFolder.wait({ tier: "edge" });
+    await aliceFolder.wait({ tier: "global" });
     const bobFolder = bob.insert(app.folders, { name: "Bob", owner_id: bobId });
-    await bobFolder.wait({ tier: "edge" });
+    await bobFolder.wait({ tier: "global" });
 
     const aliceFile = await alice.insertStreaming(app.files, {
       folder_id: aliceFolder.value.id,
@@ -138,7 +138,7 @@ describe("EpicDrop streamed upload foundation", () => {
         yield new Uint8Array([1, 2, 3]);
       })(),
     });
-    await aliceFile.wait({ tier: "edge" });
+    await aliceFile.wait({ tier: "global" });
 
     await expect(
       alice
@@ -152,15 +152,15 @@ describe("EpicDrop streamed upload foundation", () => {
             yield new Uint8Array([9]);
           })(),
         })
-        .then((write) => write.wait({ tier: "edge" })),
+        .then((write) => write.wait({ tier: "global" })),
     ).rejects.toThrow();
     await expect(
       alice
         .update(app.files, aliceFile.value.id, { folder_id: bobFolder.value.id })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(
-      alice.all(fileListQuery(aliceFolder.value.id)!, { tier: "edge" }),
+      alice.all(fileListQuery(aliceFolder.value.id)!, { tier: "global" }),
     ).resolves.toEqual([
       {
         id: aliceFile.value.id,

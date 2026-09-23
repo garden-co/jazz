@@ -1834,11 +1834,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
     await Promise.all([
       waitForPromise(
-        alice.waitForTransaction(await committedTxId(aliceTodo), "edge"),
+        alice.waitForTransaction(await committedTxId(aliceTodo), "global"),
         "alice authority row did not settle",
       ),
       waitForPromise(
-        bob.waitForTransaction(await committedTxId(bobTodo), "edge"),
+        bob.waitForTransaction(await committedTxId(bobTodo), "global"),
         "bob authority row did not settle",
       ),
     ]);
@@ -1943,7 +1943,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
     ).resolves.toHaveLength(2);
 
-    const aliceDenied = runtime.waitForTransaction(await committedTxId(aliceTodo), "edge");
+    const aliceDenied = runtime.waitForTransaction(await committedTxId(aliceTodo), "global");
     await expect(aliceDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
@@ -1955,7 +1955,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       value: expect.stringContaining("AuthorizationDenied"),
     });
     await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
-    const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "edge");
+    const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "global");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
@@ -2030,10 +2030,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       ).resolves.toHaveLength(2);
 
       await expect(
-        runtime.waitForTransaction(await committedTxId(aliceTodo), "edge"),
+        runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
       ).rejects.toThrow("AuthorizationDenied");
       await expect(
-        runtime.waitForTransaction(await committedTxId(bobTodo), "edge"),
+        runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
       ).rejects.toThrow("AuthorizationDenied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -2173,12 +2173,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       done: { type: "Boolean", value: false },
     });
     await waitForPromise(
-      writer.waitForTransaction(await committedTxId(inserted), "edge"),
+      writer.waitForTransaction(await committedTxId(inserted), "global"),
       "writer insert did not settle at edge",
     );
 
     const propagatedRow = await waitFor(async () => {
-      const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+      const rows = (await reader.query(queryJson, null, "global")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2236,7 +2236,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        writer.waitForTransaction(await committedTxId(inserted), "edge"),
+        writer.waitForTransaction(await committedTxId(inserted), "global"),
         "writer insert did not settle at persistent edge",
       );
       await writer.close();
@@ -2257,7 +2257,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       // not resolve with the reader's empty local state while the restarted
       // server is still delivering that receipt; callers should receive the
       // persisted row from this one read.
-      const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+      const rows = (await reader.query(queryJson, null, "global")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2322,7 +2322,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     await waitForPromise(
-      writer.waitForTransaction(await committedTxId(inserted), "edge"),
+      writer.waitForTransaction(await committedTxId(inserted), "global"),
       "writer public chat insert did not settle at edge",
     );
 
@@ -2331,7 +2331,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
         bobSession,
-        "edge",
+        "global",
       )) as Array<{
         id: string;
         table: string;
@@ -2355,7 +2355,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       text: { type: "Text", value: "hello through public chat policy" },
     });
     await waitForPromise(
-      writer.waitForTransaction(await committedTxId(message), "edge"),
+      writer.waitForTransaction(await committedTxId(message), "global"),
       "writer public-chat message insert did not settle at edge",
     );
 
@@ -2363,7 +2363,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "messages" }),
         bobSession,
-        "edge",
+        "global",
       )) as Array<{
         id: string;
         table: string;

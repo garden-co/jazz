@@ -147,7 +147,8 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         // dependency across independently scheduled delivery/write channels.
         FateUpdate { .. } => (ChannelClass::Writes, true),
         RowVersionPayloads { .. } => (ChannelClass::Progress, false),
-        CommitUnit { .. } | AuthorityPublication(_) => (ChannelClass::Writes, false),
+        CommitUnit { .. } => (ChannelClass::Writes, false),
+        Reserved30(retired) => match *retired {},
         RegisterShape { .. }
         | Subscribe(_)
         | Unsubscribe { .. }

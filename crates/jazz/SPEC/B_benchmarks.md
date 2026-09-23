@@ -42,7 +42,7 @@ current coverage of every scenario.
   and (where applicable) a threaded timing run; a scenario that can only run on
   one driver is incomplete (`INV-BENCH-1`).
 - **Declared topology/profile.** Each run declares its topology and per-link
-  latency model (`local`/`regional`/`edge`) and durability; compared systems and
+  latency model (`local`/`regional`/far-Core) and durability; compared systems and
   retained runs use identical declared profiles (`INV-BENCH-2`).
 - **Anchored.** Headline metrics report against at least one floor (echo latency,
   bytes), ceiling (naive refetch), or reference (SQLite) anchor (`INV-BENCH-3`).
@@ -123,19 +123,14 @@ coverage while still being unable to support every headline claim honestly.
 The older topology table below does not yet include S8's local mechanism
 phases; its emitted receipts are documented in the implementation status above.
 
-**Topology update (2026-06-15).** All implemented scenarios (S1–S7, S9) now route
-the full `client↔edge↔core` path through the `Db` facade with full client `Db`s
-(tracks E6a/E6b), emitting `edge_mergeable_acceptance` and
-`edge_permission_scope_hydration` phases. The per-row notes below predate that
-conversion and describe _phase_ coverage, not topology.
-
-**Canonical alpha topology (Plan 1).** The conformance and benchmark topology is
-client main thread (**in-memory**) ↔ client worker relay (**IndexedDB**) ↔ edge
-(**RocksDB**) ↔ core (**RocksDB**). The same sync protocol and `Db` facade are
-used at every client hop; edge/core roles are topology configuration, not a
-parallel product API. Scenario smoke runs currently exercise the client↔edge↔core
-shape in-process; browser IndexedDB and worker ownership remain integrability gates
-(ch. 9 and ch. 17).
+**Current topology (server-edge removal).** Scenario smokes run clients directly
+against Core using the `Db` facade and full client runtimes. A browser's durable
+worker and a native mobile persistence owner remain local client relays. The
+browser conformance path is foreground (**memory**) ↔ local worker
+(**IndexedDB**) ↔ Core (**RocksDB**); native cases use the corresponding local
+storage. Core alone authorizes and settles writes. Previous edge-acceptance and
+edge-permission-hydration measurements describe the retired architecture and
+must not be compared with current runs as an implementation-only speedup.
 
 **Historical Plan-1 smoke baseline (2026-07-02, git `48e6a65aa`, dirty tree).** All smoke scenarios were
 green: jazz (`cold_subscription`, `sync`, `validation`, `merge_back_cost`) and
@@ -220,7 +215,7 @@ wired.
 | S1 SaaS              | cold load                                                | Yes                      | `jazz-sim/benches/s1_saas.rs` emits cold/warm summary with `cold_bytes`, `cold_bytes_floor`, `naive_refetch_ceiling_bytes`, result rows, closure rows, and oracle equality checks.                                                                                                                                                                                            |
 | S1 SaaS              | warm local read                                          | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `warm_local_*` and `warm_settled_*`; current query paths are validated against the S1 oracle.                                                                                                                                                                                                                                             |
 | S1 SaaS              | reconnect                                                | Partial                  | FEATURE: `jazz-sim/benches/s1_saas.rs` emits `phase: reconnect` and bytes/floor, but the spec's delta-resubscribe variant remains `[needs: payload-inventory]`; the current path is full rehydrate.                                                                                                                                                                           |
-| S1 SaaS              | subscriber sweep                                         | Partial                  | HARNESS: `jazz-sim/benches/s1_saas.rs` emits `phase: subscriber_sweep`, notification bytes, bundles/refs, adds/removes, now uses full client `Db`s through an edge (track E6b); the full 10/100/1k/10k client retained sweep matrix is still pending.                                                                                                                         |
+| S1 SaaS              | subscriber sweep                                         | Partial                  | HARNESS: `jazz-sim/benches/s1_saas.rs` emits `phase: subscriber_sweep`, notification bytes, bundles/refs, adds/removes, now uses full client `Db`s directly against Core; the full 10/100/1k/10k client retained sweep matrix is still pending.                                                                                                                               |
 | S1 SaaS              | distinct-shape sweep                                     | No                       | HARNESS: no distinct-shape phase emission was found in `jazz-sim/benches/s1_saas.rs`; groove has predecessor shape-sharing signals in `groove/benches/scenario.rs`, not the S1 fixture.                                                                                                                                                                                       |
 | S1 SaaS              | query churn                                              | No                       | HARNESS: the search-as-you-type binding/shape churn phase is specified but no emitted phase or harness code was found.                                                                                                                                                                                                                                                        |
 | S1 SaaS              | high-fan-out hydration                                   | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `phase: high_fan_out_hydration`, bytes/floor, mid-hydration fate counters, maintained subscription view incremental/full-recompute/full-diff counters, and a harness-deterministic legacy-named `membership_history_scan_fallbacks` zero check; the latter is not claimed as a live serving counter.                                      |
@@ -233,13 +228,13 @@ wired.
 | S2 canvas            | history-depth current-row reads                          | Partial                  | HARNESS: `jazz/benches/cold_subscription.rs` covers history-depth current-row subscription, but the S2 JSONL phase does not yet pair those depth-latency lines with the storage-ratio artifact.                                                                                                                                                                               |
 | S2 canvas            | failure injection                                        | Yes                      | `jazz-sim/benches/s2_canvas.rs` emits `phase: failure`, recovery-to-convergence, final rows, spy rows, and convergence checks.                                                                                                                                                                                                                                                |
 | S2 canvas            | history storage ratio vs zstd JSON event log             | No                       | BASELINE: the spec-required zstd JSON event-log anchors are not emitted by `s2_canvas.rs`; only wire bytes/floor and history rows are present.                                                                                                                                                                                                                                |
-| S2 canvas            | edge topology (client↔edge↔core)                         | Yes                      | `s2_canvas.rs` routes Db client → edge Node → core Node (track E6b) and emits `edge_mergeable_acceptance` + `edge_permission_scope_hydration`.                                                                                                                                                                                                                                |
+| S2 canvas            | direct Core topology                                     | Yes                      | `s2_canvas.rs` routes Db clients to Core; smoke checks accepted writes and unauthorized-reader isolation.                                                                                                                                                                                                                                                                     |
 | S3 permissions       | cold load by persona                                     | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: cold` for simple/admin personas with bytes/floor, including Db-surface variants.                                                                                                                                                                                                                                           |
 | S3 permissions       | grant latency                                            | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: grant` with grant latency and oracle visibility checks.                                                                                                                                                                                                                                                                    |
 | S3 permissions       | revocation                                               | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: revocation` across configured revoke sizes with visibility convergence and recompute counters.                                                                                                                                                                                                                             |
 | S3 permissions       | forbidden writes                                         | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: forbidden_writes` and gates forbidden deliveries at zero, matching `INV-BENCH-6` / `INV-PERF-2`.                                                                                                                                                                                                                           |
 | S3 permissions       | reconnect                                                | No                       | HARNESS: no reconnect phase emission was found in `s3_permissions.rs`; S1 has reconnect machinery but S3 permission-filtered catch-up remains unwired.                                                                                                                                                                                                                        |
-| S3 permissions       | edge profile and permission-subscription hydration       | Yes                      | `s3_permissions.rs` routes client↔edge↔core (track E6a) with narrow `(policy_shape, writer_claim)` scope hydration + dedup; emits edge acceptance + scope-hydration phases.                                                                                                                                                                                                   |
+| S3 permissions       | direct Core permission evaluation                        | Yes                      | `s3_permissions.rs` evaluates and settles at Core; retired edge hydration phases are not current metrics.                                                                                                                                                                                                                                                                     |
 | S3 permissions       | block-tree fixture variant                               | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: block_tree_variant`, `joint_cold_hydration_headline`, and `headline_progress` with bytes/floor and visibility checks.                                                                                                                                                                                                      |
 | S4 order processing  | scale-out                                                | Yes                      | `jazz-sim/benches/s4_order_processing.rs` emits scale/SLO phases, p50/p95 settlement, warehouse/throughput fields, and same-schedule SQLite replay assertions.                                                                                                                                                                                                                |
 | S4 order processing  | contention                                               | Yes                      | `jazz-sim/benches/s4_order_processing.rs` emits contention modes, abort/retry information, and hot-payment counter notes.                                                                                                                                                                                                                                                     |
@@ -311,18 +306,10 @@ Landed capabilities were retired from the gate list; git history is the record.
 
 #### Prioritized benchmark gaps
 
-0. **HARNESS (topmost): convert every scenario to the `client↔edge↔core`
-   topology through the `Db` facade.** This is now the only supported topology
-   (§"Topology") and supersedes the piecemeal "add an edge variant to S2/S3"
-   items: every scenario drives through the `Db` facade with full client `Node`s
-   (no `PeerState` stand-ins, fixing S1's subscriber-sweep gap), routes all sync
-   through an edge node that terminates the client identity and hydrates narrow
-   permission scopes from core, and reports the two-leg profile latencies. New
-   measured phases this unlocks: edge mergeable-acceptance latency near the user,
-   and edge permission-scope hydration cost (narrow `(policy_shape, writer_claim)`
-   scope vs. the rejected whole-table scope — the B2 win). Folds in the Db-API
-   migration of the still-peer-layer scenarios (S4/S7/S9). Depends on the edge
-   topology being wired into the sim driver (edge-role node + edge↔core link).
+0. **HARNESS:** keep all scenarios on the current client↔Core topology through
+   the public `Db` facade. Exercise optional local persistence relays separately
+   and report their storage and transport costs. There is no intermediary
+   authority or regional acceptance milestone to measure.
 1. **INFRA / ORACLE:** factor shared oracle/counter gating and retained JSONL
    validation so every phase has explicit `INV-PERF-2` pass/fail counters
    instead of bespoke fields.
@@ -341,7 +328,7 @@ Landed capabilities were retired from the gate list; git history is the record.
 8. **HARNESS:** finish S4's appendix-C split: settlement throughput and
    propagation-inclusive throughput as separate retained lines.
 9. **HARNESS:** add the S3 reconnect (permission-filtered catch-up) phase. (The
-   S3 edge-profile permission-hydration phase is folded into item 0.)
+   S3 Core permission evaluation belongs to the same direct-Core profile.)
 10. **HARNESS:** expand S5 Db-surface coverage from live smoke to the full
     remote tail/resume/resumer matrix.
 11. **HARNESS:** graduate S7 from smoke to JSONL phases for mixed-version
@@ -364,12 +351,11 @@ A scenario implementation that can only run on one driver is incomplete.
 **Declared network model.** Settlement latency is dominated by link latency,
 so every run declares its topology and per-link latency distributions, and
 holds them identical across compared systems and retained runs. **The topology
-is always `client↔edge↔core`** (§"Topology" below) — every profile is a
-two-leg path. Standard profiles (overridable, always reported):
-
-- `local`: client↔edge 1ms, edge↔core 1ms (CI / development profile)
-- `regional`: client↔edge 5ms, edge↔core 30ms (edge near the user, core regional)
-- `edge`: client↔edge 20ms, edge↔core 80ms (far-core deployment — the edge pitch)
+is client↔Core** (§"Topology" below), optionally through a local persistence
+relay. Profiles must report actual link delays. S3 preserves the previous
+end-to-end delay budgets as direct one-way delays: `local` 2 ms, `regional`
+35 ms, and the historical profile name `edge` 100 ms. That last name is only a
+compatibility label for the far-Core latency budget, not an edge node.
 
 Durability config is part of the profile: core uses WAL-no-fsync-per-commit
 (the groove `WalNoSync` tier) unless a scenario says otherwise; reference
@@ -409,17 +395,11 @@ not-yet-built feature. The suite lands incrementally; a `[needs: …]` phase is
 specified now and activated when its feature ships, and the gates double as the
 demand signal for prioritizing those features.
 
-**Topology.** Every scenario runs **only** the full `client↔edge↔core` path —
-the real deployment topology, with the edge always in the path terminating the
-client identity, deciding mergeable fate near the user, and hydrating its narrow
-permission scopes from core (ch. 9). There is no `client↔core` benchmark: a
-two-node measurement would not exercise the edge acceptance latency, the
-permission-scope hydration cost, or the edge↔core durability leg that the system
-actually pays in production, so it would not honestly prove the system. The
-**client** drives through the `Db` facade — its real application API — while the
-**edge** and **core** are `Node`s (the `Db` facade is client-side only; ch. 13).
-Clients are full `Db` instances, not peer-layer stand-ins, so the measured path is
-the one applications run.
+**Topology.** The client drives through the public `Db` facade and Core is a
+`Node`. Clients are full runtimes, not peer-layer stand-ins. Local relay variants
+exercise the same authenticated protocol with client-side persistence ownership;
+they do not add a second write authority. Record the exact topology beside every
+receipt, especially when comparing against historical four-node measurements.
 
 ---
 
@@ -694,7 +674,7 @@ policy-composed-graph design claims they aren't.
 4. **Revocation** `[base]` — _secondary (permission changes are assumed rare)_:
    remove a teamTeamMembership or resourceAccess edge that makes 1 / 100 / 2,000
    resources invisible to a warm client. Measure commit-to-disappearance p50/p95
-   at the client, and core (later edge) CPU during the recursive recompute.
+   at the client, and Core CPU during the recursive recompute.
    Retained as the recursive-retraction correctness-and-cost check (the known
    recompute cliff) and the standing baseline for incremental retraction work —
    not as a headline number, since changes are rare relative to reads/writes.
@@ -704,16 +684,14 @@ policy-composed-graph design claims they aren't.
    forbidden rows/deltas delivered within K ticks** (any nonzero count is a
    security failure and fails the run outright).
 6. **Reconnect** `[base]`: as scenario 1, with permission-filtered catch-up.
-7. Repeat the grant/revocation/forbidden phases with the edge profile;
-   additionally measure permission-subscription hydration (first mergeable write
-   that forces the edge to acquire a permission subscription) vs. already-hydrated
-   acceptance.
+7. Repeat grant/revocation/forbidden phases with the far-Core latency profile
+   and optional local persistence relay; keep authorization at Core.
 
 #### Metrics
 
 cold-load time/bytes per persona vs. bytes floor · permission-evaluation
-time at core (later edge) · **permission-view sizes** (rows required to
-evaluate policies — the cost driver of the edge-authority design) · grant
+time at Core · **permission-view sizes** (rows required to
+evaluate policies — inputs to Core policy evaluation) · grant
 and revocation latencies as above · local store size per persona · counters:
 forbidden-delivery (must be 0), recursive recompute count, recompute row
 volume.
@@ -723,8 +701,8 @@ volume.
 simple user holds exactly the oracle-computed visible set, at every
 quiescent point · admin sees all 40,000 via explicit evidence · grant and
 revocation converge to oracle visibility at the requested settled tier ·
-edge fate decisions equal core decisions once permission
-subscriptions are settled.
+only Core assigns authoritative fates; local relays cannot accept a write on
+Core's behalf.
 
 ---
 

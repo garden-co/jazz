@@ -264,7 +264,7 @@ export async function upsertTodo(db: Db, importedTodoId: string) {
     done: false,
   });
 
-  await write.wait({ tier: "edge" });
+  await write.wait({ tier: "global" });
 }
 // #endregion writing-upsert-ts
 
@@ -302,7 +302,7 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
 
   await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
   await db.delete(app.todos, id).wait({ tier: "global" });
@@ -360,7 +360,7 @@ export async function groupTodoWrites(db: Db, existingTodoId: string) {
     return staged.id;
   });
 
-  await result.wait({ tier: "edge" });
+  await result.wait({ tier: "global" });
   return result.value;
 }
 // #endregion writing-transaction-ts
@@ -386,7 +386,7 @@ export async function completeTodoInTransaction(db: Db, todoId: string) {
       tx.update(app.todos, todoId, { done: true });
     });
 
-    await result.wait({ tier: "edge" });
+    await result.wait({ tier: "global" });
   } catch (error) {
     if (error instanceof PersistedWriteRejectedError) {
       console.error(error.code, error.reason);
@@ -415,7 +415,7 @@ export async function stageTodoAcrossSteps(db: Db, shouldCancel: boolean) {
   }
 
   const result = await tx.commit();
-  await result.wait({ tier: "edge" });
+  await result.wait({ tier: "global" });
 }
 // #endregion writing-manual-transaction-ts
 

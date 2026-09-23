@@ -142,7 +142,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               title: { type: "Text", value: "schema-source startup" },
               done: { type: "Boolean", value: false },
             });
-            await expect(inserted.wait({ tier: "edge" })).resolves.toBeDefined();
+            await expect(inserted.wait({ tier: "global" })).resolves.toBeDefined();
           } finally {
             await client?.shutdown();
             await server?.stop();
@@ -187,22 +187,15 @@ describe("startLocalJazzServer via JazzServer", () => {
     }
   }, 30_000);
 
-  it("passes edge upstream options through JazzServer with admin secret only", async () => {
-    const port = await getAvailablePort();
-    handle = await startLocalJazzServer({
-      port,
-      upstreamUrl: "ws://127.0.0.1:9",
-      adminSecret: "admin-secret",
-      inMemory: true,
-    });
-    const healthResponse = await fetch(`${handle.url}/health`);
-    expect(handle.port).toBe(port);
-    expect(healthResponse.status).toBe(503);
-    await expect(healthResponse.json()).resolves.toEqual({
-      status: "not_ready",
-      component: "runtime",
-    });
-  }, 30_000);
+  it("rejects removed edge startup instead of silently creating another Core", async () => {
+    await expect(
+      startLocalJazzServer({
+        upstreamUrl: "ws://127.0.0.1:9",
+        adminSecret: "admin-secret",
+        inMemory: true,
+      } as Parameters<typeof startLocalJazzServer>[0]),
+    ).rejects.toThrow("Server edges are no longer supported");
+  });
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;

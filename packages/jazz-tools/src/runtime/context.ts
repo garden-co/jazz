@@ -160,10 +160,10 @@ export interface AppContext {
    * Set for server nodes to enable durability notifications.
    * Clients typically leave this undefined.
    */
-  tier?: "local" | "edge" | "global" | Array<"local" | "edge" | "global">;
+  tier?: "local" | "global" | Array<"local" | "global">;
 
   /**
    * Default durability tier for reads and writes when no explicit tier is provided.
    */
-  defaultDurabilityTier?: "local" | "edge" | "global";
+  defaultDurabilityTier?: "local" | "global";
 }

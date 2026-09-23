@@ -569,8 +569,8 @@ fn accepted_view_scoped_child_for_parent(
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
 }
@@ -610,8 +610,8 @@ fn pending_parent_time_proof_skips_newer_but_checks_equal_and_older_parents() {
                 None,
             )],
             Fate::Accepted,
-            None,
-            DurabilityTier::Edge,
+            Some(GlobalTime(2)),
+            DurabilityTier::Global,
         )
         .unwrap();
     for (time, parent_node, should_scan) in [
@@ -957,6 +957,13 @@ fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically
         if succeeds {
             result.unwrap();
             assert!(reader.query_transaction(parent).unwrap().is_some());
+            let current = reader.current_rows("todos", DurabilityTier::Global).unwrap();
+            assert_eq!(current.len(), 1);
+            assert_eq!(
+                current[0].cell(&schema().tables[0], "title"),
+                Some(Value::String("accepted partial child".to_owned())),
+                "an older reset must ingest missing history without rewinding the cached child",
+            );
             assert!(
                 reader
                     .database
@@ -1596,7 +1603,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             full.clone(),
             Fate::Pending,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )])
         .unwrap();
     assert_eq!(

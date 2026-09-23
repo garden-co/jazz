@@ -219,14 +219,14 @@ fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_h
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     let scheduler = Rc::new(RecordingScheduler::default());
@@ -328,14 +328,14 @@ fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     control.take_observed();
@@ -1147,118 +1147,6 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     );
 }
 
-/// Edge admission compares a client HLC's Unix-millisecond physical component
-/// with the authority wall clock, not with the process-relative retry timer.
-/// This needs the real connection topology: direct NodeState admission never
-/// exercises the served-client edge path where retry timing is also available.
-#[test]
-fn edge_admits_client_write_with_current_unix_timestamp() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
-    let edge = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xd7, alice, &schema);
-
-    let (client_transport, edge_client_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_client_transport,
-            alice,
-            test_provider_claims(alice),
-            CommitUnitTrust::Session,
-        );
-
-    let unix_now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test clock is after Unix epoch")
-        .as_millis()
-        .try_into()
-        .expect("Unix milliseconds fit u64");
-    let write = client
-        .insert(
-            "todos",
-            cells("current timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd8)),
-                updated_at_ms: Some(unix_now_ms),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a current-time local write");
-
-    client.tick().expect("client uploads the write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the client write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id)),
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ) {
-            break;
-        }
-    }
-
-    let edge_state = crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id));
-    assert!(
-        matches!(
-            edge_state,
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ),
-        "a current Unix-time client write becomes Edge durable instead of being compared to the retry timer; observed {edge_state:?}"
-    );
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == write.tx_id),
-        "the admitted Edge write is retained for its upstream authority"
-    );
-
-    let future = client
-        .insert(
-            "todos",
-            cells("future timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd9)),
-                updated_at_ms: Some(
-                    unix_now_ms
-                        .saturating_add(crate::node::SKEW_TOLERANCE_MS)
-                        .saturating_add(10_000),
-                ),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a far-future local write");
-    client.tick().expect("client uploads the far-future write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the far-future write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id)),
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ) {
-            break;
-        }
-    }
-    let future_state =
-        crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id));
-    assert!(
-        matches!(
-            future_state,
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ),
-        "the same Edge path retains forward-skew rejection; observed {future_state:?}"
-    );
-}
-
 #[test]
 fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
     let schema = schema();
@@ -1361,9 +1249,9 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         block_on(
             client
                 .node
-                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
         )
-        .expect("Accepted Edge durability does not require a Global timestamp")
+        .expect("Local durability does not require a Global timestamp")
         .unwrap(),
         tx_id
     );
@@ -3096,7 +2984,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_ti
             |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
         )
     );
-    for durability in [DurabilityTier::Local, DurabilityTier::Edge] {
+    for durability in [DurabilityTier::Local, DurabilityTier::Global] {
         authority
             .send(SyncMessage::FateUpdate {
                 tx_id,
@@ -3688,14 +3576,7 @@ fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
 
     assert!(worker.detach_connection(&worker_upstream));
     assert!(core.server.detach_connection(&core_subscriber));
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(
         eviction.row_versions_evictable > 0,
         "the accepted parent must be evictable while the pending child remains pinned"
@@ -3876,14 +3757,7 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
         .unwrap();
     let child_tx = child.mergeable_tx_id();
     assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(eviction.row_versions_evictable > 0);
 
     let foreground = open_db(0xcd, author, &schema);
@@ -4456,7 +4330,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         tx_id: rejected_id,
         fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     route_local_fate(&routes, rejected_id, &rejected);
     assert!(matches!(
@@ -4686,4 +4560,165 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
         0,
         "successful refresh must acknowledge the retained generation"
     );
+}
+
+/// Only the retired receipt is planted internally: current APIs cannot create
+/// it. Everything after that uses durable reopen, ordinary connections and
+/// transaction waits, with no query that could independently trigger repair.
+fn assert_legacy_edge_receipt_replays_to_core(known_to_core: bool, permission_revoked: bool) {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc6; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = |author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            DbIdentity { author, ..identity },
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open(author);
+    let tx_id = client
+        .insert(
+            "todos",
+            cells("original offline payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe6)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let pump = |client: &Db<RocksDbStorage>| {
+        client.tick().unwrap();
+        core.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let settle = |client: &Db<RocksDbStorage>| {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
+            *observed.borrow_mut() = Some(outcome)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.borrow().is_none() && std::time::Instant::now() < deadline {
+            pump(client);
+            std::thread::yield_now();
+        }
+        let outcome = result
+            .borrow_mut()
+            .take()
+            .expect("reopen must settle the original write without a query");
+        outcome
+    };
+    let original_global_time = if known_to_core {
+        let (up, down) = duplex();
+        let upstream = block_on(client.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, author);
+        assert_eq!(settle(&client).unwrap(), tx_id);
+        drop(upstream);
+        drop(subscriber);
+        core.node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .global_time
+    } else {
+        None
+    };
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(tx_id),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    // Sharing a durable store does not let another account replay this author.
+    let other = open(other_author);
+    {
+        let (up, down) = duplex();
+        let _upstream = block_on(other.connect_upstream(up));
+        let _subscriber = core.accept_subscriber(down, other_author);
+        for _ in 0..16 {
+            pump(&other);
+        }
+        assert!(
+            other.node.outbox.borrow().iter().next().is_none(),
+            "recovery must remain author-scoped"
+        );
+        if !known_to_core {
+            assert!(core.node().borrow_mut().transaction_record(tx_id).is_none());
+        }
+    }
+    block_on(other.close()).unwrap();
+    drop(other);
+
+    let client = open(author);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .transaction_state_settled(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    // A changed provider claim represents permission loss since the old receipt.
+    let claims = test_provider_claims(if permission_revoked {
+        other_author
+    } else {
+        author
+    });
+    let _subscriber = core.accept_subscriber_with_claims(down, author, claims);
+    let outcome = settle(&client);
+    if permission_revoked {
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+        assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+    } else {
+        assert_eq!(outcome.unwrap(), tx_id);
+        let audit = core.node().borrow_mut().transaction_record(tx_id).unwrap();
+        assert_eq!(audit.made_by, author);
+        assert_eq!(audit.tx_id, tx_id);
+        assert_eq!(audit.n_total_writes, 1);
+        assert_eq!(audit.fate, Fate::Accepted);
+        assert_eq!(audit.durability, DurabilityTier::Global);
+        assert!(audit.global_time.is_some());
+        if known_to_core {
+            assert_eq!(audit.global_time, original_global_time);
+        }
+        let rows = core.read(&Query::from("todos")).unwrap();
+        assert_eq!(row_ids(&rows), vec![row(0xe6)]);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "title"),
+            Some(Value::String("original offline payload".to_owned()))
+        );
+    }
+    block_on(client.close()).unwrap();
+}
+
+#[test]
+fn legacy_edge_receipt_reopens_and_uploads_without_query() {
+    assert_legacy_edge_receipt_replays_to_core(false, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_preserves_existing_core_acceptance() {
+    assert_legacy_edge_receipt_replays_to_core(true, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_obeys_current_core_permissions() {
+    assert_legacy_edge_receipt_replays_to_core(false, true);
 }

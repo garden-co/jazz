@@ -70,7 +70,7 @@ describe("BigLabel deployed tenant authority", () => {
         userId: accountFor("member"),
         role: "editor",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await member.expectDenied((db) =>
       db.update(app.memberships, seeded.memberMembership.id, { role: "admin" }),
     );

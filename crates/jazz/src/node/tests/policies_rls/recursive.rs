@@ -684,7 +684,7 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     // table has an explicit deny policy and remains empty through an ordinary
     // client read even though its rows can authorize the outer document.
     for dependency in ["teams", "user_team_edges", "team_edges", "doc_access"] {
-        let mut evidence_peer = PeerState::edge_client(reader);
+        let mut evidence_peer = PeerState::client_link(reader);
         let update = evidence_peer
             .current_rows_update(&mut core, dependency)
             .unwrap();
@@ -723,7 +723,7 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
             ("team".to_owned(), Value::Uuid(team_a.0)),
         ])),
     );
-    let mut populated_seed_peer = PeerState::edge_client(reader);
+    let mut populated_seed_peer = PeerState::client_link(reader);
     let hidden_seed = populated_seed_peer
         .current_rows_update(&mut core, "user_team_edges")
         .unwrap();
@@ -1118,7 +1118,7 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let mut edge = PeerState::edge_client(user(0xa1));
+    let mut edge = PeerState::client_link(user(0xa1));
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
@@ -1162,7 +1162,7 @@ fn policy_free_table_denies_reads_and_writes() {
             .cells(owner_cells(user(0xa1), "privileged seed")),
     );
 
-    let mut edge = PeerState::edge_client(user(0xcc));
+    let mut edge = PeerState::client_link(user(0xcc));
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
@@ -1218,7 +1218,7 @@ fn partial_policy_set_allows_its_declared_read_and_denies_omitted_writes_at_auth
         MergeableCommit::new("todos", seed, 10).cells(owner_cells(user(0xa1), "seed")),
     );
 
-    let mut edge = PeerState::edge_client(user(0xcc));
+    let mut edge = PeerState::client_link(user(0xcc));
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([seed]),

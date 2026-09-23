@@ -66,7 +66,7 @@ async function openConnectedPeer(
 async function queryConnectedPeer(id: string): Promise<Record<string, unknown>[]> {
   const peer = connectedPeers.get(id);
   if (!peer) throw new Error(`PosterShop connected peer ${id} is not open`);
-  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "edge" });
+  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "global" });
 }
 
 async function insertConnectedPeer(
@@ -80,7 +80,7 @@ async function insertConnectedPeer(
     id,
     table,
     row,
-    tier: "edge",
+    tier: "global",
   });
 }
 

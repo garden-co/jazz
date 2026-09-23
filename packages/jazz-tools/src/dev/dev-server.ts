@@ -24,7 +24,6 @@ interface LocalJazzServerOptions {
   jwtAudience?: string;
   backendSecret?: string;
   adminSecret?: string;
-  upstreamUrl?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
@@ -68,6 +67,11 @@ async function createOwnedDataDir(): Promise<string> {
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
+  if ((options as { upstreamUrl?: unknown }).upstreamUrl !== undefined) {
+    throw new Error(
+      "Server edges are no longer supported. Remove upstreamUrl and connect clients directly to Core.",
+    );
+  }
   if (options.schema !== undefined && options.permissions == null) {
     throw new Error(
       "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
@@ -101,7 +105,6 @@ export async function startLocalJazzServer(
       jwtAudience: options.jwtAudience,
       backendSecret,
       adminSecret,
-      upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       schema: schema ? [...schema] : undefined,

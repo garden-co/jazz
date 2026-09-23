@@ -114,7 +114,7 @@ fn known_history_parent_must_match_exact_branch_for_local_and_replicated_version
             vec![remote],
             Fate::Accepted,
             None,
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
         )
         .unwrap_err();
     assert!(matches!(

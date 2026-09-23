@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cloud, Plus, Server, Smartphone, type LucideIcon } from "lucide-react";
+import { Cloud, Plus, Smartphone, type LucideIcon } from "lucide-react";
 
 import {
   bfsWaves,
@@ -22,14 +22,12 @@ import {
 } from "./diagram";
 import { INITIAL_COLOR, pickNextColor } from "./colour";
 
-type Tier = "global" | "edge" | "local";
-type NodeKey = "global" | "edge1" | "edge2" | "alice" | "bob" | "charlie";
+type Tier = "global" | "local";
+type NodeKey = "global" | "alice" | "bob" | "charlie";
 type NodeMeta = { label: string; subtitle: string; tier: Tier };
 
 const NODES: Record<NodeKey, NodeMeta> = {
-  global: { label: "Global", subtitle: "global core", tier: "global" },
-  edge1: { label: "Edge", subtitle: "sync server", tier: "edge" },
-  edge2: { label: "Edge", subtitle: "sync server", tier: "edge" },
+  global: { label: "Core", subtitle: "authoritative server", tier: "global" },
   alice: { label: "Alice", subtitle: "local", tier: "local" },
   bob: { label: "Bob", subtitle: "local", tier: "local" },
   charlie: { label: "Charlie", subtitle: "local", tier: "local" },
@@ -37,47 +35,38 @@ const NODES: Record<NodeKey, NodeMeta> = {
 
 const TIER_ICONS: Record<Tier, LucideIcon> = {
   global: Cloud,
-  edge: Server,
   local: Smartphone,
 };
 
 const TOPOLOGY: Record<NodeKey, NodeKey[]> = {
-  alice: ["edge1"],
-  bob: ["edge1"],
-  charlie: ["edge2"],
-  edge1: ["alice", "bob", "global"],
-  edge2: ["charlie", "global"],
-  global: ["edge1", "edge2"],
+  alice: ["global"],
+  bob: ["global"],
+  charlie: ["global"],
+  global: ["alice", "bob", "charlie"],
 };
 
 const CLIENTS: NodeKey[] = ["alice", "bob", "charlie"];
 
 const SLOTS: Record<NodeKey, { row: number; col: string }> = {
   global: { row: 1, col: "1 / 4" },
-  edge1: { row: 2, col: "1 / 3" },
-  edge2: { row: 2, col: "3 / 4" },
-  alice: { row: 3, col: "1 / 2" },
-  bob: { row: 3, col: "2 / 3" },
-  charlie: { row: 3, col: "3 / 4" },
+  alice: { row: 2, col: "1 / 2" },
+  bob: { row: 2, col: "2 / 3" },
+  charlie: { row: 2, col: "3 / 4" },
 };
 
-const TIER_DEPTH: Record<Tier, number> = { global: 0, edge: 1, local: 2 };
+const TIER_DEPTH: Record<Tier, number> = { global: 0, local: 1 };
 const STAGE_DURATION = 1100;
 const PULSE_MS = 1400;
 
 type ColorState = Record<NodeKey, string | null>;
 const INITIAL_COLORS: ColorState = {
   global: INITIAL_COLOR,
-  edge1: INITIAL_COLOR,
-  edge2: INITIAL_COLOR,
   alice: INITIAL_COLOR,
   bob: INITIAL_COLOR,
   charlie: INITIAL_COLOR,
 };
 const ZERO: Record<NodeKey, number> = {
   global: 0,
-  edge1: 0,
-  edge2: 0,
   alice: 0,
   bob: 0,
   charlie: 0,
@@ -389,9 +378,9 @@ export function TierSyncDiagram() {
           <span style={{ fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
             New colour
           </span>{" "}
-          on any client to set a new colour for the row. It propagates up to that client's edge,
-          across to siblings and the global core, then down through the other edge. If two clients
-          write at once, the most recent write wins, and every node ends up showing the same colour.
+          on any client to set a new colour for the row. It syncs to Core, which accepts the write
+          and sends it to the other subscribed clients. If two clients write at once, the most
+          recent write wins, and every node ends up showing the same colour.
         </>
       }
       direction="TD"

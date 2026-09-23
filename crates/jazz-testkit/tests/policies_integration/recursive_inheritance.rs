@@ -184,7 +184,7 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         Ok(transaction_id) => match alice
             .wait_for_transaction(
                 transaction_id.expect("ordinary mutation has a transaction"),
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
             )
             .await
         {

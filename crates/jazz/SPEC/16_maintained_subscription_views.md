@@ -17,7 +17,7 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
-- `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
+- `INV-SYNC-30`: A fresh `Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 - `INV-SYNC-36`: An authority synchronizes an exact, authorized input closure, never its application-output terminal. The receiver reconciles that closure with the local inputs permitted by the requested tier and runs the same maintained Groove program used for local changes. Only that receiver-local terminal may publish application rows or ordered structural edits.
 
 ## Details
@@ -211,7 +211,7 @@ are reviewed with the corresponding reader and rejection tests.
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
-node's own pending committed writes. Edge and global subscriptions are maintained
+node's own pending committed writes. Global subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
 settlement/completeness requirements. Tiers select the source/frontier
 expression and runtime consumption policy; they must not select a different
@@ -330,7 +330,7 @@ data is local knowledge too. A one-shot local-first read from a newly opened
 memory-only foreground must receive the owner's query answer (including a
 confirmed empty answer) before returning. This is local storage delivery, not
 authority settlement: it completes while the owner is offline or while its
-edge/core connection is stalled. Ordinary upstream propagation remains enabled
+Core connection is stalled. Ordinary upstream propagation remains enabled
 when requested. A standalone durable runtime can read its local storage directly
 and does not acquire this foreground delivery prerequisite.
 
@@ -470,7 +470,7 @@ application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 
 A new remote settled one-shot is a new usage site, not a request to inspect
 whatever equal-shape state happens to be materialized locally. Each fresh
-`Edge`/`Global` one-shot registers a current `SubscriptionKey` and completes
+`Global` one-shot registers a current `SubscriptionKey` and completes
 only after an authority-backed settled update covers that exact key. Binding-view
 generation advancement alone is insufficient: a late update addressed to an
 already detached equal-shape predecessor must not acknowledge its replacement
@@ -561,7 +561,7 @@ the serving boundary (`INV-SYNC-23`).
 The current maintained-subscription surface supports ordinary live query
 subscriptions whose lowered policy-composed shape can be maintained by groove,
 with the strongest production coverage on the global frontier. The target
-surface is tier-agnostic: local, edge, and global subscriptions use the same
+surface is tier-agnostic: local and global subscriptions use the same
 lowering and maintained terminal contracts, differing only in source/frontier
 selection and settlement/completeness rules. Supported maintained shapes include
 unordered `limit(1)` with offset `0` lowered through `ArgMinBy` over `row_uuid`,
@@ -739,7 +739,6 @@ that occurrence without dropping its independently maintained descendants.
   covered by `global_subscription_registers_array_subquery_upstream_coverage`,
   `array_subquery_attachment_registers_upstream_coverage`, and
   `array_subquery_remote_subscription_hydrates_edge_referenced_child_rows`.
-  Edge-tier maintained array-subquery semantics are not yet separately named.
 
 ### 16.6 Aggressive maintained support: ordered windows and `Aggregate`
 

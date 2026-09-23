@@ -115,7 +115,10 @@ describe("NativeRuntimeAdapter server convergence", () => {
       done: { type: "Boolean", value: false },
     });
 
-    await waitForPromise(inserted.wait({ tier: "edge" }), "client A insert did not settle at edge");
+    await waitForPromise(
+      inserted.wait({ tier: "global" }),
+      "client A insert did not settle at edge",
+    );
     await waitForPromise(
       observedBySubscription,
       "client B subscription did not observe the native runtime insert",
@@ -168,7 +171,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        immediateInsert.wait({ tier: "edge" }),
+        immediateInsert.wait({ tier: "global" }),
         "writer insert did not settle at edge after dynamic schema publish",
       );
 
@@ -215,7 +218,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
-        inserted.wait({ tier: "edge" }),
+        inserted.wait({ tier: "global" }),
         "writer insert did not settle at edge before restart",
       );
 
@@ -296,7 +299,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
     const inserted = writer.insert("arrays", {
       data: { type: "Bytea", value: Uint8Array.from([1, 2, 3, 4]) },
     });
-    await waitForPromise(inserted.wait({ tier: "edge" }), "BYTEA insert did not settle at edge");
+    await waitForPromise(inserted.wait({ tier: "global" }), "BYTEA insert did not settle at edge");
     await writer.shutdown();
     clients.splice(clients.indexOf(writer), 1);
 
@@ -360,13 +363,13 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        inserted.wait({ tier: "edge" }),
+        inserted.wait({ tier: "global" }),
         "writer insert did not settle at edge before delete",
       );
 
       const deleted = writer.delete("todos", inserted.value.id);
       await waitForPromise(
-        deleted.wait({ tier: "edge" }),
+        deleted.wait({ tier: "global" }),
         "writer delete did not settle at edge before restore",
       );
 
@@ -375,7 +378,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
-        restored.wait({ tier: "edge" }),
+        restored.wait({ tier: "global" }),
         "writer restore did not settle at edge",
       );
 

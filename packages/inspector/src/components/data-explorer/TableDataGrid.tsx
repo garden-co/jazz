@@ -1069,8 +1069,8 @@ export function TableDataGrid() {
   const builtQuery = useMemo(() => queryBuilder._build(), [queryBuilder]);
   // Standalone always has a server; the overlay may be fully offline (its
   // whole point is to show the host's local — possibly unsynced — data), so it
-  // must not wait for an edge ack or force a server round-trip on reads.
-  const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
+  // must not wait for Core confirmation or force a server round-trip on reads.
+  const mutationDurabilityTier = runtime === "standalone" ? "global" : "local";
   // Overlay Db construction receives an authenticated Inspector worker port.
   // Jazz Tools turns that handoff into its private local-read query source,
   // so this UI never imports or manufactures a privileged option itself.

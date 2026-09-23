@@ -1350,21 +1350,11 @@ where
                 &table.name,
                 PhysicalCurrentClass::Ahead,
             )?;
-            let ahead_content = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead_content, content_fields.clone())
-            } else {
-                ahead_content.project(content_fields.clone())
-            };
+            let ahead_content = ahead_content.project(content_fields.clone());
             let ahead_deletion =
                 GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-            let ahead_deletion = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(
-                    ahead_deletion,
-                    register_storage_field_names(),
-                )
-            } else {
-                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""))
-            };
+            let ahead_deletion =
+                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""));
             (
                 GraphBuilder::arg_max_by(
                     GraphBuilder::union([global_content, ahead_content]),

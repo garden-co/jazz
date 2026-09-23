@@ -41,7 +41,7 @@ describe("DirectConnectionManager explicit offline state", () => {
   it("never mistakes connecting, timeout, or slowness for explicit offline", async () => {
     const manager = new DirectConnectionManager(host);
     expect(manager.isExplicitlyOffline()).toBe(false);
-    await expect(manager.ensureReady("edge")).resolves.toBeUndefined();
+    await expect(manager.ensureReady("global")).resolves.toBeUndefined();
     await expect(manager.waitForReconnect()).resolves.toBeUndefined();
   });
 
@@ -52,7 +52,7 @@ describe("DirectConnectionManager explicit offline state", () => {
     await expect(manager.ensureReady("local")).resolves.toBeUndefined();
 
     let remoteSettled = false;
-    void manager.ensureReady("edge").then(() => (remoteSettled = true));
+    void manager.ensureReady("global").then(() => (remoteSettled = true));
     await nextTick();
     expect(remoteSettled).toBe(false);
     await manager.reconnect();

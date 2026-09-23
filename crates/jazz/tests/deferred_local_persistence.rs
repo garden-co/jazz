@@ -672,13 +672,13 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     let reentrant_db = Rc::clone(&db);
     db.wait_for_transaction_with(second_tx, DurabilityTier::Local, move |result| {
         local_wait_results.borrow_mut().push(result);
-        reentrant_db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
+        reentrant_db.wait_for_transaction_with(second_tx, DurabilityTier::Global, move |result| {
             reentrant_wait_results.borrow_mut().push(result)
         });
     });
     let edge_waits = Rc::new(RefCell::new(Vec::new()));
     let edge_wait_results = Rc::clone(&edge_waits);
-    db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(second_tx, DurabilityTier::Global, move |result| {
         edge_wait_results.borrow_mut().push(result);
     });
 

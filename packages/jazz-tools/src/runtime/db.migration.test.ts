@@ -112,7 +112,7 @@ describe("schema migrations", () => {
   it("a new-schema client can read rows written by an old-schema client", async () => {
     const created = await oldDb
       .insert(oldApp.todos, { title: "written through old schema", done: false })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const newRows = await waitForRows(
       newDb,
@@ -137,7 +137,7 @@ describe("schema migrations", () => {
         done: true,
         tags: ["migration"],
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const oldRows = await waitForRows(
       oldDb,
@@ -199,14 +199,14 @@ it("publishes UUID reference identity lenses and relates rows written before pub
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const record = await oldDb
       .insert(beforeApp.records, {
         ownerId: owner.id,
         memberIds: [owner.id, owner.id],
         reviewerId: null,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const migration = s.defineMigration({ from: before, to: after });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
     await deploy({
@@ -303,7 +303,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     oldDb = await createDb(await localAccountConfig(appId, server.url));
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const existing = await oldDb
       .insert(beforeApp.records, {
         ownerId: owner.id,
@@ -311,7 +311,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
         enabled: true,
         tags: ["retained"],
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const fromHash = deployed.schema.hash;
     const { hash: toHash } = await pushSchema({ ...catalogue, schema: afterApp });
     expect(toHash).not.toBe(fromHash);
@@ -380,10 +380,10 @@ it("publishes generated default-bearing relation migrations and preserves them a
         owner: { id: owner.id, name: "Existing owner" },
       },
     ]);
-    const defaultOwner = await newDb.insert(afterApp.users, {}).wait({ tier: "edge" });
+    const defaultOwner = await newDb.insert(afterApp.users, {}).wait({ tier: "global" });
     const created = await newDb
       .insert(afterApp.records, { ownerId: defaultOwner.id })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const defaultRows = await waitForRows(
       newDb,
       afterApp.records.where({ id: created.id }).include({ owner: true }),

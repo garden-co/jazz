@@ -18,7 +18,7 @@ The target is one coherent product surface:
 - browser apps call a TypeScript API backed by WASM;
 - Node apps call the same TypeScript API backed by NAPI when available;
 - servers run a small operational shell around `Node`, not a wider client `Db`;
-- edge and core deployments are topology choices, not separate products;
+- Core is the only server authority; browser/native local persistence relays remain clients;
 - branch views, lenses, subscriptions, and storage expose stable facades instead of
   leaking reference-implementation internals.
 
@@ -43,7 +43,7 @@ WASM or NAPI against a server shell without semantic forks.**
 
 **Implementation status.** The NAPI/server vertical slice is covered by
 `opens, mutates one row, and queries it through the native runtime payload shape`,
-`propagates an edge-tier query over the native runtime/server boundary and returns remote row adds`,
+`propagates a global-tier query over the native runtime/server boundary and returns remote row adds`,
 and `server_command_loads_published_schema_and_persists_ws_data_across_restart`.
 The capability matrix and the complete product-facing lens/branch-view facades remain
 roadmap work.
@@ -58,8 +58,8 @@ roadmap work.
   inputs, define sessioned simulation/admission over `WireSession`, and publish
   canonical ABI/wire fixtures consumable by Rust and TypeScript before treating
   the integration contract as frozen.
-- **Server shell and deployment roles** — ch. 9 owns the role ladder, server
-  shell responsibilities, topology conformance, edge/cache behavior, and
+- **Server shell and deployment roles** — ch. 9 owns server
+  shell responsibilities, topology conformance, local relay behavior, and
   deployability knobs.
 - **Authorization/session identity** — ch. 7 owns account/user/session/system
   terminology, admission hooks, claims, backend attribution, and fail-closed
@@ -107,14 +107,14 @@ surface.
 
 ### 17.3 P1 — harden deployability
 
-Milestone: **a browser client, Node client, edge node, and core node can run the
+Milestone: **a browser client, Node client, local relay, and Core can run the
 same conformance scenarios with topology-specific configuration only.**
 
-- **Edge topology.** Implement deployment profiles for client, relay, edge, and
-  core roles. Role flags decide fate authority, durability guarantees, caching,
-  and eviction; protocol behavior stays shared.
+- **Direct-Core topology.** Exercise clients connected directly to Core and
+  through their local persistence relays. Only Core assigns authoritative fates;
+  the protocol and transaction machinery stay shared.
 - **Conformance matrix.** Add black-box tests that run the same API scenarios
-  against Rust-only, WASM, NAPI, browser-worker, local server, and edge/core
+  against Rust-only, WASM, NAPI, browser-worker, local Core server, and local-relay
   layouts. Cover mergeable/exclusive transactions, RLS,
   subscription deltas, branch views, and lenses.
 - **Operational surface.** Standardize config, logging, metrics, health checks,
@@ -123,8 +123,8 @@ same conformance scenarios with topology-specific configuration only.**
 - **Server shell shape.** Define the smallest deployable wrapper around `Node`:
   typed config loading, storage opening/migration reporting, auth/session
   admission, WebSocket or transport listeners, health and metrics endpoints, and
-  coordinated drain/shutdown. The shell may choose core, edge, or relay role
-  configuration, but transaction, query, subscription, and sync semantics remain
+  coordinated drain/shutdown. The server shell hosts Core; local relay ownership stays in the client
+  bindings. Transaction, query, subscription, and sync semantics remain
   in their owning specs and are not re-exposed as server-only `Db` methods.
 - **Failure behavior.** Specify reconnect, resume, backpressure, local queue
   limits, storage corruption reporting, auth expiry, and unsupported feature
@@ -139,11 +139,11 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 - **Framework adapters.** Provide thin React and server-framework adapters over
   the TypeScript API, without adding alternate semantics.
 - **Hosted/serverless profile.** Document constraints for ephemeral compute,
-  edge caches, durable core storage, and background compaction.
+  client caches, durable Core storage, and background compaction.
 - **Migration playbooks.** Provide guides for schema lenses, branch-view-based
   previews, storage backend swaps, and protocol upgrades.
 - **Observability recipes.** Ship dashboards or examples for sync health,
-  subscription full-recompute budget, edge cache hit rate, and storage latency.
+  subscription full-recompute budget, local cache hit rate, and storage latency.
 - **Compatibility gates.** Require release checks that compare API capabilities,
   protocol fixtures, storage contract fixtures, and conformance scenarios.
 
@@ -174,8 +174,8 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    TypeScript events and measure every full-diff full recompute.
 6. **Lens/branch-view slice** — expose branch-view and lens facades across Rust,
    TypeScript, WASM, and NAPI with conformance tests.
-7. **Topology slice** — run the same scenario suite across client, relay, edge,
-   and core roles using the shared wire protocol.
+7. **Topology slice** — run the same scenario suite across clients, local relays,
+   and Core using the shared wire protocol.
 8. **Release slice** — package artifacts, version compatibility checks, docs,
    and operational diagnostics for integrators.
 

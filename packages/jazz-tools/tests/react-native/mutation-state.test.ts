@@ -88,7 +88,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
         );
         expect(await db.all(app.documents)).toEqual([]);
         const waited = db.insert(app.documents, { title: "waited rejection" });
-        await expect(waited.wait({ tier: "edge" })).rejects.toMatchObject({
+        await expect(waited.wait({ tier: "global" })).rejects.toMatchObject({
           name: "PersistedWriteRejectedError",
           code: "permission_denied",
         });
@@ -180,7 +180,7 @@ it.each(["finish", "abort"] as const)(
         // Real edge waiters remain pending because this fixture has no authority.
         // Stop at the host's reported bound rather than inventing pending handles.
         for (let attempt = 0; attempt < 128; attempt++) {
-          const response = execute({ type: "waitForTransaction", txId, tier: "edge" });
+          const response = execute({ type: "waitForTransaction", txId, tier: "global" });
           if (response.type === "operationError") {
             expect(response.reason).toContain("capacity");
             saturated = true;

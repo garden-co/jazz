@@ -13,10 +13,10 @@ use jazz::ids::{
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
     MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
-    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, RelationCmpOp,
@@ -318,51 +318,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .clone();
 
     let mut messages: Vec<_> = vec![
-        (
-            "authority_publication_two_complete_transactions",
-            "AuthorityPublication",
-            SyncMessage::AuthorityPublication(jazz::protocol::AuthorityPublication {
-                tx_id,
-                commits: (0..2)
-                    .map(|index| {
-                        let schema = compiled_todos_schema(&["title"]);
-                        jazz::protocol::AuthorityCommitUnit {
-                            tx: Transaction {
-                                tx_id: TxId::new(TxTime(12 + index), node),
-                                kind: TxKind::Mergeable,
-                                n_total_writes: 1,
-                                made_by: author,
-                                permission_subject: None,
-                                base_snapshot: None,
-                                row_read_set: None,
-                                absent_read_set: None,
-                                predicate_read_set: None,
-                                user_metadata_json: None,
-                                contribution_merge: None,
-                            },
-                            versions: vec![
-                                VersionRecord::from_cells(
-                                    &schema.tables()[0],
-                                    schema_version,
-                                    row,
-                                    if index == 0 { Vec::new() } else { vec![tx_id] },
-                                    author,
-                                    12,
-                                    author,
-                                    12 + index,
-                                    &BTreeMap::from([(
-                                        "title".to_owned(),
-                                        format!("publication-{index}"),
-                                    )]),
-                                    None,
-                                )
-                                .expect("publication fixture row encodes"),
-                            ],
-                        }
-                    })
-                    .collect(),
-            }),
-        ),
         (
             "chunk_upload_start_root_descriptor",
             "ChunkUploadStart",
@@ -722,14 +677,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     messages
 }
 
-fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
-    (
-        groove::Intern::new("todos".to_owned()),
-        RowUuid::from_bytes([0x77; 16]),
-        tx_id,
-    )
-}
-
 fn mixed_version_carriers(
     schema_version: SchemaVersionId,
     author: AuthorSubject,
@@ -858,18 +805,6 @@ fn hello_fixture_manifest() -> HelloManifest {
             Some(u64::MAX),
         ),
         (
-            "edge_without_authority",
-            WirePeerRole::Edge,
-            FEATURE_MESSAGE_FRAGMENTATION,
-            None,
-        ),
-        (
-            "edge_with_authority",
-            WirePeerRole::Edge,
-            FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
-            Some(300),
-        ),
-        (
             "relay_without_authority",
             WirePeerRole::Relay,
             FEATURE_AUTHORIZATION_SCOPE_VIEWS,
@@ -900,7 +835,6 @@ fn hello_fixture_manifest() -> HelloManifest {
                 role: match role {
                     WirePeerRole::Client => 0,
                     WirePeerRole::Core => 1,
-                    WirePeerRole::Edge => 2,
                     WirePeerRole::Relay => 3,
                 },
                 authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
@@ -981,6 +915,24 @@ fn wire_hello_frame_fixtures_decode_exactly() {
         suffixed.push(0);
         assert!(jazz::wire::decode_frame(&suffixed).is_err());
     }
+}
+
+/// A complete legacy publication must fail decoding before any trust-specific
+/// admission path can see it. Pin the real old bytes, not only truncated tags.
+#[test]
+fn retired_edge_publication_rejects_at_every_decoder_boundary() {
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../fixtures/retired_edge_publication.json")).unwrap();
+    let bytes = parse_hex(&fixture.frame_hex);
+    let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes).unwrap() else {
+        panic!("legacy fixture is a complete message frame");
+    };
+    assert_eq!(envelope.payload[0], 30);
+    for payload in [&[30][..], &[30, 0][..], envelope.payload.as_slice()] {
+        assert!(decode_sync_message(payload).is_err());
+        assert!(jazz::wire::decode_sync_message_trusted(payload).is_err());
+    }
+    assert!(jazz::wire::validate_frame_for_artifact_corpus(&bytes, u64::MAX).is_err());
 }
 
 /// Retired tags must fail even at the trusted codec boundary; the other

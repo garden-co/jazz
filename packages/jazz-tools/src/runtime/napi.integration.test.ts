@@ -318,7 +318,7 @@ async function waitForQueryRows<T>(
   query: QueryBuilder<T>,
   predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
-  queryOptions: { tier?: "local" | "edge" | "global" } = { tier: "edge" },
+  queryOptions: { tier?: "local" | "global" } = { tier: "global" },
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -812,7 +812,7 @@ describe("NAPI integration", () => {
             description: "created via asBackend",
             owner_id: "00000000-0000-4000-8000-000000000003",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "backend insert timed out",
       );
@@ -825,7 +825,7 @@ describe("NAPI integration", () => {
             description: "created via forSession",
             owner_id: aliceAuthor.account,
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "session insert timed out",
       );
@@ -835,7 +835,7 @@ describe("NAPI integration", () => {
           const backendRow = await withTimeout(
             backendDb.one(
               makePolicyTodoProvenanceByIdQuery(todoServerSchema, backendCreatedTodo.id),
-              { tier: "edge" },
+              { tier: "global" },
             ),
             10_000,
             "backend provenance read timed out",
@@ -846,7 +846,7 @@ describe("NAPI integration", () => {
           });
           const sessionRow = await withTimeout(
             backendDb.one(makePolicyTodoProvenanceByIdQuery(todoServerSchema, createdTodo.id), {
-              tier: "edge",
+              tier: "global",
             }),
             10_000,
             "session provenance read timed out",
@@ -861,7 +861,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "global",
               }),
               10_000,
               "backend session read timed out",
@@ -884,11 +884,11 @@ describe("NAPI integration", () => {
             description: "",
             owner_id: "00000000-0000-4000-8000-000000000002",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
       await withTimeout(
-        aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "edge" }),
+        aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "global" }),
         10_000,
         "session update timed out",
       );
@@ -898,7 +898,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "global",
               }),
               10_000,
               "backend session update read timed out",
@@ -912,7 +912,7 @@ describe("NAPI integration", () => {
       );
 
       await withTimeout(
-        aliceDb.delete(policyTodosTable, createdTodo.id).wait({ tier: "edge" }),
+        aliceDb.delete(policyTodosTable, createdTodo.id).wait({ tier: "global" }),
         10_000,
         "session delete timed out",
       );
@@ -922,7 +922,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "global",
               }),
               10_000,
               "backend session delete read timed out",
@@ -1743,7 +1743,7 @@ describe("NAPI integration", () => {
           description: "server-original",
           owner_id: aliceAuthor.account,
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
 
       const nullUpdate = aliceDb.update(policyTodosTable, createdTodo.id, {
         description: null,
@@ -1828,7 +1828,7 @@ describe("NAPI integration", () => {
 
       const createdRow = await writer
         .insert(simpleTodosTable, { title: "napi-shared-item", done: false })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       const rowId = createdRow.id;
 
       const rowsAfterCreate = await waitForQueryRows(reader, allTodosQuery, (rows) =>
@@ -1841,7 +1841,7 @@ describe("NAPI integration", () => {
         done: false,
       });
 
-      await writer.update(simpleTodosTable, rowId, { done: true }).wait({ tier: "edge" });
+      await writer.update(simpleTodosTable, rowId, { done: true }).wait({ tier: "global" });
 
       const rowsAfterUpdate = await waitForQueryRows(reader, allTodosQuery, (rows) => {
         const row = rows.find((entry) => entry.id === rowId);
@@ -1850,7 +1850,7 @@ describe("NAPI integration", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.done).toBe(true);
 
-      await writer.delete(simpleTodosTable, rowId).wait({ tier: "edge" });
+      await writer.delete(simpleTodosTable, rowId).wait({ tier: "global" });
       await settleAsyncSyncWork();
       await waitForQueryRows(
         writer,
