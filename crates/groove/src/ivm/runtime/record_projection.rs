@@ -1465,14 +1465,14 @@ pub(super) fn schema_index_input_fields(
         .primary_key
         .as_ref()
         .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
-    let catalogue = table.record_schema();
     let mut fields = Vec::new();
     for field in index
         .columns
         .iter()
         .chain(primary_key.columns.iter().map(|column| &column.column))
     {
-        if catalogue.field_index(field).is_none() {
+        // The catalogue descriptor has exactly one field per column name.
+        if !table.columns.iter().any(|column| column.name == *field) {
             return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
         }
         if !fields.contains(field) {

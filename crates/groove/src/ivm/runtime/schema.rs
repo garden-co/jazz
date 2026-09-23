@@ -244,6 +244,12 @@ impl IvmRuntime {
         }
         self.table_storage_descriptors
             .insert(table.to_owned(), table_schema.record_schema());
+        if !table_schema.has_variants() {
+            // Registry evolution changes column types; the plain-table
+            // descriptor must follow, as registration keeps it.
+            self.table_descriptors
+                .insert(table.to_owned(), table_schema.record_schema());
+        }
         let mut descriptors = HashMap::default();
         for variant in &table_schema.variants {
             let descriptor = table_schema

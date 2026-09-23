@@ -4129,7 +4129,14 @@ impl IvmRuntime {
                 if table_schema.has_variants() {
                     return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
                 }
-                Ok(table_schema.record_schema())
+                // The runtime keeps this descriptor current with the schema
+                // (registration and registry evolution); building and
+                // interning it again for every inference is pure overhead.
+                Ok(self
+                    .table_descriptors
+                    .get(table)
+                    .copied()
+                    .unwrap_or_else(|| table_schema.record_schema()))
             }
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::InputSource { output, .. } => Ok(*output),
