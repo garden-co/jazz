@@ -6,6 +6,8 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
+import { createBrowserCrypto } from "./browser.js";
+import { spaceContext, spaceRootBytes, spaceGrantBytes } from "./space-format.js";
 
 it("initialises a scoped space explicitly and delivers its key to approved devices", async () => {
   const app = s.defineApp({
@@ -51,7 +53,9 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
       },
     });
     const account = await localAccountConfig(server.appId, server.url);
-    const creator = await createDb({ ...account, e2ee: { app, store: store() } });
+    const creatorStore = store();
+    const crypto = await createBrowserCrypto();
+    const creator = await createDb({ ...account, e2ee: { app, store: creatorStore, crypto } });
     clients.push(creator);
     await creator.e2ee.devices.list();
     const project = await creator
@@ -75,8 +79,83 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
     expect(await creator.all(app.projects, { tier: "edge" })).toMatchObject([
       { id: project.id, title: "Scoped data" },
     ]);
+
+    // A root ID must name its exact scope/row pair, even when all other records agree.
+    const other = await creator
+      .insert(app.projects, { title: "Noncanonical root" })
+      .wait({ tier: "global" });
+    const accepted = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "global",
+    });
+    const device = JSON.parse((await creatorStore.read())!).devices[0];
+    const key = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    const signingKey = Uint8Array.from(device.signingPrivateKey);
+    try {
+      const root = {
+        id: "11111111-1111-8111-8111-111111111111",
+        scopeId: accepted!.scopeId,
+        identifier: other.id,
+        accountId: account.account.id,
+        deviceId: accepted!.deviceId,
+        accountEpochId: accepted!.accountEpochId,
+        epochId: globalThis.crypto.randomUUID(),
+        initialGrantId: globalThis.crypto.randomUUID(),
+        mechanism: crypto.keyEnvelope.mechanism.id,
+        version: crypto.keyEnvelope.mechanism.version,
+      };
+      const complete = {
+        ...root,
+        verification: await crypto.keyEnvelope.wrap(
+          key,
+          spaceContext(device.scope, root, "verification"),
+          new Uint8Array(32),
+        ),
+        authorEnvelope: await crypto.keyEnvelope.seal(
+          Uint8Array.from(device.publicKey),
+          spaceContext(device.scope, root, "author", root.deviceId),
+          key,
+        ),
+      };
+      const grant = {
+        id: root.initialGrantId,
+        spaceId: root.id,
+        epochId: root.epochId,
+        authorAccountId: root.accountId,
+        authorDeviceId: root.deviceId,
+        authorEpochId: root.accountEpochId,
+        operation: "add",
+        recipientKind: "account",
+        recipientId: root.accountId,
+        recipientEpochId: root.accountEpochId,
+      };
+      const rootSignature = await crypto.deviceSigner.sign(
+        signingKey,
+        spaceRootBytes(device.scope, complete),
+      );
+      const grantSignature = await crypto.deviceSigner.sign(
+        signingKey,
+        spaceGrantBytes(device.scope, root, grant),
+      );
+      const tx = creator.beginTransaction();
+      const { id, ...values } = complete;
+      tx.insert(app.__e2ee_spaces, { ...values, signature: rootSignature }, { id });
+      const { id: grantId, ...grantValues } = grant;
+      tx.insert(
+        app.__e2ee_space_grants,
+        { ...grantValues, signature: grantSignature },
+        { id: grantId },
+      );
+      await tx.commit().wait({ tier: "global" });
+      await expect(
+        creator.e2ee.explain({ scope: app.projects, identifier: other.id }),
+      ).rejects.toThrow();
+      expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
+    } finally {
+      key.fill(0);
+      signingKey.fill(0);
+    }
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 90_000);
