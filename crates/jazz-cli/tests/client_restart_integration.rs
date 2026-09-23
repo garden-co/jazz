@@ -337,7 +337,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!("timed out waiting for GlobalServer query readiness");
 }
 
 #[tokio::test]
@@ -403,7 +403,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create before restart");
@@ -450,7 +450,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create after restart");

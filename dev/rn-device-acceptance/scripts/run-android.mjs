@@ -1,7 +1,7 @@
 import payloadResolver from "../../../crates/jazz-rn/scripts/resolve-payload.cjs";
 import { verifyAndroidReleaseNetworkPolicy } from "./android-network-policy.mjs";
 import { startCoreObservationControl } from "./core-observation-control.mjs";
-import { startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
+import { startLocalServerSessionHarness } from "./server-session-harness.mjs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
@@ -49,7 +49,7 @@ const adbState = androidAdb(["get-state"]).trim();
 if (adbState !== "device")
   throw new Error(`Android emulator is not ready (adb state: ${adbState || "empty"})`);
 const deviceIdentifier = androidAdb(["shell", "getprop", "ro.build.fingerprint"]).trim();
-const localSession = await startLocalEdgeSessionHarness({
+const localSession = await startLocalServerSessionHarness({
   device: `serial=${serial ?? "default"}, adb-state=${adbState}, fingerprint=${deviceIdentifier}`,
   runNonce,
   host: "10.0.2.2",

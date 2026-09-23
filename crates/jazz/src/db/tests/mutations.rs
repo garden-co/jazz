@@ -1878,7 +1878,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1893,7 +1893,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -1931,7 +1931,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1946,7 +1946,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -1980,7 +1980,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
     client.wait_for_write_with(
         &write,
         WriteWaitOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             observe_only: true,
         },
         move |outcome| *observer.borrow_mut() = Some(outcome),
@@ -1990,7 +1990,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2374,12 +2374,12 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
 
     let target_outcome = Rc::new(RefCell::new(None));
     let target_callback = Rc::clone(&target_outcome);
-    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Global, move |outcome| {
         *target_callback.borrow_mut() = Some(outcome);
     });
     let alias_outcome = Rc::new(RefCell::new(None));
     let alias_callback = Rc::clone(&alias_outcome);
-    client.wait_for_write_with(&alias, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_write_with(&alias, DurabilityTier::Global, move |outcome| {
         *alias_callback.borrow_mut() = Some(outcome);
     });
     authority_transport
@@ -2387,7 +2387,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
             tx_id: target_tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches client");
     client.tick().expect("fate settles both active observers");
@@ -2454,7 +2454,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     let callback_result = Rc::clone(&wait_result);
     client.wait_for_transaction_with(
         write.mergeable_tx_id(),
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         move |result| *callback_result.borrow_mut() = Some(result),
     );
     authority_transport
@@ -2462,7 +2462,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
 
@@ -2511,13 +2511,13 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
 
     let error =
-        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Edge))
+        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global))
             .unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(error.message.contains("AuthorizationDenied"));
@@ -2576,7 +2576,7 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2663,7 +2663,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches durable client");
     client
@@ -2672,7 +2672,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
 
     let drained_outcome = Rc::new(RefCell::new(None));
     let callback_outcome = Rc::clone(&drained_outcome);
-    client.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
         *callback_outcome.borrow_mut() = Some(outcome);
     });
     drop(write);
@@ -2805,7 +2805,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 }
 
 #[test]
-fn session_upload_strips_forged_system_permission_before_storage_and_publication() {
+fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     let schema = schema();
     let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let edge_node = NodeUuid::from_bytes([0xe2; 16]);
@@ -2820,14 +2820,12 @@ fn session_upload_strips_forged_system_permission_before_storage_and_publication
         2,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            session_author,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
+    let _subscriber = edge.server.accept_subscriber_with_claims_and_trust(
+        edge_transport,
+        session_author,
+        BTreeMap::new(),
+        CommitUnitTrust::Session,
+    );
 
     let write = client
         .insert(
@@ -2867,31 +2865,10 @@ fn session_upload_strips_forged_system_permission_before_storage_and_publication
         "storage drops untrusted SYSTEM"
     );
 
-    crate::db::block_on(edge.node().borrow_mut().apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    ))
-    .unwrap();
     assert!(matches!(
         crate::db::block_on(edge.node().borrow_mut().transaction_state(tx_id)),
-        Some((Fate::Accepted, None, DurabilityTier::Edge))
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
-    let publication = edge
-        .node()
-        .borrow_mut()
-        .edge_authority_publication_for(tx_id)
-        .unwrap();
-    let published = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id == tx_id)
-        .expect("publication contains its anchor transaction");
-    assert_eq!(
-        published.tx.permission_subject, None,
-        "publication cannot re-emit a session-forged capability"
-    );
 }
 
 #[test]
@@ -4116,7 +4093,7 @@ fn local_persistence_wakes_existing_transaction_waits() {
             observe_only: true,
         }
     ));
-    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Edge));
+    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     assert!(local.as_mut().poll(&mut context).is_pending());
     assert!(observer.as_mut().poll(&mut context).is_pending());

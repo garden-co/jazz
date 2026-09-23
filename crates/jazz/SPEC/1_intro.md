@@ -13,8 +13,6 @@ contract.
 
 Invariant digest:
 
-- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
-- `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
 - `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
 
@@ -52,7 +50,7 @@ decisions. Guidance appendices are entirely non-normative.
 | 6   | Queries                                                                               | shapes, bindings, content-addressing, matched include paths, query-driven sync |
 | 7   | Authorization (RLS)                                                                   | policies as shapes; read/write; claim-binding                                  |
 | 8   | Sync protocol                                                                         | the peer layer: view updates, commit units, fates, subscriptions               |
-| 9   | Topology & the edge tier                                                              | client/relay/edge/core trust ladder; edge authority & cache                    |
+| 9   | Core, clients, and local relays                                                       | Core authority; client state and non-authoritative local persistence           |
 | 10  | Schema evolution: lenses & migrations                                                 | multi-schema coexistence                                                       |
 | 11  | Partitioned history, overlay views & time travel                                      | schema branch columns; live/frozen bases; contribution merges                  |
 | 13  | The high-level `Db` API                                                               | the runtime-typed surface, subscriptions, sync/serve, identity/auth            |
@@ -84,11 +82,11 @@ mechanism is specified. They are normative intent, not mechanism.
    Schemas become groove schemas, mutations become groove batches, queries and
    sync views become groove subscriptions, and RLS policies become groove
    prepared shapes (ch. 14).
-2. **One sync protocol; tiers are roles, not code.** Distribution is expressed
-   through roles in a single protocol. Every hop (UI ↔ worker, worker ↔ edge,
-   edge ↔ core) speaks that protocol; tiers differ only in role flags (fate
-   authority, durability guarantee, eviction). Inserting a tier is a deployment
-   change, not a protocol change (ch. 8–9).
+2. **One sync protocol; one authority.** Clients connect to Core, optionally
+   through a browser or native local persistence relay. UI ↔ local worker and
+   client ↔ Core use the same protocol. Core alone authorizes reads and writes
+   and assigns final transaction fates. A local relay owns persistence and
+   transport, not an intermediate authorization or durability tier (ch. 8–9).
 3. **Transactions are atomic upstream units.** A transaction is assembled locally
    in an `open` state and syncs upstream _only at commit_, as one idempotent
    `CommitUnit`; the core holds no open-transaction state (ch. 3). Downstream
@@ -150,13 +148,12 @@ up front are listed here; the full set is in appendix E:
   column-LWW vs serializable compare-and-set (ch. 3).
 - **fate** — an upstream authority's verdict on a transaction: `Pending` /
   `Accepted` / `Rejected` (ch. 3).
-- **durability tier** — how far a write has settled: `None` / `Local` / `Edge`
-  / `Global` (ch. 3).
+- **durability tier** — how far a write has settled: `None` / `Local` / `Global` (ch. 3).
 - **shape / binding** — a content-addressed query graph and a concrete
   parameter assignment against it; the unit of query-driven sync (ch. 6).
 - **policy** — an RLS read/write rule expressed as a shape, claim-bound to an
   identity (ch. 7).
-- **node roles** — client / relay / edge / core, the trust ladder (ch. 9).
+- **node roles** — client / local relay / Core, the authority boundary (ch. 9).
 
 ## Open Questions
 

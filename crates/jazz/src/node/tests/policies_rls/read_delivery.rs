@@ -169,7 +169,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         BTreeSet::from([public_message])
     );
     assert_eq!(
-        core.query_rows(&public_shape, &public_binding, DurabilityTier::Edge)
+        core.query_rows(&public_shape, &public_binding, DurabilityTier::Global)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -190,7 +190,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         BTreeSet::from([public_message, private_message])
     );
     assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, member)
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -463,7 +463,7 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
 }
 
 #[test]
-fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
+fn core_read_policy_joins_require_confirmed_dependency_rows() {
     let member = user(0xa1);
     let other = user(0xb2);
     let bob = user(0xc3);
@@ -530,6 +530,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             )]),
         );
     }
+    let mut pending = Vec::new();
     for commit in [
         MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("public".to_owned())),
@@ -576,8 +577,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
-        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
-            .unwrap();
+        pending.push(tx_id);
     }
 
     let shape = Query::from("messages")
@@ -588,10 +588,13 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()
             .is_empty(),
-        "global policy reads must not be authorized by edge-only dependency rows",
+        "Core reads must not be authorized by pending local dependency rows",
     );
+    for tx_id in pending {
+        core.accept_global_for_test(tx_id).unwrap();
+    }
     assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, member)
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -599,7 +602,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         BTreeSet::from([public_message, private_message, bob_private_message])
     );
     assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, other)
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, other)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -607,14 +610,14 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         BTreeSet::from([public_message])
     );
 
-    let mut other_peer = PeerState::edge_client(other);
+    let mut other_peer = PeerState::client_link(other);
     let update = other_peer
         .rehydrate_query_with_opts(
             &mut core,
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -622,14 +625,14 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
     assert_view_update_only_references_rows(&update, BTreeSet::from([public_chat, public_message]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat, public_message]));
 
-    let mut member_peer = PeerState::edge_client(member);
+    let mut member_peer = PeerState::client_link(member);
     let update = member_peer
         .rehydrate_query_with_opts(
             &mut core,
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -692,7 +695,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
-        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        core.accept_global_for_test(tx_id)
             .unwrap();
     }
     let seed_tx = core
@@ -707,7 +710,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(seed_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    core.accept_global_for_test(seed_tx)
         .unwrap();
 
     let shape = Query::from("messages")
@@ -719,7 +722,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .bind(BTreeMap::from([("chatId".to_owned(), Value::Uuid(chat.0))]))
         .unwrap();
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
@@ -727,7 +730,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
     };
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
     let initial = bob_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
@@ -744,16 +747,11 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        bob_membership_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(bob_membership_tx)
     .unwrap();
 
     assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, bob)
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, bob)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -812,7 +810,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
-        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        core.accept_global_for_test(tx_id)
             .unwrap();
     }
     let seed_tx = core
@@ -827,7 +825,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(seed_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    core.accept_global_for_test(seed_tx)
         .unwrap();
 
     let shape = Query::from("messages")
@@ -839,10 +837,10 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .bind(BTreeMap::from([("chatId".to_owned(), Value::Uuid(chat.0))]))
         .unwrap();
     let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+        tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
-    let mut alice_peer = PeerState::edge_client(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     let initial = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
@@ -874,12 +872,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        bob_membership_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(bob_membership_tx)
     .unwrap();
     let bob_message_tx = core
         .commit_mergeable_many_settled(vec![
@@ -893,12 +886,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(
-        bob_message_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(bob_message_tx)
     .unwrap();
 
     let rehydrated = alice_peer
@@ -962,7 +950,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
-        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        core.accept_global_for_test(tx_id)
             .unwrap();
     }
 
@@ -970,14 +958,14 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
     let update = bob_peer
         .rehydrate_query_with_opts(
             &mut core,
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -1181,14 +1169,14 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
         "an unbound relay must not acquire SYSTEM policy bypass to serve a query"
     );
 
-    let mut edge_owner = PeerState::edge_client(owner);
+    let mut edge_owner = PeerState::client_link(owner);
     assert_eq!(edge_owner.permission_subject(), Some(owner));
     assert_view_update_only_references_rows(
         &edge_owner.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),
     );
 
-    let mut edge_other = PeerState::edge_client(other);
+    let mut edge_other = PeerState::client_link(other);
     assert_eq!(edge_other.permission_subject(), Some(other));
     assert_view_update_only_references_rows(
         &edge_other.current_rows_update(&mut core, "todos").unwrap(),
@@ -1242,12 +1230,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(alice_user_id.clone())),
             ])),
     );
-    core.apply_fate_update(
-        alice_private_chat_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(alice_private_chat_tx)
     .unwrap();
     let public_chat_tx = commit_mergeable_global(
         &mut alice,
@@ -1260,12 +1243,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(alice_user_id.clone())),
             ])),
     );
-    core.apply_fate_update(
-        public_chat_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(public_chat_tx)
     .unwrap();
     let alice_private_message_tx = commit_mergeable_global(
         &mut alice,
@@ -1279,12 +1257,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(alice_id.test_uuid().to_string())),
             ])),
     );
-    core.apply_fate_update(
-        alice_private_message_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(alice_private_message_tx)
     .unwrap();
     let bob_message_tx = commit_mergeable_global(
         &mut alice,
@@ -1298,15 +1271,10 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(bob_user_id)),
             ])),
     );
-    core.apply_fate_update(
-        bob_message_tx,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    )
+    core.accept_global_for_test(bob_message_tx)
     .unwrap();
 
-    let mut bob = PeerState::edge_client(bob_id);
+    let mut bob = PeerState::client_link(bob_id);
     let chat_shape = Query::from("chats")
         .validate(&core.catalogue.schema)
         .unwrap();
@@ -1322,7 +1290,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
             &chat_shape,
             &chat_binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -1336,7 +1304,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
             &message_shape,
             &message_binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -1385,14 +1353,14 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
                 ])),
         )
         .unwrap();
-    core.apply_fate_update(chat_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    core.accept_global_for_test(chat_tx)
         .unwrap();
 
     let shape = Query::from("chats")
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
 
     let update = bob_peer
         .rehydrate_query_with_opts(
@@ -1400,7 +1368,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -1451,7 +1419,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
         .select(["title"])
         .validate(&schema)
         .unwrap();
-    let mut full_link = PeerState::edge_client(reader);
+    let mut full_link = PeerState::client_link(reader);
     let full_update = full_link
         .rehydrate_query(
             &mut core,
@@ -1459,7 +1427,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
             &full_shape.bind(BTreeMap::new()).unwrap(),
         )
         .unwrap();
-    let mut title_link = PeerState::edge_client(reader);
+    let mut title_link = PeerState::client_link(reader);
     let title_update = title_link
         .rehydrate_query(
             &mut core,
@@ -1542,7 +1510,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
                 ])),
         )
         .unwrap();
-    core.apply_fate_update(tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    core.accept_global_for_test(tx)
         .unwrap();
     core.set_test_provider_claims(
         reader,
@@ -1555,7 +1523,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, reader)
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
             .unwrap()
             .into_iter()
             .map(|row| row.row_uuid())
@@ -1563,14 +1531,14 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         BTreeSet::from([chat])
     );
 
-    let mut reader_peer = PeerState::edge_client(reader);
+    let mut reader_peer = PeerState::client_link(reader);
     let update = reader_peer
         .rehydrate_query_with_opts(
             &mut core,
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )
@@ -1609,14 +1577,14 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
                 ])),
         )
         .unwrap();
-    core.apply_fate_update(tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+    core.accept_global_for_test(tx)
         .unwrap();
 
     let shape = Query::from("chats")
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::edge_client(bob);
+    let mut bob_peer = PeerState::client_link(bob);
 
     let update = bob_peer
         .rehydrate_query_with_opts(
@@ -1624,7 +1592,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
             &shape,
             &binding,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 ..RegisterShapeOptions::default()
             },
         )

@@ -57,7 +57,7 @@ async fn wait_for_edge_ready(client: &JazzClient) {
     let _ = wait_for_todos(
         client,
         jazz::tools::ReadTier::Remote,
-        "EdgeServer query readiness",
+        "GlobalServer query readiness",
         |_| true,
     )
     .await;

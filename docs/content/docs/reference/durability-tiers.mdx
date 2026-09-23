@@ -47,9 +47,8 @@ remote scope on reconnect. Losing remote access does not erase cached data:
 local-first and offline fallback may still show it. An actual synced deletion,
 however, hides the row from local reads too.
 
-The older read values `"local"`, `"edge"`, and `"global"` remain accepted
-with their existing semantics during migration. They are legacy read controls only;
-write durability and `wait({ tier })` continue to use those values.
+The read aliases `"local"` and `"global"` remain accepted. Prefer the read choices
+above for queries; write durability uses `wait({ tier: "local" | "global" })`.
 
 These options apply to:
 
@@ -106,11 +105,8 @@ storage driver or a JavaScript-side SQLite path.
 
 For most queries and subscriptions, omitting a tier is the right choice: Jazz delivers results from local storage immediately and streams in remote updates as they arrive. Reserve explicit tiers for cases where eventual consistency is not acceptable.
 
-<Callout type="warn">
-  The read tier gates the **first** delivery of a subscription only. After the initial snapshot
-  arrives at the requested tier, subsequent updates are delivered as they reach the local node,
-  regardless of which tier they've propagated to. For example, a subscription with `tier: "global"`
-  guarantees a globally-consistent initial snapshot, but later incremental updates from other
-  clients may arrive through edge tiers before being globally available **even if the durability of
-  the write is set to 'global'**.
+<Callout type="info" title="Reads and write confirmation are different">
+  Strict remote subscriptions use Core-authorized state for later updates as well as their initial
+  result. Local-first subscriptions may display pending changes before Core accepts them. Waiting
+  for a write does not change the read choice of a separate subscription.
 </Callout>

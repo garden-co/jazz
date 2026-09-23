@@ -25,9 +25,9 @@ declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
 declare const __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: string;
 
-type PersistenceTier = "local" | "edge" | "core";
+type PersistenceTier = "local" | "core";
 
-function durabilityOptions(tier: PersistenceTier): { tier: "local" | "edge" | "global" } {
+function durabilityOptions(tier: PersistenceTier): { tier: "local" | "global" } {
   return { tier: tier === "core" ? "global" : tier };
 }
 
@@ -952,7 +952,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
     while (performance.now() < timeoutAt) {
       const rows = await onlineDb.all(
         query<CommentRow>("task_comments", [{ column: "task_id", op: "eq", value: targetTaskId }]),
-        "edge",
+        "global",
       );
       observed = rows.length;
       polls += 1;
@@ -964,7 +964,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
     }
     if (observed < target) {
       throw new Error(
-        `W3 timed out waiting for edge settlement (observed=${observed}, target=${target})`,
+        `W3 timed out waiting for Core settlement (observed=${observed}, target=${target})`,
       );
     }
     const reconnectMs = performance.now() - reconnectStart;

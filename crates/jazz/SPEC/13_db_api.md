@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-API-3`: `Db::read` and `Db::one` MUST be synchronous local reads and MUST NOT wait for upstream sync; `Db::all` MUST use `ReadOpts` to choose the effective durability tier.
 - `INV-API-4`: When `ReadOpts.local_updates == LocalUpdates::Immediate`, the effective read tier MUST be at least `DurabilityTier::Local`; when it is `Deferred`, the effective read tier MUST be exactly `ReadOpts.tier`.
 - `INV-API-5`: `ReadOpts::default()` MUST be `{ tier: DurabilityTier::Local, local_updates: LocalUpdates::Immediate, propagation: Propagation::Full }`.
-- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes and MUST publish their truthful node-local opening, including an empty opening, even when `Propagation::Full` concurrently requests upstream coverage; propagation does not raise the requested observation tier. Edge/global subscriptions apply the same query semantics over their accepted-state frontiers and MUST withhold an empty opening until it is authority-backed. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the edge/global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
+- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes and MUST publish their truthful node-local opening, including an empty opening, even when `Propagation::Full` concurrently requests upstream coverage; propagation does not raise the requested observation tier. Global subscriptions apply the same query semantics over the Core-confirmed frontier and MUST withhold an empty opening until it is authority-backed. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
 - `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
   events and MUST NOT queue facade-side full-result diffs as the normal live
   subscription mechanism.
@@ -43,11 +43,11 @@ Invariant digest:
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
-- `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
+- `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
-- `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and an authority-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted upstream fate authority; a featureless/unnegotiated link, local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
-- `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
+- `INV-API-34`: A client outbox MUST retain an upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and a Core-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted Core connection. Local persistence, hydrated state, staged/replayed updates, and receipts from detached or superseded connections MUST NOT release it.
+- `INV-SYNC-30`: A fresh `Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
 Identical active usages in one admitted authority scope MUST share one upstream
 wire subscription: equality includes the query, bound values, serving options,
@@ -74,7 +74,7 @@ browser client/worker boundary.
 
 A terminal server or protocol transport failure is not an authority fate. A
 durable browser worker MUST relay it only to currently initialized foreground
-peers so their active Edge/Global waits and remote subscriptions reject with
+peers so their active Global waits and remote subscriptions reject with
 that transport error; Local durability remains valid. The worker MUST NOT
 fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
 replay that transient foreground error to a peer attached later.
@@ -172,12 +172,11 @@ plain `fn main` without a hand-rolled executor.
 
 **The `Db` facade is the client-side application API only.** A `Db` has partial
 history, uploads its writes to an upstream, never self-finalizes, and has no fate
-authority. The server-side tiers — **core**, **edge**, and **relay** — are not
-`Db` roles. They are operated at the `Node` level: a core is a `Node` over a
-history-complete `NodeState` that self-finalizes via `finalize_*`; an edge is a
-`PeerRole::ClientLink` link; and a relay is a `PeerRole::Relay` link (ch. 9,
-appendix E). Keeping non-client topology at the `Node` layer preserves one
-vocabulary for sync roles while leaving the app facade small.
+authority. Core operates at the `Node` level over a history-complete
+`NodeState` and self-finalizes via `finalize_*`. A local persistence relay
+is a non-authoritative part of a client. `PeerRole::ClientLink` selects the
+subscriber's identity; `PeerRole::Relay` carries an admitted local relay
+connection. Neither creates a second server authority (ch. 9).
 
 The layering is: `NodeState` is the local engine; `Node` is the sync participant
 that owns a `NodeState`, all upstream and downstream connections, and the serving
@@ -219,21 +218,18 @@ include match semantics, not to broader traversed/failed-path payload material.
 
 Which `tier` to choose:
 
-| `ReadOpts.tier`   | use it for                                     | sees                                                                                                                                   |
-| ----------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `Local` (default) | optimistic UI, read-your-writes                | local currency, including your own pending committed writes                                                                            |
-| `Global`          | confirmed server-accepted state                | only globally-accepted versions                                                                                                        |
-| `Edge`            | edge-accepted state (between local and global) | versions an edge has finally judged (`Fate::Accepted` at `DurabilityTier::Edge`), excluding purely-local pending writes (ch. 5, ch. 9) |
+| `ReadOpts.tier`   | use it for                      | sees                                                        |
+| ----------------- | ------------------------------- | ----------------------------------------------------------- |
+| `Local` (default) | optimistic UI, read-your-writes | local currency, including your own pending committed writes |
+| `Global`          | confirmed server-accepted state | only globally-accepted versions                             |
 
-Freshness is expressed by the requested tier. A `Local` read includes the
-client's own optimistic writes immediately. A `Global` read shows accepted state
-only after that state has been observed locally through synchronization (§13.5);
-until then, the local view may be empty. Reads do not perform an implicit network
-wait.
+A `Local` read includes the client's optimistic writes immediately.
+An asynchronous `Global` read waits for fresh Core confirmation through the
+normal subscription path before returning. Cached data alone cannot satisfy
+that first-result gate. Synchronous local reads never perform a network wait.
 
 Repeated settled reads require a freshness proof, not merely a locally
-materialized result from an earlier request. Each newly initiated `Edge` or
-`Global` one-shot pins the shared live subscription and waits for a newer settled
+materialized result from an earlier request. Each newly initiated `Global` one-shot pins the shared live subscription and waits for a newer settled
 authority receipt following its refresh request. If no live pin remains, it opens
 a fresh wire subscription. A late update for a
 detached predecessor cannot satisfy the new read, even when its shape, binding,
@@ -244,9 +240,8 @@ coverage group (`INV-SYNC-30`, ch. 8 and ch. 16).
 `Db::subscribe(query, opts)` opens a live subscription at the requested effective
 tier. `Local` subscriptions are first-class application-facing subscriptions:
 they include the node's own pending committed writes and must be able to drive
-synchronous local UI state after a local write. `Edge` and `Global`
-subscriptions use the same query semantics, but their source/frontier and first
-settlement/completeness rules are constrained to edge- or global-accepted data.
+synchronous local UI state after a local write. `Global` subscriptions use the same query semantics, but their source/frontier and first
+settlement/completeness rules are constrained to Core-confirmed data.
 
 All live subscriptions use one maintained subscription mechanism, differing only
 in read frontier, source resolution, and settlement semantics. The facade must
@@ -473,15 +468,13 @@ using the same author is not this client's backlog. Replayed delivery is
 at-least-once by `TxId`; the authority's idempotent commit-unit handling makes
 that safe, while each individual connection still sends a `TxId` at most once.
 
-An edge-authority decision is likewise not permission to discard the edge's
-upstream outbox entry. The edge retains an edge-accepted upload until a terminal
-rejection, or an `Accepted` receipt that carries both Global durability and an
-authority-assigned `GlobalTime`, arrives for that `TxId` directly on the
-authenticated connection to the currently admitted upstream fate authority.
-A featureless/unnegotiated link has no such authority identity. Local
-acceptance, view hydration, staged or replayed updates, and receipts associated
-with a featureless, detached, or superseded authority cannot release the entry
-(`INV-API-34`, ch. 9).
+Local persistence is not permission to discard an upstream outbox entry.
+A pending upload remains until Core supplies terminal rejection or an Accepted
+receipt with both Global durability and its assigned `GlobalTime`. View
+hydration, locally replayed updates, and receipts from a detached or superseded
+connection do not release that obligation (`INV-API-34`). Legacy edge-only
+acceptance is treated as pending local work, subject to the identity checks
+above and chapter 9's migration rules.
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column accepts only syntactically valid
@@ -559,8 +552,8 @@ App consumers never operate this layer directly. A language or platform binding
 stages wire bytes into the transport and drives the tick. The connection state is
 owned by the `Db`: a client-to-upstream connection carries this `Db`'s
 subscriptions and queued commits upstream, while a server-to-subscriber
-connection wraps peer state for the subscriber identity. An edge uses both
-directions; relay/edge/core peer roles remain below the facade (ch. 9).
+connection wraps peer state for the subscriber identity. A local persistence
+relay can use both directions without becoming an authority (ch. 9).
 
 `Db::tick()` services every connection once (`INV-API-22`). For each connection,
 `PeerConnection::tick` sends each unannounced subscription once
@@ -785,7 +778,7 @@ surface on WASM and NAPI, while lower layers expose only the handle/byte ABI
 needed to implement it. Browser workers are proxy hosts for the same ABI, not a
 separate API. The server shell is operational infrastructure around `Node`
 roles, storage, auth admission, listeners, metrics, and shutdown; it must not
-widen the client `Db` product surface to model core/edge roles.
+widen the client `Db` product surface to model server roles.
 
 Current executable binding harnesses live under `examples/jazz-tools`
 and `examples/browser-wasm`. The Node harness proves the `WasmDb` method

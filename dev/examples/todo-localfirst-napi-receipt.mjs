@@ -111,22 +111,22 @@ try {
       description: "created through jazz-napi",
       owner_id: account.id,
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
 
   await waitFor(
-    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" }),
+    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "global" }),
     "backend read after insert",
   );
 
-  await db.update(app.todos, inserted.id, { done: true }).wait({ tier: "edge" });
+  await db.update(app.todos, inserted.id, { done: true }).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "global" });
     return row?.done === true ? row : null;
   }, "backend read after update");
 
-  await db.delete(app.todos, inserted.id).wait({ tier: "edge" });
+  await db.delete(app.todos, inserted.id).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "global" });
     return row === null ? true : null;
   }, "backend read after delete");
 

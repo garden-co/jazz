@@ -23,7 +23,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const userId = session?.user.account ?? null;
   const myProfile = useMyProfile();
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
-    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    () => ({ tier: db.getConfig().serverUrl ? "global" : "local" }),
     [db],
   );
 

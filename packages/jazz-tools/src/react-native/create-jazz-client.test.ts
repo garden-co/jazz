@@ -256,10 +256,10 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       title: "Native note",
     });
     await expect(inserted.txId).resolves.toBe("04".repeat(16));
-    await expect(client.db.all(app.notes, { tier: "edge" })).resolves.toMatchObject([
+    await expect(client.db.all(app.notes, { tier: "global" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
-    expect(readOptions).toContainEqual({ tier: "edge" });
+    expect(readOptions).toContainEqual({ tier: "global" });
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");

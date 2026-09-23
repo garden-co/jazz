@@ -417,6 +417,7 @@ async fn accept_loop(
                 let Ok((stream, _)) = accepted else {
                     break;
                 };
+                crate::tcp::disable_nagle(&stream);
                 tokio::task::spawn_local(handle_connection(
                     stream,
                     Arc::clone(&shell),

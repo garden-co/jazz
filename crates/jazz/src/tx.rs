@@ -501,15 +501,43 @@ pub enum RejectionReason {
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
+#[serde(from = "DurabilityEncoding", into = "DurabilityEncoding")]
 pub enum DurabilityTier {
     /// Not durable outside the local process.
     None,
     /// Stored locally.
     Local,
-    /// Stored at an edge tier.
-    Edge,
     /// Accepted and stored at the global authority.
     Global,
+}
+
+// Pin the established Postcard tags. Legacy Edge is accepted only while
+// decoding; new messages always encode Local as 1 and Global as 3.
+#[derive(serde::Deserialize, serde::Serialize)]
+enum DurabilityEncoding {
+    None,
+    Local,
+    Edge,
+    Global,
+}
+
+impl From<DurabilityEncoding> for DurabilityTier {
+    fn from(value: DurabilityEncoding) -> Self {
+        match value {
+            DurabilityEncoding::None => Self::None,
+            DurabilityEncoding::Local | DurabilityEncoding::Edge => Self::Local,
+            DurabilityEncoding::Global => Self::Global,
+        }
+    }
+}
+impl From<DurabilityTier> for DurabilityEncoding {
+    fn from(value: DurabilityTier) -> Self {
+        match value {
+            DurabilityTier::None => Self::None,
+            DurabilityTier::Local => Self::Local,
+            DurabilityTier::Global => Self::Global,
+        }
+    }
 }
 
 /// Stored history layer for a row version.

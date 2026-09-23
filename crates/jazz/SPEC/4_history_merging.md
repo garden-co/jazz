@@ -85,30 +85,18 @@ is a bounded currentness computation over the ahead set, not a history scan.
 ### 4.3 Merging concurrent heads
 
 Concurrent writes are reconciled by adding a version that records the frontier it
-merged. When an **upstream** node (edge or core — never a client) observes two or
+merged. When **Core** observes two or
 more concurrent mergeable content heads for a row, it creates one accepted
 mergeable **merge version** whose `parents` are those heads sorted, unless a
 content version with the same sorted parent set already exists (`INV-HIST-5`).
 The merge version dominates all of its parent heads and becomes the current
 content winner when present and accepted (`INV-HIST-6`).
 
-Edges reconcile concurrent mergeable writes as they admit them, including
-independent inserts of the same row ID. An edge's merge is accepted at Edge
-durability and has no global timestamp. Core must not be the first place where
-concurrency already observed by one edge is reconciled: it merges only the
-concurrent heads that remain across edge publications, then establishes Global
-durability. Replaying an edge's already reconciled frontier must not create a
-redundant merge of that frontier.
-
-An edge forwards each admitted transaction together with any merge versions it
-generated as one coherent authority publication. This is a logical admission
-boundary, not a guarantee that a transport delivers everything in one physical
-frame. Core admits the complete publication before looking for remaining
-concurrent heads. In particular, it must not process `A`, then `B`, eagerly
-create its own `M(A,B)`, and only afterward admit the edge's already-generated
-`M(A,B)` from that same publication. Dependency repair and reconnect replay must
-preserve this boundary. Separate edge publications may still leave concurrent
-heads, which core reconciles through the same merge machinery.
+Clients and local persistence relays preserve authored versions and sync them
+to Core; they do not generate authoritative merge versions. Core reconciles
+concurrent writes during admission, including independent inserts of the same
+row ID, and persists the resulting merge with Global durability. Replaying a
+commit already accepted by Core must not generate a redundant merge.
 
 The cells of a merge version are computed per column. The default strategy
 (`MergeStrategy::Lww`) fills each column independently: it takes the value from
@@ -268,7 +256,7 @@ source and do not perform a deletion anti-join (`INV-HIST-17`).
 The combined global-current table is the source of truth for `Global`
 current-row reads and sync snapshots on a node that has observed the accepted
 version. It carries only settled winner references and projected cells, so a
-global current read is O(current) in the rows and values returned. Local/edge
+global current read is O(current) in the rows and values returned. Local
 tiers use corresponding combined current state or a bounded overlay above this
 base; neither rehydrates the global baseline from either immutable history.
 

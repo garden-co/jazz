@@ -43,10 +43,10 @@ held non-rejected versions, independent of arrival order (`INV-READ-7`). This
 means it **includes the reading node's own pending committed writes**. A
 `global` read resolves against the per-layer global-current tables, which contain
 accepted state only, and therefore **excludes a write that has not yet been
-globally accepted** (`INV-READ-11`). An `edge` read occupies the tier between
-`local` and `global`: it resolves against edge-accepted mergeable fates, meaning
-state an edge has finally judged (ch. 9 §9.5) but that has not necessarily
-reached global durability. Chapter 9 defines the full `edge` semantics.
+globally accepted** (`INV-READ-11`). There is no intermediate server durability
+tier: a remote settled read requires Core confirmation. Local persistence
+relays can carry that confirmation to their foreground client, but cannot
+create it from cached rows.
 
 ### 5.2 Current-row visibility
 
@@ -84,7 +84,7 @@ and empty `dots` (`INV-READ-1`). Core settlement serializes HLC allocation with
 the durable accepted commit, so this is a clean prefix even though timestamp
 values are sparse. Numerical adjacency has no semantic role.
 
-Edges and clients are partial by design. A validated `settled_through` receipt
+Clients and their local persistence relays are partial by design. A validated `settled_through` receipt
 from the selected authority proves both that the authority has durably committed
 through that coordinate and that this exact binding is complete there. The node
 MUST advance its known `committed_global_time` from that receipt, but this does

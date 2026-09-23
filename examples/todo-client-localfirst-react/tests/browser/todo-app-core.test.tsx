@@ -86,7 +86,7 @@ function TodosEdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | nul
     // this browser canary is about. A disjoint sentinel only proved that a
     // websocket existed; it could resolve before the todo subscription had
     // been attached or replayed after a persistent-worker restart.
-    void db.all(app.todos, { tier: "edge" }).then(
+    void db.all(app.todos, { tier: "global" }).then(
       () => onSettled(null),
       (error: unknown) => onSettled(error instanceof Error ? error : new Error(String(error))),
     );

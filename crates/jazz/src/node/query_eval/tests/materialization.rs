@@ -659,7 +659,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
         tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
-    let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let update = peer
         .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
         .expect("rehydrate maintained v2 flat join");

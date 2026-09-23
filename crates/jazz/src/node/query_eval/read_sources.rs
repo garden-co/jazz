@@ -226,7 +226,7 @@ where
                 // the covered input rather than storage.
                 || matches!(
                     source,
-                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Edge
+                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Global
                 ))
         {
             // The compiler created this source map only for an exact
@@ -2668,11 +2668,7 @@ where
             global
         } else {
             let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
-            let ahead = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
-            } else {
-                ahead.project(physical_fields.clone())
-            };
+            let ahead = { ahead.project(physical_fields.clone()) };
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([global, ahead]),
                 ["row_uuid"],
@@ -2715,11 +2711,7 @@ where
             return Ok(global);
         }
         let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_source_graph(ahead, fields.clone())
-        } else {
-            ahead.project(fields.clone())
-        };
+        let ahead = { ahead.project(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
@@ -2941,11 +2933,7 @@ where
                 }
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 let ahead = self.exclude_settled_arm(request, ahead, true).await?;
-                let ahead = if tier == DurabilityTier::Edge {
-                    edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
-                } else {
-                    ahead.project(physical_fields.clone())
-                };
+                let ahead = { ahead.project(physical_fields.clone()) };
                 GraphBuilder::arg_max_by(
                     GraphBuilder::union([global, ahead]),
                     ["row_uuid"],
@@ -2986,11 +2974,7 @@ where
         }
         let global = global.project_fields(fields.clone());
         let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_source_graph(ahead, register_storage_field_names())
-        } else {
-            ahead.project_fields(fields.clone())
-        };
+        let ahead = { ahead.project_fields(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
@@ -3106,39 +3090,6 @@ fn deletion_register_current_source_graph(
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-pub(super) fn edge_accepted_transaction_source_graph() -> GraphBuilder {
-    GraphBuilder::table("jazz_transactions")
-        .filter(
-            PredicateExpr::And(vec![
-                PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                PredicateExpr::Or(vec![
-                    PredicateExpr::eq("durability", Value::EnumTag(2)),
-                    PredicateExpr::eq("durability", Value::EnumTag(3)),
-                ])
-                .canonicalize(),
-            ])
-            .canonicalize(),
-        )
-        .project(["time", "node_id"])
-}
-
-pub(super) fn edge_visible_ahead_current_source_graph(
-    source: GraphBuilder,
-    fields: Vec<String>,
-) -> GraphBuilder {
-    GraphBuilder::join(
-        source.project(fields.clone()),
-        edge_accepted_transaction_source_graph(),
-        ["tx_time", "tx_node_id"],
-        ["time", "node_id"],
-    )
-    .project_fields(
-        fields
-            .into_iter()
-            .map(|field| ProjectField::renamed(left_field(&field), field)),
-    )
-}
-
 fn content_version_current_source_graph(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -3151,30 +3102,8 @@ fn content_version_current_source_graph(
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(global_current_table_name(&table.name)).project(fields);
     }
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .iter()
-                .cloned()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    } else {
-        GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone())
-    };
+    let ahead =
+        { GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone()) };
     GraphBuilder::arg_max_by(
         GraphBuilder::union([
             GraphBuilder::table(global_current_table_name(&table.name)).project(fields.clone()),
@@ -3191,29 +3120,8 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
     }
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            key_fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    } else {
-        GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields)
-    };
+    let ahead =
+        { GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields) };
     GraphBuilder::arg_max_by(
         GraphBuilder::union([
             GraphBuilder::table(register_global_current_table_name(table)).project(key_fields),
@@ -3252,31 +3160,7 @@ fn selected_visible_current_primary_key_graph(
     ]);
     let content_scan = static_scan_for_prefix(prefix.clone(), 1);
     let deletion_scan = static_scan_for_prefix(prefix, 1);
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>, scan: StaticScanSpec| {
-        GraphBuilder::join(
-            GraphBuilder::table_scan(table_name, scan).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                        PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::EnumTag(2)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
-                        ])
-                        .canonicalize(),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deleted_winners) = if tier == DurabilityTier::Global {
         (
             GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
@@ -3289,13 +3173,7 @@ fn selected_visible_current_primary_key_graph(
             .project(["row_uuid"]),
         )
     } else {
-        let ahead_content = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_fields.clone(),
-                content_scan.clone(),
-            )
-        } else {
+        let ahead_content = {
             GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan.clone())
                 .project(content_fields.clone())
         };
@@ -3309,13 +3187,7 @@ fn selected_visible_current_primary_key_graph(
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deleted = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-                deletion_scan.clone(),
-            )
-        } else {
+        let ahead_deleted = {
             GraphBuilder::table_scan(
                 register_ahead_current_table_name(&table.name),
                 deletion_scan.clone(),
@@ -4238,10 +4110,7 @@ where
             // with the complete ahead overlay before choosing a winner, so a
             // newer row which leaves an equality prefix cannot leave behind a
             // stale settled match.
-            if matches!(
-                tier,
-                DurabilityTier::Global | DurabilityTier::Local | DurabilityTier::Edge
-            ) {
+            if matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
                 paths.insert(source, path);
             }
         }
@@ -5362,27 +5231,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                 ]),
         )
     };
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
-        GraphBuilder::join(
-            GraphBuilder::table(table_name).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deletion_current) = if tier == DurabilityTier::Global {
         (
             normalize_content_fields(
@@ -5392,12 +5241,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             GraphBuilder::table(register_global_current_table_name(&table.name)),
         )
     } else {
-        let ahead_content = if tier == DurabilityTier::Edge {
-            normalize_content_fields(edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_storage_fields.clone(),
-            ))
-        } else {
+        let ahead_content = {
             normalize_content_fields(
                 GraphBuilder::table(ahead_current_table_name(&table.name))
                     .project(content_storage_fields.clone()),
@@ -5413,12 +5257,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deletion = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-            )
-        } else {
+        let ahead_deletion = {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
                 .project(deletion_fields.clone())
         };

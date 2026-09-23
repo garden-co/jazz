@@ -331,10 +331,10 @@ describe("createPolicyTestApp", () => {
   });
 
   it("waits for authority acceptance before a session-scoped seed is returned", async () => {
-    const calls: Array<"local" | "edge"> = [];
+    const calls: Array<"local" | "global"> = [];
     const write = {
       value: { id: "seeded" },
-      wait: vi.fn(async ({ tier }: { tier: "local" | "edge" }) => {
+      wait: vi.fn(async ({ tier }: { tier: "local" | "global" }) => {
         calls.push(tier);
         return { id: tier === "local" ? "locally-settled" : "authority-settled" };
       }),
@@ -343,7 +343,7 @@ describe("createPolicyTestApp", () => {
     await expect(settlePolicySeedForSessionReads(write)).resolves.toEqual({
       id: "authority-settled",
     });
-    expect(calls).toEqual(["local", "edge"]);
+    expect(calls).toEqual(["local", "global"]);
   });
 
   it("creates a test app from an app definition and compiled permissions", async () => {

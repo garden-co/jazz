@@ -173,13 +173,13 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 query.clone(),
                 jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
-                "bob EdgeServer query excludes doc after revocation",
+                "bob GlobalServer query excludes doc after revocation",
                 |rows| rows.iter().all(|(id, _)| *id != doc_id).then_some(rows),
             )
             .await;
             assert!(
                 edge_rows_after_revoke.iter().all(|(id, _)| *id != doc_id),
-                "revoked row must not remain in Bob's settled EdgeServer result: {edge_rows_after_revoke:?}"
+                "revoked row must not remain in Bob's settled GlobalServer result: {edge_rows_after_revoke:?}"
             );
 
             let local_rows_after_revoke = bob

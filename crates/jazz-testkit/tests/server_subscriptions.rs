@@ -1,5 +1,3 @@
-#![allow(clippy::enum_variant_names)]
-
 use jazz_testkit as support;
 
 use std::time::Duration;
@@ -59,7 +57,7 @@ fn assert_exact_settled_initial_reset(
 ) {
     assert!(
         !delta.pending,
-        "{label} initial reset must be settled at the edge tier"
+        "{label} initial reset must be confirmed by Core"
     );
     assert!(
         delta.removed.is_empty(),
@@ -176,7 +174,7 @@ async fn subscription_orders_by_unprojected_field() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn edge_tier_public_subscription_opens_and_receives_rows() {
+async fn remote_public_subscription_opens_and_receives_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
@@ -195,7 +193,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
             let mut stream = client
                 .subscribe(query)
                 .await
-                .expect("edge-tier public subscription should open");
+                .expect("remote public subscription should open");
             let mut log = Vec::new();
 
             let (todo_id, _, transaction_id) = client
@@ -211,7 +209,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 &mut stream,
                 &mut log,
                 Duration::from_secs(10),
-                "edge-tier public subscription receives inserted row",
+                "remote public subscription receives inserted row",
                 |deltas| has_added_id(deltas, todo_id),
             )
             .await;
@@ -336,7 +334,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-/// An edge server sends every ordered-window boundary crossing to the client.
+/// Core sends every ordered-window boundary crossing to the client.
 /// Alice creates tied rows, then promotes and demotes a third row across the
 /// two-row window boundary.
 async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boundary() {
@@ -820,35 +818,12 @@ fn todo_query() -> jazz::query::Query {
     jazz::query::Query::from("todos").select(["title", "done"])
 }
 
-fn reserve_local_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
-    listener.local_addr().expect("reserved local addr").port()
-}
-
 async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
     let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
     wait_for_edge_query_ready(&client, "todos", Duration::from_secs(30)).await;
     client
-}
-
-/// Dynamic edges admit downstream clients only after their authoritative
-/// catalogue has bootstrapped. The testkit helper retries that explicit
-/// `NotReady/Later` bootstrap response and then proves the edge can serve the
-/// table; any other connection failure remains terminal.
-async fn connect_user_after_catalogue_bootstrap(
-    server: &JazzServer,
-    schema: Schema,
-    user_id: &str,
-) -> JazzClient {
-    TestingClient::builder()
-        .with_server(server)
-        .with_schema(schema)
-        .with_user_id(user_id)
-        .ready_on("todos", Duration::from_secs(30))
-        .connect_after_retry_later(Duration::from_secs(30))
-        .await
 }
 
 async fn wait_for_row(
@@ -1158,465 +1133,4 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
             reopened.shutdown().await;
         })
         .await;
-}
-
-/// An established Edge connector observes the exact Core link closing, enters
-/// reconnecting health, and attaches a replacement Core on the same endpoint.
-/// Relay write authorisation is deliberately outside this lifecycle receipt.
-#[tokio::test(flavor = "current_thread")]
-async fn edge_reconnects_after_established_core_drop() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let app_id = AppId::random();
-            let core_port = reserve_local_port();
-            let core = tokio::time::timeout(
-                Duration::from_secs(10),
-                JazzServer::builder()
-                    .with_app_id(app_id)
-                    .with_port(core_port)
-                    .with_schema(schema.clone())
-                    .start(),
-            )
-            .await
-            .expect("initial Core start timed out")
-            .expect("start Core server");
-            let edge = tokio::time::timeout(
-                Duration::from_secs(10),
-                JazzServer::builder()
-                    .with_app_id(app_id)
-                    .with_schema(schema.clone())
-                    .with_native_transport_connector(jazz_testkit::native_connector())
-                    .with_upstream_url(core.base_url())
-                    .start(),
-            )
-            .await
-            .expect("Edge start timed out")
-            .expect("start Edge server");
-            let edge_state = edge.server_state();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while edge_state.edge_upstream_health()
-                    != jazz_server::EdgeUpstreamHealth::Connected
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge initially bootstraps and attaches its ordinary upstream");
-
-            tokio::time::timeout(Duration::from_secs(15), core.shutdown())
-                .await
-                .expect("established Core shutdown timed out while dropping the upstream link");
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !matches!(
-                    edge_state.edge_upstream_health(),
-                    jazz_server::EdgeUpstreamHealth::Reconnecting { .. }
-                ) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge observes established upstream drop");
-
-            let restarted_core = tokio::time::timeout(
-                Duration::from_secs(10),
-                JazzServer::builder()
-                    .with_app_id(app_id)
-                    .with_port(core_port)
-                    .with_schema(schema)
-                    .start(),
-            )
-            .await
-            .expect("replacement Core start timed out")
-            .expect("restart Core server");
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while edge_state.edge_upstream_health()
-                    != jazz_server::EdgeUpstreamHealth::Connected
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge attaches a replacement upstream after the established drop");
-
-            tokio::time::timeout(Duration::from_secs(15), edge.shutdown())
-                .await
-                .expect("Edge cleanup timed out");
-            tokio::time::timeout(Duration::from_secs(15), restarted_core.shutdown())
-                .await
-                .expect("restarted Core cleanup timed out");
-        })
-        .await;
-}
-
-/// A fixed-schema Edge remains usable while its Core is unavailable. Its
-/// connector reports retry health, the local route accepts and parks a write at
-/// Edge durability, and the connector attaches once Core appears. Relaying that
-/// write into Core requires the upper-layer trusted-relay authorisation policy.
-#[tokio::test(flavor = "current_thread")]
-async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let app_id = AppId::random();
-            let core_port = reserve_local_port();
-            let edge = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(format!("http://127.0.0.1:{core_port}"))
-                .start()
-                .await
-                .expect("start test server");
-            let edge_state = edge.server_state();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !matches!(
-                    edge_state.edge_upstream_health(),
-                    jazz_server::EdgeUpstreamHealth::Reconnecting { .. }
-                ) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge reports unavailable upstream before Core starts");
-
-            let alice = connect_user(&edge, schema.clone(), "alice-upstream-unavailable").await;
-            let (_, _, tx) = alice
-                .insert(
-                    "todos",
-                    row_input!("title" => "retained without core", "done" => false),
-                )
-                .expect("edge accepts while its upstream is unavailable");
-            let tx = tx.expect("ordinary mutation commits immediately");
-            support::wait_for_edge_txs(&alice, &[tx]).await;
-            assert_ne!(
-                edge_state.edge_upstream_health(),
-                jazz_server::EdgeUpstreamHealth::Connected,
-                "the edge-tier receipt precedes any upstream connection"
-            );
-
-            let core = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_port(core_port)
-                .with_schema(schema)
-                .start()
-                .await
-                .expect("start test server");
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while edge_state.edge_upstream_health()
-                    != jazz_server::EdgeUpstreamHealth::Connected
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge attaches when the initially unavailable Core starts");
-
-            alice.shutdown().await.expect("shutdown alice");
-            edge.shutdown().await;
-            core.shutdown().await;
-        })
-        .await;
-}
-
-/// A core-origin write reaches subscribers connected through two independent
-/// edge servers.
-///
-/// Actors: carol writes directly to `core`; alice is connected to `edge_us`
-/// and bob to `edge_eu`.
-///
-/// ```text
-///                 /--upstream--> edge_us --> alice
-/// carol --> core -|
-///                 \--upstream--> edge_eu --> bob
-/// ```
-#[tokio::test(flavor = "current_thread")]
-async fn core_write_reaches_clients_on_both_edges() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let app_id = AppId::random();
-            let core = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .start()
-                .await
-                .expect("start test server");
-            let edge_us = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(core.base_url())
-                .start()
-                .await
-                .expect("start test server");
-            let edge_eu = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(core.base_url())
-                .start()
-                .await
-                .expect("start test server");
-
-            let alice =
-                connect_user_after_catalogue_bootstrap(&edge_us, schema.clone(), "alice-edge-us")
-                    .await;
-            let bob =
-                connect_user_after_catalogue_bootstrap(&edge_eu, schema.clone(), "bob-edge-eu")
-                    .await;
-            let carol = connect_user_after_catalogue_bootstrap(&core, schema, "carol-core").await;
-            let mut alice_stream = alice
-                .subscribe(todo_query())
-                .await
-                .expect("alice subscribes through edge_us");
-            let mut bob_stream = bob
-                .subscribe(todo_query())
-                .await
-                .expect("bob subscribes through edge_eu");
-            let mut alice_log = Vec::new();
-            let mut bob_log = Vec::new();
-
-            let (todo_id, expected, transaction_id) = carol
-                .insert(
-                    "todos",
-                    row_input!("title" => "core write for both edges", "done" => false),
-                )
-                .expect("carol writes directly to core");
-            carol
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::GlobalServer,
-                )
-                .await
-                .expect("core write settles globally");
-
-            wait_for_subscription_update(
-                &mut alice_stream,
-                &mut alice_log,
-                Duration::from_secs(30),
-                "alice receives the core write through edge_us",
-                |deltas| has_added_id(deltas, todo_id),
-            )
-            .await;
-            wait_for_subscription_update(
-                &mut bob_stream,
-                &mut bob_log,
-                Duration::from_secs(30),
-                "bob receives the core write through edge_eu",
-                |deltas| has_added_id(deltas, todo_id),
-            )
-            .await;
-            wait_for_row(
-                &alice,
-                jazz::tools::ReadTier::Remote,
-                todo_id,
-                expected.clone(),
-                "alice's edge query contains the core write",
-            )
-            .await;
-            wait_for_row(
-                &bob,
-                jazz::tools::ReadTier::Remote,
-                todo_id,
-                expected,
-                "bob's edge query contains the core write",
-            )
-            .await;
-
-            carol.shutdown().await.expect("shutdown carol");
-            bob.shutdown().await.expect("shutdown bob");
-            alice.shutdown().await.expect("shutdown alice");
-            edge_eu.shutdown().await;
-            edge_us.shutdown().await;
-            core.shutdown().await;
-        })
-        .await;
-}
-
-/// A write accepted through one edge becomes globally visible through a peer
-/// edge, including its existing subscription.
-///
-/// Actors: alice writes through `edge_us`; bob is subscribed through
-/// `edge_eu`.
-///
-/// ```text
-/// alice --> edge_us --upstream--> core --upstream--> edge_eu --> bob
-/// ```
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "#1787: manual peer-edge delivery topology canary; deterministic no-retry regression covers the scheduling defect"]
-async fn edge_write_reaches_client_on_peer_edge() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let app_id = AppId::random();
-            let core = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .start()
-                .await
-                .expect("start test server");
-            let edge_us = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(core.base_url())
-                .start()
-                .await
-                .expect("start test server");
-            let edge_eu = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(core.base_url())
-                .start()
-                .await
-                .expect("start test server");
-
-            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us-writer").await;
-            let bob = connect_user(&edge_eu, schema, "bob-edge-eu-reader").await;
-            let mut bob_stream = bob
-                .subscribe(todo_query())
-                .await
-                .expect("bob subscribes through edge_eu");
-            let mut bob_log = Vec::new();
-
-            let (todo_id, expected, transaction_id) = alice
-                .insert(
-                    "todos",
-                    row_input!("title" => "edge write for peer", "done" => true),
-                )
-                .expect("alice writes through edge_us");
-            alice
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::GlobalServer,
-                )
-                .await
-                .expect("edge_us write settles globally through core");
-
-            wait_for_subscription_update(
-                &mut bob_stream,
-                &mut bob_log,
-                Duration::from_secs(30),
-                "bob receives edge_us write through edge_eu",
-                |deltas| has_added_id(deltas, todo_id),
-            )
-            .await;
-            wait_for_row(
-                &bob,
-                jazz::tools::ReadTier::Remote,
-                todo_id,
-                expected,
-                "bob's edge query contains the peer-edge write",
-            )
-            .await;
-
-            bob.shutdown().await.expect("shutdown bob");
-            alice.shutdown().await.expect("shutdown alice");
-            edge_eu.shutdown().await;
-            edge_us.shutdown().await;
-            core.shutdown().await;
-        })
-        .await;
-}
-
-#[test]
-fn topology_matrix_conformance_smoke_inventory() {
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum Topology {
-        ClientCore,
-        ClientEdgeCore,
-        ClientRelayEdgeCore,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum Scenario {
-        MergeableWrite,
-        RlsNarrowedRead,
-        ReconnectKnownState,
-    }
-
-    struct Cell {
-        topology: Topology,
-        scenario: Scenario,
-        coverage: &'static str,
-    }
-
-    let cells = [
-        Cell {
-            topology: Topology::ClientCore,
-            scenario: Scenario::MergeableWrite,
-            coverage: "clients_sync::wait_for_transaction_reaches_edge_and_global_tiers",
-        },
-        Cell {
-            topology: Topology::ClientCore,
-            scenario: Scenario::RlsNarrowedRead,
-            coverage: "branch_claims_integration::query_applies_claims_select_policy",
-        },
-        Cell {
-            topology: Topology::ClientCore,
-            scenario: Scenario::ReconnectKnownState,
-            coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
-        },
-        Cell {
-            topology: Topology::ClientEdgeCore,
-            scenario: Scenario::MergeableWrite,
-            coverage: "edge_server_mode::edge_to_core_relay_retains_write_while_upstream_is_unavailable",
-        },
-        Cell {
-            topology: Topology::ClientEdgeCore,
-            scenario: Scenario::RlsNarrowedRead,
-            coverage: "catalogue_sync_integration::edge_catalogue_http_reads_and_writes_forward_to_real_core + branch_claims_integration::query_applies_claims_select_policy",
-        },
-        Cell {
-            topology: Topology::ClientEdgeCore,
-            scenario: Scenario::ReconnectKnownState,
-            coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
-        },
-        Cell {
-            topology: Topology::ClientRelayEdgeCore,
-            scenario: Scenario::MergeableWrite,
-            coverage: "jazz::peer::non_global_peer_query_subscriptions_use_maintained_path + seeded m3 sync close-out soak",
-        },
-        Cell {
-            topology: Topology::ClientRelayEdgeCore,
-            scenario: Scenario::RlsNarrowedRead,
-            coverage: "jazz::peer::aggregate_policy_oracle_matches_visible_rows_per_identity + seeded owner-policy captures",
-        },
-        Cell {
-            topology: Topology::ClientRelayEdgeCore,
-            scenario: Scenario::ReconnectKnownState,
-            coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge + seeded m3 sync close-out soak",
-        },
-    ];
-
-    let topologies = [
-        Topology::ClientCore,
-        Topology::ClientEdgeCore,
-        Topology::ClientRelayEdgeCore,
-    ];
-    let scenarios = [
-        Scenario::MergeableWrite,
-        Scenario::RlsNarrowedRead,
-        Scenario::ReconnectKnownState,
-    ];
-
-    for topology in topologies {
-        for scenario in scenarios {
-            let matching = cells
-                .iter()
-                .filter(|cell| cell.topology == topology && cell.scenario == scenario)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                matching.len(),
-                1,
-                "topology matrix cell must have exactly one coverage entry: {topology:?} {scenario:?}"
-            );
-            assert!(
-                !matching[0].coverage.is_empty(),
-                "coverage entry must name the exercised or cited test"
-            );
-        }
-    }
 }

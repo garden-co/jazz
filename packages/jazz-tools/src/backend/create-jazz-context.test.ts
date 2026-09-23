@@ -280,7 +280,7 @@ describe("backend/create-jazz-context", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       tier: "local",
-      defaultDurabilityTier: "edge",
+      defaultDurabilityTier: "global",
     });
 
     context.db();
@@ -289,7 +289,7 @@ describe("backend/create-jazz-context", () => {
       expect.anything(),
       expect.objectContaining({
         tier: "local",
-        defaultDurabilityTier: "edge",
+        defaultDurabilityTier: "global",
       }),
       expect.anything(),
     );

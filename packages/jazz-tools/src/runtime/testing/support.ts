@@ -12,7 +12,7 @@ export async function waitForRows<T>(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await db.all(query, { tier: "edge" });
+      const rows = await db.all(query, { tier: "global" });
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
