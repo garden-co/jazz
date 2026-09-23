@@ -334,6 +334,21 @@ _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
 
+Before publication, local validation compares a single-table source-row
+predicate's `(RowUuid, TxId)` output at the fixed base snapshot against a
+comparison snapshot that also covers newly visible non-rejected transactions,
+including local writes without an authority receipt. A row outside the
+predicate does not cause a conflict; a matching insert, removal, or changed
+output-row version does. For example, a read of `bucket = "destination"`
+may commit after an insert into `bucket = "unrelated"`, but must reject
+after an insert into `bucket = "destination"`.
+
+This local comparison only advances root-table history. Relational predicates,
+aggregate predicates, and degenerate whole-table predicates retain conservative
+local conflict detection. An aggregate input rewrite therefore conflicts
+locally even if its aggregate payload is unchanged. Authority validation still
+compares aggregate group identities and public payloads as described above.
+
 Schema migrations must preserve the physical identity used by these checks.
 Predicate validation resolves the recorded shape against its matching retained
 schema, rather than interpreting its table names in the current schema alone.
