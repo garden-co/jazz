@@ -8,26 +8,17 @@ pub(super) fn output_is_structured_collect_by(
     graph: &IvmGraph,
     node: NodeId,
 ) -> Result<bool, IvmRuntimeError> {
-    let mut pending = vec![node];
-    let mut seen = HashSet::new();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        let node = graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        match &node.descriptor.operator {
-            OpType::CollectBy(collect_by) => {
-                return Ok(matches!(
-                    collect_by.mode,
-                    CollectByMode::Collect | CollectByMode::Root
-                ));
-            }
-            _ => pending.extend(node.descriptor.inputs.iter().copied()),
-        }
-    }
-    Ok(false)
+    // Graph validation rejects every consumer of CollectBy, so a structured
+    // output is necessarily the collector itself. A per-output ancestor walk
+    // makes quiet writes proportional to every route's entire graph.
+    let node = graph
+        .node(node)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+    Ok(matches!(
+        &node.descriptor.operator,
+        OpType::CollectBy(collect_by)
+            if matches!(collect_by.mode, CollectByMode::Collect | CollectByMode::Root)
+    ))
 }
 
 pub(super) fn extend_root_window_positions(
