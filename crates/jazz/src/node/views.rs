@@ -2179,6 +2179,12 @@ where
             }
         }
 
+        // An empty-bundle reset may finish initial hydration even when it names
+        // peer payload refs: every covered input's body was already proven staged
+        // or physically resident by `validate_covered_input_body_witnesses`, which
+        // rejects the whole frame otherwise. This flag only ends the initial-sync
+        // flush cadence; it does not gate visibility, known state or authorization.
+        // Loosening witness validation would widen this shortcut.
         if self
             .query
             .authority_results
