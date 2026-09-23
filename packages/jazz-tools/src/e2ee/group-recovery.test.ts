@@ -8,9 +8,16 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { groupSchema } from "./groups.js";
 import { createBrowserKeyEnvelope } from "./browser.js";
 
-it.each(["ordinary", "read-only-recovered-device", "malformed-recovery-candidate"] as const)(
+it.each([
+  "ordinary",
+  "read-only-recovered-device",
+  "malformed-recovery-candidate",
+  "interrupted-read-only-recovery",
+] as const)(
   "recovers a group after losing the only enrolled device (%s)",
   async (scenario) => {
+    const interrupted = scenario === "interrupted-read-only-recovery";
+    const readOnly = scenario === "read-only-recovered-device" || interrupted;
     const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
       const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
@@ -19,7 +26,7 @@ it.each(["ordinary", "read-only-recovered-device", "malformed-recovery-candidate
       policy.__e2ee_group_membership.allowRead.where(authenticated);
       policy.__e2ee_group_membership.allowInsert.where({ authorAccountId: session.user.account });
       policy.__e2ee_group_deliveries.allowRead.where(authenticated);
-      if (scenario === "read-only-recovered-device") {
+      if (readOnly) {
         policy.__e2ee_group_deliveries.allowInsert.where((row) =>
           allOf([
             { senderAccountId: session.user.account },
@@ -87,6 +94,8 @@ it.each(["ordinary", "read-only-recovered-device", "malformed-recovery-candidate
       const group = first.e2ee.groups.create();
       await group.wait();
       expect(await first.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+      const additional = interrupted ? first.e2ee.groups.create() : undefined;
+      await additional?.wait();
       let injected = false;
       if (scenario === "malformed-recovery-candidate") {
         const writer = await createDb({ ...account });
@@ -126,18 +135,50 @@ it.each(["ordinary", "read-only-recovered-device", "malformed-recovery-candidate
       await first.shutdown();
 
       // No old local store or live key holder is available to the replacement.
-      const second = await createDb({ ...account, e2ee: { app, store: store() } });
+      const recoveredStore = store();
+      let interrupt = interrupted;
+      let recoveryOpens = 0;
+      const second = await createDb({
+        ...account,
+        e2ee: {
+          app,
+          store: recoveredStore,
+          crypto: {
+            keyEnvelope: {
+              ...keys,
+              async open(pair, context, envelope) {
+                if (
+                  interrupt &&
+                  new TextDecoder().decode(context).includes("__e2ee_group_recovery_deliveries") &&
+                  ++recoveryOpens === 2
+                ) {
+                  throw new Error("Injected later group recovery failure");
+                }
+                return keys.open(pair, context, envelope);
+              },
+            },
+          },
+        },
+      });
       clients.push(second);
       const pending = (await second.e2ee.devices.list()).find(
         (device) => device.state === "pending",
       )!;
       expect(pending).toBeDefined();
+      if (interrupted) {
+        await expect(second.e2ee.recovery.use(material).wait()).rejects.toThrow();
+        expect(recoveryOpens).toBe(2);
+        interrupt = false;
+      }
       await second.e2ee.recovery.use(material).wait();
       expect(await second.e2ee.devices.list()).toContainEqual(
         expect.objectContaining({ id: pending.id, state: "active" }),
       );
       expect(await second.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
-      if (scenario === "read-only-recovered-device") {
+      if (additional) {
+        expect(await second.e2ee.explain({ groupId: additional.id })).toEqual({ state: "ready" });
+      }
+      if (readOnly) {
         // Recovery makes the key usable; it must not bypass the creator-only delivery policy.
         expect(
           await second.all(
@@ -145,6 +186,17 @@ it.each(["ordinary", "read-only-recovered-device", "malformed-recovery-candidate
             { tier: "edge" },
           ),
         ).toEqual([]);
+        if (additional) {
+          expect(
+            await second.all(
+              app.__e2ee_group_deliveries.where({
+                groupId: additional.id,
+                recipientDeviceId: pending.id,
+              }),
+              { tier: "edge" },
+            ),
+          ).toEqual([]);
+        }
       }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
