@@ -145,9 +145,9 @@ const relatedWritePermissions = s.definePermissions(
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ $createdBy: session.user });
     policy.invitations.allowInsert.always();
-    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist"));
     policy.playlist_entries.allowInsert.where((entry) =>
-      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+      anyOf([allowedTo.update("playlist"), hasEditorInvitation(entry.playlist_id)]),
     );
   },
 );
@@ -407,7 +407,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     }
   }, 30_000);
 
-  it('keeps `allowedTo.read("target_team")` readable for team access rows', async () => {
+  it('keeps `allowedTo.read("target_teamRelation")` readable for team access rows', async () => {
     const context = await createServerBackedReproContext(
       ({ policy, allowedTo, anyOf, session }) => {
         const anyGrantRoleValues = ["viewer", "editor", "manager"];
@@ -438,7 +438,9 @@ describe("runtime permission repros for recursive gather and qualified predicate
               }),
             ]),
           ),
-          policy.team_access_edges.allowRead.where(allowedTo.read("target_team", { maxDepth: 32 })),
+          policy.team_access_edges.allowRead.where(
+            allowedTo.read("target_teamRelation", { maxDepth: 32 }),
+          ),
         ];
       },
       "global",
@@ -727,7 +729,9 @@ describe("runtime permission repros for recursive gather and qualified predicate
               }),
             ]),
           ),
-          policy.team_access_edges.allowRead.where(allowedTo.read("target_team", { maxDepth: 32 })),
+          policy.team_access_edges.allowRead.where(
+            allowedTo.read("target_teamRelation", { maxDepth: 32 }),
+          ),
         ];
       },
       "local",

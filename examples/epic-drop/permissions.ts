@@ -15,17 +15,15 @@ export default s.definePermissions(app, ({ allOf, allowedTo, policy, session }) 
   // another account's private folder. Keep the child and referenced-parent
   // authority checks paired for every operation.
   policy.files.allowRead.where((_file) =>
-    allOf([{ owner_id: session.user.account }, allowedTo.read("folder_id")]),
+    allOf([{ owner_id: session.user.account }, allowedTo.read("folder")]),
   );
   policy.files.allowInsert.where((_file) =>
-    allOf([{ owner_id: session.user.account }, allowedTo.insert("folder_id")]),
+    allOf([{ owner_id: session.user.account }, allowedTo.insert("folder")]),
   );
   policy.files.allowUpdate
-    .whereOld((_file) => allOf([{ owner_id: session.user.account }, allowedTo.update("folder_id")]))
-    .whereNew((_file) =>
-      allOf([{ owner_id: session.user.account }, allowedTo.update("folder_id")]),
-    );
+    .whereOld((_file) => allOf([{ owner_id: session.user.account }, allowedTo.update("folder")]))
+    .whereNew((_file) => allOf([{ owner_id: session.user.account }, allowedTo.update("folder")]));
   policy.files.allowDelete.where((_file) =>
-    allOf([{ owner_id: session.user.account }, allowedTo.delete("folder_id")]),
+    allOf([{ owner_id: session.user.account }, allowedTo.delete("folder")]),
   );
 });

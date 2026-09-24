@@ -33,10 +33,10 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   policy.canvases.allowInsert.always();
   policy.canvases.allowUpdate.where((canvas) => isAdmin(canvas));
   policy.canvases.allowDelete.where((canvas) => isAdmin(canvas));
-  policy.canvasMembers.allowRead.where(allowedTo.read("canvasId"));
+  policy.canvasMembers.allowRead.where(allowedTo.read("canvas"));
   policy.canvasMembers.allowInsert.where((member) =>
     anyOf([
-      allowedTo.update("canvasId"),
+      allowedTo.update("canvas"),
       allOf([
         { memberAuthor: session.user.account, role: "admin" },
         policy.canvases.exists.where({
@@ -46,11 +46,11 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
       ]),
     ]),
   );
-  policy.canvasMembers.allowUpdate.where(allowedTo.update("canvasId"));
+  policy.canvasMembers.allowUpdate.where(allowedTo.update("canvas"));
   policy.canvasMembers.allowDelete.where(
-    anyOf([allowedTo.update("canvasId"), { memberAuthor: session.user.account }]),
+    anyOf([allowedTo.update("canvas"), { memberAuthor: session.user.account }]),
   );
-  policy.layers.allowRead.where(allowedTo.read("canvasId"));
+  policy.layers.allowRead.where(allowedTo.read("canvas"));
   policy.layers.allowInsert.where((layer) =>
     anyOf([
       policy.canvasMembers.exists.where({
@@ -65,8 +65,8 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
       }),
     ]),
   );
-  policy.assets.allowRead.where(allowedTo.read("canvasId"));
-  policy.shapes.allowRead.where(allowedTo.read("canvasId"));
+  policy.assets.allowRead.where(allowedTo.read("canvas"));
+  policy.shapes.allowRead.where(allowedTo.read("canvas"));
   // Shape admission has two independently correlated proofs over the row
   // being inserted: the selected layer belongs to this shape's canvas, and
   // the current user is an editor or admin of that same canvas.  Keeping both
@@ -82,8 +82,8 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
       }),
     ]),
   );
-  policy.cursors.allowRead.where(allowedTo.read("canvasId"));
-  policy.checkpoints.allowRead.where(allowedTo.read("canvasId"));
+  policy.cursors.allowRead.where(allowedTo.read("canvas"));
+  policy.checkpoints.allowRead.where(allowedTo.read("canvas"));
   // Presence is replaceable ephemera: only its owner may update/delete it.
   // Creation remains default-deny until its product ownership rule is chosen.
   policy.cursors.allowUpdate

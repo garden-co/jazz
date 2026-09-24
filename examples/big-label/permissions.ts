@@ -91,42 +91,38 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
     .whereNew((row) => allOf([admin(row.organizationId), artistBelongsToRelease(row)]));
   policy.releases.allowDelete.where((row) => admin(row.organizationId));
 
-  policy.teamAssignments.allowRead.where(allowedTo.read("teamId"));
+  policy.teamAssignments.allowRead.where(allowedTo.read("team"));
   policy.teamAssignments.allowInsert.where((row) =>
-    allOf([
-      allowedTo.insert("teamId"),
-      teamMatchesAssignment(row),
-      membershipMatchesAssignment(row),
-    ]),
+    allOf([allowedTo.insert("team"), teamMatchesAssignment(row), membershipMatchesAssignment(row)]),
   );
   policy.teamAssignments.allowUpdate
-    .whereOld(allowedTo.update("teamId"))
+    .whereOld(allowedTo.update("team"))
     .whereNew((row) =>
       allOf([
-        allowedTo.update("teamId"),
+        allowedTo.update("team"),
         teamMatchesAssignment(row),
         membershipMatchesAssignment(row),
       ]),
     );
-  policy.teamAssignments.allowDelete.where(allowedTo.delete("teamId"));
-  policy.releaseAssignments.allowRead.where(allowedTo.read("releaseId"));
+  policy.teamAssignments.allowDelete.where(allowedTo.delete("team"));
+  policy.releaseAssignments.allowRead.where(allowedTo.read("release"));
   policy.releaseAssignments.allowInsert.where((row) =>
     allOf([
-      allowedTo.insert("releaseId"),
+      allowedTo.insert("release"),
       releaseMatchesAssignment(row),
       membershipMatchesAssignment(row),
     ]),
   );
   policy.releaseAssignments.allowUpdate
-    .whereOld(allowedTo.update("releaseId"))
+    .whereOld(allowedTo.update("release"))
     .whereNew((row) =>
       allOf([
-        allowedTo.update("releaseId"),
+        allowedTo.update("release"),
         releaseMatchesAssignment(row),
         membershipMatchesAssignment(row),
       ]),
     );
-  policy.releaseAssignments.allowDelete.where(allowedTo.delete("releaseId"));
+  policy.releaseAssignments.allowDelete.where(allowedTo.delete("release"));
 });
 
 export default {
