@@ -3697,9 +3697,42 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
+    use jazz::groove::records::{Error as RecordError, RecordDescriptor, ValueType};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_add_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&(1_u32 << 30).to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_multiplication_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
 
     /// Every ordinary write option shares `write_timestamp_option`, so this
     /// boundary test protects insert, update, upsert, delete, and restore from
