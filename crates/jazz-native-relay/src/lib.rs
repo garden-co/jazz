@@ -62,17 +62,33 @@ use jazz_native_transport::NativeWebSocketConnector;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
-/// The first public native-relay ABI. Future breaking command/wire changes
-/// receive a distinct version; no historical implementation number is public.
+/// The codec and its postcard command payloads remain at protocol ABI V1.
 pub const NATIVE_RELAY_ABI_V1: u16 = 1;
+/// Current native artifact ABI. V2 adds a separate fixed-width tick diagnostic
+/// result while preserving every V1 C symbol and its signature.
+pub const NATIVE_RELAY_ABI_V2: u16 = 2;
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JazzNativeRelayTickDiagnostic {
+    None = 0,
+    UpstreamTerminal = 1,
+    LocalTickFailure = 2,
+}
+
+impl JazzNativeRelayTickDiagnostic {
+    const fn code(self) -> u32 {
+        self as u32
+    }
+}
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
 const FOREGROUND_WAKE_AFTER: u8 = 2;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
 pub type ForegroundWakeCallback = unsafe extern "C" fn(*mut c_void, u64, u8, u64);
-
 const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
+
 const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 /// Commands which cross from a platform/JSI call into a relay owner must not
 /// be allowed to accumulate without bound. Peer frames have their own byte
@@ -726,9 +742,9 @@ impl JazzNativeRelayBytes {
     };
 }
 
-/// Status returned by the native C ABI. Diagnostic strings and Rust error
-/// types intentionally remain inside the host binding; callers branch only on
-/// these stable classes.
+/// Status returned by the native C ABI. Rust error strings and error types
+/// remain private; the V2 lease tick separately exposes only a finite safe
+/// diagnostic category. Status remains authoritative for caller decisions.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JazzNativeRelayStatus {
@@ -1438,20 +1454,41 @@ impl NativeRelayHost {
     }
 
     fn tick_foreground(&mut self, foreground: u64) -> Result<(), JazzNativeRelayStatus> {
-        let opened = self
-            .foregrounds
-            .get(&foreground)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        self.tick_foreground_with_diagnostic(foreground)
+            .map_err(|(status, _diagnostic)| status)
+    }
+
+    fn tick_foreground_with_diagnostic(
+        &mut self,
+        foreground: u64,
+    ) -> Result<(), (JazzNativeRelayStatus, JazzNativeRelayTickDiagnostic)> {
+        let opened = self.foregrounds.get(&foreground).ok_or((
+            JazzNativeRelayStatus::InvalidHandle,
+            JazzNativeRelayTickDiagnostic::None,
+        ))?;
         let (relay, scope) = (opened.relay, opened.scope.clone());
         if self.private_scope_terminal_error(&scope).is_some() {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
+            return Err((
+                JazzNativeRelayStatus::LifecycleFailure,
+                JazzNativeRelayTickDiagnostic::UpstreamTerminal,
+            ));
         }
-        self.relays
-            .get(&relay)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        self.foreground_client(foreground)?
+        self.relays.get(&relay).ok_or((
+            JazzNativeRelayStatus::InvalidHandle,
+            JazzNativeRelayTickDiagnostic::None,
+        ))?;
+        self.foreground_client(foreground)
+            .map_err(|status| (status, JazzNativeRelayTickDiagnostic::None))?
             .pump_foreground()
-            .map_err(relay_status)
+            .map_err(|error| {
+                let status = relay_status(error);
+                let diagnostic = if status == JazzNativeRelayStatus::LifecycleFailure {
+                    JazzNativeRelayTickDiagnostic::LocalTickFailure
+                } else {
+                    JazzNativeRelayTickDiagnostic::None
+                };
+                (status, diagnostic)
+            })
     }
 
     /// Lease-scoped C ABI calls must not turn an opaque foreground handle into
@@ -2033,7 +2070,7 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
 /// stay behind the future shared binary relay codec.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
-    NATIVE_RELAY_ABI_V1
+    NATIVE_RELAY_ABI_V2
 }
 
 /// Execute one codec-owned native relay command.
@@ -2571,6 +2608,42 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_open_attached_foreground(
             JazzNativeRelayStatus::Ok
         }
         Err(status) => status,
+    }
+}
+
+/// Lease-safe V2 tick. Unlike the V1 symbol, V2 also returns a fixed-width
+/// diagnostic category; status remains authoritative and all detailed causes
+/// remain private to the native relay.
+///
+/// # Safety
+/// `lease` must be live and `out_diagnostic` writable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_tick_attached_foreground_v2(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    out_diagnostic: *mut u32,
+) -> JazzNativeRelayStatus {
+    if out_diagnostic.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out_diagnostic = JazzNativeRelayTickDiagnostic::None.code() };
+    if lease.is_null() || foreground == 0 {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let lease = unsafe { &*lease };
+    let mut host = match lease.inner.lock() {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    if let Err(status) = host.require_lease_foreground_runtime(lease.runtime_token, foreground) {
+        return status;
+    }
+    match host.tick_foreground_with_diagnostic(foreground) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err((status, diagnostic)) => {
+            unsafe { *out_diagnostic = diagnostic.code() };
+            status
+        }
     }
 }
 
@@ -8420,32 +8493,38 @@ mod tests {
             },
             JazzNativeRelayStatus::Ok,
         );
-        assert_eq!(diagnostic, 0, "successful ticks have no diagnostic");
+        assert_eq!(
+            diagnostic,
+            JazzNativeRelayTickDiagnostic::None.code(),
+            "successful ticks have no diagnostic"
+        );
 
-        let scope = unsafe {
-            (*fixture.host)
+        let (connected, terminal_error) = unsafe {
+            let host = &*fixture.host;
+            let host = host
                 .inner
                 .lock()
-                .unwrap()
-                .foregrounds
-                .get(&foreground)
-                .unwrap()
-                .scope
-                .clone()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let scope = host.foregrounds.get(&foreground).unwrap().scope.clone();
+            let worker = host.private_scope_workers.get(&scope).unwrap();
+            (
+                Arc::clone(&worker.connected),
+                Arc::clone(&worker.terminal_error),
+            )
         };
-        let terminal_error = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .private_scope_workers
-                .get(&scope)
-                .unwrap()
-                .terminal_error
-                .clone()
-        };
+        jazz_testkit::wait_for(
+            Duration::from_secs(5),
+            "native tick test worker connected",
+            || {
+                let connected = Arc::clone(&connected);
+                async move { connected.load(Ordering::Acquire).then_some(()) }
+            },
+        )
+        .await;
         let sentinel = "UPSTREAM_SECRET_SENTINEL_do_not_expose";
-        *terminal_error.lock().unwrap() = Some(sentinel.to_owned());
+        *terminal_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sentinel.to_owned());
 
         diagnostic = u32::MAX;
         assert_eq!(
@@ -8459,11 +8538,15 @@ mod tests {
             JazzNativeRelayStatus::LifecycleFailure,
         );
         assert_eq!(
-            diagnostic, 1,
+            diagnostic,
+            JazzNativeRelayTickDiagnostic::UpstreamTerminal.code(),
             "a retained terminal error gets the fixed upstream-terminal code"
         );
         assert_eq!(
-            terminal_error.lock().unwrap().as_deref(),
+            terminal_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_deref(),
             Some(sentinel),
             "diagnostic reporting does not consume the retained terminal cause"
         );
@@ -8479,7 +8562,11 @@ mod tests {
             },
             JazzNativeRelayStatus::InvalidHandle,
         );
-        assert_eq!(diagnostic, 0, "invalid handles have no diagnostic");
+        assert_eq!(
+            diagnostic,
+            JazzNativeRelayTickDiagnostic::None.code(),
+            "invalid handles have no diagnostic"
+        );
 
         fixture.revoke_private_session(&capability);
         assert_eq!(

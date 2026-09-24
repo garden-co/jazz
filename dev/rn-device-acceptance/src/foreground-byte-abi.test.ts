@@ -8,7 +8,7 @@ import {
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
 import { todosQuery } from "./scope-fixture.ts";
-import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V1, NATIVE_RELAY_ABI_V2 } from "jazz-rn/native-relay-abi";
 import {
   createRecord,
   PostcardWriter,
@@ -52,7 +52,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
   };
   proveForegroundByteAbi(
     {
-      abiVersion: NATIVE_RELAY_ABI_V1,
+      abiVersion: NATIVE_RELAY_ABI_V2,
       openAttached: (received) => {
         assert.deepEqual(received, capability);
         return foreground;
@@ -101,7 +101,7 @@ test("foreground ABI mismatch records its boundary before any open", () => {
     () =>
       proveForegroundByteAbi(
         {
-          abiVersion: NATIVE_RELAY_ABI_V1 + 1,
+          abiVersion: NATIVE_RELAY_ABI_V1,
           openAttached() {
             throw new Error("must not open");
           },
@@ -204,7 +204,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     writerMustYield = false,
     writerTerminal?: "rejected" | "closed",
   ) => ({
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
       let stagedWrite = false;
@@ -439,7 +439,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     let opens = 0;
     const closes: string[] = [];
     const factory = {
-      abiVersion: NATIVE_RELAY_ABI_V1,
+      abiVersion: NATIVE_RELAY_ABI_V2,
       openAttached() {
         opens += 1;
         if (opens === 2 && failure === "reader-open")
@@ -525,7 +525,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       }, 0);
     };
     const factory = {
-      abiVersion: NATIVE_RELAY_ABI_V1,
+      abiVersion: NATIVE_RELAY_ABI_V2,
       openAttached() {
         return {
           execute(command: Uint8Array) {
@@ -783,7 +783,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   const wakeTraceToggles: boolean[][] = [[], []];
   const ticks = [0, 0];
   const factory = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached(received: Uint8Array) {
       assert.deepEqual(received, capability);
       const peer = opened++;
