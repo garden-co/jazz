@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "pull_vs_snapshot"
 harness = false
+
+[[bench]]
+name = "steady_state"
+harness = false
