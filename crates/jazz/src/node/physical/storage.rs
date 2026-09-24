@@ -22,6 +22,9 @@ where
         columns
             .iter()
             .map(|column| {
+                if column == DELETION_COLUMN_NAME {
+                    return Ok(DELETION_COLUMN_ID);
+                }
                 mapping
                     .columns
                     .get(column)
@@ -62,6 +65,9 @@ where
         columns
             .iter()
             .map(|column| {
+                if *column == DELETION_COLUMN_ID {
+                    return Ok(DELETION_COLUMN_NAME.to_owned());
+                }
                 names_by_id.get(column).cloned().ok_or(Error::InvalidStoredValue(
                     "stored authored column id is absent from its schema mapping",
                 ))
@@ -322,10 +328,10 @@ where
         let logical_descriptor = match target {
             PhysicalWriteTarget::History => source_table.history_storage_table().record_schema(),
             PhysicalWriteTarget::GlobalCurrent => {
-                source_table.global_current_storage_tables()[0].record_schema()
+                source_table.global_current_storage_table().record_schema()
             }
             PhysicalWriteTarget::AheadCurrent => {
-                source_table.ahead_current_storage_tables()[0].record_schema()
+                source_table.ahead_current_storage_table().record_schema()
             }
         };
         let physical_names = match target {
@@ -416,11 +422,6 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "stored row schema version alias missing while resolving storage table",
             ))?;
-        if version.layer() == VersionLayer::Deletion {
-            return Ok(groove::Intern::new(
-                SHARED_DELETION_HISTORY_TABLE.to_owned(),
-            ));
-        }
         Ok(groove::Intern::new(physical_history_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
@@ -432,12 +433,6 @@ where
         &self,
         version: &VersionRow,
     ) -> Result<PrimaryKeyValue, Error> {
-        if version.layer() == VersionLayer::Deletion {
-            return Ok(shared_deletion_history_primary_key(
-                self.physical_table_id_for_version(version)?,
-                version,
-            ));
-        }
         Ok(history_primary_key(version))
     }
 
@@ -756,10 +751,6 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "stored row schema version alias missing while preparing storage write",
             ))?;
-        if version.layer() == VersionLayer::Deletion {
-            return self.shared_deletion_history_write_binding(version);
-        }
-
         let plan = self.prepared_physical_write_plan(
             schema_version,
             version.table(),
@@ -857,42 +848,6 @@ where
             );
         }
         Ok(encoded)
-    }
-
-    /// Encode a deletion/register version into the fixed shared history table.
-    /// The wire and in-memory `VersionRow` stay logical-table scoped; this is
-    /// the sole physical boundary that adds local routing identity.
-    pub(super) fn shared_deletion_history_write_binding(
-        &mut self,
-        version: &VersionRow,
-    ) -> Result<
-        (
-            groove::Intern<String>,
-            groove::records::ValidatedVariantRecord,
-        ),
-        Error,
-    > {
-        debug_assert_eq!(version.layer(), VersionLayer::Deletion);
-        let schema_version = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "stored register schema version alias missing while preparing shared deletion write",
-            ))?;
-        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let mut values = version.record.to_values()?;
-        values.insert(1, Value::U64(table_id.0));
-        let descriptor = self
-            .database
-            .table_schema(SHARED_DELETION_HISTORY_TABLE)?
-            .record_schema();
-        Ok((
-            groove::Intern::new(SHARED_DELETION_HISTORY_TABLE.to_owned()),
-            groove::records::ValidatedVariantRecord::create(
-                groove_variant_tag(version.schema_version_alias())?,
-                descriptor,
-                &values,
-            )?,
-        ))
     }
 
     pub(super) fn rejected_version_storage_write_binding(

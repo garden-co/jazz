@@ -1148,7 +1148,7 @@ fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
         .expect("non-default branch row is persisted")
         .clone();
     let storage_table = node
-        .version_storage_sources_for_layer(branched.table(), branched.layer())
+        .version_storage_sources(branched.table())
         .unwrap()
         .into_iter()
         .next()
@@ -1327,20 +1327,8 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .primary_key_scan_raw(&physical_history_table_name(table_id), &prefix)
             .unwrap()
             .len(),
-        1,
-        "content history is addressed by the canonical branch prefix"
-    );
-    assert_eq!(
-        rocks
-            .database
-            .primary_key_scan_raw(
-                SHARED_DELETION_HISTORY_TABLE,
-                &[Value::Bytes(key.canonical_bytes()), Value::U64(table_id.0)],
-            )
-            .unwrap()
-            .len(),
-        1,
-        "deletion history is addressed by the same canonical branch prefix"
+        2,
+        "content and deletion images share the canonical branch prefix in history"
     );
     assert_eq!(
         rocks
@@ -1348,21 +1336,10 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &prefix)
             .unwrap()
             .len(),
-        1,
-        "locally settled content uses the canonical branch prefix in ahead-current"
+        2,
+        "locally settled content and deletion use the canonical branch prefix in ahead-current"
     );
-    assert_eq!(
-        rocks
-            .database
-            .primary_key_scan_raw(
-                &physical_register_ahead_current_table_name(table_id),
-                &prefix,
-            )
-            .unwrap()
-            .len(),
-        1,
-            "locally settled deletion uses the same prefix in register ahead-current"
-    );
+
     for branch_key in [&key, &sibling_key] {
         assert_eq!(
             rocks
@@ -1413,18 +1390,7 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         1,
         "globally accepted content retains the canonical branch prefix in global-current"
     );
-    assert_eq!(
-        rocks
-            .database
-            .primary_key_scan_raw(
-                &physical_register_global_current_table_name(table_id),
-                &prefix,
-            )
-            .unwrap()
-            .len(),
-        1,
-            "globally accepted deletion retains the same prefix in register global-current"
-    );
+
     for branch_key in [&key, &sibling_key] {
         assert_eq!(
             rocks

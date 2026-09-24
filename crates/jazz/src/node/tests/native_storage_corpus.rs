@@ -921,11 +921,8 @@ where
                 });
             stores.extend([
                 physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
                 physical_global_current_table_name(table_id),
-                physical_register_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_register_ahead_current_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ]);
         }

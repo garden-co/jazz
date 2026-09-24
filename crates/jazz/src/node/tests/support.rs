@@ -35,11 +35,11 @@ where
     S: OrderedKvStorage,
 {
     let versions = node.query_table_versions(table).unwrap();
-    let mut local_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
-    let mut global_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut local_expected = BTreeMap::<RowUuid, TxId>::new();
+    let mut global_expected = BTreeMap::<RowUuid, TxId>::new();
     for version in &versions {
         let tx_id = node.version_tx_id(version).unwrap();
-        let key = (version.row_uuid(), version.layer());
+        let key = version.row_uuid();
         local_expected
             .entry(key)
             .and_modify(|winner| *winner = (*winner).max(tx_id))
@@ -55,32 +55,24 @@ where
         }
     }
 
-    for ((row_uuid, layer), expected_tx) in local_expected {
+    for (row_uuid, expected_tx) in local_expected {
         let actual = node
-            .query_local_layer_winner(table, row_uuid, layer)
+            .query_local_winner(table, row_uuid)
             .unwrap()
             .map(|winner| node.version_tx_id(&winner).unwrap());
         assert_eq!(
             actual,
             Some(expected_tx),
-            "local argmax winner must match stored versions for {table}/{row_uuid:?}/{layer:?}"
+            "local argmax winner must match stored versions for {table}/{row_uuid:?}"
         );
     }
 
-    let mut actual_global = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut actual_global = BTreeMap::<RowUuid, TxId>::new();
     let physical_table = node
         .physical_table_id_for_schema(node.catalogue.local_schema_version_id, table)
         .unwrap();
-    for (storage_table, layer) in [
-        (
-            physical_global_current_table_name(physical_table),
-            VersionLayer::Content,
-        ),
-        (
-            physical_register_global_current_table_name(physical_table),
-            VersionLayer::Deletion,
-        ),
-    ] {
+    {
+        let storage_table = physical_global_current_table_name(physical_table);
         for raw in node
             .database
             .primary_key_scan_raw(&storage_table, &[])
@@ -103,7 +95,7 @@ where
                     .unwrap(),
             );
             let tx_node = node.node_for_alias(tx_node_alias).unwrap();
-            actual_global.insert((row_uuid, layer), TxId::new(tx_time, tx_node));
+            actual_global.insert(row_uuid, TxId::new(tx_time, tx_node));
         }
     }
     assert_eq!(
@@ -187,14 +179,12 @@ fn schema() -> JazzSchema {
 fn global_winner_tx<S>(
     node: &mut NodeState<S>,
     table: &str,
-    row_uuid: RowUuid,
-    layer: VersionLayer,
-) -> Option<TxId>
+    row_uuid: RowUuid,) -> Option<TxId>
 where
     S: OrderedKvStorage,
 {
     let winner = node
-        .query_global_layer_winner(table, row_uuid, layer)
+        .query_global_winner(table, row_uuid)
         .unwrap()?;
     Some(node.version_tx_id(&winner).unwrap())
 }
@@ -209,14 +199,6 @@ where
         .primary_key_scan_raw(&physical_ahead_current_table_name(physical_table), &[])
         .unwrap()
         .len()
-        + node
-            .database
-            .primary_key_scan_raw(
-                &physical_register_ahead_current_table_name(physical_table),
-                &[],
-            )
-            .unwrap()
-            .len()
 }
 fn owner_policy_schema() -> JazzSchema {
     build_public_test_schema(
@@ -2103,10 +2085,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         assert!(
             node.parking.parked_commit_units.is_empty(),
             "seed {seed}: {name} parked commit units should drain before index checks"
-        );
-        assert!(
-            node.rejections.child_txs_by_parent.is_empty(),
-            "seed {seed}: {name} pending cascade edges should be pruned at quiescence"
         );
     }
     assert_exclusive_serialization_matches_oracle(

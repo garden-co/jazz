@@ -951,11 +951,10 @@ where
         let mut versions = Vec::with_capacity(open_tx.writes.len());
         for write in open_tx.writes {
             let snapshot_content = self
-                .snapshot_layer_winner(
+                .snapshot_winner(
                     write.schema_version,
                     &write.table,
                     write.row_uuid,
-                    VersionLayer::Content,
                     &provenance_snapshot,
                 )
                 .await;
@@ -1484,22 +1483,10 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Content,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await;
         let deletion = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Deletion,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await;
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
@@ -1570,12 +1557,11 @@ where
         })
     }
 
-    pub(super) async fn snapshot_layer_winner(
+    pub(super) async fn snapshot_winner(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
-        layer: VersionLayer,
         snapshot: &Snapshot,
     ) -> Option<VersionRow> {
         // Snapshot reads must be stable for the whole transaction lifetime.
@@ -1589,11 +1575,11 @@ where
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             let tx_id = self.version_tx_id(version).ok()?;
-            if version.layer() == layer && self.snapshot_covers(tx_id, snapshot).await {
+            if self.snapshot_covers(tx_id, snapshot).await {
                 candidate_indices.push(idx);
             }
         }
-        current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
+        current_version_index(&versions, &candidate_indices, &self.node_aliases)
             .map(|idx| versions[idx].clone())
     }
 
@@ -1605,13 +1591,7 @@ where
         snapshot: &Snapshot,
     ) -> Option<TxId> {
         let version = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Content,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await?;
         self.version_tx_id(&version).ok()
     }

@@ -106,7 +106,7 @@ mod variant_case_tests {
         }
         let storage_tables = [
             table.history_storage_table(),
-            table.global_current_storage_tables().remove(0),
+            table.global_current_storage_table(),
             table.rejected_versions_storage_table(),
         ];
         let prefixes = [HistoryRowRecord::USER_CELLS, GlobalCurrentRowRecord::USER_CELLS,

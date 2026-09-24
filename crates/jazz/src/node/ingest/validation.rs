@@ -262,7 +262,7 @@ where
         }
 
         let mut pending_global_updates =
-            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
+            BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();
         let mut content_versions = Vec::new();
         let mut stored_versions = Vec::new();
         for version in versions {
@@ -285,20 +285,18 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
-            if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
+            if !matches!(fate, Fate::Rejected(_)) {
                 content_versions.push(stored.clone());
             }
             stored_versions.push(stored.clone());
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if global_time.is_some() {
-                    let previous_global_current = self.query_global_layer_winner_in_batch(
+                    let previous_global_current = self.query_global_winner_in_batch(
                         batch,
                         author_schema,
                         &table_schema.name,
                         stored.branch_key(),
-                        stored.row_uuid(),
-                        stored.layer(),
-                    ).await?;
+                        stored.row_uuid(),).await?;
                     let previous_global_winner =
                         if let Some(previous) = previous_global_current.as_ref() {
                             Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
@@ -321,7 +319,6 @@ where
                                 stored.table().to_owned(),
                                 stored.branch_key().clone(),
                                 stored.row_uuid(),
-                                stored.layer(),
                             ),
                             stored.clone(),
                         );
@@ -472,7 +469,7 @@ where
                 ));
             }
         };
-        if version.deletion().is_none() {
+        {
             for (column, branch_value) in branch_cells {
                 let Some(position) = table
                     .columns

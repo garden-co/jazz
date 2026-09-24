@@ -88,22 +88,14 @@ impl<S: OrderedKvStorage> NodeState<S> {
             // includeDeleted provenance may name the register event. Fetch
             // content and deletion winners independently, as ordinary views do.
             let Some(tx_id) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Content,
-                )
+                .visible_global_tx_id_for_physical_table_now(table_id, coordinate.row)
                 .await
             else {
                 continue;
             };
             let mut transactions = BTreeSet::from([tx_id]);
             if let Some(deletion_tx) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Deletion,
-                )
+                .visible_global_tx_id_for_physical_table_now(table_id, coordinate.row)
                 .await
             {
                 transactions.insert(deletion_tx);
@@ -196,10 +188,10 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 {
                     return Err(invalid());
                 }
-                // A deletion register proves lifecycle state, not a readable
-                // row body. Every Readable coordinate needs content evidence
+                // A deleted image proves lifecycle state, not a readable row
+                // body. Every Readable coordinate needs content evidence
                 // before any carrier is ingested or a caller can clear a marker.
-                if version.deletion().is_none() {
+                if version.deletion() != Some(DeletionEvent::Deleted) {
                     content_covered.insert(index);
                 }
                 requests.push(crate::protocol::RowVersionRef::new(

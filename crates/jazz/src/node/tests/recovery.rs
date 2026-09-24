@@ -1844,17 +1844,6 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
                 .len(),
             1,
         );
-        assert_eq!(
-            writer
-                .database
-                .primary_key_scan_raw(
-                    &physical_register_ahead_current_table_name(table_id),
-                    &[],
-                )
-                .unwrap()
-                .len(),
-            1,
-        );
     }
 
     drop(writer);

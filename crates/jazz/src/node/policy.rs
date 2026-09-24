@@ -100,7 +100,7 @@ where
         for version in versions {
             let (policy_schema_version, table, cells) =
                 self.policy_projection_for_version_record(version)?;
-            if version.deletion() == Some(DeletionEvent::Deleted) {
+            if version.deletes_row() {
                 actions.push(PermissionAdviceAction::Delete {
                     table: table.name.clone(),
                     row: version.row_uuid(),
@@ -167,7 +167,7 @@ where
         author: AuthorSubject,
         candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
-        if author == AuthorSubject::SYSTEM || version.deletion() == Some(DeletionEvent::Deleted) {
+        if author == AuthorSubject::SYSTEM || version.deletes_row() {
             return Ok(true);
         }
         let (policy_schema_version, table, _) =
@@ -284,7 +284,7 @@ where
         };
         // Every user operation requires an explicit grant, including on a
         // table with no policies at all. SYSTEM is the explicit bypass above.
-        if version.deletion() == Some(DeletionEvent::Deleted) {
+        if version.deletes_row() {
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(false);
             };
@@ -603,16 +603,13 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
         if self
-            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Deletion)
+            .query_local_winner(&table.name, row_uuid)
             .await?
             .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
         {
             return Ok(None);
         }
-        let Some(version) = self
-            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Content)
-            .await?
-        else {
+        let Some(version) = self.query_local_winner(&table.name, row_uuid).await? else {
             return Ok(None);
         };
         let (_policy_schema_version, projected_table, cells) =
@@ -790,7 +787,7 @@ where
         // same incoming unit for its content and real creation provenance.
         for candidate in candidate_versions {
             if candidate.row_uuid() != version.row_uuid()
-                || candidate.deletion().is_some()
+                || candidate.deletes_row()
                 || candidate.branch_key() != version.branch_key()
             {
                 continue;
@@ -828,21 +825,19 @@ where
         };
         let local_previous = match candidate_tx_id {
             Some(candidate_tx_id) => {
-                self.query_local_layer_winner_in_branch_excluding_tx(
+                self.query_local_winner_in_branch_excluding_tx(
                     subject_table,
                     version.branch_key(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                     candidate_tx_id,
                 )
                 .await?
             }
             None => {
-                self.query_local_layer_winner_in_branch(
+                self.query_local_winner_in_branch(
                     subject_table,
                     version.branch_key(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                 )
                 .await?
             }
@@ -862,12 +857,7 @@ where
         }
 
         if let Some(current_version) = self
-            .query_global_layer_winner_in_branch(
-                subject_table,
-                version.branch_key(),
-                version.row_uuid(),
-                VersionLayer::Content,
-            )
+            .query_global_winner_in_branch(subject_table, version.branch_key(), version.row_uuid())
             .await?
         {
             if candidate_tx_id != Some(self.version_tx_id(&current_version)?) {

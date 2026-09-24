@@ -959,7 +959,7 @@ where
             .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.layer() == VersionLayer::Deletion {
+        if version.is_deleted() {
             return Ok(None);
         }
         let row = self

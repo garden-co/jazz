@@ -712,7 +712,7 @@ where
                 continue;
             }
             let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -722,7 +722,6 @@ where
                         version.branch_key().clone(),
                         version.row_uuid(),
                         version.schema_version(),
-                        version.deletion().is_some(),
                     );
                     match unique_versions.get(&key) {
                         Some(existing) if *existing != version => {
@@ -779,7 +778,7 @@ where
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
         let mut current_updates = BTreeMap::<
-            (String, BranchKey, RowUuid, VersionLayer),
+            (String, BranchKey, RowUuid),
             (VersionRow, GlobalTime),
         >::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
@@ -815,7 +814,7 @@ where
             );
 
             let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -826,7 +825,6 @@ where
                             version.branch_key().clone(),
                             version.row_uuid(),
                             version.schema_version(),
-                            version.deletion().is_some(),
                         ))
                         .or_insert(version);
                 }
@@ -864,7 +862,6 @@ where
                     stored.table().to_owned(),
                     stored.branch_key().clone(),
                     stored.row_uuid(),
-                    stored.layer(),
                 );
                 let existing_winner = current_updates.get(&key).map(|(previous, _)| {
                     (
@@ -891,8 +888,7 @@ where
             let schema = self.schema_version_for_alias(stored.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
             let table = self.physical_current_table_for_schema(
-                schema, stored.table(), stored.layer(), PhysicalCurrentClass::Global,
-            )?;
+                schema, stored.table(), PhysicalCurrentClass::Global,)?;
             let has_resident_rows = if let Some(present) = resident_tables.get(&table) {
                 *present
             } else {
@@ -901,9 +897,8 @@ where
                 present
             };
             if has_resident_rows {
-                let previous = self.query_global_layer_winner_in_schema_and_branch(
-                    schema, stored.table(), stored.branch_key(), stored.row_uuid(), stored.layer(),
-                ).await?;
+                let previous = self.query_global_winner_in_schema_and_branch(
+                    schema, stored.table(), stored.branch_key(), stored.row_uuid(),).await?;
                 if let Some(previous) = previous.as_ref() {
                     let previous_tx = self.version_tx_id(previous)?;
                     let previous_made_at = self.version_made_at(previous).await?;

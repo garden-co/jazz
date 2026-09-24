@@ -1329,56 +1329,37 @@ where
         tier: DurabilityTier,
         schema_version: SchemaVersionId,
     ) -> Result<GraphBuilder, Error> {
-        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
         let content_fields = global_current_storage_fields(table, true, true);
-        let global_content = self
+        let mut image_fields = content_fields.clone();
+        image_fields.push("_deletion".to_owned());
+        let global = self
             .physical_current_source_graph(
                 schema_version,
                 &table.name,
                 PhysicalCurrentClass::Global,
             )?
-            .project(content_fields.clone());
-        let global_deletion =
-            GraphBuilder::table(physical_register_global_current_table_name(table_id))
-                .project_fields(register_storage_fields_for_query_engine(""));
-
-        let (content, deletion) = if tier == DurabilityTier::Global {
-            (global_content, global_deletion)
+            .project(image_fields.clone());
+        // Select the winning row image, then drop it when it is deleted.
+        let current = if tier == DurabilityTier::Global {
+            global
         } else {
-            let ahead_content = self.physical_current_source_graph(
-                schema_version,
-                &table.name,
-                PhysicalCurrentClass::Ahead,
-            )?;
-            let ahead_content = ahead_content.project(content_fields.clone());
-            let ahead_deletion =
-                GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-            let ahead_deletion =
-                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""));
-            (
-                GraphBuilder::arg_max_by(
-                    GraphBuilder::union([global_content, ahead_content]),
-                    ["row_uuid"],
-                    ["tx_time", "tx_node_id"],
-                )
-                .project(content_fields),
-                GraphBuilder::arg_max_by(
-                    GraphBuilder::union([global_deletion, ahead_deletion]),
-                    ["row_uuid"],
-                    ["tx_time", "tx_node_id"],
-                )
-                .project_fields(register_storage_fields_for_query_engine("")),
+            let ahead = self
+                .physical_current_source_graph(
+                    schema_version,
+                    &table.name,
+                    PhysicalCurrentClass::Ahead,
+                )?
+                .project(image_fields.clone());
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
             )
+            .project(image_fields)
         };
-        let deleted = deletion
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]);
-        Ok(GraphBuilder::anti_join(
-            content,
-            deleted,
-            ["row_uuid"],
-            ["row_uuid"],
-        ))
+        Ok(current
+            .filter(not_deleted_predicate())
+            .project(content_fields))
     }
 
     #[cfg(test)]

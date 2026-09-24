@@ -2480,7 +2480,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         assert_eq!(stored.tx.n_total_writes, 0);
         assert!(stored.view_scoped_cardinality);
         assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
-        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        assert!(reader.query_local_winner("todos", row(1)).unwrap().is_none());
         reader.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
         // A duplicate discarded Pending header must leave a terminal identity intact.
         reader.remember_discarded_pending_view_transactions(&[carrier]).unwrap();
@@ -2495,7 +2495,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         assert_eq!(stored.tx.n_total_writes, 0);
         assert_eq!(stored.fate, Fate::Accepted);
         assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
-        assert!(reader.query_local_layer_winner("todos", row(1), VersionLayer::Content).unwrap().is_none());
+        assert!(reader.query_local_winner("todos", row(1)).unwrap().is_none());
         register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let bundle = VersionBundle { scope, tx, versions, fate: Fate::Pending,

@@ -1572,7 +1572,20 @@ impl VersionRecord {
         )
     }
 
-    /// Deletion-register event, if any.
+    /// Whether this version authors a deletion of its row. Deletion is a cell
+    /// of the row image that later content writes carry forward, so only a
+    /// version that authored `_deletion` (or legacy payloads without an
+    /// authored set) performs the delete.
+    pub(crate) fn deletes_row(&self) -> bool {
+        self.deletion() == Some(DeletionEvent::Deleted)
+            && self
+                .authored_columns
+                .as_ref()
+                .is_none_or(|columns| columns.contains("_deletion"))
+    }
+
+    /// Deletion state stamped into this row image, if the row was ever
+    /// deleted or restored.
     pub fn deletion(&self) -> Option<DeletionEvent> {
         deletion_from_value(
             self.record

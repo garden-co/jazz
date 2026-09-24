@@ -1320,32 +1320,4 @@ self.database.finish_persistence(persisted)?;
             .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
     }
 
-    async fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
-        if self
-            .query_transaction(child)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
-        {
-            return;
-        }
-        for parent in parents {
-            if self
-                .query_transaction(parent)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
-            {
-                continue;
-            }
-            self.rejections
-                .child_txs_by_parent
-                .entry(parent)
-                .or_default()
-                .insert(child);
-        }
-    }
-
 }

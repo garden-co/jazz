@@ -11,9 +11,6 @@ where
     ) -> Result<Vec<FoldCandidate>, Error> {
         let mut candidates = Vec::with_capacity(records.len());
         for record in records {
-            if record.deletion().is_some() {
-                continue;
-            }
             let (projected_schema, table) = self.translate_cells_to_current_write_schema(
                 record.schema_version(),
                 record.table(),
@@ -26,12 +23,10 @@ where
                 continue;
             }
             let previous = self
-                .query_global_layer_winner_in_branch(
+                .query_global_winner_in_branch(
                     &table,
                     record.branch_key(),
-                    record.row_uuid(),
-                    VersionLayer::Content,
-                )
+                    record.row_uuid(),)
                 .await?;
             candidates.push(FoldCandidate {
                 table,
@@ -61,8 +56,7 @@ where
         let authored = self.query_versions_for_tx(tx_id).await?;
         for candidate in candidates {
             let Some(version) = authored.iter().find(|version| {
-                version.layer() == VersionLayer::Content
-                    && version.row_uuid() == candidate.row_uuid
+                version.row_uuid() == candidate.row_uuid
                     && version.branch_key() == &candidate.branch_key
             }) else {
                 continue;
@@ -87,7 +81,7 @@ where
         } = candidate;
         let table_schema = self.table_in_schema(&table, self.catalogue.active_schema.schema)?;
         let Some(installed) = self
-            .query_global_layer_winner_in_branch(&table, &branch_key, row_uuid, VersionLayer::Content)
+            .query_global_winner_in_branch(&table, &branch_key, row_uuid)
             .await?
         else {
             return Ok(PublicationOutcome::settled(Vec::new()));
@@ -108,6 +102,16 @@ where
                 folded.insert(column.name.clone(), value);
             }
         }
+        // `_deletion` folds like any other cell: only a delete/restore
+        // authors it, so a concurrent content write cannot resurrect a row.
+        let authors_deletion = authored_columns
+            .as_ref()
+            .is_none_or(|columns| columns.contains(DELETION_COLUMN_NAME));
+        let folded_deleted = if authors_deletion {
+            authored.is_deleted()
+        } else {
+            previous.as_ref().is_some_and(VersionRow::is_deleted)
+        };
         let installed_cells = installed.cells(&table_schema)?;
         let differing = table_schema
             .columns
@@ -115,7 +119,8 @@ where
             .filter(|column| folded.get(&column.name) != installed_cells.get(&column.name))
             .map(|column| column.name.clone())
             .collect::<BTreeSet<_>>();
-        if differing.is_empty() || folded.is_empty() {
+        let deletion_differs = folded_deleted != installed.is_deleted();
+        if (differing.is_empty() || folded.is_empty()) && !deletion_differs {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         let installed_at = self.version_made_at(&installed).await?;
@@ -135,31 +140,34 @@ where
         let branch = schema
             .branch_selector_for_key(&table_schema, &branch_key)
             .map_err(Error::InvalidBranchKey)?;
-        let fold_commit = MergeableCommit::new(&table, row_uuid, made_at.physical_ms())
+        let mut fold_commit = MergeableCommit::new(&table, row_uuid, made_at.physical_ms())
             .branch(branch)
             .cells(folded)
             .authored_columns(differing);
+        if deletion_differs {
+            fold_commit = fold_commit.deletion(if folded_deleted {
+                DeletionEvent::Deleted
+            } else {
+                DeletionEvent::Restored
+            });
+        }
         let publication = Box::pin(self.commit_mergeable_at(fold_commit, made_at)).await?;
         let work = Box::pin(self.resident_commit_unit(publication.tx_id)).await?;
         Ok(PublicationOutcome::published_then(Vec::new(), publication, work))
     }
 
 
-    async fn query_global_layer_winner_in_batch(
+    async fn query_global_winner_in_batch(
         &mut self,
         batch: &DatabaseBatch,
         schema_version: SchemaVersionId,
         table: &str,
         branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<VersionRow>, Error> {
+        row_uuid: RowUuid,) -> Result<Option<VersionRow>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
-            layer,
-            PhysicalCurrentClass::Global,
-        )?;
+            PhysicalCurrentClass::Global,)?;
         let raw = self.database.primary_key_get_raw_in_batch(
             batch,
             &current_table,
@@ -182,10 +190,8 @@ where
             table,
             branch_key,
             row_uuid,
-            layer,
             tx_time,
-            tx_node_alias,
-        )
+            tx_node_alias,)
         .await
     }
 
@@ -196,28 +202,16 @@ where
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
-        layer: VersionLayer,
         tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-    ) -> Result<Option<VersionRow>, Error> {
-        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
-            let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-                let mut key = self.deletion_storage_prefix_in_schema_and_branch(
-                    schema_version,
-                    table,
-                    branch_key,
-                    Some(row_uuid),
-                )?;
-                key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
-                key
-            } else {
-                vec![
-                    Value::Bytes(branch_key.canonical_bytes()),
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ]
-            };
+        tx_node_alias: NodeAlias,) -> Result<Option<VersionRow>, Error> {
+        for storage_table in self.version_storage_sources(table)? {
+            let _ = schema_version;
+            let key = vec![
+                Value::Bytes(branch_key.canonical_bytes()),
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_time.0),
+                Value::U64(tx_node_alias.0),
+            ];
             let raw = self
                 .database
                 .primary_key_get_raw_in_batch(batch, &storage_table, &key).await?;
@@ -233,19 +227,16 @@ where
     }
 
     #[cfg(test)]
-    async fn recomputed_global_layer_winner_from_history_for_test(
+    async fn recomputed_global_winner_from_history_for_test(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<VersionRow>, Error> {
+        row_uuid: RowUuid,) -> Result<Option<VersionRow>, Error> {
         let mut winner = None::<(VersionRow, TxId, TxTime)>;
         for version in self
             .query_row_versions_in_branch(table, branch_key, row_uuid)
             .await?
             .into_iter()
-            .filter(|version| version.layer() == layer)
         {
             let tx_id = self.version_tx_id(&version)?;
             let Some(tx) = self.query_transaction(tx_id).await? else {
@@ -271,29 +262,25 @@ where
         updates: &[(VersionRow, GlobalTime)],
     ) -> Result<(), Error> {
         for (version, global_time) in updates {
-            let Some(expected) = self.recomputed_global_layer_winner_from_history_for_test(
+            let Some(expected) = self.recomputed_global_winner_from_history_for_test(
                 version.table(),
                 version.branch_key(),
-                version.row_uuid(),
-                version.layer(),
-            )
+                version.row_uuid(),)
             .await?
             else {
                 panic!(
-                    "global-current update has no accepted history winner for {}/ {:?} {:?}",
+                    "global-current update has no accepted history winner for {}/ {:?}",
                     version.table(),
                     version.row_uuid(),
-                    version.layer()
                 );
             };
             let expected_tx = self.version_tx_id(&expected)?;
             let actual_tx = self.version_tx_id(version)?;
             if expected_tx != actual_tx {
                 panic!(
-                    "global-current update diverged from history for {}/{:?} {:?}: expected winner {:?}, actual update {:?}",
+                    "global-current update diverged from history for {}/{:?}: expected winner {:?}, actual update {:?}",
                     version.table(),
                     version.row_uuid(),
-                    version.layer(),
                     expected_tx,
                     actual_tx
                 );
@@ -318,29 +305,13 @@ where
         let table = self
             .table_in_schema(version.table(), schema_version)?
             .clone();
-        let storage_tables = table.global_current_storage_tables();
-        let (current_table, current_schema, expected_values) = match version.layer() {
-            VersionLayer::Content => (
-                groove::Intern::new(self.physical_current_table_for_schema(
-                    schema_version,
-                    version.table(),
-                    VersionLayer::Content,
-                    PhysicalCurrentClass::Global,
-                )?),
-                &storage_tables[0],
-                self.public_current_values(&table, version, Some(global_time))?,
-            ),
-            VersionLayer::Deletion => (
-                groove::Intern::new(self.physical_current_table_for_schema(
-                    schema_version,
-                    version.table(),
-                    VersionLayer::Deletion,
-                    PhysicalCurrentClass::Global,
-                )?),
-                &storage_tables[1],
-                register_global_current_values(version, Some(global_time))?,
-            ),
-        };
+        let current_schema = table.global_current_storage_table();
+        let current_table = groove::Intern::new(self.physical_current_table_for_schema(
+            schema_version,
+            version.table(),
+            PhysicalCurrentClass::Global,
+        )?);
+        let expected_values = self.public_current_values(&table, version, Some(global_time))?;
         let rows = self
             .database
             .primary_key_scan_raw(
@@ -352,15 +323,14 @@ where
             )
             .await?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
-        let expected = owned_record_from_storage_values(current_schema, expected_values)?
+        let expected = owned_record_from_storage_values(&current_schema, expected_values)?
             .raw()
             .to_vec();
         if actual.as_deref() != Some(expected.as_slice()) {
             panic!(
-                "global-current row diverged for {}/{:?} {:?}: expected {:?}, actual {:?}",
+                "global-current row diverged for {}/{:?}: expected {:?}, actual {:?}",
                 version.table(),
                 version.row_uuid(),
-                version.layer(),
                 expected,
                 actual
             );
@@ -384,26 +354,19 @@ where
                 Value::U64(table_id.0),
                 Value::Bytes(version.branch_key().canonical_bytes()),
                 Value::Uuid(version.row_uuid().0),
-                Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_time.0),
             ],
         )
         .await?;
         let Some(row) = rows.first() else {
             panic!(
-                "missing global-change row for {}/{:?} {:?} at {:?}",
+                "missing global-change row for {}/{:?} at {:?}",
                 version.table(),
                 version.row_uuid(),
-                version.layer(),
                 global_time
             );
         };
         let record = row.record();
-        let expected_deletion = version.deletion();
-        let actual_deletion =
-            nullable_value(record.get_idx(GlobalChangeRowRecord::FIELD__DELETION_IDX)?)?
-                .map(deletion_event_from_value)
-                .transpose()?;
         let actual_tx = TxId::new(
             TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
             self.node_for_alias(NodeAlias(
@@ -414,17 +377,14 @@ where
             ))?,
         );
         let expected_tx = self.version_tx_id(version)?;
-        if actual_tx != expected_tx || actual_deletion != expected_deletion {
+        if actual_tx != expected_tx {
             panic!(
-                "global-change row diverged for {}/{:?} {:?} at {:?}: expected tx {:?} deletion {:?}, actual tx {:?} deletion {:?}",
+                "global-change row diverged for {}/{:?} at {:?}: expected tx {:?}, actual tx {:?}",
                 version.table(),
                 version.row_uuid(),
-                version.layer(),
                 global_time,
                 expected_tx,
-                expected_deletion,
                 actual_tx,
-                actual_deletion
             );
         }
         Ok(())
@@ -439,42 +399,20 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        match version.layer() {
-            VersionLayer::Content => {
-                let plan = self.prepared_physical_write_plan(
-                    schema_version,
-                    version.table(),
-                    PhysicalWriteTarget::GlobalCurrent,
-                )?;
-                // Validate node-local authored column aliases before deriving
-                // the current carrier; encoding itself retains trusted bytes.
-                let _ = self.authored_columns_for_version(version)?;
-                let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
-                batch.update_raw(
-                    plan.storage_table.clone(),
-                    global_current_primary_key(version.branch_key(), version.row_uuid()),
-                    physical,
-                );
-            }
-            VersionLayer::Deletion => batch.update_raw(
-                self.physical_current_table_for_schema(
-                    schema_version,
-                    version.table(),
-                    VersionLayer::Deletion,
-                    PhysicalCurrentClass::Global,
-                )?,
-                global_current_primary_key(version.branch_key(), version.row_uuid()),
-                version.bind_groove_record(
-                    owned_record_from_storage_values(
-                        &self
-                            .table_in_schema(version.table(), schema_version)?
-                            .global_current_storage_tables()[1],
-                        register_global_current_values(version, Some(global_time))?,
-                    )
-                    .expect("valid register global current row"),
-                ),
-            ),
-        }
+        let plan = self.prepared_physical_write_plan(
+            schema_version,
+            version.table(),
+            PhysicalWriteTarget::GlobalCurrent,
+        )?;
+        // Validate node-local authored column aliases before deriving
+        // the current carrier; encoding itself retains trusted bytes.
+        let _ = self.authored_columns_for_version(version)?;
+        let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
+        batch.update_raw(
+            plan.storage_table.clone(),
+            global_current_primary_key(version.branch_key(), version.row_uuid()),
+            physical,
+        );
         batch.update(
             "jazz_global_changes",
             global_change_values(
@@ -503,52 +441,27 @@ where
         let physical_table_id =
             self.physical_table_id_for_schema(schema_version, version.table())?;
         let encoded_primary_key = history_primary_key(version).into_bytes();
-        if self.ahead_current_keys.contains(&(
-            physical_table_id,
-            version.layer(),
-            encoded_primary_key.clone(),
-        )) {
+        if self
+            .ahead_current_keys
+            .contains(&(physical_table_id, encoded_primary_key.clone()))
+        {
             return Ok(());
         }
-        match version.layer() {
-            VersionLayer::Content => {
-                let plan = self.prepared_physical_write_plan(
-                    schema_version,
-                    version.table(),
-                    PhysicalWriteTarget::AheadCurrent,
-                )?;
-                let _ = self.authored_columns_for_version(version)?;
-                let physical = self.encode_physical_version_record(&plan, version, None)?;
-                batch.insert_raw(
-                    plan.storage_table.clone(),
-                    history_primary_key(version),
-                    physical,
-                );
-            }
-            VersionLayer::Deletion => batch.insert_raw(
-                self.physical_current_table_for_schema(
-                    schema_version,
-                    version.table(),
-                    VersionLayer::Deletion,
-                    PhysicalCurrentClass::Ahead,
-                )?,
-                history_primary_key(version),
-                version.bind_groove_record(
-                    owned_record_from_storage_values(
-                        &self
-                            .table_in_schema(version.table(), schema_version)?
-                            .ahead_current_storage_tables()[1],
-                        register_global_current_values(version, None)?,
-                    )
-                    .expect("valid register ahead current row"),
-                ),
-            ),
-        }
+        let plan = self.prepared_physical_write_plan(
+            schema_version,
+            version.table(),
+            PhysicalWriteTarget::AheadCurrent,
+        )?;
+        let _ = self.authored_columns_for_version(version)?;
+        let physical = self.encode_physical_version_record(&plan, version, None)?;
+        batch.insert_raw(
+            plan.storage_table.clone(),
+            history_primary_key(version),
+            physical,
+        );
         self.insert_ahead_current_key(
             physical_table_id,
-            version.layer(),
-            encoded_primary_key,
-        );
+            encoded_primary_key,);
         Ok(())
     }
 
@@ -580,15 +493,11 @@ where
         let table = self.physical_current_table_for_schema(
             schema_version,
             version.table(),
-            version.layer(),
-            PhysicalCurrentClass::Ahead,
-        )?;
+            PhysicalCurrentClass::Ahead,)?;
         batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
             self.physical_table_id_for_schema(schema_version, version.table())?,
-            version.layer(),
-            history_primary_key(version).into_bytes(),
-        );
+            history_primary_key(version).into_bytes(),);
         Ok(())
     }
 

@@ -2444,19 +2444,20 @@ where
                 .node
                 .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
+            GraphBuilder::table(physical_ahead_current_table_name(table_id))
         } else {
-            GraphBuilder::table(register_ahead_current_table_name(&request.source.table))
+            GraphBuilder::table(ahead_current_table_name(&request.source.table))
         };
         let fields = register_storage_fields_for_query_engine("");
-        // Ahead can contain several unconfirmed operations for the same row.
-        // A pending restore must supersede an earlier pending deletion.
+        // Ahead can contain several unconfirmed images of the same row. The
+        // newest one decides, so a pending restore supersedes a pending delete.
         Ok(GraphBuilder::arg_max_by(
             ahead.project_fields(fields.clone()),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
-        .project_fields(fields))
+        .project_fields(fields)
+        .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub(crate) fn deletion_register_source_for_request(
@@ -2498,15 +2499,8 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
-        let register_table = self
-            .node
-            .physical_register_table_for_schema(
-                self.node.catalogue.local_schema_version_id,
-                &table.name,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         Ok(Some(DeletionRegisterSource {
-            graph: deletion_register_current_source_graph(&table.name, &register_table, tier),
+            graph: deletion_register_current_source_graph(&table.name, tier),
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }
@@ -2705,19 +2699,22 @@ where
                 )
             }))
         };
-        let global = branch_sources(physical_register_global_current_table_name(table_id))
-            .project(fields.clone());
+        // Deletion is a cell of the winning row image. Select the image winner
+        // first; rows that never carried a deletion event are not markers.
+        let global =
+            branch_sources(physical_global_current_table_name(table_id)).project(fields.clone());
         if tier == DurabilityTier::Global {
-            return Ok(global);
+            return Ok(global.filter(PredicateExpr::is_not_null("_deletion")));
         }
-        let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
-        let ahead = { ahead.project(fields.clone()) };
+        let ahead =
+            branch_sources(physical_ahead_current_table_name(table_id)).project(fields.clone());
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
-        .project(fields))
+        .project(fields)
+        .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub(crate) fn projected_content_current_source_graph<'a>(
@@ -2794,16 +2791,8 @@ where
                 if !exclude_deleted {
                     return Ok(content.project(fields));
                 }
-                let deleted_winners = self
-                    .projected_deletion_register_current_source_graph(request, tier)?
-                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-                    .project(["row_uuid"]);
-                return Ok(GraphBuilder::anti_join(
-                    content,
-                    deleted_winners,
-                    ["row_uuid"],
-                    ["row_uuid"],
-                ));
+                // The settled image is the winner; its `_deletion` cell decides.
+                return Ok(content.filter(not_deleted_predicate()));
             }
             let required_fields = self.current_projection_required_fields(request, read_table);
             let (projection_target, physical_fields) = self
@@ -2945,16 +2934,8 @@ where
             if !exclude_deleted {
                 return Ok(content.project(fields));
             }
-            let deleted_winners = self
-                .projected_deletion_register_current_source_graph(request, tier)?
-                .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-                .project(["row_uuid"]);
-            Ok(GraphBuilder::anti_join(
-                content,
-                deleted_winners,
-                ["row_uuid"],
-                ["row_uuid"],
-            ))
+            // Deletion is a cell of the winning image selected above.
+            Ok(content.filter(not_deleted_predicate()))
         })
     }
 
@@ -2968,19 +2949,20 @@ where
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let fields = register_storage_fields_for_query_engine("");
-        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
+        let global = GraphBuilder::table(physical_global_current_table_name(table_id))
+            .project_fields(fields.clone());
         if tier == DurabilityTier::Global {
-            return Ok(global);
+            return Ok(global.filter(PredicateExpr::is_not_null("_deletion")));
         }
-        let global = global.project_fields(fields.clone());
-        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-        let ahead = { ahead.project_fields(fields.clone()) };
+        let ahead = GraphBuilder::table(physical_ahead_current_table_name(table_id))
+            .project_fields(fields.clone());
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
-        .project_fields(fields))
+        .project_fields(fields)
+        .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub(crate) async fn projected_visible_current_source_graph(
@@ -3071,23 +3053,24 @@ where
     }
 }
 
-fn deletion_register_current_source_graph(
-    table: &str,
-    physical_register_table: &str,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name(table))
-            .project_fields(register_storage_fields_for_query_engine(""));
-    }
-    let current_keys = deletion_register_current_keys_graph(table, tier);
-    GraphBuilder::join(
-        GraphBuilder::table(physical_register_table),
-        current_keys,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields_for_query_engine("left."))
+fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let fields = register_storage_fields_for_query_engine("");
+    let global =
+        GraphBuilder::table(global_current_table_name(table)).project_fields(fields.clone());
+    let current = if tier == DurabilityTier::Global {
+        global
+    } else {
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                global,
+                GraphBuilder::table(ahead_current_table_name(table)).project_fields(fields.clone()),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(fields)
+    };
+    current.filter(PredicateExpr::is_not_null("_deletion"))
 }
 
 fn content_version_current_source_graph(
@@ -3115,24 +3098,6 @@ fn content_version_current_source_graph(
     .project(fields)
 }
 
-fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
-    }
-    let ahead =
-        { GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields) };
-    GraphBuilder::arg_max_by(
-        GraphBuilder::union([
-            GraphBuilder::table(register_global_current_table_name(table)).project(key_fields),
-            ahead,
-        ]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    )
-    .project(key_fields)
-}
-
 fn selected_visible_current_primary_key_graph(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -3157,70 +3122,30 @@ fn selected_visible_current_primary_key_graph(
         "tx_time".to_owned(),
         "tx_node_id".to_owned(),
     ]);
-    let content_scan = static_scan_for_prefix(prefix.clone(), 1);
-    let deletion_scan = static_scan_for_prefix(prefix, 1);
-
-    let (content_current, deleted_winners) = if tier == DurabilityTier::Global {
-        (
-            GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-                .project(content_fields.clone()),
-            GraphBuilder::table_scan(
-                register_global_current_table_name(&table.name),
-                deletion_scan,
-            )
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]),
-        )
+    let content_scan = static_scan_for_prefix(prefix, 1);
+    let mut image_fields = content_fields.clone();
+    image_fields.push("_deletion".to_owned());
+    let current = if tier == DurabilityTier::Global {
+        GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
+            .project(image_fields)
     } else {
-        let ahead_content = {
-            GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan.clone())
-                .project(content_fields.clone())
-        };
-        let deletion_fields = vec![
-            "row_uuid".to_owned(),
-            "tx_time".to_owned(),
-            "tx_node_id".to_owned(),
-            "created_by".to_owned(),
-            "created_at".to_owned(),
-            "updated_by".to_owned(),
-            "updated_at".to_owned(),
-            "_deletion".to_owned(),
-        ];
-        let ahead_deleted = {
-            GraphBuilder::table_scan(
-                register_ahead_current_table_name(&table.name),
-                deletion_scan.clone(),
-            )
-            .project(deletion_fields.clone())
-        };
-        (
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-                        .project(content_fields.clone()),
-                    ahead_content,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(content_fields.clone()),
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table_scan(
-                        register_global_current_table_name(&table.name),
-                        deletion_scan,
-                    )
-                    .project(deletion_fields),
-                    ahead_deleted,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]),
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                GraphBuilder::table_scan(
+                    global_current_table_name(&table.name),
+                    content_scan.clone(),
+                )
+                .project(image_fields.clone()),
+                GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan)
+                    .project(image_fields.clone()),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
         )
+        .project(image_fields)
     };
-    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
+    current
+        .filter(not_deleted_predicate())
         .project(content_fields)
 }
 
@@ -3839,7 +3764,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
     let logical = current_row_descriptor_with_hidden_source_fields(table, metadata);
-    let current = table.global_current_storage_tables()[0].record_schema();
+    let current = table.global_current_storage_table().record_schema();
     let current_types = table
         .columns
         .iter()
@@ -4327,7 +4252,7 @@ where
             maintained,
             source_limit,
             projection_target,
-            table.global_current_storage_tables()[0].record_schema(),
+            table.global_current_storage_table().record_schema(),
         )
     }
 
@@ -5190,12 +5115,15 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         "authored_columns".to_owned(),
     ];
     content_storage_fields.extend(user_fields.iter().cloned());
-    content_storage_fields.push("created_by".to_owned());
-    content_storage_fields.push("created_at".to_owned());
-    content_storage_fields.push("updated_by".to_owned());
-    content_storage_fields.push("updated_at".to_owned());
-    content_storage_fields.push("tx_time".to_owned());
-    content_storage_fields.push("tx_node_id".to_owned());
+    content_storage_fields.extend([
+        "created_by".to_owned(),
+        "created_at".to_owned(),
+        "updated_by".to_owned(),
+        "updated_at".to_owned(),
+        "tx_time".to_owned(),
+        "tx_node_id".to_owned(),
+        "_deletion".to_owned(),
+    ]);
     let normalize_content_fields = |graph: GraphBuilder| {
         graph.project_fields(
             ["row_uuid".to_owned()]
@@ -5209,100 +5137,55 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                     ProjectField::renamed("updated_at", "$updatedAt"),
                     ProjectField::named("tx_time"),
                     ProjectField::named("tx_node_id"),
+                    ProjectField::named("_deletion"),
                 ]),
         )
     };
-
-    let (content_current, deletion_current) = if tier == DurabilityTier::Global {
-        (
-            normalize_content_fields(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(content_storage_fields.clone()),
-            ),
-            GraphBuilder::table(register_global_current_table_name(&table.name)),
-        )
-    } else {
-        let ahead_content = {
-            normalize_content_fields(
-                GraphBuilder::table(ahead_current_table_name(&table.name))
-                    .project(content_storage_fields.clone()),
-            )
-        };
-        let deletion_fields = vec![
-            "row_uuid".to_owned(),
-            "tx_time".to_owned(),
-            "tx_node_id".to_owned(),
-            "created_by".to_owned(),
-            "created_at".to_owned(),
-            "updated_by".to_owned(),
-            "updated_at".to_owned(),
-            "_deletion".to_owned(),
-        ];
-        let ahead_deletion = {
-            GraphBuilder::table(register_ahead_current_table_name(&table.name))
-                .project(deletion_fields.clone())
-        };
-        (
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    normalize_content_fields(
-                        GraphBuilder::table(global_current_table_name(&table.name))
-                            .project(content_storage_fields.clone()),
-                    ),
-                    ahead_content,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(current_row_fields(table)),
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table(register_global_current_table_name(&table.name))
-                        .project(deletion_fields),
-                    ahead_deletion,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ),
-        )
-    };
-    let deleted_winners = deletion_current
-        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-        .project_fields([
-            ProjectField::named("row_uuid"),
-            ProjectField::named("tx_time"),
-            ProjectField::named("tx_node_id"),
-            ProjectField::renamed("updated_by", "$updatedBy"),
-            ProjectField::renamed("updated_at", "$updatedAt"),
-        ]);
-    let undeleted = GraphBuilder::anti_join(
-        content_current.clone(),
-        deleted_winners.clone(),
-        ["row_uuid"],
-        ["row_uuid"],
-    )
-    .project_fields(
-        current_row_fields(table)
-            .into_iter()
-            .map(ProjectField::named)
-            .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+    let global = normalize_content_fields(
+        GraphBuilder::table(global_current_table_name(&table.name))
+            .project(content_storage_fields.clone()),
     );
-    let deleted = GraphBuilder::join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project_fields(
+    // The winning image carries its own deletion state and provenance: a
+    // deleted row reports the deleting write as its last update.
+    let current = if tier == DurabilityTier::Global {
+        global
+    } else {
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                global,
+                normalize_content_fields(
+                    GraphBuilder::table(ahead_current_table_name(&table.name))
+                        .project(content_storage_fields),
+                ),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+    };
+    include_deleted_from_images(table, current)
+}
+
+/// Split winning row images into the IncludeDeleted carrier: every current
+/// row field plus `__jazz_deleted` derived from the image's `_deletion` cell.
+fn include_deleted_from_images(table: &TableSchema, current: GraphBuilder) -> GraphBuilder {
+    let with_flag = |graph: GraphBuilder, deleted: bool| {
+        graph.project_fields(
             current_row_fields(table)
                 .into_iter()
-                .map(|field| {
-                    let source = match field.as_str() {
-                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                            right_field(&field)
-                        }
-                        _ => left_field(&field),
-                    };
-                    ProjectField::renamed(source, field)
-                })
-                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
-        );
-    GraphBuilder::union([undeleted, deleted])
+                .map(ProjectField::named)
+                .chain([ProjectField::literal(
+                    "__jazz_deleted",
+                    Value::Bool(deleted),
+                )]),
+        )
+    };
+    GraphBuilder::union([
+        with_flag(current.clone().filter(not_deleted_predicate()), false),
+        with_flag(
+            current.filter(PredicateExpr::eq("_deletion", Value::EnumTag(0))),
+            true,
+        ),
+    ])
 }
 
 pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<String> {

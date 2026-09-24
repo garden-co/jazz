@@ -93,7 +93,6 @@ where
             .query_version_by_alias(
                 canonical_table,
                 row_uuid,
-                VersionLayer::Content,
                 version_ref.tx.time,
                 tx_node_alias,
             )
@@ -113,9 +112,7 @@ where
             .query_versions_for_tx(version_ref.tx)
             .await?
             .into_iter()
-            .filter(|version| {
-                version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content
-            })
+            .filter(|version| version.row_uuid() == row_uuid)
             .collect::<Vec<_>>();
         let mut matching = Vec::new();
         for version in candidates {
@@ -611,17 +608,8 @@ where
                             .map(|raw| raw.owned_record())
                             .collect::<Vec<_>>();
                         for record in raws {
-                            let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE
-                            {
-                                ""
-                            } else {
-                                table
-                            };
-                            let version = self.decode_history_owned_record(
-                                requested_table,
-                                &storage_table,
-                                record,
-                            )?;
+                            let version =
+                                self.decode_history_owned_record(table, &storage_table, record)?;
                             if version.tx_node_alias() != alias
                                 || !times.contains(&version.tx_time())
                             {
@@ -640,7 +628,6 @@ where
                 left.table()
                     .cmp(right.table())
                     .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
-                    .then_with(|| left.layer().cmp(&right.layer()))
             });
         }
         Ok(())
@@ -949,7 +936,6 @@ where
             .query_version_by_alias(
                 target_table_name,
                 target_row,
-                VersionLayer::Content,
                 target_tx_time,
                 target_tx_node,
             )

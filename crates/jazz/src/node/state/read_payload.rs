@@ -573,11 +573,6 @@ where
                             tx,
                             version.row_uuid(),
                             table,
-                            if version.deletion().is_some() {
-                                crate::protocol::ResultRowLayer::Deletion
-                            } else {
-                                crate::protocol::ResultRowLayer::Content
-                            },
                             version.branch_key().canonical_bytes(),
                         )
                     })
@@ -652,7 +647,6 @@ where
             TxId,
             RowUuid,
             PhysicalTableId,
-            crate::protocol::ResultRowLayer,
             Vec<u8>,
         )>,
     ) -> Result<bool, Error> {
@@ -692,7 +686,6 @@ where
             request.tx_id(),
             request.row_uuid,
             requested_table_id,
-            version.layer,
             version.branch_or_prefix.clone().unwrap_or_default(),
         )))
     }

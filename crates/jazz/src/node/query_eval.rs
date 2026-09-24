@@ -2044,143 +2044,35 @@ where
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
-        let mut rows_by_uuid = BTreeMap::<
-            RowUuid,
-            (
-                Option<(TxTime, NodeAlias)>,
-                Option<(TxTime, NodeAlias, Option<DeletionEvent>)>,
-            ),
-        >::new();
+        let mut rows_by_uuid = BTreeMap::<RowUuid, (TxTime, NodeAlias)>::new();
         for raw in self
             .bounded_global_change_records_at(table, position)
             .await?
         {
             let record = raw.record();
             let row_uuid = RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?);
-            let layer = record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?;
             let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
             let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            let deletion = record
-                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
-                .transpose()?;
-            let entry = rows_by_uuid.entry(row_uuid).or_insert((None, None));
-            if layer == version_layer_string(VersionLayer::Content).as_bytes() {
-                if entry.0.is_none_or(|current| (tx_time, tx_node) > current) {
-                    entry.0 = Some((tx_time, tx_node));
-                }
-            }
-            if entry.1.is_none_or(|(current_time, current_node, _)| {
-                (tx_time, tx_node) > (current_time, current_node)
-            }) {
-                entry.1 = Some((tx_time, tx_node, deletion));
+            let entry = rows_by_uuid.entry(row_uuid).or_insert((tx_time, tx_node));
+            if (tx_time, tx_node) > *entry {
+                *entry = (tx_time, tx_node);
             }
         }
         let mut rows = Vec::new();
-        for (row_uuid, (content, latest_event)) in rows_by_uuid {
-            let Some((_, _, latest_deletion)) = latest_event else {
-                continue;
-            };
-            if latest_deletion == Some(DeletionEvent::Deleted) {
-                continue;
-            }
-            let Some((tx_time, tx_node_alias)) = content else {
-                continue;
-            };
+        for (row_uuid, (tx_time, tx_node_alias)) in rows_by_uuid {
             let version = self
-                .query_version_by_alias(
-                    table,
-                    row_uuid,
-                    VersionLayer::Content,
-                    tx_time,
-                    tx_node_alias,
-                )
+                .query_version_by_alias(table, row_uuid, tx_time, tx_node_alias)
                 .await?
                 .ok_or(Error::InvalidStoredValue(
-                    "historical content winner is missing",
+                    "historical row winner is missing",
                 ))?;
+            if version.is_deleted() {
+                continue;
+            }
             rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
         }
         sort_current_rows(&mut rows);
         Ok(rows)
-    }
-    #[allow(dead_code)]
-    async fn historical_content_witness_at(
-        &mut self,
-        table: &str,
-        read_schema: SchemaVersionId,
-        row_uuid: RowUuid,
-        position: GlobalTime,
-    ) -> Result<Option<TxId>, Error> {
-        let mut content = None::<(TxTime, NodeAlias)>;
-        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
-        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
-        let raw_records = if position.0 == u64::MAX {
-            self.database
-                .index_scan_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                    ],
-                )
-                .await?
-        } else {
-            self.database
-                .index_scan_range_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(0),
-                    ],
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(position.0 + 1),
-                    ],
-                )
-                .await?
-        };
-        for raw in raw_records {
-            let record = raw.record();
-            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
-                continue;
-            }
-            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
-                == version_layer_string(VersionLayer::Content).as_bytes()
-                && content.is_none_or(|current| (time, alias) > current)
-            {
-                content = Some((time, alias));
-            }
-            let deletion = record
-                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
-                .transpose()?;
-            if latest_event.is_none_or(|(current_time, current_alias, _)| {
-                (time, alias) > (current_time, current_alias)
-            }) {
-                latest_event = Some((time, alias, deletion));
-            }
-        }
-        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
-            return Ok(None);
-        }
-        let Some((time, alias)) = content else {
-            return Ok(None);
-        };
-        let node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "historical content witness node alias is missing",
-            ))?;
-        Ok(Some(TxId::new(time, node)))
     }
     async fn query_relation_snapshot_in_authorization_mode(
         &mut self,
@@ -2294,8 +2186,7 @@ where
         let table_id = self.physical_table_id_for_schema(result_schema, result_table)?;
         for version in versions.iter().rev() {
             if version.row_uuid() == row_uuid
-                && !version.is_register_record()
-                && version.deletion().is_none()
+                && !version.is_deleted()
                 && self.physical_table_id_for_version(version)? == table_id
             {
                 return Ok(Some(version));
@@ -4061,14 +3952,8 @@ fn local_maintained_view_content_witness<'a>(
     table: &str,
     row_uuid: RowUuid,
 ) -> Option<&'a VersionRow> {
-    // `versions_by_tx` is canonically ordered by encoded record, not by write time.
-    // Within one transaction the complete content witness sorts after the
-    // metadata-only register projection, so search from the back.
     versions.iter().rev().find(|version| {
-        version.table() == table
-            && version.row_uuid() == row_uuid
-            && !version.is_register_record()
-            && version.deletion().is_none()
+        version.table() == table && version.row_uuid() == row_uuid && !version.is_deleted()
     })
 }
 

@@ -53,10 +53,6 @@ pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
 /// Direct groove record store used to bound crash recovery work when a process
 /// dies after a durable consistency boundary but before clean close runs.
 pub const STORAGE_CONSISTENCY_MARKERS_STORE: &str = "jazz_storage_consistency_markers";
-/// Node-local derived content-head table used to avoid row-history scans on
-/// ordinary accepted writes. It is storage metadata, never wire or app data.
-pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
-
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue
@@ -495,7 +491,6 @@ impl RuntimeSchema {
                 // application view is registered. Keep the shared physical
                 // row classes available even for the empty bootstrap schema.
                 .chain(std::iter::once("jazz_physical_history"))
-                .chain(std::iter::once("jazz_physical_register"))
                 .chain(std::iter::once("jazz_physical_global_current"))
                 .chain(std::iter::once("jazz_physical_ahead_current")),
         )
@@ -515,11 +510,8 @@ impl RuntimeSchema {
             catalogue_pointer_table(),
             transactions_table(),
             rejected_transactions_table(),
-            pending_edges_table(),
-            merge_heads_table(),
         ];
         tables.push(global_changes_table());
-        tables.push(shared_deletion_history_table());
         tables
     }
 
@@ -1024,7 +1016,6 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
-            column("layer", GrooveColumnType::Bytes),
             column("_deletion", deletion_column().nullable()),
         ];
         columns.extend(self.columns.iter().map(|user_column| {
@@ -1038,7 +1029,6 @@ impl TableSchema {
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
                 PrimaryKeyColumn::uuid("row_uuid"),
-                PrimaryKeyColumn::bytes("layer"),
             ]))
     }
 
@@ -1064,6 +1054,8 @@ impl TableSchema {
             column("created_at", GrooveColumnType::U64),
             column("updated_by", crate::ids::RowAuthor::value_type()),
             column("updated_at", GrooveColumnType::U64),
+            // Deletion is a cell of the row image: null until deleted or restored.
+            column("_deletion", deletion_column().nullable()),
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
@@ -1092,41 +1084,8 @@ impl TableSchema {
             ))
     }
 
-    /// Return the storage table for deletion-register versions.
-    pub fn register_storage_table(&self) -> GrooveTableSchema {
-        self.register_storage_table_named(format!("jazz_{}_register", self.name))
-    }
-
-    fn register_storage_table_named(&self, name: String) -> GrooveTableSchema {
-        GrooveTableSchema::new(
-            name,
-            [
-                column("branch_key", GrooveColumnType::Bytes),
-                column("row_uuid", GrooveColumnType::Uuid),
-                column("tx_time", GrooveColumnType::U64),
-                column("tx_node_id", GrooveColumnType::U64),
-                column("schema_version", GrooveColumnType::U64),
-                column("created_by", crate::ids::RowAuthor::value_type()),
-                column("created_at", GrooveColumnType::U64),
-                column("updated_by", crate::ids::RowAuthor::value_type()),
-                column("updated_at", GrooveColumnType::U64),
-                column("_deletion", deletion_column()),
-            ],
-        )
-        .with_primary_key(PrimaryKey::composite([
-            PrimaryKeyColumn::bytes("branch_key"),
-            PrimaryKeyColumn::uuid("row_uuid"),
-            PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-        ]))
-        .with_index(GrooveIndexSchema::new(
-            "by_tx",
-            ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-        ))
-    }
-
-    /// Return per-layer global-current tables for content and register winners.
-    pub fn global_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
+    /// Return the global-current table: one settled row image per row.
+    pub fn global_current_storage_table(&self) -> GrooveTableSchema {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1139,6 +1098,7 @@ impl TableSchema {
             column("updated_by", crate::ids::RowAuthor::value_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
+            column("_deletion", deletion_column().nullable()),
         ];
         // Carry every user column (not only indexed ones) so the global-current
         // table is a self-sufficient current-row index: whole-table current
@@ -1169,33 +1129,11 @@ impl TableSchema {
                 ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
-        vec![
-            content_table,
-            GrooveTableSchema::new(
-                format!("jazz_{}_register_global_current", self.name),
-                [
-                    column("branch_key", GrooveColumnType::Bytes),
-                    column("row_uuid", GrooveColumnType::Uuid),
-                    column("tx_time", GrooveColumnType::U64),
-                    column("tx_node_id", GrooveColumnType::U64),
-                    column("schema_version", GrooveColumnType::U64),
-                    column("created_by", crate::ids::RowAuthor::value_type()),
-                    column("created_at", GrooveColumnType::U64),
-                    column("updated_by", crate::ids::RowAuthor::value_type()),
-                    column("updated_at", GrooveColumnType::U64),
-                    column("global_time", GrooveColumnType::U64.nullable()),
-                    column("_deletion", deletion_column()),
-                ],
-            )
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-            ])),
-        ]
+        content_table
     }
 
-    /// Return per-layer ahead-of-global candidate tables.
-    pub fn ahead_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
+    /// Return the ahead-of-global candidate table (local pending rows).
+    pub fn ahead_current_storage_table(&self) -> GrooveTableSchema {
         let mut content_columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
@@ -1207,6 +1145,7 @@ impl TableSchema {
             column("updated_by", crate::ids::RowAuthor::value_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
+            column("_deletion", deletion_column().nullable()),
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
@@ -1218,34 +1157,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        vec![
-            GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
-                .with_primary_key(PrimaryKey::composite([
-                    PrimaryKeyColumn::bytes("branch_key"),
-                    PrimaryKeyColumn::uuid("row_uuid"),
-                    PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-                    PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-                ]))
-                .with_index(GrooveIndexSchema::new(
-                    "by_tx",
-                    ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-                )),
-            GrooveTableSchema::new(
-                format!("jazz_{}_register_ahead_current", self.name),
-                [
-                    column("branch_key", GrooveColumnType::Bytes),
-                    column("row_uuid", GrooveColumnType::Uuid),
-                    column("tx_time", GrooveColumnType::U64),
-                    column("tx_node_id", GrooveColumnType::U64),
-                    column("schema_version", GrooveColumnType::U64),
-                    column("created_by", crate::ids::RowAuthor::value_type()),
-                    column("created_at", GrooveColumnType::U64),
-                    column("updated_by", crate::ids::RowAuthor::value_type()),
-                    column("updated_at", GrooveColumnType::U64),
-                    column("global_time", GrooveColumnType::U64.nullable()),
-                    column("_deletion", deletion_column()),
-                ],
-            )
+        GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
@@ -1255,8 +1167,7 @@ impl TableSchema {
             .with_index(GrooveIndexSchema::new(
                 "by_tx",
                 ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-            )),
-        ]
+            ))
     }
 
     /// Columns available for constrained global-current reads.
@@ -1363,124 +1274,25 @@ fn global_changes_table() -> GrooveTableSchema {
             column("physical_table_id", GrooveColumnType::U64),
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
-            column("layer", GrooveColumnType::Bytes),
             column("global_time", GrooveColumnType::U64),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
-            column("_deletion", deletion_column().nullable()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::bytes("branch_key"),
         PrimaryKeyColumn::uuid("row_uuid"),
-        PrimaryKeyColumn::bytes("layer"),
         PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_global_time",
-        [
-            "global_time",
-            "physical_table_id",
-            "branch_key",
-            "row_uuid",
-            "layer",
-        ],
+        ["global_time", "physical_table_id", "branch_key", "row_uuid"],
     ))
     .with_index(GrooveIndexSchema::new(
         "by_table_global_time",
-        [
-            "physical_table_id",
-            "branch_key",
-            "global_time",
-            "row_uuid",
-            "layer",
-        ],
+        ["physical_table_id", "branch_key", "global_time", "row_uuid"],
     ))
-}
-
-/// Immutable sparse deletion/restore history for every physical table lineage.
-///
-/// This is intentionally a fixed system table rather than a schema-variant
-/// table: deletion payload has no user cells. Branch-key routing is added by
-/// the physical branch-local row layer rather than transaction metadata.
-pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_deletion_history",
-        [
-            column("branch_key", GrooveColumnType::Bytes),
-            column("physical_table_id", GrooveColumnType::U64),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
-            column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
-            column("updated_at", GrooveColumnType::U64),
-            column("_deletion", deletion_column()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("branch_key"),
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::uuid("row_uuid"),
-        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-    ]))
-    .with_index(GrooveIndexSchema::new(
-        "by_tx",
-        [
-            "tx_time",
-            "tx_node_id",
-            "branch_key",
-            "physical_table_id",
-            "row_uuid",
-        ],
-    ))
-}
-
-fn merge_heads_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        MERGE_HEADS_TABLE,
-        [
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("heads", tx_id_column().array_of()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::bytes("branch_key"),
-        PrimaryKeyColumn::uuid("row_uuid"),
-    ]))
-}
-
-fn pending_edges_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_pending_edges",
-        [
-            column("child_time", GrooveColumnType::U64),
-            column("child_node_id", GrooveColumnType::U64),
-            column("parent_time", GrooveColumnType::U64),
-            column("parent_node_id", GrooveColumnType::U64),
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("layer", GrooveColumnType::Bytes),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("child_time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("child_node_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("parent_time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("parent_node_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::bytes("branch_key"),
-        PrimaryKeyColumn::uuid("row_uuid"),
-        PrimaryKeyColumn::bytes("layer"),
-    ]))
 }
 
 /// Policy-shape constructors.
@@ -2120,13 +1932,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "physical_table_id",
-                "branch_key",
-                "row_uuid",
-                "layer",
-                "global_time"
-            ]
+            vec!["physical_table_id", "branch_key", "row_uuid", "global_time"]
         );
 
         let index = table
@@ -2136,13 +1942,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.columns,
-            vec![
-                "global_time",
-                "physical_table_id",
-                "branch_key",
-                "row_uuid",
-                "layer"
-            ]
+            vec!["global_time", "physical_table_id", "branch_key", "row_uuid",]
         );
         let table_index = table
             .indices
@@ -2151,71 +1951,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec![
-                "physical_table_id",
-                "branch_key",
-                "global_time",
-                "row_uuid",
-                "layer"
-            ]
-        );
-    }
-
-    // This is intentionally an internal schema test: the physical encoding of
-    // a derived index is not exposed by the public API. The declared type is
-    // the durable contract that keeps Rust/serde layout out of stored rows.
-    #[test]
-    fn merge_heads_use_the_native_transaction_id_array_type() {
-        let table = merge_heads_table();
-        assert_eq!(
-            table
-                .columns
-                .iter()
-                .find(|column| column.name == "heads")
-                .map(|column| &column.column_type),
-            Some(&tx_id_column().array_of())
-        );
-    }
-
-    // This is intentionally an internal schema test: physical-key boundedness
-    // is not observable through the public API until deletion ingestion routes
-    // through the shared table. It guards the storage contract that makes the
-    // later black-box collision and branch-isolation tests meaningful.
-    #[test]
-    fn shared_deletion_history_is_prefix_bounded_by_lineage_table_and_row() {
-        let table = shared_deletion_history_table();
-        assert_eq!(table.name, "jazz_deletion_history");
-        assert_eq!(
-            table
-                .primary_key
-                .as_ref()
-                .expect("shared deletion history has a primary key")
-                .columns
-                .iter()
-                .map(|column| column.column.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "branch_key",
-                "physical_table_id",
-                "row_uuid",
-                "tx_time",
-                "tx_node_id",
-            ]
-        );
-        assert_eq!(
-            table
-                .indices
-                .iter()
-                .find(|index| index.name == "by_tx")
-                .expect("shared deletion history has tx lookup")
-                .columns,
-            vec![
-                "tx_time",
-                "tx_node_id",
-                "branch_key",
-                "physical_table_id",
-                "row_uuid",
-            ]
+            vec!["physical_table_id", "branch_key", "global_time", "row_uuid",]
         );
     }
 
@@ -2236,26 +1972,17 @@ mod tests {
                 .all(|table| table.name != "jazz_todos_history"
                     && table.name != "jazz_todos_register")
         );
-        assert!(
-            tables
-                .iter()
-                .any(|table| table.name == "jazz_deletion_history")
-        );
         let history = schema.tables[0].history_storage_table();
-        let register = schema.tables[0].register_storage_table();
         assert!(tables.iter().all(|table| {
             table.name != "jazz_todos_global_current"
                 && table.name != "jazz_todos_register_global_current"
                 && table.name != "jazz_todos_ahead_current"
                 && table.name != "jazz_todos_register_ahead_current"
         }));
-        let current_tables = schema.tables[0].global_current_storage_tables();
-        let global_current = &current_tables[0];
-        let register_global_current = &current_tables[1];
-        let ahead_tables = schema.tables[0].ahead_current_storage_tables();
-        let ahead_current = &ahead_tables[0];
+        let global_current = &schema.tables[0].global_current_storage_table();
+        let ahead_current = &schema.tables[0].ahead_current_storage_table();
 
-        for table in [&history, &register, global_current, register_global_current] {
+        for table in [&history, global_current, ahead_current] {
             for name in ["created_by", "updated_by"] {
                 assert_eq!(
                     table
@@ -2295,25 +2022,18 @@ mod tests {
                 .iter()
                 .any(|column| column.name == "durability")
         );
-        assert!(
-            register
-                .columns
-                .iter()
-                .any(|column| column.name == "_deletion")
-        );
+        for table in [&history, global_current, ahead_current] {
+            assert!(
+                table
+                    .columns
+                    .iter()
+                    .any(|column| column.name == "_deletion"),
+                "row images carry their deletion state in {}",
+                table.name
+            );
+        }
         assert_eq!(
             global_current
-                .primary_key
-                .as_ref()
-                .unwrap()
-                .columns
-                .iter()
-                .map(|column| column.column.as_str())
-                .collect::<Vec<_>>(),
-            vec!["branch_key", "row_uuid"]
-        );
-        assert_eq!(
-            register_global_current
                 .primary_key
                 .as_ref()
                 .unwrap()
@@ -2424,8 +2144,8 @@ mod tests {
         };
 
         assert_eq!(
-            registry(left.register_storage_table(), "_deletion"),
-            registry(right.register_storage_table(), "_deletion")
+            registry(left.history_storage_table(), "_deletion"),
+            registry(right.history_storage_table(), "_deletion")
         );
         assert_ne!(
             registry(left.history_storage_table(), "_app_state"),

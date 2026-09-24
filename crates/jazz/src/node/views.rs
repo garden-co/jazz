@@ -43,10 +43,7 @@ fn maintained_view_tx_versions_contain_winner(
     winner: &VersionRow,
 ) -> bool {
     tx_versions.iter().any(|candidate| {
-        candidate.table() == winner.table()
-            && candidate.row_uuid() == winner.row_uuid()
-            && candidate.layer() == winner.layer()
-            && candidate.deletion() == winner.deletion()
+        candidate.table() == winner.table() && candidate.row_uuid() == winner.row_uuid()
     })
 }
 
@@ -323,12 +320,8 @@ where
         let tx_id = match tier {
             // Global current storage already represents the settled winner.
             DurabilityTier::Global => {
-                self.visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    row_uuid,
-                    VersionLayer::Deletion,
-                )
-                .await
+                self.visible_global_tx_id_for_physical_table_now(table_id, row_uuid)
+                    .await
             }
             // Local reads select the greatest global/ahead register winner.
             DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
@@ -944,11 +937,7 @@ where
                 tx_versions_cache
                     .entry(tx_id)
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
-                    .extend(
-                        versions
-                            .into_iter()
-                            .filter(|version| version.deletion().is_none()),
-                    );
+                    .extend(versions.into_iter().filter(|version| !version.is_deleted()));
                 wanted_add_rows_by_tx
                     .entry(tx_id)
                     .or_default()
@@ -1010,7 +999,7 @@ where
             // multiple versions/layers for a coordinate).
             let mut content_coordinates = tx_versions
                 .iter()
-                .filter(|version| version.deletion().is_none())
+                .filter(|version| !version.is_deleted())
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
@@ -1022,7 +1011,7 @@ where
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
                 if let Some(content_winner) = content_winner {
                     if self.version_tx_id(&content_winner)? == *tx_id {
-                        if content_winner.deletion().is_none() {
+                        if !content_winner.is_deleted() {
                             content_coordinates.insert((
                                 content_winner.table().to_owned(),
                                 content_winner.row_uuid(),
@@ -1834,11 +1823,6 @@ where
                         bundle.tx.tx_id,
                         version.table().to_owned(),
                         version.row_uuid(),
-                        if version.deletion().is_some() {
-                            crate::protocol::ResultRowLayer::Deletion
-                        } else {
-                            crate::protocol::ResultRowLayer::Content
-                        },
                         version.branch_key().canonical_bytes(),
                     )
                 })
@@ -1856,10 +1840,6 @@ where
                     *tx_id,
                     version.table().to_owned(),
                     version.row_uuid(),
-                    match version.layer() {
-                        VersionLayer::Content => crate::protocol::ResultRowLayer::Content,
-                        VersionLayer::Deletion => crate::protocol::ResultRowLayer::Deletion,
-                    },
                     version.branch_key().canonical_bytes(),
                 ));
             }
@@ -1871,7 +1851,6 @@ where
                     input.version.tx,
                     input.version_table.to_string(),
                     input.row,
-                    input.version.layer,
                     input.version.branch_or_prefix.clone().unwrap_or_default(),
                 );
                 let staged_body_witness = admitted_versions.contains(&coordinate);
@@ -1932,15 +1911,16 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
             return Ok(None);
         };
-        let layer = match input.version.layer {
-            crate::protocol::ResultRowLayer::Content => VersionLayer::Content,
-            crate::protocol::ResultRowLayer::Deletion => VersionLayer::Deletion,
+        // Content and deletion witnesses name the same stored row image.
+        match input.version.layer {
+            crate::protocol::ResultRowLayer::Content
+            | crate::protocol::ResultRowLayer::Deletion => {}
             crate::protocol::ResultRowLayer::ContentOrDeletion => {
                 return Err(Error::InvalidStoredValue(
                     "covered input must name one concrete version layer",
                 ));
             }
-        };
+        }
         let branch_key = input
             .version
             .branch_or_prefix
@@ -1956,7 +1936,6 @@ where
                     .as_str(),
                 &branch_key,
                 input.row,
-                layer,
                 input.version.tx.time,
                 tx_node_alias,
             )
@@ -2755,7 +2734,6 @@ where
                 .filter(|candidate| {
                     candidate.row_uuid() == version.row_uuid()
                         && candidate.branch_key() == version.branch_key()
-                        && candidate.layer() == version.layer()
                 })
                 .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
                 .filter(|table_id| logical_candidates.contains(table_id))
@@ -2790,7 +2768,6 @@ where
                     .find(|candidate| {
                         candidate.row_uuid() == version.row_uuid()
                             && candidate.branch_key() == version.branch_key()
-                            && candidate.layer() == version.layer()
                             && self
                                 .physical_table_id_for_version(candidate)
                                 .is_ok_and(|table_id| table_id == projected_table_id)
@@ -2809,9 +2786,7 @@ where
         // descriptor can be identical to history storage while selected-out
         // cells are still typed nulls, so first prefer its immutable stored
         // history identity even when the descriptors match.
-        for storage_table in
-            self.version_storage_sources_for_layer(version.table(), version.layer())?
-        {
+        for storage_table in self.version_storage_sources(version.table())? {
             let Some(canonical) = self
                 .query_version_by_alias_with_storage_in_schema(
                     authored_schema,
@@ -2843,19 +2818,16 @@ where
         // Only synthetic rows need a reconstructed descriptor. Ordinary rows
         // returned above already carry the immutable store's authored layout.
         let authored_table = self.table_in_schema(version.table(), authored_schema)?;
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
+        let authored_descriptor = authored_table.history_storage_table().record_schema();
         let has_authored_layout = version.record.descriptor() == &authored_descriptor;
         let has_complete_authored_payload = has_authored_layout
-            && (version.layer() == VersionLayer::Deletion
+            && (version.deletion().is_some()
                 || match self.authored_columns_for_version(version)? {
                     Some(authored) => authored.iter().all(|column| {
-                        version
-                            .cell(&authored_table, column)
-                            .is_ok_and(|value| value.is_some())
+                        column == DELETION_COLUMN_NAME
+                            || version
+                                .cell(&authored_table, column)
+                                .is_ok_and(|value| value.is_some())
                     }),
                     // Legacy complete rows predate authored-column metadata.
                     None => true,
@@ -2869,11 +2841,10 @@ where
     }
 }
 
-fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid, VersionLayer) {
+fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid) {
     (
         version.table().to_owned(),
         version.branch_key().clone(),
         version.row_uuid(),
-        VersionLayer::for_record(version),
     )
 }

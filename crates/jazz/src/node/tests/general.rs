@@ -1447,7 +1447,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         );
 
         let current_values = global_current_values(table, &content, Some(GlobalTime(7))).unwrap();
-        let global_current_table = table.global_current_storage_tables().remove(0);
+        let global_current_table = table.global_current_storage_table();
         global_current_table
             .record_schema()
             .create(&current_values)
@@ -1460,23 +1460,26 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             None,
         )
         .unwrap();
-        assert_eq!(deletion.record.descriptor().fields(), table.register_storage_table().record_schema().fields());
+        assert_eq!(
+            deletion.record.descriptor().fields(),
+            table.history_storage_table().record_schema().fields()
+        );
+        assert_eq!(deletion.deletion(), Some(DeletionEvent::Deleted));
         let deletion_values = deletion.record.to_values().unwrap();
         assert_eq!(
             table
-                .register_storage_table()
+                .history_storage_table()
                 .record_schema()
                 .create(&deletion_values)
                 .unwrap(),
             deletion.record.raw()
         );
 
-        let register_current_values =
-            register_global_current_values(&deletion, Some(GlobalTime(8))).unwrap();
-        let register_global_current_table = table.global_current_storage_tables().remove(1);
-        register_global_current_table
+        let deleted_current_values =
+            global_current_values(table, &deletion, Some(GlobalTime(8))).unwrap();
+        global_current_table
             .record_schema()
-            .create(&register_current_values)
+            .create(&deleted_current_values)
             .unwrap();
     }
 }

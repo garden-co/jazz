@@ -11,20 +11,16 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Return the global winner for a physical history register. Callers which
+    /// Return the global winner for a physical row lineage. Callers which
     /// validate an authored version must resolve its physical table through the
     /// version's schema, rather than interpreting its logical table name in the
     /// current write schema: a migration lens may have renamed that table.
-    pub(super) async fn visible_global_layer_tx_id_for_physical_table_now(
+    pub(super) async fn visible_global_tx_id_for_physical_table_now(
         &mut self,
         table_id: PhysicalTableId,
         row_uuid: RowUuid,
-        layer: VersionLayer,
     ) -> Option<TxId> {
-        let current_table = match layer {
-            VersionLayer::Content => physical_global_current_table_name(table_id),
-            VersionLayer::Deletion => physical_register_global_current_table_name(table_id),
-        };
+        let current_table = physical_global_current_table_name(table_id);
         let raw = self
             .database
             .primary_key_get_raw(
@@ -120,111 +116,21 @@ where
         Ok(false)
     }
 
-    /// Return the transaction whose row state is currently observed by an
-    /// exclusive read: the deleting transaction while deleted, otherwise the
-    /// visible content transaction.
-    pub(super) async fn visible_global_row_tx_id_now(
+    /// Return the transaction whose row image is currently globally visible,
+    /// together with that image's deletion state.
+    async fn visible_global_current_now(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
-    ) -> Option<TxId> {
-        let deletion_current_table = self
-            .physical_current_table_for_schema(
-                schema_version,
-                table,
-                VersionLayer::Deletion,
-                PhysicalCurrentClass::Global,
-            )
-            .ok()?;
-        if let Some(raw) = self
-            .database
-            .primary_key_get_raw(
-                &deletion_current_table,
-                &[
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::Uuid(row_uuid.0),
-                ],
-            )
-            .await
-            .ok()?
-        {
-            let record = raw.record();
-            let deletion = deletion_event_from_value(
-                record
-                    .get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)
-                    .ok()?,
-            )
-            .ok()?;
-            if deletion == DeletionEvent::Deleted {
-                let tx_time = TxTime(
-                    record
-                        .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
-                        .ok()?,
-                );
-                let tx_node_alias = NodeAlias(
-                    record
-                        .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
-                        .ok()?,
-                );
-                let tx_node = self.node_for_alias(tx_node_alias)?;
-                return Some(TxId::new(tx_time, tx_node));
-            }
-        }
-        self.visible_global_content_tx_id_in_schema_now(schema_version, table, row_uuid)
-            .await
-    }
-
-    pub(super) async fn visible_global_content_tx_id_in_schema_now(
-        &mut self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Option<TxId> {
-        let deletion_current_table = self
-            .physical_current_table_for_schema(
-                schema_version,
-                table,
-                VersionLayer::Deletion,
-                PhysicalCurrentClass::Global,
-            )
-            .ok()?;
-        if let Some(raw) = self
-            .database
-            .primary_key_get_raw(
-                &deletion_current_table,
-                &[
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::Uuid(row_uuid.0),
-                ],
-            )
-            .await
-            .ok()?
-        {
-            let record = raw.record();
-            let deletion = deletion_event_from_value(
-                record
-                    .get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)
-                    .ok()?,
-            )
-            .ok()?;
-            if deletion == DeletionEvent::Deleted {
-                return None;
-            }
-        }
-
-        let content_current_table = self
-            .physical_current_table_for_schema(
-                schema_version,
-                table,
-                VersionLayer::Content,
-                PhysicalCurrentClass::Global,
-            )
+    ) -> Option<(TxId, bool)> {
+        let current_table = self
+            .physical_current_table_for_schema(schema_version, table, PhysicalCurrentClass::Global)
             .ok()?;
         let raw = self
             .database
             .primary_key_get_raw(
-                &content_current_table,
+                &current_table,
                 &[
                     Value::Bytes(BranchKey::default().canonical_bytes()),
                     Value::Uuid(row_uuid.0),
@@ -243,8 +149,41 @@ where
                 .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
                 .ok()?,
         );
+        let deleted = record
+            .get_nullable_enum(GlobalCurrentRowRecord::FIELD__DELETION_IDX)
+            .ok()?
+            .is_some_and(|tag| {
+                matches!(
+                    deletion_event_from_value(Value::EnumTag(tag)),
+                    Ok(DeletionEvent::Deleted)
+                )
+            });
         let tx_node = self.node_for_alias(tx_node_alias)?;
-        Some(TxId::new(tx_time, tx_node))
+        Some((TxId::new(tx_time, tx_node), deleted))
+    }
+
+    /// Return the transaction whose row state is currently observed by an
+    /// exclusive read: the transaction of the current row image, deleted or not.
+    pub(super) async fn visible_global_row_tx_id_now(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Option<TxId> {
+        self.visible_global_current_now(schema_version, table, row_uuid)
+            .await
+            .map(|(tx_id, _)| tx_id)
+    }
+
+    pub(super) async fn visible_global_content_tx_id_in_schema_now(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Option<TxId> {
+        self.visible_global_current_now(schema_version, table, row_uuid)
+            .await
+            .and_then(|(tx_id, deleted)| (!deleted).then_some(tx_id))
     }
 
     pub(super) async fn global_current_updates_for_versions(
@@ -252,7 +191,7 @@ where
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
-        let mut updates = BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
+        let mut updates = BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();
         let version_made_at = self
             .transaction_made_at(tx_id)
             .await?
@@ -264,12 +203,11 @@ where
                     "global version schema alias must exist",
                 ))?;
             let previous_current = self
-                .query_global_layer_winner_in_schema_and_branch(
+                .query_global_winner_in_schema_and_branch(
                     authored_schema,
                     &version.table,
                     version.branch_key(),
                     version.row_uuid(),
-                    version.layer(),
                 )
                 .await?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
@@ -293,7 +231,6 @@ where
                         version.table().to_owned(),
                         version.branch_key().clone(),
                         version.row_uuid(),
-                        version.layer(),
                     ),
                     version.clone(),
                 );

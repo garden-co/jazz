@@ -566,7 +566,7 @@ pub struct NodeState<S> {
     absent_node_alias: Option<NodeUuid>,
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
-    ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
+    ahead_current_keys: FxHashSet<(PhysicalTableId, Vec<u8>)>,
 
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
@@ -953,7 +953,7 @@ struct QueryServing {
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
     /// Physical version-storage sources keyed by logical table and layer.
-    version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
+    version_storage_sources_cache: BTreeMap<String, Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Exact semantic registration options keyed by the read-view identity
@@ -1338,31 +1338,6 @@ struct OpenTxState {
 struct RejectionTracking {
     /// Transactions rejected by local policy or conflict checks.
     rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
-    /// Pending child transactions grouped by pending parent transaction.
-    child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
-    /// Includes Accepted partial-child constraints, unlike `child_txs_by_parent`.
-    /// The shared pending-edge staging helper advances this before inserting a row.
-    /// Deletes/failed batches never lower it; recovery recomputes it from every
-    /// durable edge. Unknown during startup cannot prove absence.
-    pending_parent_time_bound: PendingParentTimeBound,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-enum PendingParentTimeBound {
-    #[default]
-    Unknown,
-    Empty,
-    Through(TxTime),
-}
-
-impl PendingParentTimeBound {
-    fn observe(&mut self, time: TxTime) {
-        match self {
-            Self::Unknown => {}
-            Self::Empty => *self = Self::Through(time),
-            Self::Through(ceiling) => *ceiling = (*ceiling).max(time),
-        }
-    }
 }
 
 /// Authenticated identity attached to an inbound commit-unit upload.

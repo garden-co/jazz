@@ -552,13 +552,13 @@ fn accepted_fates_maintain_global_current_tables() {
 
     core.apply_sync_message_settled(first_message).unwrap();
     assert_eq!(
-        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        global_winner_tx(&mut core, "todos", row),
         Some(first)
     );
 
     core.apply_sync_message_settled(second_message).unwrap();
     assert_eq!(
-        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        global_winner_tx(&mut core, "todos", row),
         Some(second)
     );
 }

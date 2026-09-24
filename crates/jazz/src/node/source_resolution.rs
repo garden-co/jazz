@@ -366,7 +366,6 @@ where
         snapshot: Option<&SnapshotRef>,
     ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
         let mut content = BTreeMap::new();
-        let mut deletions = BTreeMap::new();
         let stored_keys = self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
         for stored_key in stored_keys {
             for version in self
@@ -400,10 +399,7 @@ where
                 if !visible {
                     continue;
                 }
-                let target = match version.layer() {
-                    VersionLayer::Content => &mut content,
-                    VersionLayer::Deletion => &mut deletions,
-                };
+                let target = &mut content;
                 let replace =
                     target
                         .get(&version.row_uuid())
@@ -418,6 +414,7 @@ where
                 }
             }
         }
+        let deletions = deletion_marker_winners(&content);
         Ok((content, deletions))
     }
 
@@ -615,7 +612,6 @@ where
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
             let Some(tx) = self.query_transaction(tx_id).await? else {
@@ -633,10 +629,7 @@ where
             if !visible_at_tier {
                 continue;
             }
-            let target = match version.layer() {
-                VersionLayer::Content => &mut content,
-                VersionLayer::Deletion => &mut deletions,
-            };
+            let target = &mut content;
             let replace = target.get(&version.row_uuid()).is_none_or(|existing| {
                 version.tx_time().sort_key(tx_id.node)
                     > existing.tx_time().sort_key(
@@ -649,6 +642,7 @@ where
                 target.insert(version.row_uuid(), version);
             }
         }
+        let deletions = deletion_marker_winners(&content);
         let mut rows = Vec::new();
         for (row_uuid, version) in content {
             if deletions
@@ -714,8 +708,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
             let Some(tx) = self.query_transaction(tx_id).await? else {
@@ -729,11 +722,8 @@ where
             {
                 continue;
             }
-            let target = match version.layer() {
-                VersionLayer::Content => &mut content,
-                VersionLayer::Deletion => &mut deletions,
-            };
-            let key = (version.row_uuid(), version.layer());
+            let target = &mut content;
+            let key = version.row_uuid();
             let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
                 version.tx_time().sort_key(tx_id.node)
                     > target
@@ -747,6 +737,7 @@ where
                 target.insert(version.row_uuid(), version);
             }
         }
+        let deletions = deletion_marker_winners(&content);
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
             if deletions
@@ -812,18 +803,14 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
             if !self.snapshot_covers(tx_id, snapshot).await {
                 continue;
             }
-            let target = match version.layer() {
-                VersionLayer::Content => &mut content,
-                VersionLayer::Deletion => &mut deletions,
-            };
-            let key = (version.row_uuid(), version.layer());
+            let target = &mut content;
+            let key = version.row_uuid();
             let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
                 version.tx_time().sort_key(tx_id.node)
                     > target
@@ -837,6 +824,7 @@ where
                 target.insert(version.row_uuid(), version);
             }
         }
+        let deletions = deletion_marker_winners(&content);
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
             if deletions
@@ -911,4 +899,16 @@ where
 
         Ok(None)
     }
+}
+
+/// Deletion is a cell of the row image. Callers that still distinguish the
+/// deletion marker of a winner receive the winners that carry one.
+fn deletion_marker_winners(
+    content: &BTreeMap<RowUuid, VersionRow>,
+) -> BTreeMap<RowUuid, VersionRow> {
+    content
+        .iter()
+        .filter(|(_, version)| version.deletion().is_some())
+        .map(|(row_uuid, version)| (*row_uuid, version.clone()))
+        .collect()
 }
