@@ -1621,7 +1621,8 @@ pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, Ivm
     match scan {
         StaticScanSpec::Point(values)
         | StaticScanSpec::Prefix(values)
-        | StaticScanSpec::PrefixLimit { prefix: values, .. } => {
+        | StaticScanSpec::PrefixLimit { prefix: values, .. }
+        | StaticScanSpec::ReversePrefixLimit { prefix: values, .. } => {
             Ok(StaticScanBounds::Prefix(static_scan_key(values)?))
         }
         StaticScanSpec::Range { start, end } => Ok(StaticScanBounds::Range {
@@ -1633,9 +1634,16 @@ pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, Ivm
 
 pub(super) fn scan_max_items(scan: Option<&StaticScanSpec>) -> Option<usize> {
     match scan {
-        Some(StaticScanSpec::PrefixLimit { max_items, .. }) => Some(*max_items),
+        Some(
+            StaticScanSpec::PrefixLimit { max_items, .. }
+            | StaticScanSpec::ReversePrefixLimit { max_items, .. },
+        ) => Some(*max_items),
         _ => None,
     }
+}
+
+pub(super) fn scan_reversed(scan: Option<&StaticScanSpec>) -> bool {
+    matches!(scan, Some(StaticScanSpec::ReversePrefixLimit { .. }))
 }
 
 fn static_scan_key(values: &[LiteralValue]) -> Result<Vec<u8>, IvmRuntimeError> {
@@ -1675,7 +1683,8 @@ pub(super) fn persisted_index_scan_bounds(
         Some(
             StaticScanSpec::Point(values)
             | StaticScanSpec::Prefix(values)
-            | StaticScanSpec::PrefixLimit { prefix: values, .. },
+            | StaticScanSpec::PrefixLimit { prefix: values, .. }
+            | StaticScanSpec::ReversePrefixLimit { prefix: values, .. },
         ) => StaticScanBounds::Prefix(wrap_prefix(static_scan_key(values)?)),
         Some(StaticScanSpec::Range { start, end }) => StaticScanBounds::Range {
             start: wrap_prefix(static_scan_key(start)?),

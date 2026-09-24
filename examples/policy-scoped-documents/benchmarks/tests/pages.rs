@@ -55,6 +55,24 @@ fn timed_organization_page_cannot_be_satisfied_by_direct_ownership() {
     );
 }
 
+#[test]
+fn ordered_page_preserves_id_ties_and_refills_after_deletions() {
+    let tied = Fixture::with_order_values(1_000, Policy::OwnerOrOrg, |index| (index / 5) as u64);
+    let rows = tied.session(Page::Org(0), 3, user(2)).read();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        (35..38).map(document_row).collect::<Vec<_>>()
+    );
+
+    let deleted = Fixture::new(1_000, Policy::Unrestricted);
+    deleted.delete_documents(&[29, 28, 27]);
+    let rows = deleted.session(Page::Owner(2), 2, user(2)).read();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [document_row(26), document_row(25)]
+    );
+}
+
 // Public Db integration: an independently computed oracle checks both policy
 // branches, non-members, exact descending order, empty and oversized pages.
 #[test]

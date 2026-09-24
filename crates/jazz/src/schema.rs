@@ -1019,6 +1019,9 @@ pub struct TableSchema {
     /// User columns materialized and indexed on the global-current content table.
     #[serde(default)]
     pub indexed_columns: BTreeSet<String>,
+    /// Ordered application columns indexed together on current-row storage.
+    #[serde(default)]
+    pub composite_indexes: BTreeSet<Vec<String>>,
     /// Per-column merge strategy. Columns omitted here use [`MergeStrategy::Lww`].
     #[serde(default)]
     pub merge_strategies: BTreeMap<String, MergeStrategy>,
@@ -1038,6 +1041,7 @@ impl TableSchema {
             read_policy: None,
             write_policies: WritePolicies::default(),
             indexed_columns: BTreeSet::new(),
+            composite_indexes: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
         }
     }
@@ -1258,6 +1262,13 @@ impl TableSchema {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
                 ["branch_key".to_owned(), app_storage_column_name(indexed)],
+            ));
+        }
+        for columns in &self.composite_indexes {
+            content_table = content_table.with_index(GrooveIndexSchema::new(
+                global_current_composite_index_name(columns),
+                std::iter::once("branch_key".to_owned())
+                    .chain(columns.iter().map(|column| app_storage_column_name(column))),
             ));
         }
         vec![
@@ -1652,6 +1663,17 @@ pub(crate) fn app_storage_column_name(column: &str) -> String {
 
 pub(crate) fn global_current_index_name(column: &str) -> String {
     format!("by_app_{column}")
+}
+
+pub(crate) fn global_current_composite_index_name(columns: &[String]) -> String {
+    format!(
+        "by_app_composite_{}",
+        columns
+            .iter()
+            .map(|column| format!("{}_{}", column.len(), column))
+            .collect::<Vec<_>>()
+            .join("_")
+    )
 }
 
 fn nodes_table() -> GrooveTableSchema {

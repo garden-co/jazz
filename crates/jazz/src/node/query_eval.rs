@@ -556,6 +556,7 @@ where
         identity: AuthorSubject,
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
+        ordered_source_cap: Option<usize>,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
             shape,
@@ -569,14 +570,155 @@ where
         )?;
         // The first result is hydration of the same live source graph used by
         // a retained consumer, not a snapshot-only physical scan.
-        let access_paths = self.current_query_hydration_access_paths(
+        let mut access_paths = self.current_query_hydration_access_paths(
             &request,
             shape,
             binding,
             HydrationLifetime::FirstResult,
         )?;
+        if let Some(cap) = ordered_source_cap {
+            let Some(CurrentAccessPath::Index {
+                order_column,
+                reverse,
+                source_limit,
+                maintained,
+                ..
+            }) = access_paths.get_mut(&root_source_id(&shape.query().table))
+            else {
+                return Err(Error::InvalidStoredValue(
+                    "ordered page probe has no current index access path",
+                ));
+            };
+            let order = &shape.query().order_by[0];
+            *order_column = Some(order.column.clone());
+            *reverse = order.direction == OrderDirection::Desc;
+            *source_limit = Some(cap);
+            *maintained = false;
+        }
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
+    }
+
+    /// Probe an ordered current index a page at a time. The query graph still
+    /// applies all filters, deletion checks, and policy. An extra visible row
+    /// with a strictly worse sort key proves that the requested page is final;
+    /// ties, sparse visibility, and short buckets fall back to the ordinary
+    /// complete source after this single probe.
+    async fn try_ordered_page_probe(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<Vec<CurrentRow>>, Error> {
+        let query = shape.query();
+        let Some(limit) = query.limit.filter(|limit| *limit > 0) else {
+            return Ok(None);
+        };
+        if query.offset != 0
+            || query.order_by.len() != 1
+            || query.select.is_some()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(None);
+        }
+        let order_column = &query.order_by[0].column;
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        // Nullable and floating-point sort semantics need an explicit proof
+        // that their index key order matches the query comparator.
+        if table.columns.iter().any(|column| {
+            column.name == *order_column
+                && matches!(
+                    column.column_type,
+                    ColumnType::Nullable(_) | ColumnType::F64
+                )
+        }) {
+            return Ok(None);
+        }
+        let paths = self.one_shot_access_paths(shape, binding, DurabilityTier::Global)?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            intersections,
+            ..
+        }) = paths.get(&root_source_id(&query.table))
+        else {
+            return Ok(None);
+        };
+        if !intersections.is_empty()
+            || !table
+                .composite_indexes
+                .contains(&vec![column.clone(), order_column.clone()])
+        {
+            return Ok(None);
+        }
+        // A conjunctive claim equality on another column makes this prefix
+        // sparse by construction. For example, scanning an organization page
+        // in timestamp order cannot efficiently find one user's owner rows.
+        // Alternative policy branches may still admit the ordered prefix.
+        if table.read_policy.as_ref().is_some_and(|policy| {
+            policy.policy_branches.is_empty()
+                && policy.filters.iter().any(|filter| {
+                    let claim_column = match filter {
+                        Predicate::Eq(Operand::Column(column), Operand::Claim(_))
+                        | Predicate::Eq(Operand::Claim(_), Operand::Column(column)) => Some(column),
+                        _ => None,
+                    };
+                    claim_column.is_some_and(|claim_column| claim_column != column)
+                })
+        }) {
+            return Ok(None);
+        }
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+            .schema
+            .clone();
+        let cap = limit.saturating_add(1);
+        let mut probe_query = query.clone();
+        probe_query.limit = Some(cap);
+        let probe_shape =
+            probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
+        let probe_binding = probe_shape.bind(binding.values().clone())?;
+        let program = self
+            .compile_current_query_program_for_one_shot_read(
+                &probe_shape,
+                &probe_binding,
+                DurabilityTier::Global,
+                identity,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+                Some(cap),
+            )
+            .await?;
+        let app_output = materialization_app_row_schema(None, Some(&program))?;
+        let deltas = self
+            .hydrate_lowered_program_once(program, &probe_binding)
+            .await?;
+        let mut rows = self.materialize_and_finalize_query_rows(
+            &probe_query,
+            shape.schema_version(),
+            &table,
+            &app_output,
+            &deltas,
+            None,
+        )?;
+        if rows.len() > limit
+            && query_order_value(&rows[limit - 1], &table, order_column)
+                != query_order_value(&rows[limit], &table, order_column)
+        {
+            rows.truncate(limit);
+            return Ok(Some(rows));
+        }
+        Ok(None)
     }
 
     async fn compile_current_query_program_with_access_paths(
@@ -1426,6 +1568,14 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
+        if authorization_mode == QueryAuthorizationMode::TrustedServing
+            && tier == DurabilityTier::Global
+            && let Some(rows) = self
+                .try_ordered_page_probe(shape, binding, identity)
+                .await?
+        {
+            return Ok(rows);
+        }
         let client_settled_binding_view = (authorization_mode
             == QueryAuthorizationMode::ClientLocal)
             .then(|| {
@@ -1540,6 +1690,7 @@ where
                 identity,
                 settled_binding_view,
                 authorization_mode,
+                None,
             )
             .await?
         };

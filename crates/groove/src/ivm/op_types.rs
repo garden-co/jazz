@@ -80,6 +80,11 @@ pub enum StaticScanSpec {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },
+    /// Read the last entries under a prefix, bounded before row decoding.
+    ReversePrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
     Range {
         start: Vec<LiteralValue>,
         end: Vec<LiteralValue>,

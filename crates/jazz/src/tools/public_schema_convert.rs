@@ -607,6 +607,45 @@ fn convert_table(
                 .collect()
         })
         .unwrap_or_default();
+    for (index, group) in table.composite_indexes.iter().enumerate() {
+        if group.len() < 2 {
+            return Err(err(
+                format!("$.{}.composite_indexes.{index}", name.as_str()),
+                "a composite index needs at least two columns",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for column in group {
+            let column_name = column.as_str();
+            if !column_names.contains(column_name) || !seen.insert(column_name) {
+                return Err(err(
+                    format!("$.{}.composite_indexes.{index}", name.as_str()),
+                    "composite index columns must be distinct declared columns",
+                ));
+            }
+            if table.columns.column(column_name).is_some_and(|descriptor| {
+                matches!(
+                    descriptor.column_type,
+                    ColumnType::Bytea
+                        | ColumnType::Array { .. }
+                        | ColumnType::Row { .. }
+                        | ColumnType::EnumPayload { .. }
+                        | ColumnType::CatalogueEnumPayload { .. }
+                )
+            }) {
+                return Err(err(
+                    format!("$.{}.composite_indexes.{index}", name.as_str()),
+                    "composite index columns must have ordered scalar values",
+                ));
+            }
+        }
+        converted.composite_indexes.insert(
+            group
+                .iter()
+                .map(|column| column.as_str().to_owned())
+                .collect(),
+        );
+    }
     converted.merge_strategies = merge_strategies;
     converted.read_policy = convert_optional_policy(
         schema,

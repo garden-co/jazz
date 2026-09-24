@@ -3,9 +3,8 @@
 //! This module provides deterministic binary serialization for Schema and LensTransform,
 //! enabling content-addressed storage in the catalogue.
 //!
-//! Each storage-epoch-one payload family begins with its frozen `v1` outer
-//! version byte. Decoders accept that single spelling only: no former outer
-//! labels are aliases or compatibility inputs.
+//! Storage-epoch-one schema and lens payloads retain their frozen `v1` bytes.
+//! Their `v2` form adds ordered composite indexes only when needed.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -26,7 +25,9 @@ use jazz::tools::schema_lens::{LensOp, LensTransform};
 
 /// Frozen storage-epoch-one outer envelope versions.
 const SCHEMA_VERSION: u8 = 1;
+const SCHEMA_COMPOSITE_VERSION: u8 = 2;
 const LENS_VERSION: u8 = 1;
+const LENS_COMPOSITE_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
 const PERMISSIONS_HEAD_VERSION: u8 = 1;
@@ -88,7 +89,15 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(SCHEMA_VERSION);
+    let version = if schema
+        .values()
+        .any(|table| !table.composite_indexes.is_empty())
+    {
+        SCHEMA_COMPOSITE_VERSION
+    } else {
+        SCHEMA_VERSION
+    };
+    buf.push(version);
 
     // Sort tables by name for deterministic ordering
     let mut tables: Vec<_> = schema.iter().collect();
@@ -97,7 +106,7 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     write_u32(&mut buf, tables.len() as u32);
 
     for (name, table_schema) in tables {
-        encode_table_entry(&mut buf, name, table_schema);
+        encode_table_entry(&mut buf, name, table_schema, version);
     }
 
     buf
@@ -112,7 +121,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION {
+    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_COMPOSITE_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -124,11 +133,14 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     Ok(schema)
 }
 
-fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema) {
+fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema, version: u8) {
     write_string(buf, name.as_str());
     encode_row_descriptor(buf, &schema.columns);
     encode_indexed_columns(buf, schema.indexed_columns.as_deref());
     encode_branch_bindings(buf, &schema.branch_by);
+    if version >= SCHEMA_COMPOSITE_VERSION {
+        encode_composite_indexes(buf, &schema.composite_indexes);
+    }
 }
 
 fn decode_table_entry(
@@ -140,16 +152,88 @@ fn decode_table_entry(
     let descriptor = decode_row_descriptor(data, offset, schema_version)?;
     let indexed_columns = decode_indexed_columns(data, offset)?;
     let branch_by = decode_branch_bindings(data, offset)?;
+    let composite_indexes = if schema_version >= SCHEMA_COMPOSITE_VERSION {
+        decode_composite_indexes(data, offset, &descriptor)?
+    } else {
+        Vec::new()
+    };
 
     Ok((
         TableName::new(name),
         TableSchema {
             columns: descriptor,
             indexed_columns,
+            composite_indexes,
             policies: TablePolicies::default(),
             branch_by,
         },
     ))
+}
+
+fn encode_composite_indexes(buf: &mut Vec<u8>, indexes: &[Vec<ColumnName>]) {
+    let mut sorted = indexes
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|column| column.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    sorted.sort_unstable();
+    write_u32(buf, sorted.len() as u32);
+    for group in sorted {
+        write_u32(buf, group.len() as u32);
+        for column in group {
+            write_string(buf, column);
+        }
+    }
+}
+
+fn decode_composite_indexes(
+    data: &[u8],
+    offset: &mut usize,
+    descriptor: &RowDescriptor,
+) -> Result<Vec<Vec<ColumnName>>, CatalogueEncodingError> {
+    let count = read_count(data, offset, "composite_indexes")?;
+    let declared = descriptor
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut groups = Vec::with_capacity(count);
+    let mut seen_groups = BTreeSet::new();
+    for _ in 0..count {
+        let width = read_count(data, offset, "composite_index_columns")?;
+        if width < 2 {
+            return Err(CatalogueEncodingError::DecodeError {
+                message: "composite index needs at least two columns".to_owned(),
+            });
+        }
+        let mut group = Vec::with_capacity(width);
+        let mut seen_columns = BTreeSet::new();
+        for _ in 0..width {
+            let column = read_string(data, offset, "composite_index_column")?;
+            if !declared.contains(column.as_str()) || !seen_columns.insert(column.clone()) {
+                return Err(CatalogueEncodingError::DecodeError {
+                    message: "composite index columns must be distinct declared columns".to_owned(),
+                });
+            }
+            group.push(ColumnName::new(column));
+        }
+        if !seen_groups.insert(
+            group
+                .iter()
+                .map(|column| column.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        ) {
+            return Err(CatalogueEncodingError::DecodeError {
+                message: "duplicate composite index".to_owned(),
+            });
+        }
+        groups.push(group);
+    }
+    Ok(groups)
 }
 
 fn encode_branch_bindings(buf: &mut Vec<u8>, bindings: &[ColumnName]) {
@@ -527,12 +611,22 @@ fn decode_column_type(
 /// ```
 pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(LENS_VERSION);
+    let version = if transform.ops.iter().any(|op| {
+        matches!(op,
+            LensOp::AddTable { schema, .. } | LensOp::RemoveTable { schema, .. }
+                if !schema.composite_indexes.is_empty()
+        )
+    }) {
+        LENS_COMPOSITE_VERSION
+    } else {
+        LENS_VERSION
+    };
+    buf.push(version);
 
     // Ops
     write_u32(&mut buf, transform.ops.len() as u32);
     for op in &transform.ops {
-        encode_lens_op(&mut buf, op);
+        encode_lens_op(&mut buf, op, version);
     }
 
     // Draft indices
@@ -554,7 +648,7 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION {
+    if version != LENS_VERSION && version != LENS_COMPOSITE_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
@@ -574,7 +668,7 @@ const OP_ADD_TABLE: u8 = 4;
 const OP_REMOVE_TABLE: u8 = 5;
 const OP_RENAME_TABLE: u8 = 6;
 
-fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
+fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp, version: u8) {
     match op {
         LensOp::RenameTable { old_name, new_name } => {
             buf.push(OP_RENAME_TABLE);
@@ -618,12 +712,12 @@ fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
         LensOp::AddTable { table, schema } => {
             buf.push(OP_ADD_TABLE);
             write_string(buf, table);
-            encode_table_schema(buf, schema);
+            encode_table_schema(buf, schema, version);
         }
         LensOp::RemoveTable { table, schema } => {
             buf.push(OP_REMOVE_TABLE);
             write_string(buf, table);
-            encode_table_schema(buf, schema);
+            encode_table_schema(buf, schema, version);
         }
     }
 }
@@ -714,9 +808,12 @@ fn decode_current_lens_transform(
     Ok(LensTransform { ops, draft_ops })
 }
 
-fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
+fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema, lens_version: u8) {
     encode_row_descriptor(buf, &schema.columns);
     encode_branch_bindings(buf, &schema.branch_by);
+    if lens_version >= LENS_COMPOSITE_VERSION {
+        encode_composite_indexes(buf, &schema.composite_indexes);
+    }
 }
 
 fn decode_table_schema(
@@ -727,16 +824,26 @@ fn decode_table_schema(
     let schema_version = schema_version_for_lens_payload(lens_version);
     let descriptor = decode_row_descriptor(data, offset, schema_version)?;
     let branch_by = decode_branch_bindings(data, offset)?;
+    let composite_indexes = if lens_version >= LENS_COMPOSITE_VERSION {
+        decode_composite_indexes(data, offset, &descriptor)?
+    } else {
+        Vec::new()
+    };
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
+        composite_indexes,
         policies: TablePolicies::default(),
         branch_by,
     })
 }
 
-fn schema_version_for_lens_payload(_lens_version: u8) -> u8 {
-    SCHEMA_VERSION
+fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
+    if lens_version >= LENS_COMPOSITE_VERSION {
+        SCHEMA_COMPOSITE_VERSION
+    } else {
+        SCHEMA_VERSION
+    }
 }
 
 // ============================================================================
@@ -3418,6 +3525,36 @@ mod tests {
     }
 
     #[test]
+    fn schema_roundtrip_preserves_composite_indexes_without_changing_v1_payloads() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("documents")
+                    .column("owner", ColumnType::Uuid)
+                    .column("updated", ColumnType::Timestamp)
+                    .column("title", ColumnType::Text)
+                    .composite_index(["owner", "updated"])
+                    .composite_index(["owner", "updated", "title"]),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_COMPOSITE_VERSION);
+        let decoded = decode_schema(&encoded).unwrap();
+        assert_eq!(encode_schema(&decoded), encoded);
+        assert_eq!(
+            decoded[&TableName::new("documents")].composite_indexes,
+            vec![
+                vec![ColumnName::new("owner"), ColumnName::new("updated")],
+                vec![
+                    ColumnName::new("owner"),
+                    ColumnName::new("updated"),
+                    ColumnName::new("title"),
+                ],
+            ]
+        );
+    }
+
+    #[test]
     fn schema_roundtrip_with_column_defaults() {
         let schema = SchemaBuilder::new()
             .table(
@@ -4033,6 +4170,34 @@ mod tests {
             panic!("expected add-table op");
         };
         assert_eq!(schema.policies, TablePolicies::default());
+    }
+
+    #[test]
+    fn lens_roundtrip_preserves_composite_indexes() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "documents".to_owned(),
+                schema: TableSchema::builder("documents")
+                    .column("owner", ColumnType::Uuid)
+                    .column("updated", ColumnType::Timestamp)
+                    .composite_index(["owner", "updated"])
+                    .build(),
+            },
+            false,
+        );
+
+        let encoded = encode_lens_transform(&transform);
+        assert_eq!(encoded[0], LENS_COMPOSITE_VERSION);
+        let decoded = decode_lens_transform(&encoded).unwrap();
+        assert_eq!(encode_lens_transform(&decoded), encoded);
+        let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
+            panic!("expected add-table op");
+        };
+        assert_eq!(
+            schema.composite_indexes,
+            vec![vec![ColumnName::new("owner"), ColumnName::new("updated")]]
+        );
     }
 
     #[test]

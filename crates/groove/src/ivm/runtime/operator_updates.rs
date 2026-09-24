@@ -93,6 +93,7 @@ impl NodeState {
                                 index: input.index.clone(),
                                 prefix,
                                 max_items,
+                                reversed: scan_reversed(input.scan.as_ref()),
                             }
                         } else {
                             super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
@@ -123,6 +124,7 @@ impl NodeState {
                                 family: "indices".to_owned(),
                                 prefix,
                                 max_items,
+                                reversed: scan_reversed(input.scan.as_ref()),
                             }
                         }
                         None => super::evaluation_session::StorageRequestKey::ScanPrefix {

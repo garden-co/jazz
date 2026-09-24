@@ -60,6 +60,10 @@ pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
         column: String,
+        /// Second key of an explicitly declared compound index, used only by
+        /// bounded one-shot ordered-page probes.
+        order_column: Option<String>,
+        reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
         /// A maintained source keeps every equality probe as an ordinary IVM
@@ -2403,6 +2407,8 @@ where
             }
             CurrentAccessPath::Index {
                 column,
+                order_column,
+                reverse,
                 prefix,
                 intersections,
                 source_limit,
@@ -2411,7 +2417,8 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
-                let source_limit = (request.visibility == RowVisibility::IncludeDeleted)
+                let source_limit = (order_column.is_some()
+                    || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
@@ -2421,6 +2428,8 @@ where
                         table,
                         self.read_view.read_schema,
                         &column,
+                        order_column.as_deref(),
+                        reverse,
                         &prefix,
                         &intersections,
                         false,
@@ -2756,12 +2765,16 @@ where
                     }
                     Some(CurrentAccessPath::Index {
                         column,
+                        order_column,
+                        reverse,
                         prefix,
                         intersections,
                         source_limit,
                         maintained,
                     }) => {
-                        let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                            .then_some(source_limit)
+                            .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
                             1 + intersections.len() as u64;
                         self.node
@@ -2769,6 +2782,8 @@ where
                                 read_table,
                                 self.read_view.read_schema,
                                 &column,
+                                order_column.as_deref(),
+                                reverse,
                                 &prefix,
                                 &intersections,
                                 maintained,
@@ -2853,6 +2868,8 @@ where
                 }
                 Some(CurrentAccessPath::Index {
                     column,
+                    order_column,
+                    reverse,
                     prefix,
                     intersections,
                     source_limit,
@@ -2860,7 +2877,9 @@ where
                 }) => {
                     // Select settled candidates before combining them with the
                     // corresponding Local ahead candidates below.
-                    let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
+                    let source_limit = (order_column.is_some() || !exclude_deleted)
+                        .then_some(*source_limit)
+                        .flatten();
                     self.node.query_engine_read_metrics.source_index_probes +=
                         1 + intersections.len() as u64;
                     self.node
@@ -2868,6 +2887,8 @@ where
                             read_table,
                             self.read_view.read_schema,
                             column,
+                            order_column.as_deref(),
+                            *reverse,
                             prefix,
                             intersections,
                             *maintained,
@@ -4325,6 +4346,8 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4335,6 +4358,8 @@ where
             table,
             schema_version,
             column,
+            order_column,
+            reverse,
             prefix,
             intersections,
             maintained,
@@ -4349,6 +4374,8 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4382,6 +4409,14 @@ where
         };
         let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
+            Some(max_items) if reverse => StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+                max_items,
+            },
             Some(max_items) => StaticScanSpec::PrefixLimit {
                 prefix: scan_prefix
                     .iter()
@@ -4420,7 +4455,19 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let primary_index = physical_current_index_name(column_id);
+        let primary_index = if let Some(order_column) = order_column {
+            let order_column_id =
+                mapping
+                    .columns
+                    .get(order_column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current ordered index column mapping missing",
+                    ))?;
+            physical_current_composite_index_name(&[column_id, order_column_id])
+        } else {
+            physical_current_index_name(column_id)
+        };
         if maintained {
             // `IndexedRowsIntersection` is a hydration request, not a live
             // source.  Model each equality as an index source and express the
