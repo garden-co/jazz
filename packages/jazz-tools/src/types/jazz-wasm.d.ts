@@ -47,6 +47,12 @@ declare module "jazz-wasm" {
   export class StreamingMutation {
     push(chunk: Uint8Array): Promise<void>;
     finish(): Promise<WasmWrite>;
+    stage(): Promise<StagedStreamingMutation>;
+    abort(): Promise<boolean>;
+  }
+
+  export class StagedStreamingMutation {
+    attach(openTransactionId: string): Promise<void>;
     abort(): Promise<boolean>;
   }
 

@@ -9,10 +9,16 @@ import { unwrapValue } from "../runtime/row-transformer.js";
 import { encodeCellType } from "./cell-type.js";
 import { E2eeDataError } from "./data-error.js";
 import { encodeCryptoContext } from "./context.js";
-import { encodeEnvelope, decodeEnvelope } from "./envelope.js";
+import { encodeEnvelope, decodeEnvelope, decodeEnvelopeView } from "./envelope.js";
 import { encryptedRowSpaces, encryptedSchemas } from "./encrypted-schema.js";
 import { frameCryptoRecord } from "./record-frame.js";
-import { cellCryptoForDb, withSpaceKeys } from "./lifecycle.js";
+import { cellCryptoForDb, streamingCryptoForDb, withSpaceKeys } from "./lifecycle.js";
+import {
+  STREAM_RECORD,
+  encryptStreamRecord,
+  readStreamRecord,
+  decryptStreamRecord,
+} from "./stream-record.js";
 import type { SpaceRoot } from "./spaces.js";
 import { equalityValue } from "./equality-data.js";
 
@@ -29,18 +35,25 @@ function storedCell(epoch: string, ciphertext: Uint8Array): Uint8Array {
   return encodeEnvelope(RECORD, payload);
 }
 
-function readStoredCell(value: unknown): { epoch: string; ciphertext: Uint8Array } {
+function readStoredCell(value: unknown) {
   if (!(value instanceof Uint8Array)) throw new E2eeDataError("invalid-ciphertext");
-  const payload = readEnvelope(RECORD, value);
+  let payload: Uint8Array;
+  let streaming = false;
+  try {
+    payload = decodeEnvelopeView(RECORD, value);
+  } catch {
+    payload = readEnvelope(STREAM_RECORD, value);
+    streaming = true;
+  }
   if (payload.length < 47) throw new E2eeDataError("invalid-ciphertext");
   const epoch = new TextDecoder().decode(payload.subarray(0, 36));
   if (!UUID.test(epoch)) throw new E2eeDataError("invalid-ciphertext");
-  return { epoch, ciphertext: payload.subarray(36) };
+  return { epoch, ciphertext: payload.subarray(36), streaming, record: value };
 }
 
 function readEnvelope(mechanism: Parameters<typeof decodeEnvelope>[0], value: Uint8Array) {
   try {
-    return decodeEnvelope(mechanism, value);
+    return decodeEnvelopeView(mechanism, value);
   } catch (error) {
     // These are the fixed routing errors from our decoder, not adapter exceptions.
     throw new E2eeDataError(
@@ -106,6 +119,41 @@ export async function encryptCell(
   }
 }
 
+/** Private stream encoder: the caller owns key lifetime through complete consumption. */
+export async function encryptStreamingCell(
+  db: Db,
+  table: TableProxy<unknown, unknown>,
+  rowId: string,
+  name: string,
+  secret: Uint8Array,
+  root: Readonly<SpaceRoot>,
+  source: AsyncIterable<Uint8Array>,
+  options?: { signal?: AbortSignal },
+): Promise<AsyncIterable<Uint8Array>> {
+  const column = encryptedSchemas
+    .get(table._schema)
+    ?.logical[table._table]?.columns.find((entry) => entry.name === name);
+  if (!column || column.column_type.type !== "Bytea")
+    throw new Error("Encrypted streaming requires a Bytea column");
+  try {
+    const { cipher, application } = await streamingCryptoForDb(db);
+    const context = await dataContext(
+      db,
+      table,
+      rowId,
+      column,
+      root,
+      application,
+      "jazz.e2ee.stream-record.v1",
+    );
+    const aad = frameCryptoRecord([context, encodeEnvelope(cipher.mechanism, new Uint8Array())]);
+    return encryptStreamRecord(cipher, secret, aad, root.epochId, source, options);
+  } catch (error) {
+    if (error instanceof E2eeDataError) throw error;
+    throw new E2eeDataError("encryption-failed");
+  }
+}
+
 export async function decryptCellRows(
   db: Db,
   schema: TableProxy<unknown, unknown>["_schema"],
@@ -137,6 +185,32 @@ export async function decryptCellRows(
       for (const [name, cell] of pending) {
         if (cell.epoch !== root.epochId) continue;
         const column = metadata.logical[tableName]!.columns.find((column) => column.name === name)!;
+        if (cell.streaming) {
+          if (column.column_type.type !== "Bytea" || declaration.indexes?.[name])
+            throw new E2eeDataError("unsupported-format");
+          const stream = await streamingCryptoForDb(db);
+          const context = await dataContext(
+            db,
+            table,
+            row.id as string,
+            column,
+            root,
+            stream.application,
+            "jazz.e2ee.stream-record.v1",
+          );
+          const aad = frameCryptoRecord([
+            context,
+            encodeEnvelope(stream.cipher.mechanism, new Uint8Array()),
+          ]);
+          try {
+            const { ciphertext } = readStreamRecord(cell.record, stream.cipher.mechanism);
+            decoded[name] = await decryptStreamRecord(stream.cipher, secret, aad, ciphertext);
+          } catch {
+            throw new E2eeDataError("invalid-ciphertext");
+          }
+          pending.delete(name);
+          continue;
+        }
         const aad = await dataContext(db, table, row.id as string, column, root, application);
         readEnvelope(cipher.mechanism, cell.ciphertext);
         let plaintext: Uint8Array | undefined;
