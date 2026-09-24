@@ -822,6 +822,14 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// The V2 lease tick exposes a safe category while keeping upstream details private.
+///
+/// ```text
+/// alice's relay owner ──terminal error──► foreground tick ──safe category──► JSI
+/// ```
+///
+/// The terminal cause is injected into the private worker state because this
+/// C ABI intentionally offers no way to set or read raw transport errors.
 async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
     let issuer = TestJwtIssuer::start().await;
     let edge = JazzServer::builder()
@@ -832,7 +840,7 @@ async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
         .expect("start test server");
     let storage = tempfile::tempdir().unwrap();
     let fixture = Fixture::new();
-    let bearer = TestJwtIssuer::jwt_for_user("native-tick-diagnostic");
+    let bearer = TestJwtIssuer::jwt_for_user("native-tick-alice");
     let capability = fixture
         .begin_account_session(
             &edge.base_url(),

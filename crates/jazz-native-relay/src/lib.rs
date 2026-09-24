@@ -38,14 +38,31 @@ use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz_native_transport::NativeWebSocketConnector;
 use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 
-/// The current native-relay ABI version. (The name is kept for the exported
-/// `jazz-rn` constant.) Breaking command/response changes bump the value:
+/// The current postcard command ABI version. Breaking command/response
+/// changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
 pub const NATIVE_RELAY_ABI_V1: u16 = 3;
+/// Current native artifact ABI. V2 adds a lease-scoped tick diagnostic while
+/// preserving the V1 postcard command protocol and all V1 C symbols.
+pub const NATIVE_RELAY_ABI_V2: u16 = 4;
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JazzNativeRelayTickDiagnostic {
+    None = 0,
+    UpstreamTerminal = 1,
+    LocalTickFailure = 2,
+}
+
+impl JazzNativeRelayTickDiagnostic {
+    const fn code(self) -> u32 {
+        self as u32
+    }
+}
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -1551,24 +1568,45 @@ impl NativeRelayHost {
     }
 
     fn tick_foreground(&mut self, foreground: u64) -> Result<(), JazzNativeRelayStatus> {
-        let opened = self
-            .foregrounds
-            .get(&foreground)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        self.tick_foreground_with_diagnostic(foreground)
+            .map_err(|(status, _diagnostic)| status)
+    }
+
+    fn tick_foreground_with_diagnostic(
+        &mut self,
+        foreground: u64,
+    ) -> Result<(), (JazzNativeRelayStatus, JazzNativeRelayTickDiagnostic)> {
+        let opened = self.foregrounds.get(&foreground).ok_or((
+            JazzNativeRelayStatus::InvalidHandle,
+            JazzNativeRelayTickDiagnostic::None,
+        ))?;
         let (relay, scope) = (opened.relay, opened.scope.clone());
         // A rejected session or a stopped upstream fails the tick. A lost
         // established link that the worker is retrying is not latched: it is
         // reported through the remote-link hint and `NativeConnectionStatus`
         // while local work continues.
         if self.private_scope_terminal_error(&scope).is_some() {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
+            return Err((
+                JazzNativeRelayStatus::LifecycleFailure,
+                JazzNativeRelayTickDiagnostic::UpstreamTerminal,
+            ));
         }
-        self.relays
-            .get(&relay)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        self.foreground_client(foreground)?
+        self.relays.get(&relay).ok_or((
+            JazzNativeRelayStatus::InvalidHandle,
+            JazzNativeRelayTickDiagnostic::None,
+        ))?;
+        self.foreground_client(foreground)
+            .map_err(|status| (status, JazzNativeRelayTickDiagnostic::None))?
             .pump_foreground()
-            .map_err(relay_status)
+            .map_err(|error| {
+                let status = relay_status(error);
+                let diagnostic = if status == JazzNativeRelayStatus::LifecycleFailure {
+                    JazzNativeRelayTickDiagnostic::LocalTickFailure
+                } else {
+                    JazzNativeRelayTickDiagnostic::None
+                };
+                (status, diagnostic)
+            })
     }
 
     /// Lease-scoped C ABI calls must not turn an opaque foreground handle into
@@ -2151,7 +2189,7 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
 /// stay behind the future shared binary relay codec.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
-    NATIVE_RELAY_ABI_V1
+    NATIVE_RELAY_ABI_V2
 }
 
 /// Optional foreground capture support in the linked native artifact.
@@ -2689,6 +2727,32 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_tick_attached_foreground(
     })
 }
 
+/// Lease-safe V2 tick. It returns a finite diagnostic category separately;
+/// status remains authoritative and detailed failure causes stay private.
+///
+/// # Safety
+/// `lease` must be live and `out_diagnostic` writable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_tick_attached_foreground_v2(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    out_diagnostic: *mut u32,
+) -> JazzNativeRelayStatus {
+    ffi_call(|| {
+        unsafe { reset_out(out_diagnostic, JazzNativeRelayTickDiagnostic::None.code())? };
+        let lease = unsafe { live_arg(lease)? };
+        require_arg(foreground != 0)?;
+        let mut host = lease.lock_foreground(foreground)?;
+        match host.tick_foreground_with_diagnostic(foreground) {
+            Ok(()) => Ok(()),
+            Err((status, diagnostic)) => {
+                unsafe { *out_diagnostic = diagnostic.code() };
+                Err(status)
+            }
+        }
+    })
+}
+
 /// Lease-safe variant of [`jazz_native_relay_host_close_attached_foreground`].
 ///
 /// # Safety
@@ -2947,7 +3011,7 @@ mod tests {
     #[test]
     fn c_header_names_the_relay_abi() {
         let header = include_str!("../include/jazz_native_relay.h");
-        let define = format!("#define JAZZ_NATIVE_RELAY_ABI_VERSION {NATIVE_RELAY_ABI_V1}\n");
+        let define = format!("#define JAZZ_NATIVE_RELAY_ABI_VERSION {NATIVE_RELAY_ABI_V2}\n");
         assert!(header.contains(&define), "header must contain {define:?}");
     }
 }

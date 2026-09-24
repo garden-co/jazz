@@ -57,15 +57,14 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
-The wrapper accepts ABI V1, which uses opaque host-generated admission
-capabilities and trusted revocation. ABI V1 defines the shared foreground
-`NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
-plus pending-operation poll/cancel commands for chunk-backed reads. It is a
-byte-oriented native-host contract, not a new React Native row/query API:
-`jazz-tools/react-native` is the public adapter, using the same query and
-row-delta codecs as NAPI/WASM. It selects the account-scoped persistent
-foreground path and does not fall back to a browser-WASM or generic
-TurboModule runtime.
+The JavaScript wrapper requires native artifact ABI V2. V2 adds a
+lease-scoped direct-tick diagnostic code while preserving the V1 tick C symbol;
+Rust returns only a fixed category, and the JSI adapter maps it to reviewed
+static wording without exposing transport or server error text. The postcard
+command codec remains protocol ABI V1: its `execute(Tick)` path and response
+are unchanged and do not carry this diagnostic. The native artifact bump is
+internal to the package contract; it adds no public TypeScript tick method,
+wire format, or storage behavior.
 
 An admitted native foreground is bound to the session used for admission.
 `db.updateCookieSession(...)` therefore rejects atomically on this path: it

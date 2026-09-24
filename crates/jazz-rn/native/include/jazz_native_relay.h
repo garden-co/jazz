@@ -9,15 +9,14 @@
 extern "C" {
 #endif
 
-/* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 3
+/* The current native artifact ABI (Rust `NATIVE_RELAY_ABI_V2`). */
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
 
 /*
- * Return the shared native relay ABI version embedded in this artifact.
- *
- * JNI and other platform wrappers must compare this before decoding or sending
- * a command. This header intentionally exposes no database/query handles.
+ * Current native artifact ABI. The postcard command codec remains protocol
+ * ABI V1 (currently 3); artifact ABI V2 adds the lease-scoped diagnostic tick.
  */
+#define JAZZ_NATIVE_RELAY_ABI_V2 4
 uint16_t jazz_native_relay_abi_version(void);
 
 /* Optional foreground capture support, a feature query outside the command layout. */
@@ -44,6 +43,12 @@ typedef enum jazz_native_relay_status {
    * Wrappers surface it with the stable code "unsupported_storage_codecs". */
   JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS = 10,
 } jazz_native_relay_status;
+
+typedef enum jazz_native_relay_tick_diagnostic {
+  JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_NONE = 0,
+  JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_UPSTREAM_TERMINAL = 1,
+  JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_LOCAL_TICK_FAILURE = 2,
+} jazz_native_relay_tick_diagnostic;
 
 /* Stateless account crypto. No database or network is opened. Secret output
  * is exactly 32 OS-random bytes; mint output is the shared local-first JWT in
@@ -162,6 +167,14 @@ jazz_native_relay_status jazz_native_relay_host_lease_open_attached_foreground(
 jazz_native_relay_status jazz_native_relay_host_lease_tick_attached_foreground(
     jazz_native_relay_host_lease *lease,
     uint64_t foreground);
+
+/* V2 preserves the V1 tick symbol and adds only a bounded diagnostic category.
+ * out_diagnostic is initialized to NONE for successful and early-return paths;
+ * status remains authoritative. No Rust error text crosses this seam. */
+jazz_native_relay_status jazz_native_relay_host_lease_tick_attached_foreground_v2(
+    jazz_native_relay_host_lease *lease,
+    uint64_t foreground,
+    uint32_t *out_diagnostic);
 jazz_native_relay_status jazz_native_relay_host_lease_close_attached_foreground(
     jazz_native_relay_host_lease *lease,
     uint64_t foreground,
