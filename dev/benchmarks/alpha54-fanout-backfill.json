@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "historical-harness-backfill",
+  "releaseTag": "v2.0.0-alpha.54",
+  "engineSha": "7cb8a9b4e088c5810540f221c0d3434069566e6b",
+  "harnessSourceSha": "91bd1bb97c6ad723ba92a8f73d6133f64bee1874",
+  "effectiveDate": "2026-09-10T04:26:57.178Z",
+  "effectiveDateSource": "npm jazz-tools time[2.0.0-alpha.54]",
+  "measurementMode": "walltime",
+  "runner": "codspeed-macro",
+  "rustToolchain": "1.93.1",
+  "cargoCodspeedVersion": "5.0.1",
+  "jobs": {
+    "w1-subscription-fanout": {
+      "package": "jazz-example-benchmark-w1",
+      "bench": "reads_memory_walltime",
+      "allocator": "system",
+      "benchmarks": [
+        "subscription_fanout_memory[(600, 0)]",
+        "subscription_fanout_memory[(600, 10)]",
+        "subscription_fanout_memory[(600, 60)]",
+        "subscription_fanout_memory[(6000, 60)]"
+      ]
+    }
+  },
+  "notPortable": {
+    "first_sync_local_relay_27518_rocksdb": "Its Core is a jazz Node; scope-isolated relay admission at Node level is pub(crate) in this release. The public #[cfg(feature = \"testing\")] Node wrapper was added to the engine by 3dc586449 after alpha.56, and a harness cannot add it without changing pinned engine bytes."
+  }
+}
