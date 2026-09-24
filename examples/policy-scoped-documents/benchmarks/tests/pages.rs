@@ -73,6 +73,29 @@ fn ordered_page_preserves_id_ties_and_refills_after_deletions() {
     );
 }
 
+#[test]
+fn unrelated_delete_and_restore_registers_do_not_expand_ordered_page_reads() {
+    let fixture = Fixture::new(1_000, Policy::OwnerOrOrg);
+    let unrelated = (700..1_000).collect::<Vec<_>>();
+    fixture.delete_documents(&unrelated);
+    for restored in [false, true] {
+        if restored {
+            fixture.restore_documents(&unrelated, |index| index as u64);
+        }
+        let mut session = fixture.session(Page::Org(0), 10, user(2));
+        let rows = session.read();
+        assert_eq!(
+            rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+            (30..40).rev().map(document_row).collect::<Vec<_>>()
+        );
+        let register_reads = session.take_metrics().register_global_current_rows.reads;
+        assert!(
+            register_reads <= 32,
+            "unrelated deletion and restore records must not be read for this page: {register_reads}"
+        );
+    }
+}
+
 // Public Db integration: an independently computed oracle checks both policy
 // branches, non-members, exact descending order, empty and oversized pages.
 #[test]

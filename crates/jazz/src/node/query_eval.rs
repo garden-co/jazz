@@ -595,8 +595,131 @@ where
             *source_limit = Some(cap);
             *maintained = false;
         }
+        if let Some(cap) = ordered_source_cap {
+            let root = root_source_id(&shape.query().table);
+            let path = access_paths.get(&root).ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no current index access path",
+            ))?;
+            let register = self
+                .bounded_deletion_register_for_ordered_page(shape, path, cap)
+                .await?;
+            return self
+                .compile_query_program_request_with_bounded_deletion_register(
+                    request,
+                    access_paths,
+                    (root, register),
+                )
+                .await;
+        }
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
+    }
+
+    /// Materialize only the deletion winners whose content rows can enter a
+    /// bounded ordered page probe. The caller holds the node's read lock over
+    /// both this snapshot and execution of the lowered query program.
+    async fn bounded_deletion_register_for_ordered_page(
+        &mut self,
+        shape: &ValidatedQuery,
+        path: &CurrentAccessPath,
+        cap: usize,
+    ) -> Result<GraphBuilder, Error> {
+        let CurrentAccessPath::Index {
+            column,
+            order_column: Some(order_column),
+            reverse,
+            prefix,
+            intersections,
+            ..
+        } = path
+        else {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe requires a composite index",
+            ));
+        };
+        if !intersections.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe cannot intersect indexes",
+            ));
+        }
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .and_then(|mapping| mapping.tables.get(&shape.query().table))
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no physical table mapping",
+            ))?;
+        let column_id = *mapping
+            .columns
+            .get(column)
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no equality column mapping",
+            ))?;
+        let order_column_id =
+            *mapping
+                .columns
+                .get(order_column)
+                .ok_or(Error::InvalidStoredValue(
+                    "ordered page probe has no order column mapping",
+                ))?;
+        let content_table = physical_global_current_table_name(mapping.table_id);
+        let register_table = physical_register_global_current_table_name(mapping.table_id);
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let scan_prefix = std::iter::once(branch.clone())
+            .chain(prefix.iter().cloned())
+            .map(LiteralValue::from)
+            .collect();
+        let scan = if *reverse {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        } else {
+            StaticScanSpec::PrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        };
+        let projection = self.ensure_physical_current_projection_for_enum_columns(
+            shape.schema_version(),
+            &shape.query().table,
+            &BTreeSet::new(),
+        )?;
+        let candidates = self
+            .database
+            .query_graph(
+                GraphBuilder::variant_index_scan(
+                    content_table,
+                    physical_current_composite_index_name(&[column_id, order_column_id]),
+                    projection,
+                    scan,
+                )
+                .project(["row_uuid"]),
+            )
+            .await
+            .map_err(Error::Groove)?;
+        let row_uuids = candidates
+            .iter()
+            .map(|(row, _)| row.get_uuid(0))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut registers = Vec::with_capacity(row_uuids.len());
+        for row_uuid in row_uuids {
+            if let Some(register) = self
+                .database
+                .primary_key_get_raw(&register_table, &[branch.clone(), Value::Uuid(row_uuid)])
+                .await
+                .map_err(Error::Groove)?
+            {
+                registers.push(register.raw().to_vec());
+            }
+        }
+        let descriptor = self
+            .database
+            .table_schema(&register_table)
+            .map_err(Error::Groove)?
+            .record_schema();
+        Ok(GraphBuilder::inline_records(descriptor, registers))
     }
 
     /// Probe an ordered current index a page at a time. The query graph still

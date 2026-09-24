@@ -32,6 +32,9 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// A one-shot ordered page can restrict deletion checks to its bounded
+    /// content candidates. Other sources retain the complete register.
+    pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
     /// same deduplicated physical source node, so only the outer fragment owns
@@ -2984,6 +2987,12 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        if tier == DurabilityTier::Global
+            && let Some((source, graph)) = &self.bounded_deletion_register
+            && *source == request.source
+        {
+            return Ok(graph.clone());
+        }
         let table_id = self
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
