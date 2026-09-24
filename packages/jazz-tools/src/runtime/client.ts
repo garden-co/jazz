@@ -135,6 +135,8 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ * Plain-record `headers` keys are matched case-insensitively; conflicting case variants
+ * are rejected. Web `Headers` objects retain their native lookup behavior.
  */
 export interface RequestLike {
   header?: (name: string) => string | undefined;
