@@ -228,10 +228,16 @@ where
             )
             .await?;
         let Some(raw) = raw else { return Ok(None) };
-        let record = raw.record();
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let current = raw.owned_record();
+        if let Some(winner) =
+            self.history_image_from_current_record(schema_version, table, current.borrowed())?
+        {
+            return Ok(Some(winner));
+        }
+        let current = current.borrowed();
+        let tx_time = TxTime(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            NodeAlias(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias_in_branch(
             schema_version,
             table,
@@ -287,10 +293,16 @@ where
         let Some(raw) = raw else {
             return Ok(None);
         };
-        let record = raw.record();
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let current = raw.owned_record();
+        if let Some(winner) =
+            self.history_image_from_current_record(schema_version, table, current.borrowed())?
+        {
+            return Ok(Some(winner));
+        }
+        let current = current.borrowed();
+        let tx_time = TxTime(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            NodeAlias(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias_in_branch(
             schema_version,
             table,
@@ -300,6 +312,73 @@ where
             tx_node_alias,
         )
         .await
+    }
+
+    /// Global current stores the winner's full body, so the winner is read
+    /// from it rather than re-fetched from history by `(tx_time, node)`.
+    /// The two layouts differ only in the `global_time` cell and the
+    /// provenance timestamps: current stores whole milliseconds, history the
+    /// same instant as an HLC. Provenance HLCs are always minted from
+    /// milliseconds (logical counter zero), so the conversion is lossless.
+    pub(super) fn history_image_from_current_record(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        current: groove::records::BorrowedRecord<'_>,
+    ) -> Result<Option<VersionRow>, Error> {
+        let history_table =
+            physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
+        let history_descriptor = self.database.table_schema(&history_table)?.record_schema();
+        let current_descriptor = current.descriptor();
+        let global_time_idx = GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX;
+        // Across a schema lineage the current table may be a different
+        // physical projection than this schema's history table; only the
+        // same-lineage layout is a byte-for-byte image of the history row.
+        if current_descriptor.fields().len() != history_descriptor.fields().len() + 1
+            || (0..history_descriptor.fields().len()).any(|index| {
+                let source = if index >= global_time_idx {
+                    index + 1
+                } else {
+                    index
+                };
+                current_descriptor.fields()[source].value_type
+                    != history_descriptor.fields()[index].value_type
+            })
+        {
+            return Ok(None);
+        }
+        let raw = history_descriptor.create_with_encoded_fields::<Error>(
+            current.raw().len(),
+            |index, output| {
+                let value = match index {
+                    HistoryRowRecord::FIELD_CREATED_AT_IDX => {
+                        Some(current.get_u64(GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX)?)
+                    }
+                    HistoryRowRecord::FIELD_UPDATED_AT_IDX => {
+                        Some(current.get_u64(GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX)?)
+                    }
+                    _ => None,
+                };
+                if let Some(ms) = value {
+                    let time = TxTime::from_physical_ms(ms).map_err(|_| {
+                        Error::InvalidStoredValue("current provenance ms exceeds HLC range")
+                    })?;
+                    history_descriptor.encode_field_into(index, &Value::U64(time.0), output)?;
+                    return Ok(());
+                }
+                let source = if index >= global_time_idx {
+                    index + 1
+                } else {
+                    index
+                };
+                let span = current_descriptor.field_span(current.raw(), source)?;
+                output.extend_from_slice(&current.raw()[span]);
+                Ok(())
+            },
+        )?;
+        let record = OwnedRecord::new(raw, history_descriptor);
+        self.decode_history_owned_record(table, &history_table, record)
+            .map(Some)
     }
 
     pub(super) async fn query_winner_from_pk(

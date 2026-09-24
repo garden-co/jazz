@@ -180,7 +180,13 @@ where
         let Some(raw) = raw else {
             return Ok(None);
         };
-        let record = raw.record();
+        let current = raw.owned_record();
+        if let Some(winner) =
+            self.history_image_from_current_record(schema_version, table, current.borrowed())?
+        {
+            return Ok(Some(winner));
+        }
+        let record = current.borrowed();
         let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
             NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
