@@ -1179,6 +1179,7 @@ where
             }
         }
         for predicate in &open_tx.predicate_reads {
+            let mut comparison: Option<Snapshot> = None;
             for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
@@ -1186,6 +1187,45 @@ where
                     .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
+                    if comparison.is_none() {
+                        let query = &predicate.shape;
+                        // This comparison advances only root-table history.
+                        // Preserve conservative rejection for relational reads
+                        // and aggregates, whose output hides input rewrites.
+                        if query.aggregate.is_some()
+                            || !query.joins.is_empty()
+                            || query.flat_join.is_some()
+                            || !query.policy_branches.is_empty()
+                            || !query.reachable.is_empty()
+                            || !query.inherits.is_empty()
+                            || !query.includes.is_empty()
+                            || !query.array_subqueries.is_empty()
+                            || query.relation.is_some()
+                            || self.predicate_read_is_degenerate_whole_table(predicate)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    comparison
+                        .get_or_insert_with(|| open_tx.base_snapshot.clone())
+                        .dots
+                        .push(tx_id);
+                }
+            }
+            if let Some(mut current) = comparison {
+                current.dots.sort_unstable();
+                current.dots.dedup();
+                // A newer row outside the filter is not a phantom. Retain the
+                // fixed base and compare against every newly visible version,
+                // including local writes that have no authority receipt yet.
+                if self
+                    .shape_predicate_outputs_differ(
+                        predicate,
+                        &open_tx.base_snapshot,
+                        Some(&current),
+                    )
+                    .await?
+                {
                     return Ok(false);
                 }
             }

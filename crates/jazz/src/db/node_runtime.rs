@@ -4693,7 +4693,7 @@ where
                             // newly complete closure.
                         }
                         update @ (LocalMaintainedViewSubscriptionUpdate::Flat { .. }
-                        | LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+                        | LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                             ..
                         }) => {
                             let state_ref = &mut refresh;

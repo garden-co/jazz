@@ -943,6 +943,61 @@ async fn json_pointer_observes_literal_indirect_json_semantics() {
 }
 
 #[futures_test::test]
+async fn json_pointer_nested_array_indices_are_canonical_and_string_values_are_rejected() {
+    let source = br#"[{"items":["zero","one"],"01":"literal","+1":"signed"}]"#;
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    for kind in [LargeValueKind::Json, LargeValueKind::String] {
+        let prepared = prepare(kind, source).unwrap();
+        let chunks = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (provider, _) = TestChunkProvider::controlled(chunks);
+        database.set_chunk_provider(Rc::new(provider));
+        if kind == LargeValueKind::String {
+            assert!(
+                database
+                    .read_large_json_pointer(&prepared.value_ref, "/0/items/1")
+                    .await
+                    .is_err()
+            );
+            continue;
+        }
+        let oracle: serde_json::Value = serde_json::from_slice(source).unwrap();
+        for pointer in [
+            "/0/items/0",
+            "/0/items/1",
+            "/0/items/01",
+            "/0/items/+1",
+            "/0/items/-",
+            "/0/items/99999999999999999999999999",
+            "/0/01",
+            "/0/+1",
+        ] {
+            assert_eq!(
+                database
+                    .read_large_json_pointer(&prepared.value_ref, pointer)
+                    .await
+                    .unwrap(),
+                oracle.pointer(pointer).cloned(),
+                "{pointer}"
+            );
+        }
+    }
+}
+
+#[futures_test::test]
 async fn root_array_json_pointer_stops_after_the_selected_complete_element() {
     let mut source = br#"[{"name":"target"}"#.to_vec();
     for _ in 0..200_000 {
