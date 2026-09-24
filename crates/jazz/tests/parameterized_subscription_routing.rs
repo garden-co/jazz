@@ -349,3 +349,145 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
         "team B after team B insert",
     );
 }
+
+/// Local-tier bindings of one shape stay exact under churn:
+///
+/// ```text
+/// documents ──> team = $team ──> binding per team ──> subscriber per team
+///               (unbounded, and Top 3 by updated_at)
+/// ```
+///
+/// Rows are inserted, moved between teams, reordered and deleted, and
+/// bindings are dropped and re-opened, while every maintained subscription
+/// is compared against a one-shot read of the same binding after each step.
+#[test]
+fn local_bindings_of_one_shape_match_one_shot_reads_under_churn() {
+    const TEAMS: u64 = 5;
+    const STEPS: u64 = 160;
+
+    let db = open_db();
+    let team = |index: u64| row(1_000 + index % TEAMS);
+    let unbounded = Query::from("documents").filter(eq(col("team"), param("team")));
+    let top = Query::from("documents")
+        .filter(eq(col("team"), param("team")))
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(3);
+    let prepare = |query: &Query, team: RowUuid| {
+        db.prepare_query_bound(
+            query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]),
+        )
+        .expect("prepare team binding")
+    };
+
+    struct Live {
+        label: String,
+        prepared: PreparedQuery,
+        stream: SubscriptionStream,
+        rows: BTreeSet<RowUuid>,
+    }
+    let open = |label: String, prepared: PreparedQuery| {
+        let mut stream =
+            block_on(db.subscribe(&prepared, local_read_opts())).expect("subscribe team binding");
+        let mut rows = take_initial_reset(&label, &mut stream);
+        apply_pending_events(&label, &mut stream, &mut rows);
+        Live {
+            label,
+            prepared,
+            stream,
+            rows,
+        }
+    };
+    let expected = |live: &Live| {
+        block_on(db.all(&live.prepared, local_read_opts()))
+            .unwrap_or_else(|error| panic!("{} one-shot read failed: {error}", live.label))
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>()
+    };
+
+    for seed in 0..12 {
+        insert_document(&db, row(seed), team(seed), seed * 7 % 23);
+    }
+    let mut live = (0..TEAMS)
+        .flat_map(|index| {
+            [
+                (format!("all/{index}"), prepare(&unbounded, team(index))),
+                (format!("top/{index}"), prepare(&top, team(index))),
+            ]
+        })
+        .map(|(label, prepared)| open(label, prepared))
+        .collect::<Vec<_>>();
+    for subscription in &live {
+        assert_eq!(
+            subscription.rows,
+            expected(subscription),
+            "{} initial",
+            subscription.label
+        );
+    }
+
+    let mut documents = (0..12).collect::<Vec<u64>>();
+    let mut next_document = 12;
+    for step in 0..STEPS {
+        let pick = documents[(step as usize * 5) % documents.len()];
+        match step % 6 {
+            0 | 3 => {
+                insert_document(&db, row(next_document), team(step * 3), step % 29);
+                documents.push(next_document);
+                next_document += 1;
+            }
+            1 => {
+                block_on(db.update(
+                    "documents",
+                    row(pick),
+                    BTreeMap::from([("team".to_owned(), Value::Uuid(team(step + pick).0))]),
+                    Default::default(),
+                ))
+                .expect("move document to another team");
+            }
+            2 | 4 => {
+                block_on(db.update(
+                    "documents",
+                    row(pick),
+                    BTreeMap::from([("updated_at".to_owned(), Value::U64(step * 11 % 31))]),
+                    Default::default(),
+                ))
+                .expect("reorder document");
+            }
+            _ => {
+                block_on(db.delete("documents", row(pick), Default::default()))
+                    .expect("delete document");
+                documents.retain(|document| *document != pick);
+            }
+        }
+        if step % 40 == 39 {
+            // Drop one binding and re-open it while its siblings stay live.
+            let index = (step / 40) as usize % live.len();
+            let Live {
+                label,
+                prepared,
+                stream,
+                ..
+            } = live.swap_remove(index);
+            drop(stream);
+            block_on(db.tick()).expect("retire dropped binding");
+            live.push(open(format!("{label}/reopened"), prepared));
+        }
+        for subscription in &mut live {
+            apply_pending_events(
+                &subscription.label,
+                &mut subscription.stream,
+                &mut subscription.rows,
+            );
+            assert_eq!(
+                subscription.rows,
+                expected(subscription),
+                "{} diverged from its one-shot read after step {step}",
+                subscription.label
+            );
+        }
+    }
+    drop(live);
+    block_on(db.close()).expect("close churn fixture");
+}
