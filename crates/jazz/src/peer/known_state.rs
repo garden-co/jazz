@@ -251,9 +251,27 @@ impl PeerState {
             .map(PeerSubscriptionState::previous_tx_ids)
     }
 
-    /// Return this peer's maintained subscription view counters and latest footprint.
+    /// Return this peer's cheap maintained subscription view counters.
     pub fn maintained_subscription_view_metrics(&self) -> MaintainedSubscriptionViewMetrics {
         *self.metrics.maintained_subscription_view
+    }
+
+    /// Inspect the current retained index footprint of one maintained subscription.
+    ///
+    /// This diagnostic walks retained state and can cost O(subscription size).
+    /// Publication never calls it. Inspect outside timed operations when reporting
+    /// benchmark memory, and sample sparingly in production. The estimate excludes
+    /// allocator overhead and is neither process RSS nor a peer-wide aggregate.
+    /// Returns `None` when the subscription has no maintained view, including after
+    /// it has been forgotten; absence is not a measured zero-byte view.
+    pub fn inspect_maintained_subscription_view_footprint(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<MaintainedSubscriptionViewMetricsFootprint> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .map(|maintained| maintained.maintained.footprint().into())
     }
 
 }

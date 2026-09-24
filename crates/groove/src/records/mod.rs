@@ -317,91 +317,6 @@ impl RecordDescriptor {
         Ok(record)
     }
 
-    pub(crate) fn project_record_raw_into(
-        &self,
-        source_descriptors: &[RecordDescriptor],
-        source_records: &[&[u8]],
-        mapping: &[(usize, usize)],
-        output: &mut BytesMut,
-        variable_scratch: &mut Vec<(usize, std::ops::Range<usize>)>,
-    ) -> Result<std::ops::Range<usize>, Error> {
-        if self.fields.len() != mapping.len() {
-            return Err(Error::ArityMismatch {
-                expected: self.fields.len(),
-                actual: mapping.len(),
-            });
-        }
-        if source_descriptors.len() != source_records.len() {
-            return Err(Error::ArityMismatch {
-                expected: source_descriptors.len(),
-                actual: source_records.len(),
-            });
-        }
-
-        variable_scratch.clear();
-        let start = output.len();
-        let fixed_size = self.fixed_size();
-        let variable_count = self.variable_count();
-        let offset_table_size = variable_count.saturating_sub(1) * 4;
-        output.reserve(fixed_size + offset_table_size);
-
-        for logical_idx in &self.layout.logical_by_physical {
-            let (source_descriptor_idx, source_field_idx) = mapping[*logical_idx];
-            let source_descriptor = source_descriptors.get(source_descriptor_idx).ok_or(
-                Error::FieldIndexOutOfBounds {
-                    index: source_descriptor_idx,
-                    len: source_descriptors.len(),
-                },
-            )?;
-            let source_record = source_records.get(source_descriptor_idx).ok_or_else(|| {
-                Error::FieldIndexOutOfBounds {
-                    index: source_descriptor_idx,
-                    len: source_records.len(),
-                }
-            })?;
-            let source_field = source_descriptor.fields.get(source_field_idx).ok_or(
-                Error::FieldIndexOutOfBounds {
-                    index: source_field_idx,
-                    len: source_descriptor.fields.len(),
-                },
-            )?;
-            let output_field = &self.fields[*logical_idx];
-            if source_field.value_type != output_field.value_type {
-                return Err(Error::TypeMismatch {
-                    expected: output_field.value_type.clone(),
-                });
-            }
-            let span = source_descriptor.field_span(source_record, source_field_idx)?;
-            let encoded = &source_record[span.clone()];
-            match self.layout.fields[*logical_idx] {
-                FieldLayout::Static { width, .. } => {
-                    if encoded.len() != width {
-                        return Err(Error::InvalidOffset);
-                    }
-                    output.extend_from_slice(encoded);
-                }
-                FieldLayout::Variable { .. } => {
-                    variable_scratch.push((source_descriptor_idx, span));
-                }
-            }
-        }
-
-        let variable_start = fixed_size + offset_table_size;
-        let mut next_offset = variable_start;
-        for (_, span) in variable_scratch
-            .iter()
-            .take(variable_scratch.len().saturating_sub(1))
-        {
-            next_offset = checked_add(next_offset, span.end - span.start)?;
-            output.extend_from_slice(&usize_to_u32(next_offset)?.to_le_bytes());
-        }
-        for (source_record_idx, span) in variable_scratch {
-            output.extend_from_slice(&source_records[*source_record_idx][span.clone()]);
-        }
-
-        Ok(start..output.len())
-    }
-
     pub fn bind<'a>(&'a self, raw: &'a [u8]) -> BorrowedRecord<'a> {
         BorrowedRecord::new(raw, self)
     }
@@ -751,6 +666,98 @@ pub(crate) struct PreparedProjection {
     pub(crate) reuses_input: bool,
 }
 
+/// A multi-input byte-copy kernel with descriptor/type work compiled once.
+/// It emits the existing record encoding; row headers and selected field
+/// offsets are still checked on every execution, including untrusted bytes.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedRecordCopy {
+    sources: Vec<(RecordDescriptor, bool)>,
+    target: RecordDescriptor,
+    fields: Vec<(usize, FieldLayout)>,
+}
+
+impl PreparedRecordCopy {
+    pub(crate) fn new(
+        sources: &[RecordDescriptor],
+        target: RecordDescriptor,
+        mapping: &[(usize, usize)],
+    ) -> Result<Self, Error> {
+        if target.fields.len() != mapping.len() {
+            return Err(Error::ArityMismatch {
+                expected: target.fields.len(),
+                actual: mapping.len(),
+            });
+        }
+        let mut sources = sources
+            .iter()
+            .map(|source| (*source, false))
+            .collect::<Vec<_>>();
+        let mut fields = Vec::with_capacity(mapping.len());
+        let source_count = sources.len();
+        for (target_idx, &(source_idx, field_idx)) in mapping.iter().enumerate() {
+            let (source, used) =
+                sources
+                    .get_mut(source_idx)
+                    .ok_or(Error::FieldIndexOutOfBounds {
+                        index: source_idx,
+                        len: source_count,
+                    })?;
+            let field = source
+                .fields
+                .get(field_idx)
+                .ok_or(Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: source.fields.len(),
+                })?;
+            if field.value_type != target.fields[target_idx].value_type {
+                return Err(Error::TypeMismatch {
+                    expected: target.fields[target_idx].value_type.clone(),
+                });
+            }
+            *used = true;
+            fields.push((source_idx, source.layout.fields[field_idx]));
+        }
+        Ok(Self {
+            sources,
+            target,
+            fields,
+        })
+    }
+
+    pub(crate) fn project_into(
+        &self,
+        records: &[&[u8]],
+        output: &mut BytesMut,
+    ) -> Result<std::ops::Range<usize>, Error> {
+        if records.len() != self.sources.len() {
+            return Err(Error::ArityMismatch {
+                expected: self.sources.len(),
+                actual: records.len(),
+            });
+        }
+        for ((descriptor, used), record) in self.sources.iter().zip(records) {
+            if *used {
+                validate_record_header(record, descriptor)?;
+            }
+        }
+        let start = output.len();
+        let result = self
+            .target
+            .write_projected_fields_into(output, |target_idx, output| {
+                let (source_idx, layout) = self.fields[target_idx];
+                let record = records[source_idx];
+                let span =
+                    record_value_span_for_layout(record, &self.sources[source_idx].0, layout)?;
+                output.extend_from_slice(&record[span.start..span.end]);
+                Ok::<_, Error>(())
+            });
+        if result.is_err() {
+            output.truncate(start);
+        }
+        result
+    }
+}
+
 impl PreparedProjection {
     pub(crate) fn new(
         source: RecordDescriptor,
@@ -935,6 +942,25 @@ impl RecordDescriptor {
         output: &mut BytesMut,
         mut evaluate: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
     ) -> Result<std::ops::Range<usize>, E> {
+        self.write_projected_fields_into(output, |target_idx, output| {
+            append_projected_field(
+                source,
+                source_record,
+                &fields[target_idx],
+                target_idx,
+                output,
+                &mut evaluate,
+            )
+        })
+    }
+
+    /// The same record framing for ordinary and composed field projections.
+    /// This is an execution interface, not a new record encoding.
+    pub(crate) fn write_projected_fields_into<E: From<Error>>(
+        &self,
+        output: &mut BytesMut,
+        mut append: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
+    ) -> Result<std::ops::Range<usize>, E> {
         let start = output.len();
         let fixed_size = self.fixed_size();
         let variable_count = self.variable_count();
@@ -943,14 +969,7 @@ impl RecordDescriptor {
         // ends are patched as their bytes arrive: no per-row span/scratch vector.
         for target_idx in &self.layout.logical_by_physical {
             if matches!(self.layout.fields[*target_idx], FieldLayout::Static { .. }) {
-                append_projected_field(
-                    source,
-                    source_record,
-                    &fields[*target_idx],
-                    *target_idx,
-                    output,
-                    &mut evaluate,
-                )?;
+                append(*target_idx, output)?;
             }
         }
         let offset_start = output.len();
@@ -959,14 +978,7 @@ impl RecordDescriptor {
             let FieldLayout::Variable { variable_idx } = self.layout.fields[*target_idx] else {
                 continue;
             };
-            append_projected_field(
-                source,
-                source_record,
-                &fields[*target_idx],
-                *target_idx,
-                output,
-                &mut evaluate,
-            )?;
+            append(*target_idx, output)?;
             if variable_idx + 1 < variable_count {
                 let end = usize_to_u32(output.len() - start)?;
                 let offset = start + fixed_size + variable_idx * 4;

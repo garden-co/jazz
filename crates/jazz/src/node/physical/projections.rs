@@ -633,6 +633,14 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
     ) -> Result<(String, Vec<String>), Error> {
+        if let Some(prepared) = self
+            .catalogue
+            .physical_current_winner_projections
+            .get(&target_schema)
+            .and_then(|targets| targets.get(target_table_name))
+        {
+            return Ok(prepared.clone());
+        }
         let target_mapping = self
             .catalogue
             .physical_mappings
@@ -796,7 +804,15 @@ where
                 }
             }
         }
-        Ok((projection_target, output_fields.unwrap_or_default()))
+        let prepared = (projection_target, output_fields.unwrap_or_default());
+        // Publish only after every source variant and both storage layers have
+        // been registered. Failed registration must not become a cache hit.
+        self.catalogue
+            .physical_current_winner_projections
+            .entry(target_schema)
+            .or_default()
+            .insert(target_table_name.to_owned(), prepared.clone());
+        Ok(prepared)
     }
 
     /// Resolve a missing target user field through the migration path before
@@ -971,6 +987,10 @@ where
     }
 
     pub(super) async fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+        // The registry can evolve without changing a logical schema key (for
+        // example, an old reader gains a new physical enum case). Rebuild all
+        // successful metadata with the new registry, not only the new schema.
+        self.catalogue.physical_current_winner_projections.clear();
         // A physical schema is a coupled registry: tables, variants, enum
         // registries, indices, and projection cases all become observable by
         // the same live runtime.  Do not leave a prefix behind if any later
@@ -981,6 +1001,9 @@ where
         let result = self.synchronize_physical_version_tables_inner().await;
         if result.is_err() {
             self.database.restore_runtime_registry(checkpoint);
+            // A later target may have failed after earlier targets succeeded.
+            // None of those successes describe the restored registry.
+            self.catalogue.physical_current_winner_projections.clear();
         }
         result
     }

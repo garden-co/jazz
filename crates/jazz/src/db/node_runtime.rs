@@ -2497,6 +2497,20 @@ where
         )
     }
 
+    /// Test-only counterpart of the authenticated scope-isolated relay handshake.
+    /// As with the `Db` helper, callers supply the already authenticated session.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_scope_isolated_relay_subscriber_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_scope_isolated_relay_subscriber(transport, identity, claims, admission_epoch)
+    }
+
     /// Admit the one immutable session selected during a scope-isolated relay
     /// handshake. This is crate-private so a host must not turn application
     /// claims or raw frames into a relay capability.
@@ -3893,12 +3907,10 @@ where
             .as_ref()
             .map(|(_, claims)| claims.clone());
         let groove_runtime_token = node.lock().await.groove_runtime_token();
-        // A foreground's provisional graph may already have consumed an empty
-        // first batch. Initialize it again after the owner's complete answer so
-        // the ordinary cold-graph gate covers evaluation of all recovered inputs.
-        if awaiting_initial_owner_result
-            || state.borrow().groove_runtime_token != groove_runtime_token
-        {
+        // Owner input arrival advances the existing storage-backed graph.
+        // Recompile only after real runtime/plan invalidation; initial owner
+        // settlement below fences the retained graph's pending evaluation.
+        if state.borrow().groove_runtime_token != groove_runtime_token {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
@@ -4484,10 +4496,13 @@ where
                     reconciled_authoritative_resets.insert(key.clone(), generation);
                 }
                 if initial_local_snapshot_pending {
-                    let replacement_ready = refresh
-                        .maintained
-                        .as_ref()
-                        .is_some_and(LocalMaintainedViewSubscription::initial_snapshot_received);
+                    let replacement_ready = refresh.maintained.as_ref().is_some_and(|maintained| {
+                        maintained.initial_snapshot_received()
+                            && (!awaiting_initial_owner_result
+                                || !node.borrow().subscription_has_pending_query_runtime(
+                                    maintained.subscription_id(),
+                                ))
+                    });
                     if !replacement_ready {
                         retained.push(Rc::downgrade(&state));
                         continue;
@@ -4540,7 +4555,11 @@ where
                     );
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
-                    state.borrow_mut().pending_initial_local_snapshot = false;
+                    {
+                        let mut state = state.borrow_mut();
+                        state.pending_initial_local_snapshot = false;
+                        state.pending_initial_owner_result = false;
+                    }
                     let mut event = subscription_delta_event_with_reset(
                         snapshot_tier,
                         settled,

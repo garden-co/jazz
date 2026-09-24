@@ -34,7 +34,7 @@ pub(super) fn collect_layout(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     routing_param_fields: &BTreeSet<String>,
     parameter_domain: &ParameterDomain,
     available_fields: &BTreeSet<String>,
@@ -405,7 +405,7 @@ pub(super) fn lower_collect_slot_graphs(
     layout: &CollectLayout,
     inherited_flat_fields: &BTreeSet<String>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<GraphBuilder>> {
     let joined = lower_correlated_path_relation_graph_from_parent(
         path,

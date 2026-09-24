@@ -1,5 +1,7 @@
 //! W1 compatibility fixture derived from the realistic project-board workload.
 
+pub mod subscription_fanout;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;

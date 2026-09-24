@@ -70,6 +70,92 @@ must not accidentally make backend transaction lifecycle a new requirement.
 
 ### One evaluator lifecycle
 
+Immutable scheduling topology may be shared across evaluations. The graph owns
+a bounded cache keyed by the canonical root set: compact node slots, dependency
+counts, reverse edges (including repeated inputs), and storage-source slots.
+Adding unrelated consumers leaves existing ancestor layouts valid; removing a
+node invalidates layouts containing it, and mutable descriptor access clears
+the cache. Layouts do not retain graph nodes and are never persisted.
+
+Every evaluation owns a fresh readiness frame over its layout. Requests,
+temporal blockers, row values, memo validity, and publication state are not
+layout metadata. Sharing topology therefore does not share readiness or bypass
+snapshot installation barriers. Runtime statistics expose layout builds and
+hits to distinguish topology reuse from semantic memo reuse.
+
+Physical tasks may contract private synchronous filter/projection chains without
+changing graph identity. The cached topology contains only structural candidates;
+each frame checks global consumers, live retainers and its observable roots before
+contracting an edge. Shared, retained, durable and stateful boundaries remain
+independently materialized. Filters requiring indirect-field I/O remain ordinary
+tasks. Recursive child evaluators retain their scoped execution path.
+
+A contracted task owns its source batch, row/stage cursor, two reusable encoded
+row scratch buffers and private final output. Only its terminal batch enters the
+memo. Yield budgets count row-stage work, including deep chains over few rows.
+No intermediate completion or partial output is published before the entire task
+succeeds. Error precedence remains stage-major, then input-row order: after an
+error in a later stage, remaining rows still execute preceding stages so an
+earlier-stage error wins. Cancellation drops all task-local work. These physical
+plans and continuations have no storage or wire encoding.
+
+Hydration memo reuse compiles its structural producer requirements once per
+installed node, then checks the live scope, tick/sub-tick, input generation and
+producer state on every reuse attempt. Stateless ancestry is not rediscovered
+per hit. A recursive producer ends the caller's structural walk: its completion
+proof owns child-scope readiness. Arrangement demand remains live because new
+consumers can require a physical index without changing the producer's ancestry.
+The requirement list is not itself proof that any producer is ready.
+
+Ordinary operators execute as synchronous batch kernels after the driver has
+resolved their inputs. This includes arrangements, joins, winner selection,
+aggregates and collectors, not only private unary pipelines. Input resolution
+still verifies memo generations and physical-producer readiness. A missing
+input uses the scoped rebuild driver; I/O index sources, streaming checksums and
+recursive child evaluation retain explicit async boundaries. Both entry paths
+call the same resident kernels. A resident kernel never recursively schedules
+its own predecessors. This separation does not yet bound every stateful kernel's
+CPU work or replace the transactional state maps.
+
+The execution layout also compiles forward input slots, preserving duplicate
+edges. An evaluation's private batch registers carry completed canonical batches
+and their generation/context keys. Ordinary kernels and private pipelines read
+these slots directly after checking the same live physical-producer requirements
+as memo reuse. Missing or stale slots fall back to the scoped resolver. Registers
+are resolved only after a node's own memo misses, so an unused predecessor is not
+driven or validated merely because the output is already available. Suspended
+evaluations never share registers; recursive child scopes retain their own
+context-keyed resolver. Registers do not enter the retained memo or durable
+storage as a separate cache.
+
+Join output compiles source field layouts and exact type compatibility once,
+then copies selected encoded spans into its batch allocation. Each execution
+still validates source row headers and selected offsets. The compiled plan is
+in-memory only and emits the existing record byte format; it is not a new codec
+or authority for interpreting arbitrary descriptors.
+
+Terminal publication likewise caches only ordered candidate nodes and the
+presence of a public root. Current per-evaluation terminal deltas are always
+consulted; the cache never stores a selected terminal or a publication. Both
+structural summaries retire with existing node metadata and do not keep nodes
+or subscriptions alive.
+
+Within a private task, total projections compose field routes back to the last
+materialized input. Field selections, nested record paths, encoded constants and
+nullable wrapping need no intermediate row encoding. Predicates use the same
+comparison kernel against either a real record or those routed fields, including
+SQL nulls, nested enum predicates and field-to-field comparisons. Only requested
+predicate values are decoded; ordinary scalar literal comparisons retain their
+encoded-field fast path. Final output uses the existing record framing writer.
+Byte-identical output continues sharing the original record bytes.
+
+Fallible constants and semantic enum conversions are not elided, even when their
+outputs are subsequently dropped or filtered away. They materialize the preceding
+virtual record and execute at their original semantic boundary. Resumable budget
+slots remain for composed stages, so deep chains cannot bypass cooperative yields.
+Composition assumes descriptor-valid input records, like ordinary compiler field
+selection composition; it does not introduce a new storage or wire representation.
+
 Hydration and incremental maintenance use the same owned evaluation session.
 Hydration is the initial delta from empty state; it is not a second evaluator
 or snapshot-shaped installation path. Incremental input can discover a newly

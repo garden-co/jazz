@@ -37,19 +37,19 @@ use super::query_engine::{
     OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
     PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
     ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
-    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
-    SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
-    SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
-    StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
-    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
-    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
-    route_param_field, user_column_field,
+    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramCompilation,
+    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
+    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
+    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
+    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
+    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
+    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
+    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
+    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
+    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
+    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
+    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
+    right_field, route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -229,8 +229,8 @@ pub(crate) fn take_required_sink_deltas(
 
 mod lowering;
 
-pub(crate) use lowering::PolicyAuthorizationGraph;
 use lowering::*;
+pub(crate) use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
 
 enum CurrentQueryProgramOutput {
     AppRows,
@@ -491,6 +491,33 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
+    }
+
+    fn current_query_program_request_and_access_paths(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
         let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
@@ -518,8 +545,7 @@ where
                     .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
             );
         }
-        self.compile_query_program_request_with_access_paths(request, access_paths)
-            .await
+        Ok((request, access_paths))
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -1103,6 +1129,8 @@ where
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
     }
 
     #[cfg(test)]
@@ -3142,17 +3170,19 @@ where
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view_in_authorization_mode(
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            None,
             authorization_mode,
-        )
-        .await
-        .map(|_| ())
+            PreparedClaimBindingMode::Strict,
+        )?;
+        self.ensure_query_program_request_supported(request, access_paths)
+            .await
     }
 
     pub(crate) fn mark_peer_maintained_query_shape_cache(

@@ -47,18 +47,25 @@ use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, S
 use thiserror::Error;
 
 mod aggregate;
+mod compilation_cache;
+mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
 mod persist;
+pub(crate) mod pipeline;
+mod rank_index;
 mod recursion;
 mod state;
 mod terminal;
+mod typed_template;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
 use persist::apply_persist_delta;
+use rank_index::RankIndex;
 use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
     recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
@@ -67,7 +74,7 @@ use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
     HydrationMode, NodeInputSignature, OperatorStateKey, ScopeId, SubTick, Tick,
 };
-pub use state::{RuntimeStats, TickMetrics};
+pub use state::{ExecutionLayoutStats, RuntimeStats, TickMetrics};
 pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };
@@ -169,6 +176,9 @@ pub struct IvmRuntime {
     /// sources. Cases are runtime input metadata rather than graph identity.
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
+    /// Pure typed fragments, independent of source identity and live state.
+    projection_plans: RefCell<typed_projection::ProjectionPlans>,
+    compilation_cache: compilation_cache::CompilationCache,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
@@ -204,7 +214,7 @@ pub struct IvmRuntime {
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     memo_use_clock: u64,
@@ -261,6 +271,8 @@ impl IvmRuntime {
             variant_descriptors,
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
+            projection_plans: RefCell::default(),
+            compilation_cache: compilation_cache::CompilationCache::default(),
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
@@ -269,7 +281,7 @@ impl IvmRuntime {
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
-            eval_memo: HashMap::default(),
+            eval_memo: EvaluationMemo::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,
@@ -405,10 +417,13 @@ mod graph_lifecycle;
 mod runtime_tick;
 mod schema;
 mod subscriptions;
+mod typed_projection;
 pub use subscriptions::*;
 mod operator_updates;
 use operator_updates::*;
 mod evaluator;
+#[cfg(test)]
+pub(crate) use evaluator::take_async_node_frame_count;
 use evaluator::*;
 mod record_projection;
 use record_projection::*;

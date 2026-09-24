@@ -900,6 +900,13 @@ where
         self.database.has_pending_progress()
     }
 
+    pub(crate) fn subscription_has_pending_query_runtime(
+        &self,
+        subscription: groove::ivm::SubscriptionId,
+    ) -> bool {
+        self.database.subscription_has_pending_progress(subscription)
+    }
+
     pub(crate) async fn set_initial_sync_flush_cadence(
         &mut self,
         every: usize,

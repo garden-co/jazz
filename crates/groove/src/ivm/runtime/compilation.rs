@@ -261,15 +261,65 @@ impl IvmRuntime {
         &mut self,
         graph: &GraphBuilder,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, false)
+    }
+
+    // Only the isolated template compiler accepts unbound scalar arguments.
+    // No runtime/global mode survives the call; normal installation is strict.
+    pub(super) fn add_dedup_template_graph(
+        &mut self,
+        graph: &GraphBuilder,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, true)
+    }
+
+    fn add_dedup_graph_inner(
+        &mut self,
+        graph: &GraphBuilder,
+        template: bool,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
-        // Precompute descriptors once for the complete graph. The postorder
-        // compiler below can then reuse those descriptors without repeatedly
-        // traversing a long policy graph from each parent.
-        self.infer_builder_output_cached(graph, &mut output_memo)?;
         let mut compiled_memo = HashMap::default();
-        for builder in graph.postorder() {
-            self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+        for (builder, owner) in compilation_cache::compilation_order(graph) {
+            if !template
+                && match builder {
+                    GraphBuilder::Filter { predicate, .. } => predicate.has_template_arguments(),
+                    GraphBuilder::Project { fields, .. } => fields.iter().any(|field| {
+                        matches!(field.expression, ProjectExpr::TemplateArgument { .. })
+                    }),
+                    _ => false,
+                }
+            {
+                return Err(IvmRuntimeError::UnsupportedOperator);
+            }
+            let key = graph_builder_key(builder);
+            if let Some((compiled, inferred, logical_nodes)) = owner.and_then(|owner| {
+                self.compilation_cache
+                    .get(owner, &compiled_memo, &output_memo, &self.graph)
+            }) {
+                self.logical_nodes_requested += logical_nodes;
+                output_memo.insert(key, inferred);
+                compiled_memo.insert(key, compiled);
+                continue;
+            }
+            // Inputs have already been inferred and compiled. Source ownership
+            // and schema checks therefore run before a parent's reuse decision.
+            let inferred = self.infer_builder_output_uncached(builder, &mut output_memo)?;
+            output_memo.insert(key, inferred);
+            let before = self.logical_nodes_requested;
+            let compiled =
+                self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+            if let Some(owner) = owner {
+                self.compilation_cache.insert(
+                    owner,
+                    &compiled_memo,
+                    &output_memo,
+                    compiled,
+                    inferred,
+                    self.logical_nodes_requested - before,
+                );
+            }
         }
         compiled_memo
             .remove(&graph_builder_key(graph))
@@ -288,6 +338,31 @@ impl IvmRuntime {
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                scalars,
+            } => {
+                let compiled = inputs
+                    .iter()
+                    .map(|input| {
+                        compiled_memo
+                            .get(&graph_builder_key(input))
+                            .cloned()
+                            .ok_or(IvmRuntimeError::UnsupportedOperator)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.install_typed_template(program, &compiled, inputs, predicates, scalars)
+            }
+            GraphBuilder::TemplateInput { input, output, .. } => {
+                let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                let compiled = self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
+                if compiled.output != *output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(compiled)
+            }
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
             | GraphBuilder::InputSource { .. }
@@ -981,16 +1056,8 @@ impl IvmRuntime {
                 let mut input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let mut expressions = fields
-                    .iter()
-                    .map(|field| {
-                        project_field_expr(&input_output, field).map(|expression| ProjectionExpr {
-                            expression,
-                            output_name: Some(field.output_name.clone()),
-                            output_identity: field.output_identity.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let plan = self.projection_plan(input_output, fields)?;
+                let mut expressions = plan.expressions()?.to_vec();
                 // Compose only total field selections. Dropping an unselected
                 // enum conversion or constant expression could change whether
                 // a row is omitted or an error is raised. Never cross those,
@@ -1874,7 +1941,10 @@ fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }
 fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldRef> {
@@ -1886,6 +1956,9 @@ fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldR
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }
