@@ -307,7 +307,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         )
     );
     assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].parents(), vec![base]);
+    assert!(versions[0].parents().is_empty());
 }
 
 #[test]
@@ -838,10 +838,11 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
         .iter()
         .find(|version| version.deletion() == Some(DeletionEvent::Restored))
         .unwrap();
-    // Planted sensitivity: dropping content ancestry because the row was
-    // hidden makes authority CAS compare Some(C) with None and reject.
-    assert_eq!(content.parents(), vec![content_parent]);
-    assert_eq!(restore.parents(), vec![deletion_parent]);
+    // Linear history: exclusive writes carry no ancestry; authority CAS checks
+    // each written register against the transaction's base snapshot.
+    let _ = (content_parent, deletion_parent);
+    assert!(content.parents().is_empty());
+    assert!(restore.parents().is_empty());
 
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1871,7 +1872,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         stored.versions()[0].test_cells(&schema().tables[0]),
         title_cells("retry me")
     );
-    assert_eq!(stored.versions()[0].parents().len(), 1);
+    assert!(stored.versions()[0].parents().is_empty());
     assert!(
         writer_b
             .row_history("todos", row)
