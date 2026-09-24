@@ -5266,8 +5266,8 @@ pub struct SubscriptionStream {
     cleanup: Option<SubscriptionCleanup>,
     finalization: Option<SubscriptionFinalization>,
     terminated: bool,
-    /// The local-first read of a remote window, held until the window
-    /// either opens (dropping it) or can no longer be answered (serving it).
+    /// The local-first read of a remote window. Dropped once the window
+    /// opens; served while the window cannot be answered, until it opens.
     window_fallback: Option<Box<SubscriptionStream>>,
     serving_fallback: bool,
 }
@@ -5388,8 +5388,9 @@ impl SubscriptionStream {
     }
 
     /// Settle which side of a remote window this stream serves. Once the
-    /// window opens (or ends without opening) its fallback is dropped; once
-    /// it falls back, the window is retired and the fallback serves.
+    /// window opens (or ends without opening) its fallback is dropped. Once
+    /// it falls back, the fallback serves while the window stays registered;
+    /// see [`Self::poll_window_fallback`].
     fn sync_window_fallback(&mut self) {
         if self.serving_fallback || self.window_fallback.is_none() {
             return;
@@ -5404,12 +5405,43 @@ impl SubscriptionStream {
         };
         if fell_back {
             self.serving_fallback = true;
-            if let Some(cleanup) = self.cleanup.take() {
-                drop(cleanup(None));
-            }
-            self.receiver.close();
         } else if decided {
             self.window_fallback = None;
+        }
+    }
+
+    /// Serve a fallen-back window: the cached local-first page until the
+    /// still-registered remote window opens with the server's page, which
+    /// replaces it with one reset. From then on the stream is the window.
+    fn poll_window_fallback(&mut self, cx: &mut Context<'_>) -> Poll<Option<SubscriptionEvent>> {
+        loop {
+            match Pin::new(&mut self.receiver).poll_next(cx) {
+                Poll::Ready(Some(
+                    event @ SubscriptionEvent::Delta {
+                        reset: true,
+                        publishable: true,
+                        ..
+                    },
+                )) => {
+                    self.serving_fallback = false;
+                    self.window_fallback = None;
+                    return Poll::Ready(Some(event));
+                }
+                // Anything before the window's opening reset (its link wake,
+                // receipt-only transitions) describes no published view.
+                Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
+                Poll::Ready(Some(event)) => {
+                    // A rejection or close ends the window; the fallback
+                    // keeps serving the cached page.
+                    drop(event);
+                    break;
+                }
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        match self.window_fallback.as_mut() {
+            Some(fallback) => Pin::new(fallback.as_mut()).poll_next(cx),
+            None => Poll::Ready(None),
         }
     }
 
@@ -5450,7 +5482,11 @@ impl SubscriptionStream {
         loop {
             self.sync_window_fallback();
             if self.serving_fallback {
-                return self.window_fallback.as_mut()?.try_next_event();
+                let mut context = Context::from_waker(Waker::noop());
+                return match self.poll_window_fallback(&mut context) {
+                    Poll::Ready(event) => event,
+                    Poll::Pending => None,
+                };
             }
             let event = self.receiver.try_recv().ok()?;
             if subscription_event_is_publishable(&event) {
@@ -5493,10 +5529,7 @@ impl Stream for SubscriptionStream {
         loop {
             this.sync_window_fallback();
             if this.serving_fallback {
-                return match this.window_fallback.as_mut() {
-                    Some(fallback) => Pin::new(fallback.as_mut()).poll_next(cx),
-                    None => Poll::Ready(None),
-                };
+                return this.poll_window_fallback(cx);
             }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {

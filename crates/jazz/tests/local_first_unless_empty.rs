@@ -509,6 +509,48 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     block_on(released.close()).expect("close the fallen-back window");
 }
 
+/// A fallen-back window keeps its remote window registered: once the
+/// server can answer, the server's page replaces the local one with a single
+/// reset, even though the local-first read of a partly synced cache would
+/// never converge on it.
+///
+/// ```text
+/// alice (empty): hint Attempting ─ subscribe window ── 5 s ──► reset []
+/// alice ══ connect ══ server(a..j), hint Live ────────────────► reset [e, f]
+/// ```
+#[test]
+fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
+    let server = seeded_server();
+    let alice = fresh_client(0x6a);
+    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    let mut stream = subscribe(&alice, &window(), unless_empty());
+    std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
+    let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
+    assert!(reset && rows.is_empty() && !settled, "the empty local page");
+
+    connect(&alice, &server);
+    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut page = None;
+    for _ in 0..MAX_TURNS {
+        while let Some(event) = stream.try_next_event() {
+            let (reset, mut rows, settled) = opening(event);
+            rows.sort();
+            if !rows.is_empty() || reset {
+                assert!(reset, "the server's page replaces the local one");
+                page = Some((rows, settled));
+            }
+        }
+        if page.is_some() {
+            break;
+        }
+        turn(&alice, Some(&server));
+    }
+    let (rows, settled) = page.expect("the server's page arrives");
+    assert!(settled, "the window's page is the settled server view");
+    assert_eq!(rows, vec![row(4), row(5)]);
+    block_on(stream.close()).expect("close the window");
+}
+
 /// A non-durable foreground (a browser tab or an RN foreground) over a
 /// durable storage owner (its worker or relay) that is connected to `server`.
 struct Foreground {

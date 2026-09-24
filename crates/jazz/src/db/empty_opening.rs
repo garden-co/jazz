@@ -412,10 +412,11 @@ impl SubscriptionState {
     /// published now as one reset of the current maintained result, still
     /// unsettled; afterwards the stream publishes as its tier normally does.
     ///
-    /// An unopened strict remote window instead hands its stream to the
+    /// An unopened strict remote window instead lets its stream serve the
     /// local-first read of the same window: its own (Global) view has no
     /// answer to show, and every read whose remote cannot answer is plain
-    /// local-first.
+    /// local-first. The window stays registered, and its stream switches
+    /// back to it with one reset when the server's page arrives.
     pub(super) fn release_opening_gate(&self) {
         let mut publication = self.sender.publication.borrow_mut();
         let Some(gate) = publication.opening_gate.take() else {
