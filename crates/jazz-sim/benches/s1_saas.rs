@@ -2207,8 +2207,8 @@ fn schema() -> JazzSchema {
                     .column("start", PublicColumnType::Timestamp)
                     .column("end", PublicColumnType::Timestamp),
             )
-            .table(
-                PublicTableSchema::builder(ISSUES)
+            .table({
+                let issues = PublicTableSchema::builder(ISSUES)
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text)
                     .column("state", issue_state)
@@ -2216,8 +2216,13 @@ fn schema() -> JazzSchema {
                     .fk_column("assignee", USERS)
                     .fk_column("milestone", MILESTONES)
                     .fk_column("project", PROJECTS)
-                    .fk_column("cycle", CYCLES),
-            )
+                    .fk_column("cycle", CYCLES);
+                if std::env::var_os("JAZZ_S1_COMPOSITE_EQ").is_some() {
+                    issues.composite_index(["project", "state"])
+                } else {
+                    issues
+                }
+            })
             .table(
                 PublicTableSchema::builder(ISSUE_TAGS)
                     .fk_column("issue", ISSUES)

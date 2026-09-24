@@ -622,6 +622,95 @@ fn filtered_join_one_shot_uses_both_source_indexes() {
     );
 }
 
+/// The public result guards semantics; the storage counter is needed because
+/// choosing the composite equality prefix is observable only as read work.
+#[test]
+fn first_result_join_uses_declared_composite_equality_index() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .composite_index(["group", "state"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=80 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .filter(eq(col("state"), lit("open")))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 55,
+        "composite equality should avoid hydrating the other 30 group rows: {reads:?}"
+    );
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();

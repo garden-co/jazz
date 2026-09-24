@@ -553,6 +553,34 @@ pub(super) fn select_current_access_path(
     })
 }
 
+/// A first-result equality conjunction can use both columns of an explicitly
+/// declared composite index. The ordinary selector above deliberately keeps
+/// its single-column probes for live sources and ordered-page planning.
+pub(super) fn select_composite_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+) -> Option<CurrentAccessPath> {
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        let first_value = equalities.get(first)?.clone();
+        let second_value = equalities.get(second)?.clone();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![
+                physical_current_index_value(table, first, first_value),
+                physical_current_index_value(table, second, second_value),
+            ],
+            intersections: Vec::new(),
+            maintained: false,
+            source_limit: None,
+        })
+    })
+}
+
 /// Current storage uses one nullable envelope to represent an un-authored
 /// cell. A logically nullable column has its own, inner envelope as well.
 /// Predicates use logical values, but secondary-index keys are physical

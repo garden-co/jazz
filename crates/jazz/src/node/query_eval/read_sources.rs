@@ -4277,15 +4277,22 @@ where
                 && query.array_subqueries.is_empty()
                 && query.aggregate.is_none()
                 && query.relation.is_none()
+                && !matches!(paths.get(&root), Some(CurrentAccessPath::PrimaryKey(_)))
             {
+                let table = self.table_in_schema(&query.table, shape.schema_version())?;
+                let equalities = root_literal_equalities(query, binding)?;
                 if !paths.contains_key(&root) {
-                    let table = self.table_in_schema(&query.table, shape.schema_version())?;
-                    let equalities = root_literal_equalities(query, binding)?;
                     if let Some(path @ CurrentAccessPath::Index { .. }) =
                         select_current_access_path(&table, &equalities)
                     {
                         paths.insert(root.clone(), path);
                     }
+                }
+                if query.limit.is_none()
+                    && query.order_by.is_empty()
+                    && let Some(path) = select_composite_equality_access_path(&table, &equalities)
+                {
+                    paths.insert(root.clone(), path);
                 }
             }
             if matches!(
