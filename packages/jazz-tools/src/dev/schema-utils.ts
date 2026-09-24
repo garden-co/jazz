@@ -40,6 +40,19 @@ export function structuralSchemaHash(schema: WasmSchema): string {
         writer.byte(0);
       }
     }
+    if (table.composite_indexes?.length) {
+      writer.stringBytes("composite_indexes\0");
+      const indexes = table.composite_indexes.map((columns) => [...columns]);
+      indexes.sort((left, right) => {
+        for (let index = 0; index < Math.min(left.length, right.length); index++) {
+          if (left[index] !== right[index]) {
+            return left[index]! < right[index]! ? -1 : 1;
+          }
+        }
+        return left.length - right.length;
+      });
+      writer.stringBytes(JSON.stringify(indexes));
+    }
     if (table.branchBy?.length) {
       writer.stringBytes("branch_by\0");
       writer.stringBytes(JSON.stringify(table.branchBy));
@@ -315,6 +328,15 @@ function indexedColumnsEqual(
   return leftColumns.every((column, index) => column === rightColumns[index]);
 }
 
+function compositeIndexesEqual(
+  left: readonly (readonly string[])[] | undefined,
+  right: readonly (readonly string[])[] | undefined,
+): boolean {
+  const a = (left ?? []).map((columns) => JSON.stringify(columns)).sort();
+  const b = (right ?? []).map((columns) => JSON.stringify(columns)).sort();
+  return a.length === b.length && a.every((index, position) => index === b[position]);
+}
+
 export function tableSchemasEqual(
   left: WasmSchema[string] | undefined,
   right: WasmSchema[string] | undefined,
@@ -328,6 +350,9 @@ export function tableSchemasEqual(
   }
 
   if (!indexedColumnsEqual(left.indexed_columns, right.indexed_columns)) {
+    return false;
+  }
+  if (!compositeIndexesEqual(left.composite_indexes, right.composite_indexes)) {
     return false;
   }
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {

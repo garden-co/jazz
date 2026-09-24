@@ -441,6 +441,10 @@ pub struct TableSchema {
     /// Internal `_id` and `_id_deleted` indexes are always maintained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_columns: Option<Vec<ColumnName>>,
+    /// Ordered multi-column indexes. The first column can be constrained by an
+    /// equality while the following column supplies the query's sort order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composite_indexes: Vec<Vec<ColumnName>>,
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
@@ -462,6 +466,7 @@ impl TableSchema {
         Self {
             columns,
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
         }
@@ -472,6 +477,7 @@ impl TableSchema {
         Self {
             columns,
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies,
             branch_by: Vec::new(),
         }
@@ -517,6 +523,7 @@ pub struct TableSchemaBuilder {
     name: String,
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
+    composite_indexes: Vec<Vec<ColumnName>>,
     policies: TablePolicies,
     branch_by: Vec<ColumnName>,
 }
@@ -528,6 +535,7 @@ impl TableSchemaBuilder {
             name: name.to_string(),
             columns: Vec::new(),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
         }
@@ -613,6 +621,17 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add an ordered multi-column index, such as `(owner_id, updated_at)`.
+    pub fn composite_index<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<ColumnName>,
+    {
+        self.composite_indexes
+            .push(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -623,6 +642,7 @@ impl TableSchemaBuilder {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
+            composite_indexes: self.composite_indexes,
             policies: self.policies,
             branch_by: self.branch_by,
         }
@@ -634,6 +654,7 @@ impl TableSchemaBuilder {
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
+            composite_indexes: self.composite_indexes,
             policies: self.policies,
             branch_by: self.branch_by,
         };

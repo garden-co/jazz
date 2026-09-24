@@ -42,6 +42,7 @@ export class DefinedTable<
     public readonly relations: TRelations,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
     public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
+    public readonly compositeIndexes?: readonly (readonly Extract<keyof TColumns, string>[])[],
   ) {
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
   }
@@ -59,7 +60,32 @@ export class DefinedTable<
       }
     }
 
-    return new DefinedTable(this.columns, this.relations, normalizedColumns, this.branchColumns);
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      normalizedColumns,
+      this.branchColumns,
+      this.compositeIndexes,
+    );
+  }
+
+  compositeIndex<
+    const TColumnsForIndex extends readonly [
+      Extract<keyof TColumns, string>,
+      Extract<keyof TColumns, string>,
+      ...Extract<keyof TColumns, string>[],
+    ],
+  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
+    if (
+      new Set(columns).size !== columns.length ||
+      columns.some((column) => !(column in this.columns))
+    ) {
+      throw new Error("table.compositeIndex(...) requires distinct declared columns.");
+    }
+    return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, [
+      ...(this.compositeIndexes ?? []),
+      [...columns],
+    ]);
   }
 
   branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
@@ -86,7 +112,13 @@ export class DefinedTable<
       }
     }
 
-    return new DefinedTable(this.columns, this.relations, this.indexedColumns, normalizedColumns);
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      this.indexedColumns,
+      normalizedColumns,
+      this.compositeIndexes,
+    );
   }
 }
 
@@ -1627,6 +1659,20 @@ function tableIndexedColumns(
   return undefined;
 }
 
+function tableCompositeIndexes(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): string[][] | undefined {
+  if (
+    typeof definition === "object" &&
+    definition !== null &&
+    definition.__jazzTableDefinition === true
+  ) {
+    const indexes = (definition as DefinedTable).compositeIndexes;
+    return indexes?.map((columns) => [...columns]);
+  }
+  return undefined;
+}
+
 function tableBranchColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): string[] | undefined {
@@ -1720,12 +1766,14 @@ export function definitionToSchema<TSchema extends SchemaDefinition>(
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       assertSchemaNameAllowed(tableName);
       const indexedColumns = tableIndexedColumns(tableDefinition);
+      const compositeIndexes = tableCompositeIndexes(tableDefinition);
       const branchColumns = tableBranchColumns(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
         relations: tableRelationships(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
+        ...(compositeIndexes ? { compositeIndexes } : {}),
         ...(branchColumns ? { branchBy: branchColumns } : {}),
       };
     }),

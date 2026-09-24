@@ -60,6 +60,10 @@ pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
         column: String,
+        /// Second key of an explicitly declared two-column composite index.
+        /// When set, `prefix` addresses that composite index rather than the
+        /// single-column index on `column`.
+        order_column: Option<String>,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
         /// A maintained source keeps every equality probe as an ordinary IVM
@@ -2403,6 +2407,7 @@ where
             }
             CurrentAccessPath::Index {
                 column,
+                order_column,
                 prefix,
                 intersections,
                 source_limit,
@@ -2421,6 +2426,7 @@ where
                         table,
                         self.read_view.read_schema,
                         &column,
+                        order_column.as_deref(),
                         &prefix,
                         &intersections,
                         false,
@@ -2756,6 +2762,7 @@ where
                     }
                     Some(CurrentAccessPath::Index {
                         column,
+                        order_column,
                         prefix,
                         intersections,
                         source_limit,
@@ -2769,6 +2776,7 @@ where
                                 read_table,
                                 self.read_view.read_schema,
                                 &column,
+                                order_column.as_deref(),
                                 &prefix,
                                 &intersections,
                                 maintained,
@@ -2853,6 +2861,7 @@ where
                 }
                 Some(CurrentAccessPath::Index {
                     column,
+                    order_column,
                     prefix,
                     intersections,
                     source_limit,
@@ -2868,6 +2877,7 @@ where
                             read_table,
                             self.read_view.read_schema,
                             column,
+                            order_column.as_deref(),
                             prefix,
                             intersections,
                             *maintained,
@@ -4409,6 +4419,7 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4419,6 +4430,7 @@ where
             table,
             schema_version,
             column,
+            order_column,
             prefix,
             intersections,
             maintained,
@@ -4433,6 +4445,7 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4504,7 +4517,19 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let primary_index = physical_current_index_name(column_id);
+        let primary_index = if let Some(order_column) = order_column {
+            let order_column_id =
+                mapping
+                    .columns
+                    .get(order_column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current ordered index column mapping missing",
+                    ))?;
+            physical_current_composite_index_name(&[column_id, order_column_id])
+        } else {
+            physical_current_index_name(column_id)
+        };
         if maintained {
             // `IndexedRowsIntersection` is a hydration request, not a live
             // source.  Model each equality as an index source and express the
