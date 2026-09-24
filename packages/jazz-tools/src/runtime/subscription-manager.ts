@@ -682,6 +682,22 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   /**
+   * The current result as a single opening reset. Used when earlier deltas
+   * were withheld from the consumer, so its first delivery is the whole state.
+   */
+  openingDelta(): SubscriptionDelta<T> {
+    const rows = this.orderedIds.flatMap((id) => {
+      const item = this.currentResults.get(id);
+      return item === undefined ? [] : [{ id, item }];
+    });
+    return {
+      reset: true,
+      all: rows.map(({ item }) => item),
+      delta: rows.map(({ id, item }, index) => ({ kind: RowChangeKind.Added, id, index, item })),
+    };
+  }
+
+  /**
    * Get the current number of tracked items.
    */
   get size(): number {

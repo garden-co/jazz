@@ -8,6 +8,7 @@ import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
+import type { RemoteLinkState } from "../remote-link-state.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -159,6 +160,42 @@ export abstract class ConnectionManager {
 
   /** Resolves when that explicit offline state is cleared. */
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
+
+  /**
+   * Live reachability of the configured server. Only
+   * `ReadTier.LocalFirstUnlessEmpty` consults it, to decide whether an empty
+   * local opening may wait for a remote answer.
+   */
+  remoteLinkState(): RemoteLinkState {
+    const { config, runtimeSource } = this.host;
+    if (!config.serverUrl && runtimeSource?.nativeConnection?.configured() !== true) return "none";
+    if (this.isExplicitlyOffline()) return "unavailable";
+    return this.transportLinkState();
+  }
+
+  /** The runtime transport's own view, once a server is configured and not explicitly offline. */
+  protected transportLinkState(): RemoteLinkState {
+    return this.getCurrentClient()?.getRuntime().remoteLinkState?.() ?? "connecting";
+  }
+
+  /** Observe {@link remoteLinkState} changes, including explicit disconnects. */
+  onRemoteLinkStateChange(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    let published = this.remoteLinkState();
+    const check = () => {
+      if (signal.aborted) return;
+      const state = this.remoteLinkState();
+      if (state === published) return;
+      published = state;
+      listener(state);
+    };
+    this.onExplicitOfflineChange(check, signal);
+    this.onTransportLinkStateChange(check, signal);
+  }
+
+  protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
+    this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+  }
 
   /**
    * Browser worker followers learn the namespace-wide explicit-offline state

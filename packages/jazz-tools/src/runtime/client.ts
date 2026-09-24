@@ -23,6 +23,7 @@ import {
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
+import type { RemoteLinkState } from "./remote-link-state.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -156,6 +157,10 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal Live reachability of the upstream server, for read scheduling only. */
+  remoteLinkState?(): RemoteLinkState;
+  /** @internal Observe {@link Runtime.remoteLinkState} changes. */
+  onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -348,10 +353,28 @@ export const ReadTier = {
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
-  /** Remote scope plus pending scoped edits/new inserts online; local knowledge after explicit disconnect. */
+  /**
+   * Local knowledge and pending writes, delivered immediately. Only when the
+   * local result is empty while the server is reachable (or still connecting)
+   * does the first delivery wait for the first remote answer. Offline,
+   * unconfigured, and failed connections deliver the local result at once.
+   */
+  LocalFirstUnlessEmpty: "local-first-unless-empty",
+  /**
+   * @deprecated Use `ReadTier.LocalFirstUnlessEmpty`. The old
+   * `"remote-if-possible"` value is still accepted and now has exactly the
+   * `LocalFirstUnlessEmpty` behavior.
+   */
   RemoteIfPossible: "remote-if-possible",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
+
+/** @internal True for the local-first-unless-empty tier and its deprecated alias. */
+export function isLocalFirstUnlessEmptyTier(
+  tier: unknown,
+): tier is typeof ReadTier.LocalFirstUnlessEmpty | typeof ReadTier.RemoteIfPossible {
+  return tier === ReadTier.LocalFirstUnlessEmpty || tier === ReadTier.RemoteIfPossible;
+}
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
 export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
@@ -398,7 +421,7 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  /** Product read tier. @deprecated DurabilityTier values remain accepted with their old meaning. */
   tier?: QueryReadTier;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
@@ -432,6 +455,7 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
   return (
     value === ReadTier.LocalFirst ||
     value === ReadTier.Remote ||
+    value === ReadTier.LocalFirstUnlessEmpty ||
     value === ReadTier.RemoteIfPossible ||
     value === "local" ||
     value === "global"
@@ -617,9 +641,11 @@ export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
     throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
   }
   if (tier === "local-only") return "local";
-  return tier === ReadTier.LocalFirst
+  // Db owns the local-first-unless-empty opening gate. Its native stream is
+  // an ordinary local-first read.
+  return tier === ReadTier.LocalFirst || isLocalFirstUnlessEmptyTier(tier)
     ? "local"
-    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
+    : tier === ReadTier.Remote
       ? "global"
       : tier;
 }

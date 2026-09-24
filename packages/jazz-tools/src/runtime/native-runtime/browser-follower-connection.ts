@@ -75,6 +75,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
@@ -383,6 +384,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "transport-state") {
       this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
+      return;
+    }
+    if (message.type === "remote-link") {
+      this.callbacks.onRemoteLinkChange?.(message.state);
       return;
     }
     if (message.type === "mutation-error") {
