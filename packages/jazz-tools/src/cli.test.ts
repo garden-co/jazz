@@ -3194,16 +3194,10 @@ export default s.defineMigration({
       }),
     );
 
-    expect(
-      logs.some(
-        (line) =>
-          /already.connected/i.test(line) &&
-          /skip/i.test(line) &&
-          line.includes(previousShortHash) &&
-          line.includes(nextShortHash),
-      ),
-    ).toBe(true);
-    expect(logs.some((line) => /published migration/i.test(line))).toBe(false);
+    expect(logs).toContain(
+      `Migration ${previousShortHash} -> ${nextShortHash} is already connected; skipping migration publish.`,
+    );
+    expect(logs.some((line) => /^(?:Published|Pushed) migration\b/i.test(line))).toBe(false);
     expect(logs.some((line) => /skip(ping)? (the )?(whole|entire|all) deploy/i.test(line))).toBe(
       false,
     );
