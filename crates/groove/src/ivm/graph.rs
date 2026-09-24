@@ -1769,7 +1769,14 @@ impl IvmGraph {
         descriptor: NodeDescriptor,
         durability: NodeDurability,
     ) -> NodeId {
-        self.activations.added(&descriptor.inputs);
+        // A durable node changes whether every route barrier above it keeps
+        // ordinary activation, including in plans that never reached its
+        // inputs because they stopped at such a barrier.
+        if matches!(durability, NodeDurability::Durable { .. }) {
+            self.activations.clear();
+        } else {
+            self.activations.added(&descriptor.inputs);
+        }
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);

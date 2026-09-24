@@ -258,6 +258,39 @@ mod tests {
     }
 
     #[test]
+    fn durable_node_below_a_route_barrier_invalidates_plans_that_stopped_there() {
+        let mut graph = IvmGraph::new();
+        let a = source(&mut graph, "a");
+        let union = |inputs: Vec<NodeId>| {
+            NodeDescriptor::new(
+                OpType::Union,
+                inputs,
+                RecordDescriptor::new([("id", ValueType::U64)]),
+            )
+        };
+        let barrier = graph.dedup_node(union(vec![a]), NodeDurability::Ephemeral);
+        graph.add_route_barrier(a, barrier, vec![0], vec![ValueType::U64], vec![1], None);
+        let before = plan(&graph, &["a"]);
+        assert_eq!(*before.affected, HashSet::from([a]));
+
+        // The new node's only input is the barrier, which the cached plan
+        // never reached; it must still be rebuilt because the barrier now
+        // reaches a durable node and keeps ordinary activation.
+        let durable = graph.dedup_node(
+            union(vec![barrier]),
+            NodeDurability::Durable {
+                storage: crate::ivm::DurableStorage {
+                    column_family: "durable".into(),
+                    key_prefix: Vec::new(),
+                },
+            },
+        );
+        let after = plan(&graph, &["a"]);
+        assert_eq!(*after.affected, HashSet::from([a, barrier, durable]));
+        assert_eq!(after.durable, vec![durable]);
+    }
+
+    #[test]
     fn activation_keys_follow_new_sources_and_cache_eviction_preserves_live_plans() {
         let mut graph = IvmGraph::new();
         let empty = plan(&graph, &["later"]);
