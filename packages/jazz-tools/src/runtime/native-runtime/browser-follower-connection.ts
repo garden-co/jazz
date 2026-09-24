@@ -391,7 +391,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
-      // error before any later port teardown so active Edge/Global waits and
+      // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
       this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;

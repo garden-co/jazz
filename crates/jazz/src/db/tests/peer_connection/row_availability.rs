@@ -1,5 +1,5 @@
 //! Internal because the pilot exposes a typed reconciliation hook, not a public
-//! API. Real Core/Edge node owners and authenticated transport admission run;
+//! API. Real Core/relay node owners and authenticated transport admission run;
 //! every frame crosses the production native wire codec.
 use super::*;
 use crate::db::row_availability::CurrentRowsResult;
@@ -116,19 +116,19 @@ fn core_current_rows_same_row_revocation_has_no_hidden_payload() {
     assert!(denied.authorization_progress > read.authorization_progress);
     assert!(denied.settled_through > read.settled_through);
 
-    let edge = open_db(0xe2, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xe2, AuthorSubject::SYSTEM, &schema);
     let (up, down) = link(AuthorSubject::SYSTEM, 0xe2, 0xc1, true);
-    let _edge_up = block_on(edge.connect_upstream(up));
-    let _edge_down = core.accept_subscriber_with_trust(
+    let _backend_up = block_on(backend.connect_upstream(up));
+    let _backend_down = core.accept_subscriber_with_trust(
         down,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     for _ in 0..4 {
-        edge.tick().unwrap();
+        backend.tick().unwrap();
         core.tick().unwrap();
     }
-    let own = edge.node.request_current_rows(
+    let own = backend.node.request_current_rows(
         vec![coordinate],
         PolicyBindingKey::from_canonical_parts(
             AuthorSubject::SYSTEM,
@@ -136,7 +136,7 @@ fn core_current_rows_same_row_revocation_has_no_hidden_payload() {
         ),
     );
     for _ in 0..4 {
-        edge.tick().unwrap();
+        backend.tick().unwrap();
         core.tick().unwrap();
     }
     let own = applied(block_on(own));
@@ -144,11 +144,11 @@ fn core_current_rows_same_row_revocation_has_no_hidden_payload() {
     assert_eq!(own.context.identity, AuthorSubject::SYSTEM);
 }
 
-/// Alice -> Edge Bob -> Core Carol. Bob retains an old grant and can read the
+/// Alice -> relay Bob -> Core Carol. Bob retains an old grant and can read the
 /// successor as SYSTEM. Alice's delegated request still reaches Carol and gets
 /// generic unavailability, with neither the successor nor hidden grant bytes.
 #[test]
-fn edge_proxies_current_rows_after_related_grant_revocation() {
+fn relay_proxies_current_rows_after_related_grant_revocation() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -188,11 +188,11 @@ fn edge_proxies_current_rows_after_related_grant_revocation() {
         ]),
     )
     .unwrap();
-    let edge = open_core(0xe3, AuthorSubject::SYSTEM, &schema);
-    assert!(edge.server.node().borrow().is_history_complete());
-    assert!(!edge.server.node().borrow().can_mint_current_row_receipts());
+    let relay = open_core(0xe3, AuthorSubject::SYSTEM, &schema);
+    assert!(relay.server.node().borrow().is_history_complete());
+    assert!(!relay.server.node().borrow().can_mint_current_row_receipts());
     let (up, down) = link(AuthorSubject::SYSTEM, 0xe3, 0xc2, true);
-    let _edge_up = block_on(edge.server.connect_upstream(up));
+    let _relay_up = block_on(relay.server.connect_upstream(up));
     let _core_down = core.accept_subscriber_with_trust(
         down,
         AuthorSubject::SYSTEM,
@@ -201,11 +201,11 @@ fn edge_proxies_current_rows_after_related_grant_revocation() {
     let client = open_db(0xe4, alice, &schema);
     let (up, down) = link(alice, 0xe4, 0xe3, false);
     let _client_up = block_on(client.connect_upstream(up));
-    let _edge_down = edge.accept_subscriber(down, alice);
+    let _relay_down = relay.accept_subscriber(down, alice);
     let pump = || {
         for _ in 0..8 {
             client.tick().unwrap();
-            edge.tick().unwrap();
+            relay.tick().unwrap();
             core.tick().unwrap();
         }
     };
@@ -226,7 +226,7 @@ fn edge_proxies_current_rows_after_related_grant_revocation() {
         AuthorSubject::SYSTEM,
         test_provider_claims(AuthorSubject::SYSTEM),
     );
-    let warm = edge
+    let warm = relay
         .server
         .request_current_rows(vec![grant_coordinate], system.clone());
     pump();
@@ -267,7 +267,7 @@ fn edge_proxies_current_rows_after_related_grant_revocation() {
                 .cells(cells("forbidden successor", false, alice)),
         ],
     );
-    let own = edge
+    let own = relay
         .server
         .request_current_rows(vec![coordinate.clone()], system);
     pump();
@@ -476,7 +476,7 @@ fn current_rows_reject_wrong_context_partial_receipt_and_cancel() {
     drop(connection);
 }
 
-/// Bob's trusted Edge revalidates more than 64 sequential immutable contexts at
+/// Bob's trusted backend revalidates more than 64 sequential immutable contexts at
 /// Core Carol. Completed nonce floors retire safely instead of permanently
 /// exhausting the router's bounded evidence cache.
 #[test]
@@ -495,16 +495,16 @@ fn current_rows_more_than_64_sequential_contexts_remain_functional() {
         ),
     )
     .unwrap();
-    let edge = open_db(0xe8, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xe8, AuthorSubject::SYSTEM, &schema);
     let (up, down) = link(AuthorSubject::SYSTEM, 0xe8, 0xc8, true);
-    let _up = block_on(edge.connect_upstream(up));
+    let _up = block_on(backend.connect_upstream(up));
     let _down = core.accept_subscriber_with_trust(
         down,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     for _ in 0..4 {
-        edge.tick().unwrap();
+        backend.tick().unwrap();
         core.tick().unwrap();
     }
     let coordinate = core
@@ -518,17 +518,17 @@ fn current_rows_more_than_64_sequential_contexts_remain_functional() {
             AuthorSubject::SYSTEM,
             BTreeMap::from([("probe".to_owned(), Value::U64(index))]),
         );
-        let future = edge
+        let future = backend
             .node
             .request_current_rows(vec![coordinate.clone()], context.clone());
         for _ in 0..4 {
-            edge.tick().unwrap();
+            backend.tick().unwrap();
             core.tick().unwrap();
         }
         let receipt = applied(block_on(future));
         assert_eq!(receipt.context, context);
         assert_eq!(receipt.outcomes, [CurrentRowOutcome::Readable]);
-        assert!(edge.node.current_rows.borrow().floors.len() <= 64);
+        assert!(backend.node.current_rows.borrow().floors.len() <= 64);
     }
 }
 
@@ -605,22 +605,15 @@ fn current_rows_reject_deletion_only_readable_receipt() {
     );
 }
 
-/// Alice repairs an exact older body through a partial Edge. Core authorizes
-/// the row first; a later Core-only owner change blocks Edge's stale grant.
-/// Alice -> Edge cached body -> Core current-read receipt -> exact repair.
-
-/// Unknown Core evidence stays pending. Removing either physical link cancels
-/// its active nonce; cached bytes never become a fallback authorization source.
-
-/// The Edge's own SYSTEM local-first query repairs its retained cache after
+/// A trusted backend's own SYSTEM local-first query repairs its retained cache after
 /// reconnect. No downstream client or client-context exclusion participates.
 /// This uses admitted links and the native codec, not a WebSocket server.
 #[test]
-fn edge_own_system_scalar_query_reconciles_after_reconnect() {
+fn backend_own_system_scalar_query_reconciles_after_reconnect() {
     let schema = owner_read_schema();
     let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
     core.server.enable_authoritative_scalar_exit_refresh();
-    let edge = open_db(0xe4, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xe4, AuthorSubject::SYSTEM, &schema);
     let target = row(0xd4);
     core.insert_with_id(
         "todos",
@@ -629,24 +622,24 @@ fn edge_own_system_scalar_query_reconciles_after_reconnect() {
     )
     .unwrap();
     let (up, down) = link(AuthorSubject::SYSTEM, 0xe4, 0xc4, true);
-    let upstream = block_on(edge.connect_upstream(up));
+    let upstream = block_on(backend.connect_upstream(up));
     let _downstream = core.accept_subscriber_with_trust(
         down,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     let query = Query::from("todos").filter(eq(col("done"), lit(false)));
-    let mut stream = prepared_subscribe(&edge, &query, ReadOpts::default()).unwrap();
+    let mut stream = prepared_subscribe(&backend, &query, ReadOpts::default()).unwrap();
     let mut snapshot = RelationSnapshot::default();
     for _ in 0..32 {
         core.tick().unwrap();
-        edge.tick().unwrap();
+        backend.tick().unwrap();
         while let Some(event) = stream.try_next_event() {
             apply_subscription_event(&mut snapshot, event);
         }
     }
     assert_eq!(snapshot.root_count, 1);
-    assert!(block_on(edge.detach_connection_async(&upstream)).unwrap());
+    assert!(block_on(backend.detach_connection_async(&upstream)).unwrap());
     core.update(
         "todos",
         target,
@@ -659,7 +652,7 @@ fn edge_own_system_scalar_query_reconciles_after_reconnect() {
     .unwrap();
     assert_eq!(snapshot.root_count, 1);
     let (up, down) = link(AuthorSubject::SYSTEM, 0xe4, 0xc4, true);
-    let _upstream = block_on(edge.connect_upstream(up));
+    let _upstream = block_on(backend.connect_upstream(up));
     let _downstream = core.accept_subscriber_with_trust(
         down,
         AuthorSubject::SYSTEM,
@@ -667,17 +660,17 @@ fn edge_own_system_scalar_query_reconciles_after_reconnect() {
     );
     for _ in 0..64 {
         core.tick().unwrap();
-        edge.tick().unwrap();
+        backend.tick().unwrap();
         while let Some(event) = stream.try_next_event() {
             apply_subscription_event(&mut snapshot, event);
         }
     }
     assert_eq!(
         snapshot.root_count, 0,
-        "Edge own query removes stale scalar match"
+        "backend own query removes stale scalar match"
     );
     let cached = prepared_all(
-        &edge,
+        &backend,
         &Query::from("todos"),
         ReadOpts {
             propagation: Propagation::LocalOnly,

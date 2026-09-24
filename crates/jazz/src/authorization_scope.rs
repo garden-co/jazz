@@ -118,7 +118,7 @@ impl AuthorityContext {
     /// Whether two snapshots describe the same authenticated physical
     /// connection. Scope receipts legitimately advance the remaining fields
     /// while that connection stays live; those receipt bounds must not make an
-    /// already parked edge-fate route look as if it belonged to a stale link.
+    /// already parked relay fate route look as if it belonged to a stale link.
     pub(crate) fn same_admitted_link(self, other: Self) -> bool {
         self.authority == other.authority
             && self.link == other.link

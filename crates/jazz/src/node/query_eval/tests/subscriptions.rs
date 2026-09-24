@@ -1548,7 +1548,7 @@ fn storage_backed_global_restore_ignores_newer_pending_local_deletion() {
 }
 
 #[test]
-fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
+fn authority_result_key_is_explicit_and_does_not_replace_direct_global_source() {
     let (_dir, mut node) = open_node();
     let shape = Query::from("issues")
         .validate(&node.catalogue.schema)
@@ -1583,7 +1583,7 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
             &ReadViewSpec::default(),
         ),
         Some(expected_ordinary),
-        "marking a worker must not retag ordinary direct Edge settlement",
+        "marking a worker must not retag ordinary direct Global settlement",
     );
     let relay_authority = AuthorityResultKey::policy_scoped(
         ordinary_direct,

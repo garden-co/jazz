@@ -102,7 +102,7 @@ the table, the shape, or a per-call derivation instead of the actual change.
   settlement throughput and propagation-inclusive throughput. Per-commit fan-out is
   intended to be O(delta), not O(table). The relay whole-table full recompute case has
   been fixed (degenerate system whole-table views stay incremental);
-  filtered/join/edge-client views still take the conservative full-diff full recompute
+  filtered/join/client views still take the conservative full-diff full recompute
   on exclusive-sibling drains — measure whether that path needs delta-sizing
   too.
 - **Cross-scenario levers** (from profiling): avoid per-call

@@ -74,7 +74,7 @@ async fn sync_layers_emit_otel_spans() {
                     DurabilityTier::GlobalServer,
                 )
                 .await
-                .expect("alice persisted todo reaches edge");
+                .expect("alice persisted todo reaches global");
 
             wait_for_query(
                 &bob,

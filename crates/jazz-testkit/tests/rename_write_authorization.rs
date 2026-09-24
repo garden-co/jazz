@@ -17,7 +17,9 @@ use jazz::tools::schema_lens::{Lens, LensTransform};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz_server::JazzServer;
-use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
+use support::{
+    publish_allow_all_permissions, push_catalogue_in_memory, wait_for_remote_query_ready,
+};
 
 fn author(byte: u8) -> AuthorSubject {
     AuthorSubject::for_test_bytes([byte; 16])
@@ -332,7 +334,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 /// bob   --insert people-------> server --write policy on v2 table--> accepted
 /// ```
 #[tokio::test(flavor = "current_thread")]
-async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
+async fn renamed_table_insert_after_schema_evolution_reaches_global() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start().await.expect("start test server");
@@ -378,12 +380,12 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             )
             .await
             .expect("connect bob");
-            wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+            wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
             let (_, _, transaction_id) = bob
                 .insert("people", client_person_values("bob@example.com"))
                 .expect("bob creates v2 person");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bob,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -475,7 +477,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
             row_input!("title" => "before", "left_owner" => "alice", "tag" => "left-only"),
         )
         .unwrap();
-    support::wait_for_edge_txs(&alice, &[tx.unwrap()]).await;
+    support::wait_for_global_txs(&alice, &[tx.unwrap()]).await;
 
     let owner = PolicyExpr::eq_session(
         "right_owner",
@@ -533,7 +535,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         )
         .unwrap()
         .unwrap();
-    support::wait_for_edge_txs(&alice, &[tx]).await;
+    support::wait_for_global_txs(&alice, &[tx]).await;
     support::wait_for_query(
         &reader,
         Query::from("right_notes").select(["title"]),
@@ -549,7 +551,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
             row_input!("title" => "reverse", "right_owner" => "alice", "category" => "right-only"),
         )
         .unwrap();
-    support::wait_for_edge_txs(&reader, &[tx.unwrap()]).await;
+    support::wait_for_global_txs(&reader, &[tx.unwrap()]).await;
     // Select B again so its renamed table is governed by explicit current grants.
     let owner = PolicyExpr::eq_session(
         "left_owner",

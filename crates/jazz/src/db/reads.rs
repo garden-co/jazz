@@ -677,8 +677,8 @@ where
         let tier = effective_read_tier(&opts);
         // Follow the same host-selected authority route as subscription
         // registration. Storage durability alone cannot identify that route:
-        // a direct core connection may raise Edge to Global, while a relay
-        // connection retains Edge. Local knowledge stays local in either case.
+        // authority-tier reads are floored at the host's upstream durability
+        // tier. Local knowledge stays local in either case.
         let tier = if authorization_mode == QueryAuthorizationMode::ClientLocal {
             self.client_authority_read_tier(tier)
         } else {

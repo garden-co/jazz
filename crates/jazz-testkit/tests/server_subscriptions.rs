@@ -16,8 +16,8 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
-    wait_for_query, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_query,
+    wait_for_remote_query_ready, wait_for_subscription_update,
 };
 use tempfile::TempDir;
 
@@ -107,7 +107,7 @@ async fn subscription_orders_by_unprojected_field() {
                 ids.push(id);
                 txs.push(transaction_id.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&client, &txs).await;
+            support::wait_for_global_txs(&client, &txs).await;
 
             let mut stream = client
                 .subscribe(
@@ -142,7 +142,7 @@ async fn subscription_orders_by_unprojected_field() {
                     vec![("rank".to_owned(), Value::Integer(0))],
                 )
                 .expect("change only the unprojected ordering field");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -169,50 +169,6 @@ async fn subscription_orders_by_unprojected_field() {
 
             client.shutdown().await.expect("shutdown test client");
             server.shutdown().await;
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn remote_public_subscription_opens_and_receives_rows() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone())
-                .await
-                .expect("start test server");
-            let client = TestingClient::builder()
-                .with_server(&server)
-                .with_schema(schema)
-                .with_user_id("00000000-0000-4000-8000-000000000001")
-                .ready_on("todos", Duration::from_secs(30))
-                .connect()
-                .await;
-
-            let query = jazz::query::Query::from("todos");
-            let mut stream = client
-                .subscribe(query)
-                .await
-                .expect("remote public subscription should open");
-            let mut log = Vec::new();
-
-            let (todo_id, _, transaction_id) = client
-                .insert("todos", row_input!("title" => "visible", "done" => false))
-                .expect("insert todo");
-            support::wait_for_edge_txs(
-                &client,
-                &[transaction_id.expect("ordinary mutation commits immediately")],
-            )
-            .await;
-
-            wait_for_subscription_update(
-                &mut stream,
-                &mut log,
-                Duration::from_secs(10),
-                "remote public subscription receives inserted row",
-                |deltas| has_added_id(deltas, todo_id),
-            )
-            .await;
         })
         .await;
 }
@@ -260,7 +216,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
                 ids.push(id);
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&client, &txs).await;
+            support::wait_for_global_txs(&client, &txs).await;
             let mut row_id_order = ids.clone();
             row_id_order.sort();
 
@@ -361,7 +317,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 tied.push(id);
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&client, &txs).await;
+            support::wait_for_global_txs(&client, &txs).await;
             tied.sort();
             let tie_query =
                 jazz::query::Query::from("todos").order_by("title", OrderDirection::Asc);
@@ -420,7 +376,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                     vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
                 )
                 .expect("move row into window");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -465,7 +421,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                     vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
                 )
                 .expect("move row out of window");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -511,7 +467,7 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                     row_input!("title" => "delta item", "done" => false),
                 )
                 .expect("insert todo");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -822,7 +778,7 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
-    wait_for_edge_query_ready(&client, "todos", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&client, "todos", Duration::from_secs(30)).await;
     client
 }
 
@@ -911,7 +867,7 @@ async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
             row_input!("mapping_rule" => mapping_rule, "label" => "visible mapping rule child"),
         )
         .expect("insert mapping rule child");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         admin,
         &[
             seed_tx.expect("ordinary mutation commits immediately"),

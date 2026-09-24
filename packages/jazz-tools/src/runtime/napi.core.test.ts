@@ -2131,7 +2131,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expect(transport.close()).toBe(false);
   });
 
-  it("propagates an edge-tier query over the native runtime/server boundary and returns remote row adds", async () => {
+  it("propagates a global-tier query over the native runtime/server boundary and returns remote row adds", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -2174,7 +2174,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
     await waitForPromise(
       writer.waitForTransaction(await committedTxId(inserted), "global"),
-      "writer insert did not settle at edge",
+      "writer insert did not settle at global tier",
     );
 
     const propagatedRow = await waitFor(async () => {
@@ -2184,7 +2184,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         values: unknown[];
       }>;
       return rows.find((row) => row.id === inserted.id);
-    }, "reader edge query did not receive the propagated row add");
+    }, "reader global query did not receive the propagated row add");
 
     expect(propagatedRow).toEqual({
       id: inserted.id,
@@ -2196,7 +2196,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
   }, 15_000);
 
-  it("propagates an edge-tier query through a persistent core server", async () => {
+  it("propagates a global-tier query through a persistent core server", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -2237,7 +2237,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       });
       await waitForPromise(
         writer.waitForTransaction(await committedTxId(inserted), "global"),
-        "writer insert did not settle at persistent edge",
+        "writer insert did not settle at persistent global tier",
       );
       await writer.close();
       runtimes.splice(runtimes.indexOf(writer), 1);
@@ -2323,7 +2323,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     await waitForPromise(
       writer.waitForTransaction(await committedTxId(inserted), "global"),
-      "writer public chat insert did not settle at edge",
+      "writer public chat insert did not settle at global tier",
     );
 
     const bobSession = testExternalSessionJson(BOB_ID);
@@ -2338,7 +2338,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         values: unknown[];
       }>;
       return rows.find((row) => row.id === inserted.id);
-    }, "reader edge query did not receive public branch-policy chat");
+    }, "reader global query did not receive public branch-policy chat");
 
     expect(propagatedRow).toEqual({
       id: inserted.id,
@@ -2356,7 +2356,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
     await waitForPromise(
       writer.waitForTransaction(await committedTxId(message), "global"),
-      "writer public-chat message insert did not settle at edge",
+      "writer public-chat message insert did not settle at global tier",
     );
 
     const propagatedMessage = await waitFor(async () => {
@@ -2370,7 +2370,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         values: unknown[];
       }>;
       return rows.find((row) => row.id === message.id);
-    }, "reader edge query did not receive message through public-chat branch policy");
+    }, "reader global query did not receive message through public-chat branch policy");
 
     expect(propagatedMessage).toEqual({
       id: message.id,

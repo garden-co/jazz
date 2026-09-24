@@ -103,7 +103,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   authorization or fate authority. **Core** is history-complete and authorizes
   both mergeable and exclusive transactions. A **client** retains authorized
   history and optimistic local edits. These roles share the same query and
-  transaction machinery; there is no intermediary server edge.
+  transaction machinery; there is no intermediary server tier.
 - **scope-isolated client relay** — a non-authority persistent relay whose store
   and attached foreground runtimes belong to exactly one app/environment/auth
   scope. It serves retained authorized knowledge to those foregrounds without

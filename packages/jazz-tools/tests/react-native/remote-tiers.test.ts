@@ -12,17 +12,15 @@ const app = schema.defineApp({
 
 // These cases intentionally have no authority peer: an ordinary persisted
 // local write is not evidence of Core admission.
-it("keeps concurrent Global waits pending while local writes remain responsive", async () => {
+it("keeps a Global wait pending while local writes remain responsive", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const write = db.insert(app.todos, { title: "pending admission", done: false });
     const row = await write.wait({ tier: "local" });
     const settled: string[] = [];
-    const waits = ["global", "global"].map((tier) =>
-      write.wait({ tier: tier as "global" }).then(
-        () => settled.push(tier),
-        () => settled.push(`${tier}:closed`),
-      ),
+    const globalWait = write.wait({ tier: "global" }).then(
+      () => settled.push("global"),
+      () => settled.push("global:closed"),
     );
     const later = await db
       .insert(app.todos, { title: "responsive local", done: false })
@@ -31,8 +29,8 @@ it("keeps concurrent Global waits pending while local writes remain responsive",
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(settled).toEqual([]);
     await db.shutdown();
-    await Promise.all(waits);
-    expect(settled.sort()).toEqual(["global:closed", "global:closed"]);
+    await globalWait;
+    expect(settled).toEqual(["global:closed"]);
   });
 });
 
@@ -63,7 +61,7 @@ it("does not publish unconfirmed local rows to a strict remote subscription", as
   });
 });
 
-it("resumes strict remote reads and both write tiers after native reconnect", async () => {
+it("resumes strict remote reads and Global write waits after native reconnect", async () => {
   const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
@@ -109,14 +107,10 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         await expect.poll(() => fallback.at(-1)).toEqual([row]);
         stopFallback();
         let remoteReady = false;
-        let secondGlobalReady = false;
         let globalReady = false;
         const remote = db.all(app.todos, { tier: ReadTier.Remote }).then((rows) => {
           remoteReady = true;
           return rows;
-        });
-        const secondGlobal = write.wait({ tier: "global" }).then(() => {
-          secondGlobalReady = true;
         });
         const global = write.wait({ tier: "global" }).then(() => {
           globalReady = true;
@@ -127,9 +121,9 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         await laterWrite.wait({ tier: "local" });
         await new Promise((resolve) => setTimeout(resolve, 100));
         expect(strictSnapshots.flat()).toEqual([]);
-        expect([remoteReady, secondGlobalReady, globalReady]).toEqual([false, false, false]);
+        expect([remoteReady, globalReady]).toEqual([false, false]);
         await db.reconnect();
-        await Promise.all([secondGlobal, global]);
+        await global;
         // The parked read can observe an empty authority snapshot before the
         // queued upload is accepted. Completion proves fresh coverage; the
         // post-settlement read below asserts the accepted write is visible.

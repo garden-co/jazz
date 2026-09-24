@@ -61,11 +61,11 @@ struct SyncBench {
     config: Config,
     ui: NodeState<RocksDbStorage>,
     worker: NodeState<RocksDbStorage>,
-    edge: NodeState<RocksDbStorage>,
+    relay: NodeState<RocksDbStorage>,
     core: NodeState<RocksDbStorage>,
     _dirs: Vec<tempfile::TempDir>,
-    core_to_edge: PeerState,
-    edge_to_worker: PeerState,
+    core_to_relay: PeerState,
+    relay_to_worker: PeerState,
     worker_to_ui: PeerState,
     ui_author: AuthorSubject,
     ui_owner: AuthorSubject,
@@ -83,23 +83,23 @@ impl SyncBench {
         dirs.push(dir);
         let (dir, mut worker) = open_node(node(2), schema.clone());
         dirs.push(dir);
-        let (dir, mut edge) = open_node(node(3), schema.clone());
+        let (dir, mut relay) = open_node(node(3), schema.clone());
         dirs.push(dir);
         let (dir, mut core) = open_node(node(4), schema);
         dirs.push(dir);
         let ui_author = AuthorSubject::for_test_bytes([7; 16]);
-        for node in [&mut ui, &mut worker, &mut edge, &mut core] {
+        for node in [&mut ui, &mut worker, &mut relay, &mut core] {
             node.admit_test_session_claims(ui_author, BTreeMap::new());
         }
         Self {
             config,
             ui,
             worker,
-            edge,
+            relay,
             core,
             _dirs: dirs,
-            core_to_edge: PeerState::new(),
-            edge_to_worker: PeerState::new(),
+            core_to_relay: PeerState::new(),
+            relay_to_worker: PeerState::new(),
             worker_to_ui: PeerState::client_link(ui_author),
             ui_author,
             ui_owner: ui_author,
@@ -114,7 +114,7 @@ impl SyncBench {
         reset_phase_counters(&mut [
             &mut self.ui,
             &mut self.worker,
-            &mut self.edge,
+            &mut self.relay,
             &mut self.core,
         ]);
         let run_start = Instant::now();
@@ -124,9 +124,9 @@ impl SyncBench {
 
             let start = Instant::now();
             relay_ingest(&mut self.worker, &unit);
-            relay_ingest(&mut self.edge, &unit);
+            relay_ingest(&mut self.relay, &unit);
             let fate = core_ingest(&mut self.core, &unit, now_ms);
-            support::apply_and_settle(&mut self.edge, fate.clone());
+            support::apply_and_settle(&mut self.relay, fate.clone());
             support::apply_and_settle(&mut self.worker, fate.clone());
             support::apply_and_settle(&mut self.ui, fate.clone());
             self.metrics.record_fate_rtt(start.elapsed());
@@ -180,9 +180,9 @@ impl SyncBench {
 
     fn pipeline_without_timing(&mut self, unit: &SyncMessage, now_ms: u64) -> SyncMessage {
         relay_ingest(&mut self.worker, unit);
-        relay_ingest(&mut self.edge, unit);
+        relay_ingest(&mut self.relay, unit);
         let fate = core_ingest(&mut self.core, unit, now_ms);
-        support::apply_and_settle(&mut self.edge, fate.clone());
+        support::apply_and_settle(&mut self.relay, fate.clone());
         support::apply_and_settle(&mut self.worker, fate.clone());
         support::apply_and_settle(&mut self.ui, fate.clone());
         fate
@@ -291,8 +291,8 @@ impl SyncBench {
 
     fn refresh_views(&mut self, record: bool) {
         let start = Instant::now();
-        refresh(&mut self.core, &mut self.edge, &mut self.core_to_edge);
-        refresh(&mut self.edge, &mut self.worker, &mut self.edge_to_worker);
+        refresh(&mut self.core, &mut self.relay, &mut self.core_to_relay);
+        refresh(&mut self.relay, &mut self.worker, &mut self.relay_to_worker);
         refresh(&mut self.worker, &mut self.ui, &mut self.worker_to_ui);
         if record {
             self.metrics.record_view_refresh(start.elapsed());
@@ -303,9 +303,9 @@ impl SyncBench {
         let core_rows = current_rows(&mut self.core);
         let ui_expected_rows = rows_owned_by(&core_rows, self.ui_owner);
 
-        // INV-RLS-11: relay/system links do not narrow; INV-RLS-5: edge-client
+        // INV-RLS-11: relay/system links do not narrow; INV-RLS-5: client
         // links converge to the read-policy view for the link identity.
-        assert_eq!(current_rows(&mut self.edge), core_rows);
+        assert_eq!(current_rows(&mut self.relay), core_rows);
         assert_eq!(current_rows(&mut self.worker), core_rows);
         // The UI authored the hidden row itself. Losing it from the remote
         // read scope does not evict that already-known row from local storage.
@@ -340,8 +340,8 @@ impl SyncBench {
             self.worker.sync_metrics().parked_orphans_resolved
         );
         assert_eq!(
-            self.edge.sync_metrics().parked_orphans,
-            self.edge.sync_metrics().parked_orphans_resolved
+            self.relay.sync_metrics().parked_orphans,
+            self.relay.sync_metrics().parked_orphans_resolved
         );
     }
 
@@ -374,20 +374,20 @@ impl SyncBench {
             serde_json::json!(self.metrics.view_refresh.value_at_quantile(0.95)),
         );
         fields.insert(
-            "core_edge_version_bundles_out".to_owned(),
-            serde_json::json!(self.core_to_edge.metrics.version_bundles_out),
+            "core_relay_version_bundles_out".to_owned(),
+            serde_json::json!(self.core_to_relay.metrics.version_bundles_out),
         );
         fields.insert(
-            "core_edge_complete_tx_payload_refs_out".to_owned(),
-            serde_json::json!(self.core_to_edge.metrics.complete_tx_payload_refs_out),
+            "core_relay_complete_tx_payload_refs_out".to_owned(),
+            serde_json::json!(self.core_to_relay.metrics.complete_tx_payload_refs_out),
         );
         fields.insert(
-            "edge_worker_version_bundles_out".to_owned(),
-            serde_json::json!(self.edge_to_worker.metrics.version_bundles_out),
+            "relay_worker_version_bundles_out".to_owned(),
+            serde_json::json!(self.relay_to_worker.metrics.version_bundles_out),
         );
         fields.insert(
-            "edge_worker_complete_tx_payload_refs_out".to_owned(),
-            serde_json::json!(self.edge_to_worker.metrics.complete_tx_payload_refs_out),
+            "relay_worker_complete_tx_payload_refs_out".to_owned(),
+            serde_json::json!(self.relay_to_worker.metrics.complete_tx_payload_refs_out),
         );
         fields.insert(
             "worker_ui_version_bundles_out".to_owned(),
@@ -431,7 +431,7 @@ impl SyncBench {
         );
         insert_node_metrics(&mut fields, "ui", &self.ui);
         insert_node_metrics(&mut fields, "worker", &self.worker);
-        insert_node_metrics(&mut fields, "edge", &self.edge);
+        insert_node_metrics(&mut fields, "relay", &self.relay);
         insert_node_metrics(&mut fields, "core", &self.core);
         emit_json_line("sync", fields);
     }

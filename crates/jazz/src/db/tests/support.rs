@@ -317,7 +317,7 @@ pub(super) fn duplex_with_taps() -> (
 
 /// In-memory transport pair with a read-only tap on server-to-client frames.
 /// The tap lets a Core-serving test inspect the canonical `ViewUpdate` before
-/// the receiving edge applies it.
+/// the receiving client applies it.
 pub(super) fn duplex_with_server_outbound_tap() -> (
     Box<dyn Transport>,
     Box<dyn Transport>,
@@ -342,7 +342,7 @@ pub(super) fn duplex_with_server_outbound_tap() -> (
 }
 
 /// In-memory transport pair with a read-only tap on client-to-server frames.
-/// The tap lets an Edge test inspect an upstream upload before Core applies it.
+/// The tap lets a test inspect a client's upstream upload before Core applies it.
 pub(super) fn duplex_with_client_outbound_tap() -> (
     Box<dyn Transport>,
     Box<dyn Transport>,
@@ -714,16 +714,6 @@ pub(super) fn event_settled(event: &SubscriptionEvent) -> bool {
 }
 
 pub(super) fn global_subscribe_opts() -> ReadOpts {
-    ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
-        include_deleted: false,
-        ..ReadOpts::default()
-    }
-}
-
-pub(super) fn edge_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,

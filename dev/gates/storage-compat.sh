@@ -24,3 +24,6 @@ dev/t --exact node::tests::harness::native_jazz_corpus_digest_is_sensitive_to_ap
 dev/t --exact node::tests::harness::native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_families
 # Immutable bytes produced by the distributed alpha.54 Linux NAPI artifact.
 dev/t --exact node::tests::harness::published_alpha54_native_corpus_reopens_and_accepts_current_writes
+# Immutable client root produced by the distributed alpha.56 NAPI/jazz-tools
+# packages: a retired Edge receipt (Accepted, durability tag 2, no global time).
+dev/t --exact node::tests::harness::published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent

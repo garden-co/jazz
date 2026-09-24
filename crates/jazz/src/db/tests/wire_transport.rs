@@ -2071,11 +2071,7 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
             } else {
                 None
             },
-            durability: Some(if repair {
-                DurabilityTier::Global
-            } else {
-                DurabilityTier::Global
-            }),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     subscriber.borrow_mut().transport.poll_flush().unwrap();

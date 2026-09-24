@@ -504,13 +504,13 @@ pub struct NodeState<S> {
     /// Schema catalogue, migration lenses, and logical-to-physical mappings.
     catalogue: SchemaCatalogue,
     /// Whether this runtime has an authoritative catalogue lineage that may
-    /// safely describe application data.  A dynamic edge starts
+    /// safely describe application data.  A dynamically catalogued node starts
     /// `Uninitialized`: its temporary system-only runtime schema is never a
     /// database genesis and no query or write may use it.  The first trusted
     /// catalogue snapshot installs the authority's exact genesis together
     /// with its mappings and write pointer in one durable batch.
     catalogue_bootstrap_state: CatalogueBootstrapState,
-    /// Whether this durable catalogue was installed through the dynamic-edge
+    /// Whether this durable catalogue was installed through the dynamic-catalogue
     /// bootstrap snapshot boundary and therefore carries a completion record
     /// that must be refreshed with later trusted snapshots.
     catalogue_bootstrap_marker: bool,
@@ -552,7 +552,7 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
-    /// This process is the durable browser relay that owns upstream Edge
+    /// This process is the durable browser relay that owns upstream Core
     /// authority sessions for a non-durable client. This is process-local
     /// topology, never schema policy or persisted state.
     relay_authority_session_owner: Option<crate::db::ClientRelayScope>,
@@ -783,7 +783,7 @@ impl ActiveSchema {
 /// This is deliberately separate from the catalogue's current-write pointer.
 /// A pointer is meaningful only after a durable authority lineage exists;
 /// treating an empty constructor schema as that lineage manufactures a false
-/// genesis on an edge that has not yet heard from its core.
+/// genesis on a node that has not yet heard from its Core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogueBootstrapState {
     /// No authority catalogue has been installed.  Application state must
@@ -1009,7 +1009,7 @@ struct QueryServing {
     /// Bounded, receiver-local source pages retained by a non-durable client
     /// after the matching authority usage site detached. This is not an
     /// authority receipt: only an exact compatible Local lowering may use it;
-    /// Edge/Global must open fresh coverage.
+    /// Remote/Global reads must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
 }
 
@@ -2894,7 +2894,7 @@ struct SchemaLineageActivation {
 }
 
 /// Durable completion receipt for an authority snapshot installed by an
-/// initially unconfigured dynamic edge.  Its record is the atomic boundary:
+/// initially unconfigured dynamically catalogued node.  Its record is the atomic boundary:
 /// discovery never repairs a prefix that lacks this exact join.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 struct CatalogueBootstrapReady {

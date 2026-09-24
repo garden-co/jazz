@@ -251,7 +251,7 @@ where
     }
 
     /// Return the authoritative current-write pointer, or fail closed before
-    /// an edge has adopted its first trusted catalogue snapshot.
+    /// the node has adopted its first trusted catalogue snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.require_catalogue_ready()?;
@@ -259,7 +259,7 @@ where
     }
 
     /// Return the active read-schema only after an authority catalogue has
-    /// been durably adopted.  Dynamic-edge callers must use this instead of
+    /// been durably adopted.  Dynamic-catalogue callers must use this instead of
     /// treating the temporary system schema as an application schema.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_current_schema(&self) -> Result<&JazzSchema, Error> {
@@ -298,7 +298,7 @@ where
 
     /// Current write-schema pointer known to this node.
     ///
-    /// An uninitialized dynamic edge has no current application schema; the
+    /// An uninitialized dynamic-catalogue node has no current application schema; the
     /// temporary system-only layout must not leak through this API.
     pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.try_current_write_schema()

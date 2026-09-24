@@ -120,7 +120,7 @@ fn maintained_open_defers_cold_multisink_witnesses_to_its_publication_owner() {
 }
 
 #[test]
-fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
+fn settled_global_authority_preserves_an_ordinary_local_content_update() {
     let (_server_dir, mut server) = open_node();
     let (_client_dir, mut client) = open_node();
     let issue = row(0);
@@ -592,7 +592,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
 /// retained exact authority result rather than waiting for a second upstream
 /// delta which may never arrive.
 #[test]
-fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
+fn relay_open_after_live_authority_receipt_seeds_initial_membership() {
     let (_server_dir, mut server) = open_node();
     let (_client_dir, mut client) = open_node();
     let issue = row(41);

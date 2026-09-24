@@ -9,7 +9,7 @@ use jazz::tools::{
 };
 use jazz_server::JazzServer;
 use support::{
-    publish_permissions, push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query,
+    publish_permissions, push_catalogue_in_memory, wait_for_query, wait_for_remote_query_ready,
 };
 use uuid::Uuid;
 
@@ -300,7 +300,7 @@ async fn connect_ready_user(
         .await
         .expect("enroll test identity");
     let client = jazz_testkit::connect(context).await.expect("connect user");
-    wait_for_edge_query_ready(&client, ready_table, Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&client, ready_table, Duration::from_secs(30)).await;
     client
 }
 
@@ -352,7 +352,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                     ),
                 )
                 .expect("alice inserts document");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     folder_tx.expect("ordinary mutation commits immediately"),
@@ -434,7 +434,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                     row_input!("file_id" => file_id, "team_id" => team_id),
                 )
                 .expect("alice attaches file to team");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),
@@ -524,7 +524,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                     ),
                 )
                 .expect("alice inserts document");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),
@@ -608,7 +608,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                     ),
                 )
                 .expect("insert shared document");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     bob_folder_tx.expect("ordinary mutation commits immediately"),
@@ -691,7 +691,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     ),
                 )
                 .expect("insert shared document");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),
@@ -768,7 +768,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
-            wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
+            wait_for_remote_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
@@ -800,7 +800,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
                 .expect("alice update should be admitted by inherited UPDATE policy");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),
@@ -884,7 +884,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
-            wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
+            wait_for_remote_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
@@ -916,7 +916,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
                 .expect("alice update should be admitted by multi-hop inherited UPDATE policy");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),
@@ -984,7 +984,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
-            wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
+            wait_for_remote_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
@@ -1029,7 +1029,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     ],
                 )
                 .expect("alice reparent update should be admitted by inherited UPDATE policy");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[
                     organization_tx.expect("ordinary mutation commits immediately"),

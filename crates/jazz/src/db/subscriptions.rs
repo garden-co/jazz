@@ -1040,7 +1040,7 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            // Edge/Global cache possession is never a settlement receipt,
+            // Global cache possession is never a settlement receipt,
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
             requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Global;
@@ -1154,7 +1154,7 @@ where
             ) && (!subscription.has_covered_input_sources() || covered_closure_installed)
         };
         // An empty local opening carries no observable result information at
-        // an Edge/Global request.  Until the authority replies, publishing it
+        // a Global request.  Until the authority replies, publishing it
         // would let a public subscription report a provisional empty view as
         // its first delivery.  `awaits_initial_authority_response` is only
         // known while opening a fresh upstream handle, but an already-open

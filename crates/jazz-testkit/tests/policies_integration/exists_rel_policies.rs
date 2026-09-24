@@ -483,7 +483,7 @@ async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let (_, _, grant_tx) = backend
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
         .expect("seed private admin grant");
-    jazz_testkit::wait_for_edge_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
+    jazz_testkit::wait_for_global_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
 
     let alice = connect_ready_user(
         &server,
@@ -801,7 +801,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
     tokio::task::LocalSet::new()
         .run_until(async {
             use jazz_testkit::{
-                connect_ready_user, has_added_id, has_removed, wait_for_edge_txs, wait_for_query,
+                connect_ready_user, has_added_id, has_removed, wait_for_global_txs, wait_for_query,
                 wait_for_subscription_update,
             };
             let schema = SchemaBuilder::new()
@@ -848,7 +848,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             let (row, _, tx) = admin
                 .insert("protected", row_input!("data" => "secret"))
                 .unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             let query = Query::from("protected").select(["data"]);
             let mut stream = alice.subscribe(query.clone()).await.unwrap();
             let mut log = Vec::new();
@@ -867,7 +867,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             let (grant2, _, tx2) = admin
                 .insert("grants", row_input!("user_id" => ALICE_ID))
                 .unwrap();
-            wait_for_edge_txs(&admin, &[tx1.unwrap(), tx2.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx1.unwrap(), tx2.unwrap()]).await;
             wait_for_subscription_update(
                 &mut stream,
                 &mut log,
@@ -895,7 +895,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             )
             .await;
             let tx = admin.delete("grants", grant1).unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query.clone(),
@@ -916,7 +916,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             .await;
             log.clear();
             let tx = admin.delete("grants", grant2).unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query,

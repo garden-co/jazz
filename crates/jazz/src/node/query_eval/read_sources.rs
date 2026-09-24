@@ -2750,7 +2750,7 @@ where
             // Global current storage has already selected the physical winner.  Apply
             // the ordinary lens-aware projection directly so added-column defaults
             // survive instead of being replaced with physical nulls by the raw
-            // winner projection.  Local and Edge reads still need to choose between
+            // winner projection.  Local reads still need to choose between
             // Global and Ahead candidates before their compatibility boundary.
             if tier == DurabilityTier::Global {
                 let projection_target = self.current_projection_target(request, read_table)?;
@@ -4010,7 +4010,7 @@ where
             if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
                 *maintained = true;
             }
-            // Local/Edge sources still combine the selected settled candidates
+            // Local sources still combine the selected settled candidates
             // with the complete ahead overlay before choosing a winner, so a
             // newer row which leaves an equality prefix cannot leave behind a
             // stale settled match.

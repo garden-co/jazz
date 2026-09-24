@@ -1,6 +1,6 @@
 use super::*;
 use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+    FutureResolveExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,8 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
 use crate::protocol::{
-    BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage,
-    VersionRecord,
+    BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage, VersionRecord,
 };
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
@@ -1253,7 +1252,6 @@ fn aggregate_access_policy_schema() -> JazzSchema {
     )
 }
 
-
 fn session_seed_write_policy_schema() -> JazzSchema {
     let policy = crate::test_public_schema::seeded_recursive_access_policy(
         "resourceAccess",
@@ -1295,7 +1293,6 @@ fn session_seed_write_policy_schema() -> JazzSchema {
             ),
     )
 }
-
 
 #[test]
 fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
@@ -1342,14 +1339,6 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         "an unseeded session must not inherit SYSTEM bypass: {denied:?}"
     );
 }
-
-
-/// Deferred edge fates own their support receiver by the exact admission
-/// snapshot, not merely by the canonical policy clause. A later authenticated
-/// refresh for the same author must park beside the old fate without replacing
-/// its support view.
-
-
 
 fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -1406,10 +1395,6 @@ fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<Roc
     open_node_with_schema(node_uuid, schema)
 }
 
-/// Permission-scope cache retention is maintenance, not authority admission.
-/// The receipt drives the public edge-ingest path because a direct eviction
-/// call would not prove that ingress keeps the two clocks separate.
-
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     core.apply_fate_update(
         tx_id,
@@ -1421,8 +1406,7 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
 }
 
 fn accept_confirmed(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
-    core.finalize_local_mergeable_commit_settled(tx_id)
-        .unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 }
 
 fn title_shape_binding(title: &str) -> (ValidatedQuery, Binding) {
@@ -1632,33 +1616,6 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     }
 }
 
-#[test]
-fn non_global_peer_query_subscriptions_use_maintained_path() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x44));
-    let (shape, binding) = title_shape_binding("match");
-    let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Global,
-        ..RegisterShapeOptions::default()
-    };
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: opts.read_view_key(),
-    };
-    let mut peer = PeerState::new();
-
-    peer.rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
-        .unwrap();
-    assert!(
-        peer.publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_some()
-    );
-    peer.query_update_for_subscription_with_opts(&mut core, subscription, &shape, &binding, opts)
-        .unwrap();
-}
-
 /// A served publication is a local owner of its shape even though it did not
 /// arrive through the inbound `RegisterShape` stream.  Inbound registration
 /// teardown therefore must not reclaim the common shape (and its bindings or
@@ -1669,11 +1626,11 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     let (_dir, mut core) = open_node_with_uuid(node(0x45));
     let (shape, binding) = title_shape_binding("shared");
     let subscription = subscription_key(&shape, &binding);
-    let edge_opts = RegisterShapeOptions {
+    let global_opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
-    let edge_subscription = subscription_key_with_opts(&shape, &binding, &edge_opts);
+    let global_subscription = subscription_key_with_opts(&shape, &binding, &global_opts);
     let mut first_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x45; 16]));
     let mut cloned_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x47; 16]));
     let mut reconnected_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x46; 16]));
@@ -1699,7 +1656,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     )
     .unwrap();
     reconnected_peer
-        .rehydrate_query_with_opts(&mut core, &shape, &binding, edge_opts)
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, global_opts)
         .unwrap();
     assert_eq!(
         core.outbound_shape_owner_count_for_test(shape.shape_id()),
@@ -1728,7 +1685,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     assert_eq!(
         core.registered_query_binding_count_for_test(),
         2,
-        "retiring one reader must preserve the sibling policy scope and edge view"
+        "retiring one reader must preserve the sibling policy scope and Global-tier view"
     );
 
     cloned_peer.forget_subscription_with_node(&mut core, subscription);
@@ -1739,7 +1696,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     );
     assert!(core.registered_shape(shape.shape_id()).is_some());
 
-    reconnected_peer.forget_subscription_with_node(&mut core, edge_subscription);
+    reconnected_peer.forget_subscription_with_node(&mut core, global_subscription);
     assert!(
         core.registered_shape(shape.shape_id()).is_none(),
         "the final outbound owner must reclaim shape registrations and caches"
@@ -2449,7 +2406,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
 }
 
 #[test]
-fn local_rehydrate_after_edge_restore_ships_restored_row() {
+fn local_rehydrate_after_core_restore_ships_restored_row() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_core_dir, mut core) = open_node_with_uuid(node(0x94));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x95));
@@ -2528,7 +2485,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
 }
 
 #[test]
-fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
+fn local_rehydrate_after_core_restore_transaction_ships_restored_row() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_core_dir, mut core) = open_node_with_uuid(node(0x96));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
@@ -4802,7 +4759,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
 }
 
 #[test]
-fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_client() {
+fn current_rows_update_installs_maintained_subscription_for_relay_and_direct_client() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4834,7 +4791,7 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert_eq!(relay.maintained_subscription_view_metrics().hits_out, 1);
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
-    let mut edge_owner = PeerState::client_link(owner);
+    let mut client_owner = PeerState::client_link(owner);
     core.set_test_provider_claims(
         owner,
         BTreeMap::from([(
@@ -4842,15 +4799,15 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
             Value::Uuid(owner.test_uuid()),
         )]),
     );
-    let edge_update = edge_owner.current_rows_update(&mut core, "docs").unwrap();
-    assert!(maintained_subscription_id(&edge_owner, subscription).is_some());
+    let owner_update = client_owner.current_rows_update(&mut core, "docs").unwrap();
+    assert!(maintained_subscription_id(&client_owner, subscription).is_some());
     assert_eq!(
-        edge_owner.maintained_subscription_view_metrics().hits_out,
+        client_owner.maintained_subscription_view_metrics().hits_out,
         1
     );
-    assert!(view_update_added_rows(edge_update).contains(&doc));
+    assert!(view_update_added_rows(owner_update).contains(&doc));
 
-    let mut edge_other = PeerState::client_link(other);
+    let mut client_other = PeerState::client_link(other);
     core.set_test_provider_claims(
         other,
         BTreeMap::from([(
@@ -4858,10 +4815,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
             Value::Uuid(other.test_uuid()),
         )]),
     );
-    let other_update = edge_other.current_rows_update(&mut core, "docs").unwrap();
-    assert!(maintained_subscription_id(&edge_other, subscription).is_some());
+    let other_update = client_other.current_rows_update(&mut core, "docs").unwrap();
+    assert!(maintained_subscription_id(&client_other, subscription).is_some());
     assert_eq!(
-        edge_other.maintained_subscription_view_metrics().hits_out,
+        client_other.maintained_subscription_view_metrics().hits_out,
         1
     );
     assert!(!view_update_added_rows(other_update).contains(&doc));

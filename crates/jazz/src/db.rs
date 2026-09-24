@@ -2970,7 +2970,7 @@ pub struct QueryAttachment {
     /// A memory-only foreground reads local state from its durable owner.
     /// That delivery is required independently of any remote authority receipt.
     requires_delivery_receipt: bool,
-    /// Edge/Global coverage is live authority evidence, not merely a newer
+    /// Global coverage is live authority evidence, not merely a newer
     /// durable view generation.
     requires_current_authority_receipt: bool,
     registrations: Vec<SubscriptionKey>,
@@ -5148,7 +5148,7 @@ pub enum SubscriptionEvent {
         /// Typed structural edits to already hydrated terminal rows.
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Whether the result is complete at the requested read tier.
-        /// Public Edge/Global streams emit only settled results. Local streams
+        /// Public Global streams emit only settled results. Local streams
         /// can publish materialized local rows before remote coverage settles.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -5174,8 +5174,8 @@ enum SubscriptionFinalization {
 
 /// Stream of application-ready subscription events.
 ///
-/// Local results publish as soon as required cells are materialized. Edge and
-/// Global results also wait for settlement at the requested tier. Withheld
+/// Local results publish as soon as required cells are materialized. Global
+/// results also wait for settlement at the requested tier. Withheld
 /// changes are coalesced relative to the last emitted result, so consumers do
 /// not maintain provisional snapshots or replay hidden terminal history.
 pub struct SubscriptionStream {

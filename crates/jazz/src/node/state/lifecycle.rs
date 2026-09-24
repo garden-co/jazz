@@ -167,7 +167,7 @@ where
         .await
     }
 
-    /// Open an edge-local runtime before it has received an authenticated
+    /// Open a downstream runtime before it has received an authenticated
     /// authority catalogue.
     ///
     /// Unlike [`NodeState::new`], this deliberately does *not* create a
@@ -184,7 +184,7 @@ where
         let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage).await?;
         if let Some(schema) = durable_genesis {
             // A fresh process cannot assume the temporary empty schema it
-            // would use for an uninitialized edge.  Recover the authority
+            // would use for an uninitialized runtime.  Recover the authority
             // genesis from the durable catalogue first, then use the normal
             // ready open path so all physical layouts are reconstructed from
             // the real lineage.
@@ -228,7 +228,7 @@ where
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
-        // repurpose as an uninitialized edge.
+        // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
             Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())

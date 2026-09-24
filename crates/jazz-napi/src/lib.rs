@@ -1181,7 +1181,7 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
     pub settled: bool,
-    #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
+    #[napi(ts_type = "'None' | 'Local' | 'Global'")]
     pub tier: String,
 }
 
