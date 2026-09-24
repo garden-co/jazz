@@ -1077,14 +1077,44 @@ impl Lcg {
     }
 }
 
-fn git_output<const N: usize>(args: [&str; N]) -> String {
+fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
     Command::new("git")
         .args(args)
         .output()
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_default()
+        .and_then(git_output_from_output)
+}
+
+fn git_output_from_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+fn git_status() -> (bool, bool) {
+    match git_output(["status", "--porcelain"]) {
+        Some(status) => {
+            let dirty = if retain_result_dirty_ignored() {
+                status.lines().any(|line| {
+                    let path = line.get(3..).unwrap_or_default();
+                    !(path.starts_with("benchmarks/results/")
+                        || path.starts_with("\"benchmarks/results/"))
+                })
+            } else {
+                !status.is_empty()
+            };
+            (true, dirty)
+        }
+        None => (false, true),
+    }
+}
+
+#[cfg(test)]
+fn git_dirty() -> bool {
+    git_status().1
 }
 
 fn hostname() -> String {
@@ -1105,6 +1135,7 @@ fn hostname() -> String {
 struct ProcessMetadata {
     git_sha: String,
     git_dirty: bool,
+    git_status_available: bool,
     hostname: String,
     knobs: BTreeMap<String, String>,
 }
@@ -1112,22 +1143,15 @@ struct ProcessMetadata {
 static PROCESS_METADATA: OnceLock<ProcessMetadata> = OnceLock::new();
 
 fn process_metadata() -> &'static ProcessMetadata {
-    PROCESS_METADATA.get_or_init(|| ProcessMetadata {
-        git_sha: git_output(["rev-parse", "HEAD"]),
-        git_dirty: git_dirty(),
-        hostname: hostname(),
-        knobs: knob_env(),
-    })
-}
-
-fn git_dirty() -> bool {
-    let status = git_output(["status", "--porcelain"]);
-    if !retain_result_dirty_ignored() {
-        return !status.is_empty();
-    }
-    status.lines().any(|line| {
-        let path = line.get(3..).unwrap_or_default();
-        !(path.starts_with("benchmarks/results/") || path.starts_with("\"benchmarks/results/"))
+    PROCESS_METADATA.get_or_init(|| {
+        let (git_status_available, git_dirty) = git_status();
+        ProcessMetadata {
+            git_sha: git_output(["rev-parse", "HEAD"]).unwrap_or_default(),
+            git_dirty,
+            git_status_available,
+            hostname: hostname(),
+            knobs: knob_env(),
+        }
     })
 }
 
@@ -1142,6 +1166,10 @@ fn insert_process_metadata(fields: &mut Map<String, Value>) {
     let metadata = process_metadata();
     fields.insert("git_sha".to_owned(), json!(metadata.git_sha));
     fields.insert("git_dirty".to_owned(), json!(metadata.git_dirty));
+    fields.insert(
+        "git_status_available".to_owned(),
+        json!(metadata.git_status_available),
+    );
     fields.insert("hostname".to_owned(), json!(metadata.hostname));
     fields.insert("knobs".to_owned(), json!(metadata.knobs));
 }
@@ -1568,6 +1596,21 @@ mod tests {
 
         assert_eq!(run(), run());
     }
+    #[test]
+    fn git_output_conversion_rejects_failed_exit_and_invalid_utf8() {
+        let failed = Command::new("git")
+            .arg("--definitely-not-a-git-option")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert_eq!(git_output_from_output(failed), None);
+
+        let mut invalid_utf8 = Command::new("git").arg("--version").output().unwrap();
+        assert!(invalid_utf8.status.success());
+        invalid_utf8.stdout = vec![0xff];
+        assert_eq!(git_output_from_output(invalid_utf8), None);
+    }
+
     #[test]
     fn git_status_failure_is_reported_dirty() {
         const CHILD: &str = "JAZZ_SIM_GIT_STATUS_FAILURE_CHILD";
