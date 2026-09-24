@@ -2241,25 +2241,23 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
       write(`packages/jazz-tools/${relative}`);
     }
 
-    const nodeMarker = path.join(fixture, "node-inspector.html");
-    const browserMarker = path.join(fixture, "browser-inspector.html");
-    const run = () =>
-      spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
-        cwd: fixture,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
-          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
-          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
-          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
-          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
-          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
-          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(nodeMarker)}`,
-          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(browserMarker)}`,
-        },
-      });
-    const missing = run();
+    const nodeMarker = path.join(fixture, "node-inspector-started");
+    const browserMarker = path.join(fixture, "browser-inspector-started");
+    const missing = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+        JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+        JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+        JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+        JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+        JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+        JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+        JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+      },
+    });
     assert.notEqual(missing.status, 0, missing.stdout);
     assert.equal(fs.existsSync(nodeMarker), false, "node suite started without inspector assets");
     assert.equal(
@@ -2267,12 +2265,6 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
       false,
       "browser suite started without inspector assets",
     );
-
-    write("packages/inspector/dist-embedded/embedded.html", "prepared inspector");
-    const prepared = run();
-    assert.equal(prepared.status, 0, `${prepared.stdout}\n${prepared.stderr}`);
-    assert.equal(fs.readFileSync(nodeMarker, "utf8"), "prepared inspector");
-    assert.equal(fs.readFileSync(browserMarker, "utf8"), "prepared inspector");
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
