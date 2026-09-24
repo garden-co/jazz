@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ivm::graph::{DurableStorage, ProjectExpr};
+use crate::ivm::graph::{DurableStorage, IndexCandidateFilter, ProjectExpr};
 use crate::records::{FieldIdentity, RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
 
@@ -51,6 +51,7 @@ pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
     pub intersections: Vec<(String, StaticScanSpec)>,
+    pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.

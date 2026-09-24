@@ -59,6 +59,16 @@ pub(super) enum HydrationLifetime {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(super) struct CurrentIndexCandidateFilter {
+    table: String,
+    column: String,
+    order_column: Option<String>,
+    prefix: Vec<Value>,
+    source_column: String,
+    candidate_column: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
@@ -69,6 +79,8 @@ pub(super) enum CurrentAccessPath {
         reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        /// Snapshot-only cross-table index-key filter before row hydration.
+        candidate_filter: Option<CurrentIndexCandidateFilter>,
         /// A maintained source keeps every equality probe as an ordinary IVM
         /// source and intersects them in the graph. The fused storage request
         /// is snapshot-only and cannot observe later transitions through a
@@ -2437,6 +2449,7 @@ where
                         &intersections,
                         false,
                         source_limit,
+                        None,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -2774,12 +2787,13 @@ where
                         intersections,
                         source_limit,
                         maintained,
+                        candidate_filter,
                     }) => {
                         let source_limit = (order_column.is_some() || !exclude_deleted)
                             .then_some(source_limit)
                             .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
-                            1 + intersections.len() as u64;
+                            1 + intersections.len() as u64 + u64::from(candidate_filter.is_some());
                         self.node
                             .physical_global_current_source_for_index_scan(
                                 read_table,
@@ -2791,6 +2805,7 @@ where
                                 &intersections,
                                 maintained,
                                 source_limit,
+                                candidate_filter.as_ref(),
                                 &projection_target,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -2877,6 +2892,7 @@ where
                     intersections,
                     source_limit,
                     maintained,
+                    ..
                 }) => {
                     // Select settled candidates before combining them with the
                     // corresponding Local ahead candidates below.
@@ -2896,6 +2912,7 @@ where
                             intersections,
                             *maintained,
                             source_limit,
+                            None,
                             &projection_target,
                             raw_global_output.clone(),
                         )
@@ -4339,18 +4356,65 @@ where
                         }
                         _ => literal_equalities_for_filters(&join.filters, binding)?,
                     };
-                    if let Some(path @ CurrentAccessPath::Index { .. }) =
-                        select_current_access_path(&join_table, &equalities)
+                    if let Some(mut path @ CurrentAccessPath::Index { .. }) =
+                        select_current_access_path(&join_table, &equalities).or_else(|| {
+                            select_composite_leading_equality_access_path(
+                                &join_table,
+                                &equalities,
+                                &join.on_column,
+                            )
+                        })
                     {
-                        paths.insert(
-                            SourceId {
-                                table: join.table.clone(),
-                                path: SourcePath {
-                                    components: vec![SourceRole::Alias("join_via:0".to_owned())],
-                                },
+                        let join_source = SourceId {
+                            table: join.table.clone(),
+                            path: SourcePath {
+                                components: vec![SourceRole::Alias("join_via:0".to_owned())],
                             },
-                            path,
-                        );
+                        };
+                        if query.limit.is_none()
+                            && query.order_by.is_empty()
+                            && query.aggregate.is_none()
+                            && matches!(
+                                request.reads.primary.source_current_tier(&root),
+                                Some(DurabilityTier::Global)
+                            )
+                            && matches!(
+                                request.reads.primary.source_current_tier(&join_source),
+                                Some(DurabilityTier::Global)
+                            )
+                            && let CurrentAccessPath::Index {
+                                column: join_column,
+                                order_column: join_order_column,
+                                prefix: join_prefix,
+                                intersections: join_intersections,
+                                candidate_filter,
+                                ..
+                            } = &mut path
+                            && join_prefix.len() == 1
+                            && join_intersections.is_empty()
+                            && join_table.composite_indexes.iter().any(|columns| {
+                                columns.as_slice()
+                                    == [join_column.as_str(), join.on_column.as_str()]
+                            })
+                            && let Some(CurrentAccessPath::Index {
+                                column: root_column,
+                                order_column: root_order_column,
+                                prefix: root_prefix,
+                                source_limit: None,
+                                ..
+                            }) = paths.get(&root)
+                        {
+                            *join_order_column = Some(join.on_column.clone());
+                            *candidate_filter = Some(CurrentIndexCandidateFilter {
+                                table: query.table.clone(),
+                                column: root_column.clone(),
+                                order_column: root_order_column.clone(),
+                                prefix: root_prefix.clone(),
+                                source_column: join.on_column.clone(),
+                                candidate_column: "row_uuid".to_owned(),
+                            });
+                        }
+                        paths.insert(join_source, path);
                     }
                 }
             }
@@ -4455,6 +4519,7 @@ where
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
         source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
         self.physical_global_current_source_for_index_scan_with_output(
@@ -4467,6 +4532,7 @@ where
             intersections,
             maintained,
             source_limit,
+            candidate_filter,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
         )
@@ -4483,6 +4549,7 @@ where
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
         source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
         projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
@@ -4592,6 +4659,56 @@ where
                 graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
             }
             Ok(graph)
+        } else if let Some(filter) = candidate_filter {
+            let candidate_mapping = self
+                .catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| mapping.tables.get(&filter.table))
+                .ok_or(Error::InvalidStoredValue(
+                    "candidate index table mapping missing",
+                ))?;
+            let candidate_column_id = candidate_mapping
+                .columns
+                .get(&filter.column)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "candidate index column mapping missing",
+                ))?;
+            let candidate_index = if let Some(second) = &filter.order_column {
+                let second_id = candidate_mapping.columns.get(second).copied().ok_or(
+                    Error::InvalidStoredValue("candidate composite index column mapping missing"),
+                )?;
+                physical_current_composite_index_name(&[candidate_column_id, second_id])
+            } else {
+                physical_current_index_name(candidate_column_id)
+            };
+            let source_column_id = mapping.columns.get(&filter.source_column).copied().ok_or(
+                Error::InvalidStoredValue("source join column mapping missing"),
+            )?;
+            if filter.candidate_column != "row_uuid" || !intersections.is_empty() {
+                return Err(Error::InvalidStoredValue(
+                    "unsupported candidate-filtered index shape",
+                ));
+            }
+            let candidate_prefix =
+                std::iter::once(Value::Bytes(BranchKey::default().canonical_bytes()))
+                    .chain(filter.prefix.iter().cloned())
+                    .map(LiteralValue::from)
+                    .collect();
+            Ok(GraphBuilder::variant_index_candidate_scan(
+                storage_table,
+                primary_index,
+                scan,
+                groove::ivm::IndexCandidateFilter {
+                    table: physical_global_current_table_name(candidate_mapping.table_id),
+                    index: candidate_index,
+                    scan: StaticScanSpec::Prefix(candidate_prefix),
+                    source_column: physical_user_column_field(source_column_id),
+                    candidate_column: filter.candidate_column.clone(),
+                },
+                projection_target,
+            ))
         } else {
             Ok(GraphBuilder::variant_index_intersection_scan(
                 storage_table,

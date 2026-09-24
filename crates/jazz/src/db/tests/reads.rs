@@ -724,6 +724,127 @@ fn first_result_join_uses_declared_composite_equality_index() {
     );
 }
 
+/// The public result and live deltas guard semantics. The storage count checks
+/// that a first Global result compares covered join keys before loading link rows.
+#[test]
+fn first_result_join_filters_junction_keys_before_row_hydration() {
+    let link_row = |n: u8, replica: u8| {
+        let mut bytes = [0xbc; 16];
+        bytes[14] = replica;
+        bytes[15] = n;
+        RowUuid::from_bytes(bytes)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .composite_index(["group", "state"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .composite_index(["tag", "issue"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xba; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=160 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 80 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        for replica in 0..if n > 81 { 7 } else { 1 } {
+            db.seed_settled_mergeable_for_bootstrap(
+                "issue_tags",
+                link_row(n, replica),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([
+                    ("issue".to_owned(), Value::Uuid(row(n).0)),
+                    (
+                        "tag".to_owned(),
+                        Value::String(if n == 1 || n > 80 { "wanted" } else { "other" }.to_owned()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        }
+    }
+    let query = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 40,
+        "unmatched junction rows should not be hydrated: {reads:?}"
+    );
+
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![row(1)]);
+    let changed = block_on(db.update(
+        "issues",
+        row(81),
+        BTreeMap::from([("group".to_owned(), Value::String("wanted".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(changed.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(81)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(1), row(81)]);
+
+    let deleted = block_on(db.delete("issue_tags", link_row(1, 0), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(81)]);
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();

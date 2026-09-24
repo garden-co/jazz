@@ -2223,11 +2223,16 @@ fn schema() -> JazzSchema {
                     issues
                 }
             })
-            .table(
-                PublicTableSchema::builder(ISSUE_TAGS)
+            .table({
+                let issue_tags = PublicTableSchema::builder(ISSUE_TAGS)
                     .fk_column("issue", ISSUES)
-                    .fk_column("tag", TAGS),
-            )
+                    .fk_column("tag", TAGS);
+                if std::env::var_os("JAZZ_S1_COMPOSITE_JOIN").is_some() {
+                    issue_tags.composite_index(["tag", "issue"])
+                } else {
+                    issue_tags
+                }
+            })
             .build(),
     )
 }

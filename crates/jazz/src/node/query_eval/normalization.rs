@@ -549,6 +549,7 @@ pub(super) fn select_current_access_path(
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
         maintained: false,
+        candidate_filter: None,
         source_limit: None,
     })
 }
@@ -588,6 +589,36 @@ pub(super) fn select_composite_equality_access_path(
                 physical_current_index_value(table, second, second_value),
             ],
             intersections,
+            maintained: false,
+            candidate_filter: None,
+            source_limit: None,
+        })
+    })
+}
+
+/// Use the leading equality of a declared composite index when no matching
+/// single-column index exists. The second column remains available as a
+/// covered join key, while the ordinary graph checks all remaining filters.
+pub(super) fn select_composite_leading_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+    required_second: &str,
+) -> Option<CurrentAccessPath> {
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        if second != required_second {
+            return None;
+        }
+        let value = equalities.get(first)?.clone();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![physical_current_index_value(table, first, value)],
+            intersections: Vec::new(),
+            candidate_filter: None,
             maintained: false,
             source_limit: None,
         })
