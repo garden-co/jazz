@@ -39,9 +39,9 @@ const recordPlayerPermissions = s.definePermissions(
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ "$createdBy.account": session.user.account });
-    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist"));
     policy.playlist_entries.allowInsert.where((entry) =>
-      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+      anyOf([allowedTo.update("playlist"), hasEditorInvitation(entry.playlist_id)]),
     );
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));

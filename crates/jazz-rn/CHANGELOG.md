@@ -1,5 +1,13 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.56
+
+### Patch Changes
+
+- 9462d65: Resolve the Android Kotlin Gradle plugin and standard library through the consuming React Native project's Kotlin version, with the package's configured version as the fallback.
+  - jazz-rn-ios@2.0.0-alpha.56
+  - jazz-rn-android@2.0.0-alpha.56
+
 ## 2.0.0-alpha.55
 
 ### Patch Changes
