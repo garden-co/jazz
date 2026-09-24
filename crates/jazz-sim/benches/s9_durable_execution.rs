@@ -574,18 +574,18 @@ fn apply_transition(
     } else {
         "running"
     };
-    jazz::db::block_on(tx.insert(
+    // The instance row already exists (read above); advancing it is an
+    // update, since an explicit-id insert in an exclusive tx only creates.
+    jazz::db::block_on(tx.update(
         INSTANCES,
+        row,
         cells_map([
             ("workflow", Value::Uuid(workflow.0)),
             ("state", Value::String(state.to_owned())),
             ("currentStep", Value::U64(next_step)),
             ("wakeAt", Value::U64(0)),
         ]),
-        jazz::db::InsertOptions {
-            row_id: Some(row),
-            ..Default::default()
-        },
+        Default::default(),
     ))?;
     let _tx_id = jazz::db::block_on(tx.commit())?;
     jazz::db::block_on(client.db.tick())?;
