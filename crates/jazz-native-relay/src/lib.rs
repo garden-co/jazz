@@ -799,6 +799,9 @@ struct OpenedForeground {
     client: u64,
     /// Last native-socket reachability reported to this foreground's `Db`.
     remote_link_hint: Option<RemoteLinkHint>,
+    /// This foreground was reported `Live` since it opened or last went
+    /// explicitly offline; a disconnected worker is then backing off.
+    link_was_live: bool,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
@@ -1432,6 +1435,7 @@ impl NativeRelayHost {
                 relay: relay_handle,
                 client: client_handle,
                 remote_link_hint: None,
+                link_was_live: false,
                 runtime_token,
                 wake: None,
                 lease,
@@ -1462,7 +1466,23 @@ impl NativeRelayHost {
         }
         let scope = opened.scope.clone();
         let previous = opened.remote_link_hint;
-        let hint = if self.explicitly_offline_scopes.contains(&scope) {
+        let explicitly_offline = self.explicitly_offline_scopes.contains(&scope);
+        if explicitly_offline
+            && opened.link_was_live
+            && let Some(opened) = self.foregrounds.get_mut(&foreground)
+        {
+            // Going back online after an explicit offline period is a fresh
+            // attempt.
+            opened.link_was_live = false;
+        }
+        let Some(opened) = self.foregrounds.get(&foreground) else {
+            return;
+        };
+        // A worker that is not connected after this foreground saw it live
+        // is backing off between retries: nothing waits on that, as on the
+        // TS and native-facade hosts. Only a first connection, or one after
+        // an explicit offline period, is an attempt.
+        let hint = if explicitly_offline {
             RemoteLinkHint::Failed
         } else {
             match self.private_scope_workers.get(&scope) {
@@ -1470,6 +1490,7 @@ impl NativeRelayHost {
                 Some(_) if self.private_scope_terminal_error(&scope).is_some() => {
                     RemoteLinkHint::Failed
                 }
+                Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
                 Some(_) => RemoteLinkHint::Attempting,
                 None => RemoteLinkHint::Failed,
             }
@@ -1482,6 +1503,7 @@ impl NativeRelayHost {
             .is_ok_and(|client| client.set_foreground_remote_link_hint(hint).is_ok());
         if reported && let Some(opened) = self.foregrounds.get_mut(&foreground) {
             opened.remote_link_hint = Some(hint);
+            opened.link_was_live |= hint == RemoteLinkHint::Live;
         }
     }
 

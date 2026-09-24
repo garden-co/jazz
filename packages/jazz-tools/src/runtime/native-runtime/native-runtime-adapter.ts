@@ -714,6 +714,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverLinkRequested = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
+  private unlessEmptyReadSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
@@ -1157,14 +1158,38 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     this.remoteLink.subscribe(listener, signal);
-    if (this.db?.nativeConnectionStatus && !this.nativeLinkPoll && !this.closed) {
-      // A native host owns its socket and exposes status only by request.
-      // Poll only while someone waits on it.
-      this.nativeLinkPoll = setInterval(() => {
-        if (!this.remoteLink.hasListeners) this.stopNativeLinkPoll();
-        else this.remoteLink.changed();
-      }, NATIVE_LINK_POLL_MS);
+    this.startNativeLinkPoll();
+  }
+
+  /**
+   * A native host owns its socket and exposes status only by request; each
+   * request also lets the relay report the link to the core read gate. Poll
+   * only while someone listens and this runtime has issued a
+   * local-first-unless-empty read, so apps that never use the tier pay
+   * nothing.
+   */
+  private startNativeLinkPoll(): void {
+    if (
+      !this.db?.nativeConnectionStatus ||
+      this.nativeLinkPoll ||
+      this.closed ||
+      !this.unlessEmptyReadSeen ||
+      !this.remoteLink.hasListeners
+    ) {
+      return;
     }
+    this.nativeLinkPoll = setInterval(() => {
+      if (!this.remoteLink.hasListeners) this.stopNativeLinkPoll();
+      else this.remoteLink.changed();
+    }, NATIVE_LINK_POLL_MS);
+  }
+
+  private noteReadTier(tier?: string | null): void {
+    if (tier !== LOCAL_FIRST_UNLESS_EMPTY) return;
+    const owner = this.ownerRuntime;
+    if (owner.unlessEmptyReadSeen) return;
+    owner.unlessEmptyReadSeen = true;
+    owner.startNativeLinkPoll();
   }
 
   private stopNativeLinkPoll(): void {
@@ -1958,6 +1983,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<unknown> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     assertSupportedReadOptions(tier, optionsJson);
+    this.noteReadTier(tier);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
@@ -2011,6 +2037,7 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson?: string | null,
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
+    this.noteReadTier(tier);
     if (queryIncludesDeleted(queryJson)) {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }

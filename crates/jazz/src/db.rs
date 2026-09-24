@@ -4830,6 +4830,12 @@ struct SubscriptionPublication {
     unresolved: BTreeSet<OutputOccurrenceId>,
     /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
     opening_gate: Option<OpeningGate>,
+    /// This stream is an `EmptyOpening::AwaitRemote` offset window read as a
+    /// strict remote view, with a local-first fallback beside it.
+    remote_window: bool,
+    /// The remote window released unopened because its remote could no
+    /// longer answer; its stream now serves the local-first fallback.
+    window_fell_back: bool,
 }
 
 struct SubscriptionPublicationSnapshot {
@@ -5260,6 +5266,10 @@ pub struct SubscriptionStream {
     cleanup: Option<SubscriptionCleanup>,
     finalization: Option<SubscriptionFinalization>,
     terminated: bool,
+    /// The local-first read of a remote window, held until the window
+    /// either opens (dropping it) or can no longer be answered (serving it).
+    window_fallback: Option<Box<SubscriptionStream>>,
+    serving_fallback: bool,
 }
 
 struct CleanupGuard {
@@ -5295,6 +5305,14 @@ impl SubscriptionStream {
     /// so cancelling this caller future leaves a later `close` able to resume
     /// and await the same finalization command.
     pub async fn close(&mut self) -> Result<(), Error> {
+        self.close_own().await?;
+        if let Some(fallback) = self.window_fallback.as_mut() {
+            Box::pin(fallback.close()).await?;
+        }
+        Ok(())
+    }
+
+    async fn close_own(&mut self) -> Result<(), Error> {
         if self.finalization.is_none() {
             let Some(cleanup) = self.cleanup.take() else {
                 return Ok(());
@@ -5357,15 +5375,41 @@ impl SubscriptionStream {
 
     /// Await the next materialized subscription event.
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
-        if self.terminated {
-            return None;
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
+    pub(super) fn is_remote_window(&self) -> bool {
+        self._state
+            .borrow()
+            .sender
+            .publication
+            .borrow()
+            .remote_window
+    }
+
+    /// Settle which side of a remote window this stream serves. Once the
+    /// window opens (or ends without opening) its fallback is dropped; once
+    /// it falls back, the window is retired and the fallback serves.
+    fn sync_window_fallback(&mut self) {
+        if self.serving_fallback || self.window_fallback.is_none() {
+            return;
         }
-        loop {
-            let event =
-                std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
-            if subscription_event_is_publishable(&event) {
-                return Some(event);
+        let (fell_back, decided) = {
+            let state = self._state.borrow();
+            let publication = state.sender.publication.borrow();
+            (
+                publication.window_fell_back,
+                publication.opened || publication.opening_gate.is_none(),
+            )
+        };
+        if fell_back {
+            self.serving_fallback = true;
+            if let Some(cleanup) = self.cleanup.take() {
+                drop(cleanup(None));
             }
+            self.receiver.close();
+        } else if decided {
+            self.window_fallback = None;
         }
     }
 
@@ -5404,6 +5448,10 @@ impl SubscriptionStream {
             return None;
         }
         loop {
+            self.sync_window_fallback();
+            if self.serving_fallback {
+                return self.window_fallback.as_mut()?.try_next_event();
+            }
             let event = self.receiver.try_recv().ok()?;
             if subscription_event_is_publishable(&event) {
                 return Some(event);
@@ -5443,6 +5491,13 @@ impl Stream for SubscriptionStream {
             return Poll::Ready(None);
         }
         loop {
+            this.sync_window_fallback();
+            if this.serving_fallback {
+                return match this.window_fallback.as_mut() {
+                    Some(fallback) => Pin::new(fallback.as_mut()).poll_next(cx),
+                    None => Poll::Ready(None),
+                };
+            }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
                     return Poll::Ready(Some(event));

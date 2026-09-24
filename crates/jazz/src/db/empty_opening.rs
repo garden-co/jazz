@@ -411,22 +411,37 @@ impl SubscriptionState {
     /// loss, host hint, elapsed attempt window). A withheld opening is
     /// published now as one reset of the current maintained result, still
     /// unsettled; afterwards the stream publishes as its tier normally does.
+    ///
+    /// An unopened strict remote window instead hands its stream to the
+    /// local-first read of the same window: its own (Global) view has no
+    /// answer to show, and every read whose remote cannot answer is plain
+    /// local-first.
     pub(super) fn release_opening_gate(&self) {
         let mut publication = self.sender.publication.borrow_mut();
         let Some(gate) = publication.opening_gate.take() else {
             return;
         };
+        if gate.route == OpeningRoute::RemoteWindow {
+            if !publication.opened {
+                publication.window_fell_back = true;
+                drop(publication);
+                // Wake the consumer so the stream switches to its fallback.
+                let _ = self.sender.sender.unbounded_send(SubscriptionEvent::Delta {
+                    reset: false,
+                    publishable: false,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    settled: false,
+                    tier: self.read_tier,
+                });
+            }
+            return;
+        }
         // Without a withheld opening, ordinary local-first publication
-        // delivers the first materialized result when it exists. A strict
-        // remote window would instead keep withholding its unsettled opening
-        // until the authority answers, so it opens now with its current
-        // (possibly empty) view even if no refresh withheld it yet.
-        let window_unopened =
-            gate.route == OpeningRoute::RemoteWindow && !self.pending_initial_local_snapshot;
-        if publication.opened
-            || !(gate.withheld || window_unopened)
-            || !publication.unresolved.is_empty()
-        {
+        // delivers the first materialized result when it exists.
+        if publication.opened || !gate.withheld || !publication.unresolved.is_empty() {
             return;
         }
         let Ok(current) =

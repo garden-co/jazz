@@ -1760,8 +1760,9 @@ impl ClientDbInner {
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
         if let Some(db) = self.db.as_ref() {
-            // Explicit disconnects and recovery starts are not live; a
-            // recovery attempt reports its own start.
+            // Explicit disconnects and recovery starts are not live, and
+            // recovery retries keep reporting `Failed`: nothing waits on a
+            // backoff. Only a fresh connect reports an attempt.
             db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
         }
         let Some(connection) = self.upstream.take() else {
@@ -2002,7 +2003,7 @@ impl ClientDbInner {
         inner: &Weak<RefCell<Self>>,
         expected_generation: u64,
     ) -> Result<bool> {
-        let (db, identity, scheduler, config, state_notify) = {
+        let (db, identity, scheduler, config, state_notify, recovering) = {
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -2023,12 +2024,17 @@ impl ClientDbInner {
                 Rc::clone(&inner_state.scheduler),
                 config,
                 Arc::clone(&inner_state.upstream_state_notify),
+                inner_state.upstream_recovery_generation == Some(expected_generation),
             )
         };
 
         // The core empty-opening gate waits on an attempt, bounded from its
         // start; a failed attempt or a backoff between retries never waits.
-        db.set_remote_link_hint(CoreRemoteLinkHint::Attempting);
+        // A recovery retry after a lost link keeps the `Failed` reported at
+        // the loss, as the TS and RN hosts do.
+        if !recovering {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Attempting);
+        }
         let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,

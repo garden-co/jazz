@@ -445,6 +445,70 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
     );
 }
 
+/// A window whose remote stops being able to answer before it opens is
+/// served by the plain local-first read of the same window, like the one-shot
+/// read: a warm cache never shows an empty page because the link is down.
+///
+/// ```text
+/// alice ══ upstream ══ server(a..j): remote read of all items (cache warm)
+/// alice: detach, hint Attempting
+/// alice: subscribe window (unless-empty) ─ (withheld) ── 5 s ──► [e, f]
+/// alice: subscribe window, then hint Failed ────────────────────► [e, f]
+/// alice: one-shot window (unless-empty) ────────────────────────► [e, f]
+/// ```
+#[test]
+fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer() {
+    let server = seeded_server();
+    let alice = fresh_client(0x69);
+    let (client_transport, server_transport) = duplex();
+    let upstream = block_on(alice.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let remote = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Immediate,
+        ..ReadOpts::default()
+    };
+    let mut warm = subscribe(&alice, &items(), remote);
+    let (_, mut rows, settled) = opening(first_event(&mut warm, &alice, Some(&server)));
+    rows.sort();
+    assert!(settled);
+    assert_eq!(rows, all_rows(), "the cache holds every item");
+    let expected = vec![row(4), row(5)];
+
+    assert!(alice.detach_connection(&upstream));
+    // Delta `added` order is not the window order; compare row sets.
+    let page = |event| {
+        let (reset, mut rows, _) = opening(event);
+        rows.sort();
+        (reset, rows)
+    };
+    let mut plain = subscribe(&alice, &window(), ReadOpts::default());
+    let (_, plain_page) = page(first_event(&mut plain, &alice, None));
+    assert_eq!(plain_page, expected, "the plain local-first page is cached");
+
+    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    let mut held = subscribe(&alice, &window(), unless_empty());
+    assert_withheld(&mut held, &alice, None, 3);
+    std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
+    let (reset, rows) = page(first_event(&mut held, &alice, None));
+    assert!(reset, "the fallback opens with a reset");
+    assert_eq!(rows, expected, "the cached page, not an empty one");
+
+    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    let mut released = subscribe(&alice, &window(), unless_empty());
+    assert_withheld(&mut released, &alice, None, 3);
+    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    let (reset, rows) = page(first_event(&mut released, &alice, None));
+    assert!(reset);
+    assert_eq!(rows, expected, "a failed link releases to the cached page");
+
+    assert_eq!(
+        one_shot(&alice, None, &window(), unless_empty(), 10),
+        expected
+    );
+    block_on(released.close()).expect("close the fallen-back window");
+}
+
 /// A non-durable foreground (a browser tab or an RN foreground) over a
 /// durable storage owner (its worker or relay) that is connected to `server`.
 struct Foreground {

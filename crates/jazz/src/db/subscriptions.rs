@@ -946,6 +946,46 @@ where
         authorization_mode: QueryAuthorizationMode,
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
+        let local_first_opts = ReadOpts {
+            empty_opening: super::EmptyOpening::Deliver,
+            ..opts.clone()
+        };
+        // Boxed so this wrapper adds no inline opener frame to its callers.
+        let mut stream = Box::pin(self.open_gated_subscription(
+            prepared,
+            opts,
+            author,
+            authorization_mode,
+            allow_pending_overlay,
+        ))
+        .await?;
+        // A remote window that stops being able to answer before it opens
+        // is served by the plain local-first read of the same window, as the
+        // one-shot read falls back to its local result. That read is opened
+        // now, beside the window, so a warm cache can serve it without a
+        // round trip; the stream drops whichever side it does not serve.
+        if stream.is_remote_window() {
+            let fallback = Box::pin(self.open_gated_subscription(
+                prepared,
+                local_first_opts,
+                author,
+                authorization_mode,
+                allow_pending_overlay,
+            ))
+            .await?;
+            stream.window_fallback = Some(Box::new(fallback));
+        }
+        Ok(stream)
+    }
+
+    async fn open_gated_subscription(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+        allow_pending_overlay: bool,
+    ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_read(&opts).await?;
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
@@ -1208,6 +1248,8 @@ where
             sender,
             publication: Rc::new(RefCell::new(SubscriptionPublication {
                 opening_gate,
+                remote_window: opening_gate
+                    .is_some_and(|gate| gate.route == super::OpeningRoute::RemoteWindow),
                 ..SubscriptionPublication::default()
             })),
             requested_tier: read_tier,
@@ -1350,6 +1392,8 @@ where
             cleanup: Some(cleanup),
             finalization: None,
             terminated: false,
+            window_fallback: None,
+            serving_fallback: false,
         })
     }
 
