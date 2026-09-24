@@ -489,6 +489,13 @@ fn insert_process_metadata(fields: &mut Map<String, Value>) {
     fields.insert("knobs".to_owned(), json!(knob_env()));
 }
 
+#[cfg(test)]
+pub(super) fn process_metadata_for_test() -> Map<String, Value> {
+    let mut fields = Map::new();
+    insert_process_metadata(&mut fields);
+    fields
+}
+
 fn git_dirty() -> bool {
     !git_output(["status", "--porcelain"]).is_empty()
 }

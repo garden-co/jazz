@@ -1568,6 +1568,116 @@ mod tests {
 
         assert_eq!(run(), run());
     }
+    #[test]
+    fn git_status_failure_is_reported_dirty() {
+        const CHILD: &str = "JAZZ_SIM_GIT_STATUS_FAILURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(git_dirty(), "failed `git status` must be reported dirty");
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-git-status-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(
+            !status.status.success(),
+            "temporary non-repository must make `git status` fail",
+        );
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::git_status_failure_is_reported_dirty"])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+        assert!(
+            result.status.success(),
+            "child test should observe failed git status as dirty:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "expected child harness to run this regression:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+    }
+
+    #[test]
+    fn successful_empty_git_status_is_available_without_a_commit() {
+        const CHILD: &str = "JAZZ_SIM_EMPTY_STATUS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let fields = metadata_fields("test", "test", 0, "s");
+            assert_eq!(fields["git_dirty"], false);
+            assert_eq!(fields["git_status_available"], true);
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-empty-git-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&temp_dir)
+            .status()
+            .unwrap();
+        assert!(
+            initialized.success(),
+            "temporary repository should initialize"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::successful_empty_git_status_is_available_without_a_commit",
+            ])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+
+        assert!(
+            result.status.success(),
+            "child test should distinguish successful empty status from missing HEAD:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+    }
 }
 
 #[cfg(feature = "cold-settle-attribution")]
