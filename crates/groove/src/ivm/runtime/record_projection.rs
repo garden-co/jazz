@@ -144,66 +144,107 @@ pub(super) fn root_identity_fields(
     Ok(Some(RootIdentity { fields, group_len }))
 }
 
-/// Root ordering for one group's window: like
-/// [`apply_root_ordering_operations`], but only this group's roots take part,
-/// and indices are positions within the group.
-pub(super) fn apply_group_root_ordering_operations(
-    before: &BTreeMap<Vec<u8>, usize>,
-    after: &BTreeMap<Vec<u8>, usize>,
+/// Encodes a window record's terminal root key.
+pub(super) type RootKeyOf<'a> = dyn Fn(&[u8]) -> Result<Vec<u8>, IvmRuntimeError> + 'a;
+
+/// A root in one group's window during ordering: a row byte-identical in
+/// the before and after windows is tracked by its bytes, so only changed rows
+/// are keyed. Unchanged rows keep their relative order and carry no edit.
+#[derive(PartialEq, Eq)]
+enum WindowRoot<'a> {
+    Unchanged(&'a [u8]),
+    Keyed(Vec<u8>),
+}
+
+/// Root ordering for one group's window (#3290): only this group's roots take
+/// part, indices are positions within the group, and only rows that differ
+/// between the windows (plus any unchanged row that must move) are keyed.
+pub(super) fn apply_group_window_ordering(
+    before: &[WindowedRecord],
+    after: &[WindowedRecord],
+    key_of: &RootKeyOf<'_>,
     root_descriptor: RecordDescriptor,
     terminal: &mut TerminalDeltas,
-) {
-    let in_group = |key: &[u8]| before.contains_key(key) || after.contains_key(key);
+) -> Result<(), IvmRuntimeError> {
+    fn root<'a>(
+        record: &'a [u8],
+        other: &[WindowedRecord],
+        key_of: &RootKeyOf<'_>,
+    ) -> Result<WindowRoot<'a>, IvmRuntimeError> {
+        if other
+            .iter()
+            .any(|(candidate, _)| candidate.as_ref() == record)
+        {
+            Ok(WindowRoot::Unchanged(record))
+        } else {
+            key_of(record).map(WindowRoot::Keyed)
+        }
+    }
     let mut current = before
         .iter()
-        .map(|(key, index)| (*index, key.clone()))
+        .map(|(record, _)| root(record, after, key_of))
+        .collect::<Result<Vec<_>, _>>()?;
+    let desired = after
+        .iter()
+        .map(|(record, _)| root(record, before, key_of))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Only changed rows can carry an edit; they are exactly the keyed roots.
+    let group_keys = current
+        .iter()
+        .chain(&desired)
+        .filter_map(|root| match root {
+            WindowRoot::Keyed(key) => Some(key.clone()),
+            WindowRoot::Unchanged(_) => None,
+        })
         .collect::<Vec<_>>();
-    current.sort_by_key(|(index, _)| *index);
-    let mut current = current.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
     for operation in &mut terminal.operations {
-        if !operation.path.is_empty() || !in_group(&operation.root_key) {
+        if !operation.path.is_empty() || !group_keys.contains(&operation.root_key) {
             continue;
         }
         match &mut operation.edit {
             TerminalEdit::Insert { index, key, .. } => {
-                if let Some(actual) = after.get(key) {
-                    *index = *actual;
+                let root = WindowRoot::Keyed(key.clone());
+                if let Some(actual) = desired.iter().position(|candidate| *candidate == root) {
+                    *index = actual;
                 }
-                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                if let Some(existing) = current.iter().position(|candidate| *candidate == root) {
                     current.remove(existing);
                 }
-                current.insert((*index).min(current.len()), key.clone());
+                current.insert((*index).min(current.len()), root);
             }
             TerminalEdit::Remove { key } => {
-                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                let root = WindowRoot::Keyed(key.clone());
+                if let Some(existing) = current.iter().position(|candidate| *candidate == root) {
                     current.remove(existing);
                 }
             }
             TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
         }
     }
-    let mut desired = after
-        .iter()
-        .map(|(key, index)| (*index, key.clone()))
-        .collect::<Vec<_>>();
-    desired.sort_by_key(|(index, _)| *index);
-    for (after_index, key) in desired {
-        if current.get(after_index) != Some(&key)
-            && let Some(existing) = current.iter().position(|candidate| candidate == &key)
-        {
-            current.remove(existing);
-            current.insert(after_index.min(current.len()), key.clone());
-            terminal.operations.push(TerminalOperation {
-                root_descriptor,
-                root_key: key.clone(),
-                path: Vec::new(),
-                edit: TerminalEdit::Move {
-                    key,
-                    index: after_index,
-                },
-            });
+    for (after_index, root) in desired.iter().enumerate() {
+        if current.get(after_index) == Some(root) {
+            continue;
         }
+        let Some(existing) = current.iter().position(|candidate| candidate == root) else {
+            continue;
+        };
+        let moved = current.remove(existing);
+        current.insert(after_index.min(current.len()), moved);
+        let key = match root {
+            WindowRoot::Keyed(key) => key.clone(),
+            WindowRoot::Unchanged(record) => key_of(record)?,
+        };
+        terminal.operations.push(TerminalOperation {
+            root_descriptor,
+            root_key: key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Move {
+                key,
+                index: after_index,
+            },
+        });
     }
+    Ok(())
 }
 
 pub(super) fn apply_root_ordering_operations(
