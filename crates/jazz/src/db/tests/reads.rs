@@ -538,6 +538,90 @@ fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
     assert_eq!(read(&prepared), vec![row(1)]);
 }
 
+/// The public result is the oracle. The internal probe count confirms that a
+/// broad first-result join uses both the root and junction filter indexes.
+#[test]
+fn filtered_join_one_shot_uses_both_source_indexes() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb8; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=80 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([(
+                "group".to_owned(),
+                Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+            )]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "both filtered sources should probe indexes before joining"
+    );
+}
+
 /// Opens a history-complete store with two issues and a set of settled
 /// `issue_tags` links for the point-join equivalence tests below. The junction
 /// carries a `scope` column so a test can install a read policy that hides some

@@ -455,6 +455,7 @@ fn db_read_receipt(config: &Config) {
         let prepared = db.prepare_query(&query).expect("prepare receipt query");
         let prepare_us = start.elapsed().as_micros();
         for sample in 0..7 {
+            db.reset_storage_read_metrics_for_test();
             let start = Instant::now();
             let global_rows = block_on(db.all_for_identity(
                 &prepared,
@@ -468,6 +469,7 @@ fn db_read_receipt(config: &Config) {
             ))
             .expect("global receipt query");
             let global_us = start.elapsed().as_micros();
+            let global_reads = db.take_storage_read_metrics_for_test();
             let actual = row_set(global_rows);
             assert!(
                 actual == expected,
@@ -475,9 +477,11 @@ fn db_read_receipt(config: &Config) {
                 expected.len(),
                 actual.len()
             );
+            db.reset_storage_read_metrics_for_test();
             let start = Instant::now();
             let (rows, p) = db.read_profiled(&prepared).expect("profile receipt query");
             let outer_us = start.elapsed().as_micros();
+            let local_reads = db.take_storage_read_metrics_for_test();
             let actual = row_set(rows);
             assert!(
                 actual == expected,
@@ -495,7 +499,15 @@ fn db_read_receipt(config: &Config) {
                     "expected_rows": expected.len(),
                     "prepare_us": prepare_us,
                     "global_us": global_us,
+                    "global_current_rows_read": global_reads.global_current_rows.reads,
+                    "global_current_indexes_read": global_reads.global_current_indexes.reads,
+                    "global_deletion_registers_read": global_reads.register_global_current_rows.reads,
+                    "global_storage_ranges": global_reads.total.ranges,
                     "local_profiled_us": outer_us,
+                    "local_current_rows_read": local_reads.global_current_rows.reads,
+                    "local_current_indexes_read": local_reads.global_current_indexes.reads,
+                    "local_deletion_registers_read": local_reads.register_global_current_rows.reads,
+                    "local_storage_ranges": local_reads.total.ranges,
                     "total_us": p.total.as_micros(),
                     "resolve_us": p.resolve_view.as_micros(),
                     "compile_us": p.compile_program.as_micros(),

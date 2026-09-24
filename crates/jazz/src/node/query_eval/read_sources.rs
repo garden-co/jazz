@@ -4237,8 +4237,8 @@ where
                 // Preserve bounded current ID reads. The policy-point guard
                 // from #2187 applies to future deletion delivery, not an
                 // initial snapshot whose owner releases it before any writes.
-                // Do not inherit snapshot-only secondary-index intersections
-                // or source limits: both consumers use live index graphs below.
+                // Select initial paths below from the executing binding; the
+                // generic cache must not retain binding-specific prefixes.
                 let tier = request
                     .reads
                     .primary
@@ -4257,6 +4257,38 @@ where
         );
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
+            let root = root_source_id(&query.table);
+            // A conjunctive root equality applies to every result even when
+            // includes or an existential join add relational nodes to the
+            // normalized program. The generic selector declines the whole
+            // program in that case; select only this root occurrence here.
+            // Policy alternatives and relation unions can reuse the same
+            // source identity for arms with different predicates.
+            if query.flat_join.is_none()
+                && query.policy_branches.is_empty()
+                && query.reachable.is_empty()
+                && query.inherits.is_empty()
+                && query.array_subqueries.is_empty()
+                && query.aggregate.is_none()
+                && query.relation.is_none()
+            {
+                if !paths.contains_key(&root) {
+                    let equalities = root_literal_equalities(query, binding)?;
+                    // Same admission guard as the ordinary selector and the
+                    // junction narrowing below.
+                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
+                        .guarded_current_access_path(
+                            &request.reads.primary,
+                            &root,
+                            &equalities,
+                            true,
+                            true,
+                        )?
+                    {
+                        paths.insert(root.clone(), path);
+                    }
+                }
+            }
             if query.joins.len() == 1
                 && query.flat_join.is_none()
                 && query.policy_branches.is_empty()
@@ -4271,13 +4303,23 @@ where
                     && join.source_lookup.is_none()
                     && join.correlated_filters.is_empty()
                     && join.nested_joins.is_empty()
-                    && let Some(Value::Uuid(row_id)) =
-                        root_literal_equalities(query, binding)?.get("id")
                 {
-                    // The root equality fixes the only row id that can satisfy
-                    // this existential junction join. Narrow this occurrence
-                    // before the ordinary filter, deletion, and policy graphs
-                    // evaluate it; retained subscriptions keep their live path.
+                    // An exact root id fixes the junction's foreign key. Without
+                    // one, a conjunctive junction filter can still narrow this
+                    // occurrence before the ordinary join, deletion, and policy
+                    // graphs evaluate it. Keep the root-id probe when available
+                    // rather than intersecting it with a potentially broad tag
+                    // index; retained subscriptions keep their live path.
+                    let equalities = match root_literal_equalities(query, binding)?.get("id") {
+                        Some(Value::Uuid(row_id)) => {
+                            BTreeMap::from([(join.on_column.clone(), Value::Uuid(*row_id))])
+                        }
+                        _ => literal_equalities_for_filters(&join.filters, binding)?,
+                    };
+                    // Key the path by the occurrence normalization actually
+                    // emitted rather than re-spelling its alias scheme here: a
+                    // stale spelling would silently drop the probe, or narrow
+                    // a different occurrence of the same table.
                     //
                     // Admission uses the same guard as the ordinary selector:
                     // the junction source's own read tier must be Global or
@@ -4286,24 +4328,17 @@ where
                     // admitted path keeps the exact shape
                     // `select_current_access_path` produces for this one-shot
                     // read.
-                    let source = SourceId {
-                        table: join.table.clone(),
-                        path: SourcePath {
-                            components: vec![SourceRole::Alias("join_via:0".to_owned())],
-                        },
-                    };
-                    let equalities =
-                        BTreeMap::from([(join.on_column.clone(), Value::Uuid(*row_id))]);
-                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
-                        .guarded_current_access_path(
-                            &request.reads.primary,
-                            &source,
-                            &equalities,
-                            true,
-                            true,
-                        )?
+                    if let Some(join_source) = single_root_join_source(request, &join.table)
+                        && let Some(path @ CurrentAccessPath::Index { .. }) = self
+                            .guarded_current_access_path(
+                                &request.reads.primary,
+                                join_source,
+                                &equalities,
+                                true,
+                                true,
+                            )?
                     {
-                        paths.insert(source, path);
+                        paths.insert(join_source.clone(), path);
                     }
                 }
             }
@@ -5501,4 +5536,24 @@ fn append_author_projection_values(
         values.push(value);
     }
     Ok(())
+}
+
+/// The normalized source occurrence of a query's only root-level `join_via`.
+///
+/// Returns `None` unless normalization recorded exactly one root join
+/// contribution and it reads `join_table`, so a caller never guesses which
+/// occurrence an access path applies to.
+fn single_root_join_source<'a>(
+    request: &'a QueryProgramRequest,
+    join_table: &str,
+) -> Option<&'a SourceId> {
+    let mut root_joins = request
+        .input
+        .shape
+        .join_contributions
+        .iter()
+        .filter(|contribution| contribution.parent.is_none());
+    let contribution = root_joins.next()?;
+    (root_joins.next().is_none() && contribution.source.table == join_table)
+        .then_some(&contribution.source)
 }
