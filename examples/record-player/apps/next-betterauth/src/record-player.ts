@@ -62,7 +62,7 @@ export class JazzRecordPlayerStore {
     }));
   }
 
-  /** Offsets use cached rows once any are local; an empty cache waits for the server. */
+  /** Authority-relative: an offset over a partly synced cache would skip rows. */
   async playlistWindow(
     playlistId: string,
     offset = PLAYLIST_WINDOW_OFFSET,
@@ -74,7 +74,7 @@ export class JazzRecordPlayerStore {
         .orderBy("position", "asc")
         .offset(offset)
         .limit(limit),
-      { tier: "local-first-unless-empty" },
+      { tier: "remote" },
     );
     return rows.map((row) => ({
       id: row.id,
