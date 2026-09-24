@@ -80,6 +80,7 @@ fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
 replay that transient foreground error to a peer attached later.
 
 - `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
+- `INV-API-36`: An explicit-id `insert` in an exclusive transaction MUST only create: it MUST reject with `ErrorCode::WriteRejected`, without staging content, when its `(table, row)` target is visible in the transaction's snapshot-plus-overlay view, deleted there, or staged earlier in the same transaction. A target hidden by read policy MUST be rejected with the same error as an `upsert` over it, never disclosed as existing. Overwriting requires `upsert` or `update`; concurrent creates of one absent id remain first-committer-wins.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -366,13 +367,22 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
-For an exclusive transaction, a root `insert` with an explicit id is
-insert-only: its target MUST be absent in the transaction's frozen snapshot
-and in its own staged overlay. An existing content row, a committed or
-pending deletion, or any earlier staged mutation at that id MUST reject with
-`ErrorCode::WriteRejected` before creating or replacing pending content. A
-truly absent insert remains subject to exclusive first-committer-wins
-validation, so concurrent inserts still allow exactly one commit to win.
+In an exclusive transaction, `insert` with an explicit row id is
+create-only (`INV-API-36`): overwriting an existing row requires `upsert`
+(`INV-API-10`) or `update`. The existence check is keyed by `(table, row)` and
+resolved against the transaction's snapshot-plus-overlay view before any
+content is staged. A target visible there, or staged earlier in the same
+transaction, rejects with `ErrorCode::WriteRejected` ("row already exists"). A
+committed or staged deletion also rejects with `ErrorCode::WriteRejected`
+("row already deleted"), matching the deleted-target rule for `upsert`; an
+insert never implicitly restores the deletion register. Deciding existence is
+a user read (ch. 7), so a target hidden from the transaction's identity by read
+policy is rejected through exactly the path, code, and message an `upsert` over
+it produces, without naming the row as existing. A truly absent target stages
+normally, records its absence read, and remains subject to exclusive
+first-committer-wins validation, so of two concurrent creates of one absent id
+exactly one commits. Inserts that let `RowIdSource` choose the id skip the
+check. Standalone `Db::insert` and mergeable-transaction inserts are unchanged.
 
 An upsert's `WriteTarget` is the complete read view used to choose between
 update and insert. For a head-over-base branch view, a head-local row is patched

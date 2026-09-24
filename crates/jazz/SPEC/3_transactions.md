@@ -244,6 +244,10 @@ While the transaction is open, a point read records either
 binding_id, binding_values }` carrying the inline shape. Snapshot reads stay
 stable after later commits and observe the transaction's own pending writes
 (`INV-TX-14`, `INV-TX-15`).
+An explicit-id `insert` is create-only in an exclusive transaction: it performs
+the same authoritative point read as `upsert` (recording the `RowRead` or
+`AbsentRead`) and rejects rather than replacing a visible, deleted, or
+already-staged target (ch. 13, `INV-API-36`).
 
 Commit closes the exclusive transaction and makes its writes syncable.
 `commit_exclusive` mints the `TxId`, stores the writes locally as
