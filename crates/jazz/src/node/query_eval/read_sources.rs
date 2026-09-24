@@ -4097,34 +4097,58 @@ where
 
         let mut paths = BTreeMap::new();
         for (source, equalities) in equalities_by_source {
-            let Some(tier) = read_view.source_current_tier(&source) else {
-                continue;
-            };
-            let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-            let Some(mut path) = select_current_access_path(&table, &equalities) else {
-                continue;
-            };
-            // Authorization dependencies are cached by policy shape and claim
-            // schema, not by a resolved claim value. A secondary-index prefix
-            // derived from this request could therefore make a later identity
-            // reuse another identity's candidate set. Keep those reusable
-            // graphs identity-neutral; maintained root views are compiled for
-            // this concrete request and may safely select their own index.
-            if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
-                continue;
-            }
-            if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
-                *maintained = true;
-            }
-            // Local sources still combine the selected settled candidates
-            // with the complete ahead overlay before choosing a winner, so a
-            // newer row which leaves an equality prefix cannot leave behind a
-            // stale settled match.
-            if matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
+            if let Some(path) = self.guarded_current_access_path(
+                read_view,
+                &source,
+                &equalities,
+                allow_local,
+                allow_secondary_indexes,
+            )? {
                 paths.insert(source, path);
             }
         }
         Ok(paths)
+    }
+
+    /// The single admission guard for a physical current-source access path.
+    /// Every selector, including specialised first-result narrowings, must go
+    /// through this so none can obtain an index path that the ordinary
+    /// normalized-program selector would refuse.
+    fn guarded_current_access_path(
+        &self,
+        read_view: &ReadView<RequestedSourceStage>,
+        source: &SourceId,
+        equalities: &BTreeMap<String, Value>,
+        allow_local: bool,
+        allow_secondary_indexes: bool,
+    ) -> Result<Option<CurrentAccessPath>, Error> {
+        let Some(tier) = read_view.source_current_tier(source) else {
+            return Ok(None);
+        };
+        // Local sources still combine the selected settled candidates
+        // with the complete ahead overlay before choosing a winner, so a
+        // newer row which leaves an equality prefix cannot leave behind a
+        // stale settled match. Any other tier keeps its full source.
+        if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
+            return Ok(None);
+        }
+        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
+        let Some(mut path) = select_current_access_path(&table, equalities) else {
+            return Ok(None);
+        };
+        // Authorization dependencies are cached by policy shape and claim
+        // schema, not by a resolved claim value. A secondary-index prefix
+        // derived from this request could therefore make a later identity
+        // reuse another identity's candidate set. Keep those reusable
+        // graphs identity-neutral; maintained root views are compiled for
+        // this concrete request and may safely select their own index.
+        if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+            return Ok(None);
+        }
+        if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+            *maintained = true;
+        }
+        Ok(Some(path))
     }
 
     pub(super) fn one_shot_access_paths(
@@ -4259,10 +4283,17 @@ where
                 && query.relation.is_none()
             {
                 if !paths.contains_key(&root) {
-                    let table = self.table_in_schema(&query.table, shape.schema_version())?;
                     let equalities = root_literal_equalities(query, binding)?;
-                    if let Some(path @ CurrentAccessPath::Index { .. }) =
-                        select_current_access_path(&table, &equalities)
+                    // Same admission guard as the ordinary selector and the
+                    // junction narrowing below.
+                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
+                        .guarded_current_access_path(
+                            &request.reads.primary,
+                            &root,
+                            &equalities,
+                            true,
+                            true,
+                        )?
                     {
                         paths.insert(root.clone(), path);
                     }
@@ -4305,7 +4336,6 @@ where
                     // graphs evaluate it. Keep the root-id probe when available
                     // rather than intersecting it with a potentially broad tag
                     // index; retained subscriptions keep their live path.
-                    let join_table = self.table_in_schema(&join.table, shape.schema_version())?;
                     let equalities = match root_literal_equalities(query, binding)?.get("id") {
                         Some(Value::Uuid(row_id)) => {
                             BTreeMap::from([(join.on_column.clone(), Value::Uuid(*row_id))])
@@ -4316,9 +4346,23 @@ where
                     // emitted rather than re-spelling its alias scheme here: a
                     // stale spelling would silently drop the probe, or narrow
                     // a different occurrence of the same table.
+                    //
+                    // Admission uses the same guard as the ordinary selector:
+                    // the junction source's own read tier must be Global or
+                    // Local, and secondary indexes must be allowed. It passes
+                    // `allow_local` like `one_shot_access_paths`, so the
+                    // admitted path keeps the exact shape
+                    // `select_current_access_path` produces for this one-shot
+                    // read.
                     if let Some(join_source) = single_root_join_source(request, &join.table)
-                        && let Some(path @ CurrentAccessPath::Index { .. }) =
-                            select_current_access_path(&join_table, &equalities)
+                        && let Some(path @ CurrentAccessPath::Index { .. }) = self
+                            .guarded_current_access_path(
+                                &request.reads.primary,
+                                join_source,
+                                &equalities,
+                                true,
+                                true,
+                            )?
                     {
                         paths.insert(join_source.clone(), path);
                     }

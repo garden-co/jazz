@@ -1636,9 +1636,72 @@ pub struct IvmGraph {
     table_sources: HashMap<String, HashSet<NodeId>>,
     binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
     frontier_sources: HashMap<String, HashSet<NodeId>>,
+    /// Route barriers below shared prepared-shape terminals (#3288).
+    routes: super::routes::RouteIndex,
 }
 
 impl IvmGraph {
+    pub(crate) fn routes(&self) -> &super::routes::RouteIndex {
+        &self.routes
+    }
+
+    /// Mark `barrier` (a bound route filter over `terminal`) so activation
+    /// stops there and the tick routes `terminal`'s delta by key instead.
+    pub(crate) fn add_route_barrier(
+        &mut self,
+        terminal: NodeId,
+        barrier: NodeId,
+        field_indices: Vec<usize>,
+        field_types: Vec<ValueType>,
+        key: Vec<u8>,
+        root_ordering_node: Option<NodeId>,
+    ) {
+        if self.routes.add(
+            terminal,
+            barrier,
+            field_indices,
+            field_types,
+            key,
+            root_ordering_node,
+        ) {
+            self.activations.clear();
+        }
+    }
+
+    pub(crate) fn release_route_barrier(&mut self, barrier: NodeId) {
+        if self.routes.release(barrier) {
+            self.activations.clear();
+        }
+    }
+
+    /// Every descendant of `roots`, including those behind route barriers.
+    pub(crate) fn downstream_through_routes(
+        &self,
+        roots: impl IntoIterator<Item = NodeId>,
+    ) -> std::collections::HashSet<NodeId> {
+        let mut reached = std::collections::HashSet::new();
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if reached.insert(id)
+                && let Some(node) = self.nodes.get(&id)
+            {
+                pending.extend(node.children.iter().copied());
+            }
+        }
+        reached
+    }
+
+    /// Descendants of changed sources, crossing route barriers. Hydration uses
+    /// this: a binding change must invalidate every bound suffix it reaches.
+    pub(crate) fn affected_nodes_through_routes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> std::collections::HashSet<NodeId> {
+        let sources = self.source_nodes(tables, bindings);
+        self.downstream_through_routes(sources)
+    }
+
     pub(crate) fn execution_layout(
         &self,
         roots: impl IntoIterator<Item = NodeId>,
@@ -1706,7 +1769,14 @@ impl IvmGraph {
         descriptor: NodeDescriptor,
         durability: NodeDurability,
     ) -> NodeId {
-        self.activations.added(&descriptor.inputs);
+        // A durable node changes whether every route barrier above it keeps
+        // ordinary activation, including in plans that never reached its
+        // inputs because they stopped at such a barrier.
+        if matches!(durability, NodeDurability::Durable { .. }) {
+            self.activations.clear();
+        } else {
+            self.activations.added(&descriptor.inputs);
+        }
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
@@ -1772,7 +1842,8 @@ impl IvmGraph {
         self.nodes.get(&id)
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+    #[cfg(test)]
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
         self.activations.clear();
         self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
@@ -1800,7 +1871,16 @@ impl IvmGraph {
         tables: impl IntoIterator<Item = &'a str>,
         bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
     ) -> Result<std::sync::Arc<super::activation::ActivationPlan>, NodeId> {
-        let sources = tables
+        let sources = self.source_nodes(tables, bindings);
+        self.activations.get(self, sources)
+    }
+
+    fn source_nodes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> Vec<NodeId> {
+        tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
             .chain(bindings.into_iter().flat_map(|binding| {
@@ -1811,8 +1891,7 @@ impl IvmGraph {
                 )
             }))
             .flat_map(|nodes| nodes.iter().copied())
-            .collect::<Vec<_>>();
-        self.activations.get(self, sources)
+            .collect()
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
@@ -1832,6 +1911,9 @@ impl IvmGraph {
 
     pub fn remove_node(&mut self, id: NodeId) {
         self.activations.removed(id);
+        if self.routes.remove(id) {
+            self.activations.clear();
+        }
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
