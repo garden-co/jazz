@@ -2518,21 +2518,6 @@ pub(super) fn current_version_index(
     })
 }
 
-pub(super) fn version_wins_over_open_winner(
-    _incoming: &VersionRow,
-    incoming_tx_id: TxId,
-    incoming_made_at: TxTime,
-    open_winner: Option<(&VersionRow, TxId, TxTime)>,
-) -> bool {
-    match open_winner {
-        None => true,
-        Some((_, winner_tx_id, winner_made_at)) => {
-            incoming_made_at.sort_key(incoming_tx_id.node)
-                > winner_made_at.sort_key(winner_tx_id.node)
-        }
-    }
-}
-
 pub(super) fn version_tx_id_from_aliases(
     version: &VersionRow,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,

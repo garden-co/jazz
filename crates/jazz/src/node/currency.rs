@@ -927,16 +927,6 @@ where
             .is_some())
     }
 
-    pub(super) async fn transaction_made_at(&self, tx_id: TxId) -> Result<Option<TxTime>, Error> {
-        if !self.node_aliases.contains_key(&tx_id.node) {
-            return Ok(None);
-        }
-        if self.transaction_exists(tx_id).await? {
-            return Ok(Some(tx_id.time));
-        }
-        Ok(None)
-    }
-
     pub(super) async fn query_version_by_alias(
         &mut self,
         table: &str,

@@ -285,34 +285,55 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
-            if !matches!(fate, Fate::Rejected(_)) {
-                content_versions.push(stored.clone());
-            }
-            stored_versions.push(stored.clone());
+            let mut stored = stored;
             if update_current_indexes && matches!(fate, Fate::Accepted) {
-                if global_time.is_some() {
+                if global_time.is_some() && self.minting_global_time {
                     let key = (
                         stored.table().to_owned(),
                         stored.branch_key().clone(),
                         stored.row_uuid(),
                     );
                     if let Some(merged) = self
-                        .merged_global_post_image(
-                            batch,
-                            author_schema,
-                            &table_schema,
-                            &stored,
-                            tx.tx_id,
-                        )
+                        .merged_global_post_image(batch, author_schema, &table_schema, &stored, tx.tx_id)
                         .await?
                     {
+                        // History holds the post-image at this seq; peers
+                        // receive it for this transaction.
+                        stored = merged.clone();
                         pending_global_updates.insert(key, merged);
+                    }
+                } else if global_time.is_some() {
+                    let key = (
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
+                        stored.row_uuid(),
+                    );
+                    // Accepted rows from upstream are post-images at their
+                    // seq: a newer seq replaces the row whole.
+                    let current_seq = self
+                        .global_current_seq_in_batch(
+                            batch,
+                            author_schema,
+                            stored.table(),
+                            stored.branch_key(),
+                            stored.row_uuid(),
+                        )
+                        .await?;
+                    if current_seq.is_none_or(|current| Some(current) < global_time) {
+                        pending_global_updates.insert(key, stored.clone());
                     }
                 }
             }
+            if !matches!(fate, Fate::Rejected(_)) {
+                content_versions.push(stored.clone());
+            }
+            stored_versions.push(stored.clone());
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             let storage_key = self.version_storage_primary_key(&stored)?;
-            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+            if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
+                // The authority's post-image replaces this node's own copy.
+                batch.update_raw(history_table.as_ref(), storage_key, groove_record);
+            } else if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
                 == groove::db::EnsureExactOutcome::Conflict
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -363,22 +384,6 @@ where
             }
         }
         Ok(())
-    }
-
-    fn translate_cells_to_current_write_schema(
-        &mut self,
-        source: SchemaVersionId,
-        table: &str,
-        cells: &mut BTreeMap<String, Value>,
-    ) -> Result<(SchemaVersionId, String), Error> {
-        let target = self.catalogue.active_schema.schema;
-        if source == target {
-            return Ok((source, table.to_owned()));
-        }
-        if let Some(path) = self.compiled_lens_path(source, target, table)? {
-            return Ok((target, apply_compiled_lens_path(&path, cells)));
-        }
-        Ok((source, table.to_owned()))
     }
 
     /// A wire row version is a complete row under the schema id it declares.

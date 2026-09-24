@@ -805,7 +805,8 @@ where
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             absent_node_alias: None,
-            ahead_current_keys: FxHashSet::default(),
+            ahead_current_keys: FxHashMap::default(),
+            minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             #[cfg(any(test, feature = "testing"))]

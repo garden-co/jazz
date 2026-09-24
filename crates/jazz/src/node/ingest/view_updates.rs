@@ -66,38 +66,68 @@ where
         let wins = |name: &str| {
             authors(name) && !newer_sets_everything && !newer_sets.contains(name)
         };
-        let mut merged = previous.record.to_values()?;
-        let incoming_values = incoming.record.to_values()?;
-        let mut changed = false;
-        let mut take = |merged: &mut Vec<Value>, index: usize| {
-            if merged[index] != incoming_values[index] {
-                merged[index] = incoming_values[index].clone();
-                changed = true;
-            }
+        // The post-image keeps the incoming write's identity: it is the row
+        // as of this write's seq. Only cells that a newer write set keep
+        // their value from the previous image.
+        let mut merged = incoming.record.to_values()?;
+        let previous_values = previous.record.to_values()?;
+        let keep = |merged: &mut Vec<Value>, index: usize| {
+            merged[index] = previous_values[index].clone();
         };
-        if wins(DELETION_COLUMN_NAME) {
-            take(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
+        if !wins(DELETION_COLUMN_NAME) {
+            keep(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
         }
         for (index, column) in table_schema.columns.iter().enumerate() {
-            if wins(&column.name) {
-                take(&mut merged, HistoryRowRecord::USER_CELLS + index);
+            if !wins(&column.name) {
+                keep(&mut merged, HistoryRowRecord::USER_CELLS + index);
             }
         }
-        if incoming_is_newest {
-            for index in [
-                HistoryRowRecord::FIELD_TX_TIME_IDX,
-                HistoryRowRecord::FIELD_TX_NODE_ID_IDX,
-                HistoryRowRecord::FIELD_UPDATED_BY_IDX,
-                HistoryRowRecord::FIELD_UPDATED_AT_IDX,
-                merged.len() - 1,
-            ] {
-                take(&mut merged, index);
-            }
+        if !incoming_is_newest {
+            keep(&mut merged, HistoryRowRecord::FIELD_UPDATED_BY_IDX);
+            keep(&mut merged, HistoryRowRecord::FIELD_UPDATED_AT_IDX);
         }
-        if !changed {
+        for index in [
+            HistoryRowRecord::FIELD_CREATED_BY_IDX,
+            HistoryRowRecord::FIELD_CREATED_AT_IDX,
+        ] {
+            keep(&mut merged, index);
+        }
+        incoming.with_record_values(merged).map(Some)
+    }
+
+    pub(super) async fn global_current_seq_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<GlobalTime>, Error> {
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
+            table,
+            PhysicalCurrentClass::Global,
+        )?;
+        let Some(raw) = self
+            .database
+            .primary_key_get_raw_in_batch(
+                batch,
+                &current_table,
+                &[
+                    Value::Bytes(branch_key.canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?
+        else {
             return Ok(None);
-        }
-        previous.with_record_values(merged).map(Some)
+        };
+        Ok(
+            match raw.record().get_idx(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)? {
+                Value::U64(seq) => Some(GlobalTime(seq)),
+                _ => None,
+            },
+        )
     }
 
     async fn query_global_winner_in_batch(
@@ -339,6 +369,20 @@ where
         Ok(())
     }
 
+    pub(super) fn write_history_post_image(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        version: &VersionRow,
+    ) -> Result<(), Error> {
+        let (history_table, record) = self.version_storage_write_binding(version)?;
+        batch.update_raw(
+            history_table.as_ref(),
+            self.version_storage_primary_key(version)?,
+            record,
+        );
+        Ok(())
+    }
+
     pub(super) fn write_global_current_update(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -373,26 +417,29 @@ where
         Ok(())
     }
 
+    /// The client overlay holds one row per row: the newest pending local
+    /// image. Each local image is already built over the previous visible row
+    /// (overlay or synced), so the newest pending image is the fold of every
+    /// pending patch for that row. Replays and older images are ignored.
     pub(super) fn write_ahead_current_insert(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
     ) -> Result<(), Error> {
-        // A peer may replay a transaction that is already present locally
-        // (notably while a fresh browser relay hydrates from its persistent
-        // worker). History ingestion verifies that replay is byte-identical;
-        // its pending-current projection must be idempotent too. Otherwise a
-        // self-referential schema can visit the same version twice and try to
-        // insert its exact current primary key again.
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         let physical_table_id =
             self.physical_table_id_for_schema(schema_version, version.table())?;
-        let encoded_primary_key = history_primary_key(version).into_bytes();
+        let tx_id = self.version_tx_id(version)?;
+        let overlay_key = (
+            physical_table_id,
+            global_current_primary_key(version.branch_key(), version.row_uuid()).into_bytes(),
+        );
         if self
             .ahead_current_keys
-            .contains(&(physical_table_id, encoded_primary_key.clone()))
+            .get(&overlay_key)
+            .is_some_and(|existing| *existing >= tx_id)
         {
             return Ok(());
         }
@@ -403,14 +450,12 @@ where
         )?;
         let _ = self.authored_columns_for_version(version)?;
         let physical = self.encode_physical_version_record(&plan, version, None)?;
-        batch.insert_raw(
+        batch.update_raw(
             plan.storage_table.clone(),
-            history_primary_key(version),
+            global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
-        self.insert_ahead_current_key(
-            physical_table_id,
-            encoded_primary_key,);
+        self.ahead_current_keys.insert(overlay_key, tx_id);
         Ok(())
     }
 
@@ -431,22 +476,63 @@ where
         global_current_values(table, version, global_time)
     }
 
+    /// Drop the overlay row when it holds this version's image. An overlay
+    /// holding a newer pending image already includes this one's effect.
+    /// Returns whether the overlay was dropped.
     pub(super) fn write_ahead_current_delete(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let physical_table_id =
+            self.physical_table_id_for_schema(schema_version, version.table())?;
+        let tx_id = self.version_tx_id(version)?;
+        let primary_key = global_current_primary_key(version.branch_key(), version.row_uuid());
+        let overlay_key = (physical_table_id, primary_key.clone().into_bytes());
+        if self.ahead_current_keys.get(&overlay_key) != Some(&tx_id) {
+            return Ok(false);
+        }
         let table = self.physical_current_table_for_schema(
             schema_version,
             version.table(),
-            PhysicalCurrentClass::Ahead,)?;
-        batch.delete(table, history_primary_key(version));
-        self.remove_ahead_current_key(
-            self.physical_table_id_for_schema(schema_version, version.table())?,
-            history_primary_key(version).into_bytes(),);
+            PhysicalCurrentClass::Ahead,
+        )?;
+        batch.delete(table, primary_key);
+        self.ahead_current_keys.remove(&overlay_key);
+        Ok(true)
+    }
+
+    /// After a rejected image leaves the overlay, the newest remaining
+    /// pending image for the row (if any) takes its place.
+    pub(super) async fn restore_ahead_overlay_after_reject(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        rejected: &VersionRow,
+    ) -> Result<(), Error> {
+        let rejected_tx = self.version_tx_id(rejected)?;
+        let mut newest: Option<(TxId, VersionRow)> = None;
+        for version in self
+            .query_row_versions_in_branch(rejected.table(), rejected.branch_key(), rejected.row_uuid())
+            .await?
+        {
+            let tx_id = self.version_tx_id(&version)?;
+            if tx_id == rejected_tx || newest.as_ref().is_some_and(|(best, _)| *best >= tx_id) {
+                continue;
+            }
+            if !matches!(
+                self.query_transaction_state(tx_id).await?,
+                Some((Fate::Pending, None, _))
+            ) {
+                continue;
+            }
+            newest = Some((tx_id, version));
+        }
+        if let Some((_, version)) = newest {
+            self.write_ahead_current_insert(batch, &version)?;
+        }
         Ok(())
     }
 
@@ -471,7 +557,7 @@ where
         versions: &[VersionRow],
     ) -> Result<(), Error> {
         for version in versions {
-            self.write_ahead_current_delete(batch, &version)?;
+            self.write_ahead_current_delete(batch, version)?;
         }
         Ok(())
     }

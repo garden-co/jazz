@@ -235,13 +235,6 @@ where
         Ok(TxId::new(version.tx_time(), node))
     }
 
-    async fn version_made_at(&mut self, version: &VersionRow) -> Result<TxTime, Error> {
-        let tx_id = self.version_tx_id(version)?;
-        self.transaction_made_at(tx_id)
-            .await?
-            .ok_or(Error::MissingTransaction(tx_id))
-    }
-
     fn version_record_from_row(&self, version: &VersionRow) -> Result<VersionRecord, Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())

@@ -86,6 +86,12 @@ where
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
+                // History holds the row's post-image at this seq, which is
+                // what peers receive for this transaction.
+                self.write_history_post_image(&mut batch, version)?;
+            }
+            if !global_current_updates.is_empty() {
+                self.invalidate_tx_version_tables_cache(tx_id);
             }
         }
         #[cfg(test)]
@@ -832,7 +838,9 @@ where
             ));
         }
         for version in &rejected {
-            self.write_ahead_current_delete(batch, version)?;
+            if self.write_ahead_current_delete(batch, version)? {
+                self.restore_ahead_overlay_after_reject(batch, version).await?;
+            }
             let history_table = self.version_storage_table_for_row(version)?;
             batch.delete(
                 history_table.as_ref(),

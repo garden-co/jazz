@@ -949,28 +949,20 @@ where
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
+                let record = raw.record();
+                let tx_time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
+                let node = self
+                    .node_for_alias(NodeAlias(
+                        record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                    ))
+                    .ok_or(Error::InvalidStoredValue("overlay node alias must exist"))?;
                 self.ahead_current_keys
-                    .insert((table_id, raw.key().to_vec()));
+                    .insert((table_id, raw.key().to_vec()), TxId::new(tx_time, node));
             }
         }
         Ok(())
     }
 
-    fn insert_ahead_current_key(
-        &mut self,
-        table_id: PhysicalTableId,
-        encoded_primary_key: Vec<u8>,) {
-        self.ahead_current_keys
-            .insert((table_id, encoded_primary_key));
-    }
-
-    fn remove_ahead_current_key(
-        &mut self,
-        table_id: PhysicalTableId,
-        encoded_primary_key: Vec<u8>,) {
-        self.ahead_current_keys
-            .remove(&(table_id, encoded_primary_key));
-    }
 
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
         self.query.tx_version_tables_cache.get(&tx_id).cloned()

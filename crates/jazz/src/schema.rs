@@ -336,38 +336,6 @@ impl RuntimeSchema {
         Ok(cells)
     }
 
-    /// Reconstruct the table-local named selector for an exact stored key.
-    pub(crate) fn branch_selector_for_key(
-        &self,
-        table: &TableSchema,
-        key: &BranchKey,
-    ) -> Result<BranchSelector, String> {
-        let mut values = BTreeMap::new();
-        for column_name in &table.branch_by {
-            let column = table
-                .columns
-                .iter()
-                .find(|column| column.name == *column_name)
-                .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
-            let value = key
-                .values
-                .iter()
-                .find(|(name, _)| name == column_name)
-                .map(|(_, value)| value.clone())
-                .or_else(|| {
-                    column.default.as_ref().map(|value| {
-                        BranchColumnValue::encode_typed(value, &column.column_type)
-                            .expect("validated branch default")
-                    })
-                })
-                .ok_or_else(|| {
-                    format!("branch key is missing {column_name} without a migration default")
-                })?;
-            values.insert(column_name.clone(), value);
-        }
-        Ok(BranchSelector { values })
-    }
-
     #[cfg(test)]
     fn validated(self) -> Self {
         let mut branch_column_types = BTreeMap::new();
@@ -1158,11 +1126,10 @@ impl TableSchema {
             GrooveColumnType::U64.array_of().nullable(),
         ));
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
+            // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
-                PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
             ]))
             .with_index(GrooveIndexSchema::new(
                 "by_tx",

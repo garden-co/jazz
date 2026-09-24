@@ -519,15 +519,19 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        // Keep persistence out of the policy admission frame.
-        Box::pin(self.ingest_known_transaction(
+        // Keep persistence out of the policy admission frame. This node
+        // mints the seq, so it merges the patch into the row's post-image.
+        self.minting_global_time = true;
+        let ingested = Box::pin(self.ingest_known_transaction(
             tx.clone(),
             versions,
             fate.clone(),
             Some(global_time),
             durability,
         ))
-        .await?;
+        .await;
+        self.minting_global_time = false;
+        ingested?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
         Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -570,6 +574,12 @@ where
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
                 let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
+                if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
+                    // The authority's post-image replaces this node's copy.
+                    batch.update_raw(table.as_ref(), key, record);
+                    version_bundles.push(version);
+                    continue;
+                }
                 match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
                     groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
                     groove::db::EnsureExactOutcome::AlreadyIdentical => {},
@@ -849,14 +859,11 @@ where
                     stored.branch_key().clone(),
                     stored.row_uuid(),
                 );
-                let existing_winner = current_updates.get(&key).map(|(previous, _)| {
-                    (
-                        previous,
-                        self.version_tx_id(previous).expect("valid version tx id"),
-                        previous.tx_time(),
-                    )
-                });
-                if version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, existing_winner)
+                // Accepted rows are post-images at their seq: the newest seq
+                // is the row.
+                if current_updates
+                    .get(&key)
+                    .is_none_or(|(_, existing)| *existing < global_time)
                 {
                     current_updates.insert(key, (stored, global_time));
                 }
@@ -883,17 +890,13 @@ where
                 present
             };
             if has_resident_rows {
-                let previous = self.query_global_winner_in_schema_and_branch(
-                    schema, stored.table(), stored.branch_key(), stored.row_uuid(),).await?;
-                if let Some(previous) = previous.as_ref() {
-                    let previous_tx = self.version_tx_id(previous)?;
-                    let previous_made_at = self.version_made_at(previous).await?;
-                    if !version_wins_over_open_winner(
-                        &stored, self.version_tx_id(&stored)?, stored.tx_time(),
-                        Some((previous, previous_tx, previous_made_at)),
-                    ) {
-                        continue;
-                    }
+                let current_seq = self
+                    .global_current_seq_in_batch(
+                        &batch, schema, stored.table(), stored.branch_key(), stored.row_uuid(),
+                    )
+                    .await?;
+                if current_seq.is_some_and(|current| current >= global_time) {
+                    continue;
                 }
             }
             winning_updates.insert(key, (stored, global_time));

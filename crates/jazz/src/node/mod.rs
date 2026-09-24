@@ -27,7 +27,7 @@ use groove::ivm::ProjectField;
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value, ValueType};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[allow(unused_imports)] // Typed receipt integration is implemented in a separate change.
@@ -566,7 +566,10 @@ pub struct NodeState<S> {
     absent_node_alias: Option<NodeUuid>,
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
-    ahead_current_keys: FxHashSet<(PhysicalTableId, Vec<u8>)>,
+    /// Overlay row key -> the pending transaction whose image it holds.
+    ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
+    /// Set while this node (Core) mints a seq for an incoming patch.
+    minting_global_time: bool,
 
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
@@ -2827,18 +2830,6 @@ impl<T> PublicationOutcome<T> {
             value,
             publications: vec![publication],
             post_settlement_work: VecDeque::new(),
-        }
-    }
-
-    pub(crate) fn published_then(
-        value: T,
-        publication: PublishedTransaction,
-        work: SyncMessage,
-    ) -> Self {
-        Self {
-            value,
-            publications: vec![publication],
-            post_settlement_work: VecDeque::from([work]),
         }
     }
 }
