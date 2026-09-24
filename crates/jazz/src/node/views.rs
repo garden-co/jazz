@@ -1536,11 +1536,6 @@ where
                 deferred_bundles.push(bundle);
             }
         }
-        self.write_merge_heads_for_bulk_content_versions(
-            &mut receiver_batch,
-            &receiver_batch_content_versions,
-        )
-        .await?;
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
@@ -1553,8 +1548,6 @@ where
             for global_time in receiver_batch_global_times {
                 self.record_applied_global_time(global_time);
             }
-            self.settle_completed_parent_batch(&receiver_batch_tx_ids)
-                .await?;
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
                 self.persist_storage_consistency_marker_through(tx_time)
                     .await?;

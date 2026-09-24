@@ -1,0 +1,278 @@
+{
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_or_org_policy_org_page50[10000]": [
+    0.025071587, 0.024975113
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_or_org_policy_org_page50[100000]": [
+    0.178239834, 0.173286949
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_or_org_policy_owner_page50[10000]": [
+    0.013944848, 0.014067663
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_or_org_policy_owner_page50[100000]": [
+    0.053904227, 0.052962677
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_policy_page50[10000]": [
+    0.00998377, 0.009893852
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::owner_policy_page50[100000]": [
+    0.039339473, 0.039185313
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::policy_free_org_page50[10000]": [
+    0.016489334, 0.016783842
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::policy_free_org_page50[100000]": [
+    0.119717612, 0.120508512
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::policy_free_owner_page50[10000]": [
+    0.008841087, 0.008726777
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::policy_free_owner_page50[100000]": [
+    0.03395789, 0.034660903
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_or_org_policy_org_page50[10000]": [
+    0.133526851, 0.131569227
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_or_org_policy_org_page50[100000]": [
+    0.398004674, 0.393781512
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_or_org_policy_owner_page50[10000]": [
+    0.113712977, 0.114295251
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_or_org_policy_owner_page50[100000]": [
+    0.181513366, 0.181604723
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_policy_page50[10000]": [
+    0.076835056, 0.077742544
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_owner_policy_page50[100000]": [
+    0.131963796, 0.131591185
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_policy_free_org_page50[10000]": [
+    0.085689192, 0.085960461
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_policy_free_org_page50[100000]": [
+    0.280356318, 0.279801262
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_policy_free_owner_page50[10000]": [
+    0.072051454, 0.071182036
+  ],
+  "examples/policy-scoped-documents/benchmarks/benches/walltime.rs::subscribe_policy_free_owner_page50[100000]": [
+    0.121954324, 0.121180629
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_board_profile_s_memory": [
+    0.039020152, 0.037983521
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_comments_scaling_memory[(300, 1200, 900)]": [
+    0.012025714, 0.012104233
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_comments_scaling_memory[(3000, 12000, 9000)]": [
+    0.129298145, 0.128729899
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_task_detail_profile_s_memory": [
+    0.220720176, 0.224076853
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_board_profile_s_rocksdb": [
+    0.039560901, 0.039673706
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_comments_scaling_rocksdb[(300, 1200, 900)]": [
+    0.012404407, 0.012445045
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_comments_scaling_rocksdb[(3000, 12000, 9000)]": [
+    0.138597093, 0.139216441
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_task_detail_profile_s_rocksdb": [
+    0.240586807, 0.239397378
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_bounded_activity_page_profile_s_memory": [
+    0.106382947, 0.104550489
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_bounded_activity_page_scaling_memory[30000]": [
+    0.374346808, 0.368485614
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::query_bounded_activity_page_scaling_memory[9000]": [
+    0.115866386, 0.108488916
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_bounded_activity_page_profile_s_rocksdb": [
+    0.116507666, 0.116438707
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_bounded_activity_page_scaling_rocksdb[30000]": [
+    0.412569461, 0.423374117
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::query_bounded_activity_page_scaling_rocksdb[9000]": [
+    0.12035592, 0.116823547
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::subscribe_activity_intersection_delta_memory": [
+    0.008339822, 0.008429193
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::update_activity_indexed_predicate_no_subscription_memory": [
+    0.00053952, 0.000572113
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::subscribe_activity_intersection_delta_rocksdb": [
+    0.00898776, 0.008892946
+  ],
+  "examples/benchmarks/w1/benches/reads_rocksdb_walltime.rs::update_activity_indexed_predicate_no_subscription_rocksdb": [
+    0.000840061, 0.000812018
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::delete_task_point_scaling_memory[900]": [
+    0.002394172, 0.002390145
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::delete_task_point_scaling_memory[9000]": [
+    0.001288682, 0.001318492
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::restore_task_point_scaling_memory[900]": [
+    0.001161457, 0.001177263
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::restore_task_point_scaling_memory[9000]": [
+    0.001142377, 0.001153372
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::resubscribe_activity_point_profile_s_memory": [
+    0.031043303, 0.029634433
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::resume_one_task_update_scaling_memory[(300, 1200, 900)]": [
+    0.07364966, 0.073988439
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::resume_one_task_update_scaling_memory[(500, 2000, 1500)]": [
+    0.120939102, 0.121848895
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::subscribe_activity_point_scaling_memory[900]": [
+    0.061072919, 0.061197995
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::subscribe_activity_point_scaling_memory[9000]": [
+    0.086699324, 0.087074038
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::subscribe_activity_policy_point_scaling_memory[900]": [
+    0.082806769, 0.082162886
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::subscribe_activity_policy_point_scaling_memory[9000]": [
+    0.316535884, 0.314485618
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::update_activity_policy_no_subscription_memory": [
+    0.003256611, 0.003291972
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::update_activity_policy_scaling_memory[900]": [
+    0.003157396, 0.003360408
+  ],
+  "examples/benchmarks/w1/benches/reads_memory_walltime.rs::update_activity_policy_scaling_memory[9000]": [
+    0.003308741, 0.003391093
+  ],
+  "examples/permissioned-resources/benchmarks/benches/walltime.rs::first_sync_27518_rocksdb": [
+    42.291031204, 41.996618891
+  ],
+  "examples/benchmarks/smoke/benches/fixture.rs::indexed_fixture_count[(16, 512)]": [
+    4.023909539393056e-5, 4.023909539393056e-5
+  ],
+  "examples/benchmarks/smoke/benches/fixture.rs::indexed_fixture_count[(4, 128)]": [
+    3.1124555478111218e-6, 3.1124555478111218e-6
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::artist_load[4096]": [
+    0.11678650343221393, 0.11621742908020821
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::artist_load[512]": [
+    0.023676808009261013, 0.023666405381855053
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::catalog_load[4096]": [
+    0.2004019578970078, 0.1990490708968216
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::catalog_load[512]": [
+    0.033178395762515314, 0.03315315255473812
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::label_load[4096]": [
+    0.15297092130911005, 0.152083608460982
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::label_load[512]": [
+    0.027696631912425773, 0.027787890745050465
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::author_history[1024]": [
+    0.03382393252985117, 0.033837056779841564
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::author_history[4096]": [
+    0.11164424916643054, 0.11157058670511313
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::timeline_second_page[1024]": [
+    0.033159161715067983, 0.0331881876075067
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::timeline_second_page[4096]": [
+    0.10138956088936274, 0.10141401477490983
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::unread_recent_rooms[1024]": [
+    0.010871044095740306, 0.01090139989363078
+  ],
+  "examples/band-chat/benchmarks/benches/loads.rs::unread_recent_rooms[4096]": [
+    0.015721416334802535, 0.015774859080513903
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::ingest_batch_amortization[1]": [
+    1.0982444275370613, 1.0981514182779726
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::ingest_batch_amortization[10]": [
+    0.38248617790083556, 0.38275366311200104
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::ingest_batch_amortization[100]": [
+    0.33050449215137667, 0.32974890599691736
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::ingest_batch_amortization[1000]": [
+    0.3759224152319098, 0.37510195225280935
+  ],
+  "examples/big-label/benchmarks/benches/loads.rs::ingest_high_scale[10000]": [
+    3.8376491179548564, 3.837993299592631
+  ],
+  "examples/benchmarks/w1/benches/ahead_current.rs::local_ahead_current_history[100]": [
+    0.0038651751422200177, 0.003875018434721928
+  ],
+  "examples/benchmarks/w1/benches/ahead_current.rs::local_ahead_current_history[1000]": [
+    0.01519818388342567, 0.015121426260867052
+  ],
+  "examples/benchmarks/w1/benches/ahead_current.rs::local_ahead_current_history[10000]": [
+    0.13458958123046755, 0.13482639889967216
+  ],
+  "examples/band-chat/benchmarks/benches/fast_resume.rs::caught_up_fast_resume[100]": [
+    0.018802748325460816, 0.018637391897073127
+  ],
+  "examples/band-chat/benchmarks/benches/fast_resume.rs::caught_up_fast_resume[1000]": [
+    0.15166477377385368, 0.1519691063005599
+  ],
+  "examples/band-chat/benchmarks/benches/fast_resume.rs::caught_up_fast_resume[10000]": [
+    1.9784419128060553, 1.9815869122551677
+  ],
+  "examples/world-tour/benchmarks/benches/queries.rs::member_calendar_window[128]": [
+    0.021809319254313467, 0.02179063988078677
+  ],
+  "examples/world-tour/benchmarks/benches/queries.rs::member_calendar_window[4096]": [
+    0.21591343063419827, 0.2162037926610351
+  ],
+  "examples/world-tour/benchmarks/benches/queries.rs::public_calendar_window[128]": [
+    0.021926912551187592, 0.021895082063926288
+  ],
+  "examples/world-tour/benchmarks/benches/queries.rs::public_calendar_window[4096]": [
+    0.22145395651717334, 0.22145435491955068
+  ],
+  "crates/jazz/benches/selective_global_hydration.rs::maintained_subscription_hydration_100k": [
+    0.009369271, 0.009254222
+  ],
+  "crates/jazz/benches/selective_global_hydration.rs::maintained_subscription_hydration_10k": [
+    0.009347336, 0.009242931
+  ],
+  "examples/todo-client-localfirst-ts/benchmarks/benches/walltime.rs::batch_update_1350_rocksdb": [
+    0.988032349, 0.981609861
+  ],
+  "examples/todo-client-localfirst-ts/benchmarks/benches/walltime.rs::reopen_1500_rocksdb": [
+    0.592985436, 0.596487589
+  ],
+  "examples/todo-client-localfirst-ts/benchmarks/benches/walltime.rs::sequential_update_1350_rocksdb": [
+    4.985067066, 4.983174589
+  ],
+  "examples/todo-client-localfirst-ts/benchmarks/benches/walltime.rs::sequential_insert_1350_rocksdb": [
+    5.989547443, 5.907274225
+  ],
+  "crates/jazz/benches/route_subscription_curve.rs::attach_route_bindings[100]": [
+    0.907059523, 0.909926171
+  ],
+  "crates/jazz/benches/route_subscription_curve.rs::matching_write_fanout[100]": [
+    0.043088893, 0.042966254
+  ],
+  "examples/big-label/benchmarks/benches/ingest_walltime.rs::ingest_walltime_100k": [
+    18.537547112, 18.569813579
+  ],
+  "examples/big-label/benchmarks/benches/ingest_walltime.rs::ingest_walltime_10k": [
+    1.667038175, 1.6686802
+  ]
+}

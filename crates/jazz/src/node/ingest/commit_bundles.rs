@@ -72,14 +72,12 @@ where
         if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            let mut updates = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
                 global_time: None,
                 durability: None,
-            }]);
-            updates.value.extend(self.cascade_rejections_from(tx.tx_id).await?);
-            return Ok(updates);
+            }]));
         }
         if commit_unit_write_count_matches(&tx, versions.len())
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
@@ -187,6 +185,7 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
+        let fold_candidates = self.fold_candidates_for_versions(&records).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -196,7 +195,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = self.create_merge_versions_for(&records).await?;
+        let merges = self.create_fold_versions_for(tx_id, fold_candidates).await?;
         Ok(PublicationOutcome {
             value: (),
             publications: merges.publications,
@@ -250,6 +249,7 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
+        let fold_candidates = self.fold_candidates_for_versions(&versions).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -259,7 +259,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = self.create_merge_versions_for(&versions).await?;
+        let merges = self.create_fold_versions_for(tx_id, fold_candidates).await?;
         Ok(PublicationOutcome {
             value: Fate::Accepted,
             publications: merges.publications,
@@ -374,16 +374,6 @@ where
         }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
 
-        let mut memo = IngestMemo::default();
-        if self.park_commit_unit_if_missing_parents_with_mode(
-            &tx,
-            &versions,
-            u64::MAX - SKEW_TOLERANCE_MS,
-            &mut memo,
-            relay_mode,
-        ).await? {
-            return Ok(());
-        }
         self.ingest_transaction_and_versions(
             tx,
             versions,
@@ -405,20 +395,17 @@ where
             Some(CommitUnitTrust::Session | CommitUnitTrust::Relay)
         );
         let versions = canonical_versions(versions);
-        let mut memo = IngestMemo::default();
         if !commit_unit_write_count_matches(&tx, versions.len()) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(
                 "commit unit version count does not match transaction n_total_writes".to_owned(),
             ));
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            let mut updates = vec![SyncMessage::FateUpdate {
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
                 global_time: None,
                 durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
-            return Ok(PublicationOutcome::settled(updates));
+            }]));
         }
         if let Some(reason) = self.malformed_authored_version_reason(&versions) {
             return self
@@ -494,45 +481,8 @@ where
                 .await
                 .map(PublicationOutcome::settled);
         }
-        if self.park_commit_unit_if_missing_parents_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            &mut memo,
-            CommitUnitParkMode {
-                ingest_context,
-                ..CommitUnitParkMode::default()
-            },
-        ).await? {
-            return Ok(PublicationOutcome::settled(Vec::new()));
-        }
-        if !self.commit_unit_satisfies_clock_condition(&tx, &versions, &mut memo).await? {
-            let fate = Fate::Rejected(RejectionReason::CausalityViolation);
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_time: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
-            return Ok(PublicationOutcome::settled(updates));
-        }
         if tx.tx_id.time.physical_ms() > now_ms.saturating_add(SKEW_TOLERANCE_MS) {
             let fate = Fate::Rejected(RejectionReason::ClientClockTooFarAhead);
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_time: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
-            return Ok(PublicationOutcome::settled(updates));
-        }
-
-        if let Some(root) = self.cascade_root_for_versions(&versions).await {
-            let fate = Fate::Rejected(RejectionReason::Cascade { root });
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
@@ -541,6 +491,7 @@ where
                 durability: None,
             }]));
         }
+
         if !Box::pin(self.commit_unit_satisfies_write_policies(
             &tx,
             &versions,
@@ -550,25 +501,18 @@ where
         {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            let mut updates = vec![SyncMessage::FateUpdate {
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
                 global_time: None,
                 durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
-            return Ok(PublicationOutcome::settled(updates));
+            }]));
         }
         if tx.kind == TxKind::Exclusive
             && !self.validate_exclusive_commit_unit(&tx, &versions).await?
         {
             let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
-            // This is a newly observed authority-side rejection. No stored
-            // descendant can already point at it: descendants delivered before
-            // the parent would park on the missing parent instead of entering
-            // history. Later descendants will cascade when their parent state
-            // is checked, so scanning all stored history here is redundant.
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
@@ -584,8 +528,8 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
-        // Keep persistence and merge construction out of the policy admission frame.
+        let fold_candidates = self.fold_candidates_for_versions(&versions).await?;
+        // Keep persistence and fold construction out of the policy admission frame.
         Box::pin(self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -601,7 +545,9 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(Box::pin(self.create_merge_versions_for_rows(merge_rows)).await?);
+        outcome.append_outcome(
+            Box::pin(self.create_fold_versions_for(tx.tx_id, fold_candidates)).await?,
+        );
         Ok(outcome)
     }
 
@@ -631,9 +577,6 @@ where
             // Normalize aliases before establishing the batch's resident base.
             for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
                 self.ensure_schema_version_alias(schema).await?;
-            }
-            for parent in versions.iter().flat_map(VersionRecord::parents) {
-                self.ensure_node_alias(parent.node).await?;
             }
             let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
@@ -693,14 +636,6 @@ where
             return self
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
-        }
-        if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
-        {
-            self.preflight_complete_parent_batch(
-                batch,
-                &[(tx.tx_id, complete_parent_versions)],
-            )
-            .await?;
         }
         let (staged_versions, fate, global_time) = self.stage_transaction_and_versions_with_current_indexes(
             batch,
@@ -813,16 +748,6 @@ where
             {
                 continue;
             }
-            let mut missing_refs = false;
-            for bundle in &tx_bundles {
-                if !self.missing_parent_refs(bundle.versions).await?.is_empty() {
-                    missing_refs = true;
-                    break;
-                }
-            }
-            if missing_refs {
-                continue;
-            }
             if loaded_tx_ids.insert(tx_id) {
                 let mut local_tx = transaction_without_permission_subject(first.tx);
                 if view_scoped {
@@ -844,24 +769,7 @@ where
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
 
-        let mut complete_parents = Vec::new();
-        for (tx_bundles, tx, _) in &eligible {
-            let versions = tx_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
-                .collect::<Vec<_>>();
-            if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
-                complete_parents.push((tx.tx_id, versions));
-            }
-        }
-        let complete_parent_tx_ids = complete_parents
-            .iter()
-            .map(|(tx_id, _)| *tx_id)
-            .collect::<BTreeSet<_>>();
-
         let mut batch = self.database.open_batch();
-        self.preflight_complete_parent_batch(&mut batch, &complete_parents)
-            .await?;
         self.sync_metrics.receiver_bulk_ingest_commits += 1;
         self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
         let version_count = eligible
@@ -874,9 +782,6 @@ where
             (String, BranchKey, RowUuid, VersionLayer),
             (VersionRow, GlobalTime),
         >::new();
-        let mut content_versions = Vec::new();
-        let mut content_rows =
-            BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for (tx_bundles, local_tx, view_scoped) in eligible {
@@ -954,15 +859,6 @@ where
                     self.version_storage_primary_key(&stored)?,
                     groove_record,
                 );
-                if stored.layer() == VersionLayer::Content {
-                    content_versions.push(stored.clone());
-                    content_rows.insert((
-                        self.physical_table_id_for_version(&stored)?,
-                        stored.table().to_owned(),
-                        stored.branch_key().clone(),
-                        stored.row_uuid(),
-                    ));
-                }
 
                 let key = (
                     stored.table().to_owned(),
@@ -1025,26 +921,6 @@ where
         for (stored, global_time) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_time)?;
         }
-        // An empty physical content-history table makes the incoming Accepted
-        // versions its complete post-commit history. Probe applied resident
-        // storage, not the uncommitted batch and not a derived head/current
-        // index. No helper below writes history before this batch is applied.
-        let mut probed_history_tables = BTreeSet::new();
-        let mut empty_history_tables = BTreeSet::new();
-        for (table_id, _, _, _) in &content_rows {
-            if probed_history_tables.insert(*table_id) {
-                self.sync_metrics.receiver_history_table_probes += 1;
-                if !self.database.table_has_stored_rows(&physical_history_table_name(*table_id)).await? {
-                    empty_history_tables.insert(*table_id);
-                }
-            }
-        }
-        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
-            &mut batch,
-            &content_versions,
-            &empty_history_tables,
-        ).await?;
-
         #[cfg(test)]
         let current_update_versions = current_updates
             .values()
@@ -1053,36 +929,12 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
-        let rebuild_rows = content_rows.iter()
-            .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        self.sync_metrics.receiver_history_rebuild_rows_avoided +=
-            (content_rows.len() - rebuild_rows.len()) as u64;
-        // Counterfactual benchmark only: price the post-write history reread.
-        // This is not a supported ingestion mode or a proof of redundancy.
-        #[cfg(feature = "testing")]
-        let skip_head_rebuild = std::env::var_os("JAZZ_HISTORY_SKIP_HEAD_REBUILD").is_some();
-        #[cfg(not(feature = "testing"))]
-        let skip_head_rebuild = false;
-        if !skip_head_rebuild {
-            self.rebuild_merge_heads_after_history_commit(&rebuild_rows)
-                .await?;
-        }
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time).await?;
         }
         #[cfg(test)]
         {
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
-                for (_, table, branch_key, row_uuid) in &content_rows {
-                    self.assert_merge_heads_match_history_in_branch_for_test(
-                        table,
-                        branch_key,
-                        *row_uuid,
-                    )
-                    .await?;
-                }
                 self.assert_global_current_updates_match_history_for_test(
                     &current_update_versions,
                 )
@@ -1095,8 +947,6 @@ where
         for global_time in applied_global_times {
             self.record_applied_global_time(global_time);
         }
-        self.settle_completed_parent_batch(&complete_parent_tx_ids)
-            .await?;
         Ok(loaded_tx_ids)
     }
 }

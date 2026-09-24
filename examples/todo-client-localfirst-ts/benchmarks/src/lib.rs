@@ -381,21 +381,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let backend = self.backend;
         let count = self.count;
         let schema = &self.schema;
-        let seed = self.seed;
         let worker = self.worker.as_mut().expect("reopen before updates");
         let foreground = self.foreground.as_mut().expect("reopen before updates");
         let peer = &mut self.peer;
         foreground.reset_storage_read_metrics();
         let commits = range
             .clone()
-            .map(|i| {
-                let commit = MergeableCommit::new("tasks", row(i), 2000).cells(cells(i, !insert));
-                if insert {
-                    commit
-                } else {
-                    commit.parents(vec![seed])
-                }
-            })
+            .map(|i| MergeableCommit::new("tasks", row(i), 2000).cells(cells(i, !insert)))
             .collect();
         let publication = phase(backend, count, "batch_author", || {
             block_on(foreground.commit_mergeable_many(commits)).unwrap()

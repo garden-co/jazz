@@ -10,32 +10,21 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
-        self.apply_fate_update_with_cascade(tx_id, fate, global_time, durability, true)
-            .await
-    }
-
-    async fn apply_fate_update_with_cascade(
-        &mut self,
-        tx_id: TxId,
-        fate: Fate,
-        global_time: Option<GlobalTime>,
-        durability: Option<DurabilityTier>,
-        cascade_descendants: bool,
-    ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         debug_assert!(
             global_time.is_none() || durability == Some(DurabilityTier::Global),
             "a global timestamp requires Global durability"
         );
         let mut terminal_fate_persisted = false;
-        let result = self.apply_fate_update_once(
-            tx_id,
-            fate,
-            global_time,
-            durability,
-            &mut terminal_fate_persisted,
-            cascade_descendants,
-        ).await;
+        let result = self
+            .apply_fate_update_once(
+                tx_id,
+                fate,
+                global_time,
+                durability,
+                &mut terminal_fate_persisted,
+            )
+            .await;
         if terminal_fate_persisted {
             self.open_tx.local_permission_subjects.remove(&tx_id);
         }
@@ -49,7 +38,6 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
         terminal_fate_persisted: &mut bool,
-        cascade_descendants: bool,
     ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id).await?
@@ -76,37 +64,9 @@ where
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
-        #[cfg(test)]
-        let content_versions = tx_versions
-            .iter()
-            .filter(|version| version.layer() == VersionLayer::Content)
-            .cloned()
-            .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions).await?;
-        }
-        if let Some(child_alias) = self.node_aliases.get(&tx_id.node).copied() {
-            for raw in self.database.primary_key_scan_raw(
-                "jazz_pending_edges",
-                &[Value::U64(tx_id.time.0), Value::U64(child_alias.0)],
-            ).await? {
-                let record = raw.record();
-                let parent_alias =
-                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-                let parent = TxId::new(
-                    TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                    self.node_for_alias(parent_alias)
-                        .ok_or(Error::InvalidStoredValue(
-                            "pending edge parent alias must exist",
-                        ))?,
-                );
-                let coordinate = pending_edge_coordinate_from_record(record)?;
-                batch.delete(
-                    "jazz_pending_edges",
-                    pending_edge_primary_key(child_alias, tx_id, parent_alias, parent, &coordinate)?,
-                );
-            }
         }
         let contribution_merge = self.contribution_merge_storage_value(
             stored.tx.contribution_merge.as_ref(),
@@ -123,15 +83,6 @@ where
                 contribution_merge,
             )?,
         );
-        // Pending and accepted content versions both participate in local
-        // merge-head state. Ingest already installed this transaction's
-        // versions while it was pending, so advancing the fate must not replay
-        // reachability maintenance over its history. Besides being redundant,
-        // fate updates can arrive newest-first and turn that replay into a
-        // quadratic walk of one row's causal chain.
-        //
-        // Rejections are handled by `remove_rejected_local_versions`, which
-        // rebuilds the affected derived state after removing the rows.
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
@@ -174,18 +125,6 @@ where
         }
         #[cfg(test)]
         {
-            let rows = content_versions
-                .iter()
-                .map(|version| {
-                    (
-                        version.table().to_owned(),
-                        version.branch_key().clone(),
-                        version.row_uuid(),
-                    )
-                })
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)
-                .await?;
             self.assert_global_current_updates_match_history_for_test(
                 &global_current_update_versions,
             )
@@ -196,40 +135,6 @@ where
             self.rejections
                 .rejected_transactions
                 .insert(tx_id, rejected_payload);
-        }
-        let accepted_final = matches!(stored.fate, Fate::Accepted);
-        let rejected_root = rejected_root_for(&stored.fate, tx_id);
-        if accepted_final {
-            self.rejections.child_txs_by_parent.remove(&tx_id);
-            self.prune_child_edges(tx_id);
-        } else if let Some(root) = rejected_root {
-            self.prune_child_edges(tx_id);
-            if !cascade_descendants {
-                self.rejections.child_txs_by_parent.remove(&tx_id);
-                return Ok(());
-            }
-            let cascades = self.local_cascade_descendants(tx_id, root).await?;
-            for descendant in cascades {
-                // Authority-side parking resolves parents before children, so
-                // a locally cascaded descendant should still be speculative.
-                let descendant_fate = self.query_transaction(descendant).await?.map(|tx| tx.fate);
-                debug_assert!(
-                    matches!(descendant_fate.as_ref(), Some(Fate::Pending))
-                        || matches!(
-                            descendant_fate.as_ref(),
-                            Some(Fate::Rejected(RejectionReason::Cascade { root: existing }))
-                                if *existing == root
-                        )
-                );
-                Box::pin(self.apply_fate_update_with_cascade(
-                    descendant,
-                    Fate::Rejected(RejectionReason::Cascade { root }),
-                    None,
-                    None,
-                    false,
-                ))
-                .await?;
-            }
         }
         Ok(())
     }
@@ -335,13 +240,11 @@ where
                 VersionLayer::for_record(version),
                 &mut visible_layer_memo,
             ).await;
-            let parents = version.parents();
-            let parent = match parents.as_slice() {
-                [] => None,
-                [parent] => Some(*parent),
-                _ => return Ok(false),
-            };
-            if current != parent {
+            // First committer wins: the written register must be unchanged
+            // since the transaction's base snapshot.
+            if let Some(current) = current
+                && !self.snapshot_covers(current, base_snapshot).await
+            {
                 return Ok(false);
             }
         }
@@ -620,10 +523,9 @@ where
                 }
                 match &intent.operation {
                     crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
-                        if matching_versions.iter().any(|version| {
-                            !version.parents().is_empty()
-                                || version.deletion() == Some(DeletionEvent::Deleted)
-                        })
+                        if matching_versions
+                            .iter()
+                            .any(|version| version.deletion() == Some(DeletionEvent::Deleted))
                             || !self
                                 .branch_view_copy_satisfies_read_for_write_visibility(
                                     evidence,
@@ -636,27 +538,10 @@ where
                             return Ok(false);
                         }
                     }
-                    crate::tx::BranchWriteOperation::ExactHeadInsert => {
-                        // This classifies the author's parentless write, not
-                        // an absence precondition at admission. Independent
-                        // offline inserts into the same head merge normally.
-                        // The ordinary policy checks below still require read
-                        // and update permission if an existing head is known.
-                        if matching_versions
-                            .iter()
-                            .any(|version| !version.parents().is_empty())
-                        {
-                            return Ok(false);
-                        }
-                    }
-                    crate::tx::BranchWriteOperation::ExactHeadUpdate => {
-                        if matching_versions
-                            .iter()
-                            .any(|version| version.parents().is_empty())
-                        {
-                            return Ok(false);
-                        }
-                    }
+                    // Linear history: insert vs update is Core's current
+                    // row, which the ordinary policy checks below evaluate.
+                    crate::tx::BranchWriteOperation::ExactHeadInsert
+                    | crate::tx::BranchWriteOperation::ExactHeadUpdate => {}
                 }
             }
         }
@@ -701,53 +586,6 @@ where
         .await
     }
 
-    pub(super) async fn cascade_root_for_versions(
-        &mut self,
-        versions: &[VersionRecord],
-    ) -> Option<TxId> {
-        for parent in versions.iter().flat_map(|version| version.parents()) {
-            if let Some(root) = self.cascade_root_for_tx(parent).await {
-                return Some(root);
-            }
-        }
-        None
-    }
-
-    pub(super) async fn park_commit_unit_if_missing_parents_with_mode(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        memo: &mut IngestMemo,
-        mode: CommitUnitParkMode,
-    ) -> Result<bool, Error> {
-        if self.missing_parent_refs_memo(versions, memo).await?.is_empty() {
-            return Ok(false);
-        }
-        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
-            if existing.tx != *tx || existing.versions != versions {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            if existing.ingest_context != mode.ingest_context {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
-            return Ok(true);
-        }
-        self.sync_metrics.parked_orphans += 1;
-        self.parking.parked_commit_units.insert(
-            tx.tx_id,
-            ParkedCommitUnit {
-                tx: tx.clone(),
-                versions: versions.to_vec(),
-                now_ms,
-                ingest_context: mode.ingest_context,
-                ingress_role: mode.ingress_role,
-            },
-        );
-        Ok(true)
-    }
-
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
         &mut self,
         tx: &Transaction,
@@ -788,47 +626,6 @@ where
         Ok(true)
     }
 
-    pub(super) async fn missing_parent_refs(
-        &mut self,
-        versions: &[VersionRecord],
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let mut memo = IngestMemo::default();
-        self.missing_parent_refs_memo(versions, &mut memo).await
-    }
-
-    pub(super) async fn missing_parent_refs_memo(
-        &mut self,
-        versions: &[VersionRecord],
-        memo: &mut IngestMemo,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let mut missing = BTreeSet::new();
-        for parent in versions.iter().flat_map(|version| version.parents()) {
-            if !self.transaction_exists_memo(parent, memo).await? {
-                missing.insert(parent);
-            }
-        }
-        Ok(missing)
-    }
-
-    pub(super) async fn commit_unit_satisfies_clock_condition(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        for version in versions {
-            for parent in version.parents() {
-                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo).await? else {
-                    return Ok(false);
-                };
-                if tx.tx_id.time <= parent_made_at {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
-
     pub(super) async fn drain_parked_commit_units(
         &mut self,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
@@ -850,8 +647,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions).await?.is_empty()
-                {
+                }) {
                     ready.push(tx_id);
                 }
             }
@@ -895,8 +691,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions).await?.is_empty()
-                {
+                }) {
                     ready.push(tx_id);
                 }
             }
@@ -930,54 +725,6 @@ where
         Ok(())
     }
 
-    pub(super) async fn cascade_root_for_tx(&mut self, tx_id: TxId) -> Option<TxId> {
-        let mut stack = vec![tx_id];
-        let mut seen = BTreeSet::new();
-        while let Some(current) = stack.pop() {
-            if !seen.insert(current) {
-                continue;
-            }
-            if let Ok(Some(tx)) = self.query_transaction(current).await
-                && let Some(root) = rejected_root_for(&tx.fate, current)
-            {
-                return Some(root);
-            }
-            if let Ok(Some(tx)) = self.query_transaction(current).await
-                && matches!(tx.fate, Fate::Accepted)
-            {
-                continue;
-            }
-            let Ok(versions) = self.query_versions_for_tx(current).await else {
-                return None;
-            };
-            stack.extend(versions.iter().flat_map(|version| version.parents()));
-        }
-        None
-    }
-
-    pub(super) async fn cascade_rejections_from(
-        &mut self,
-        rejected: TxId,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        let Some(root) = self.cascade_root_for_tx(rejected).await.or(Some(rejected)) else {
-            return Ok(Vec::new());
-        };
-        let descendants = self.local_cascade_descendants(rejected, root).await?;
-        let mut updates = Vec::new();
-        for descendant in descendants {
-            let fate = Fate::Rejected(RejectionReason::Cascade { root });
-            self.apply_fate_update_with_cascade(descendant, fate.clone(), None, None, false)
-                .await?;
-            updates.push(SyncMessage::FateUpdate {
-                tx_id: descendant,
-                fate,
-                global_time: None,
-                durability: None,
-            });
-        }
-        Ok(updates)
-    }
-
     #[cfg(test)]
     pub(crate) async fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
@@ -999,42 +746,6 @@ where
         Ok(tx_ids)
     }
 
-    pub(super) async fn local_cascade_descendants(
-        &mut self,
-        rejected: TxId,
-        root: TxId,
-    ) -> Result<Vec<TxId>, Error> {
-        let mut descendants = BTreeSet::new();
-        let mut stack = self
-            .rejections
-            .child_txs_by_parent
-            .remove(&rejected)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut seen = BTreeSet::new();
-        while let Some(tx_id) = stack.pop() {
-            if !seen.insert(tx_id) {
-                continue;
-            }
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            let eligible = !matches!(tx.fate, Fate::Rejected(_))
-                || matches!(
-                    tx.fate,
-                    Fate::Rejected(RejectionReason::Cascade { root: existing }) if existing == root
-                );
-            if eligible {
-                descendants.insert(tx_id);
-                if let Some(children) = self.rejections.child_txs_by_parent.get(&tx_id) {
-                    stack.extend(children.iter().copied());
-                }
-            }
-        }
-        Ok(descendants.into_iter().collect())
-    }
-
     pub(super) async fn remove_rejected_local_versions(
         &mut self,
         tx_id: TxId,
@@ -1045,23 +756,10 @@ where
         if rejected.is_empty() {
             return Ok(None);
         }
-        self.clear_content_version_reachability_cache();
         let affected = rejected
             .iter()
             .map(|version| (version.table, version.row_uuid(), version.layer()))
             .collect::<BTreeSet<_>>();
-        let affected_content_rows = rejected
-            .iter()
-            .filter(|version| version.layer() == VersionLayer::Content)
-            .map(|version| {
-                Ok((
-                    self.physical_table_id_for_version(version)?,
-                    version.table().to_owned(),
-                    version.branch_key().clone(),
-                    version.row_uuid(),
-                ))
-            })
-            .collect::<Result<BTreeSet<_>, Error>>()?;
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -1121,18 +819,6 @@ where
                 self.version_storage_primary_key(version)?,
             );
         }
-        for (table_id, table, branch_key, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(
-                batch,
-                table_id,
-                &table,
-                &branch_key,
-                row_uuid,
-                tx_id,
-            )
-            .await?;
-        }
-        self.clear_content_version_reachability_cache();
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

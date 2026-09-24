@@ -806,15 +806,8 @@ where
             node_aliases: BTreeMap::new(),
             absent_node_alias: None,
             ahead_current_keys: FxHashSet::default(),
-            content_version_reachability_cache: BTreeMap::new(),
-            content_version_reachability_cache_order: VecDeque::new(),
-            content_version_reachability_cache_tx_ids: 0,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_walks: 0,
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_nodes: 0,
             #[cfg(any(test, feature = "testing"))]
             query_program_compilations: 0,
             session_claims: BTreeMap::new(),
@@ -1792,7 +1785,6 @@ where
     fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
-        self.clear_content_version_reachability_cache();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

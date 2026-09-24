@@ -291,23 +291,6 @@ where
         .await
     }
 
-    pub(super) async fn query_current_layer_winner_in_branch(
-        &mut self,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<VersionRow>, Error> {
-        if let Some(local) = self
-            .query_local_layer_winner_in_branch(table, branch_key, row_uuid, layer)
-            .await?
-        {
-            return Ok(Some(local));
-        }
-        self.query_global_layer_winner_in_branch(table, branch_key, row_uuid, layer)
-            .await
-    }
-
     /// Read the global winner through a specified schema's physical lineage.
     /// Incoming historical versions retain their authored table literal, which
     /// need not exist in the currently selected write/read schema after a
@@ -590,99 +573,6 @@ where
                 .then_with(|| left.layer().cmp(&right.layer()))
         });
         Ok(versions)
-    }
-
-    /// Probe one parent witness using the existing immutable history key.
-    /// This does not replace transaction-wide reads used to decide completeness
-    /// when the requested witness has not arrived.
-    pub(super) async fn query_exact_parent_version(
-        &mut self,
-        tx_id: TxId,
-        tx_node_alias: NodeAlias,
-        coordinate: &ParentCoordinate,
-    ) -> Result<Option<VersionRow>, Error> {
-        if !self.catalogue.physical_mappings.values().any(|mapping| {
-            mapping
-                .tables
-                .values()
-                .any(|table| table.table_id == coordinate.physical_table_id)
-        }) {
-            return Ok(None);
-        }
-        let Ok(branch_bytes) = coordinate.branch_key.try_canonical_bytes() else {
-            // No stored witness can have a noncanonical key. Let the caller's
-            // existing missing-coordinate rules decide rejection/completeness.
-            return Ok(None);
-        };
-        let mut key = vec![Value::Bytes(branch_bytes)];
-        let storage_table = match coordinate.layer {
-            VersionLayer::Content => physical_history_table_name(coordinate.physical_table_id),
-            VersionLayer::Deletion => {
-                key.push(Value::U64(coordinate.physical_table_id.0));
-                SHARED_DELETION_HISTORY_TABLE.to_owned()
-            }
-        };
-        key.extend([
-            Value::Uuid(coordinate.row_uuid.0),
-            Value::U64(tx_id.time.0),
-            Value::U64(tx_node_alias.0),
-        ]);
-        let raw = self
-            .database
-            .primary_key_get_raw(&storage_table, &key)
-            .await?
-            .map(|raw| raw.owned_record());
-        let Some(record) = raw else {
-            return Ok(None);
-        };
-        // Physical history carries its authored schema, including old logical
-        // names after a rename. Resolve from that schema instead of today's name.
-        self.decode_history_owned_record("", &storage_table, record)
-            .map(Some)
-    }
-
-    pub(super) async fn query_versions_for_tx_physical_coordinate(
-        &mut self,
-        tx_id: TxId,
-        physical_table_id: PhysicalTableId,
-        row_uuid: RowUuid,
-    ) -> Result<Vec<VersionRow>, Error> {
-        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
-            let aliases = self
-                .catalogue
-                .physical_mappings
-                .iter()
-                .flat_map(|(schema_version, mapping)| {
-                    let schema_alias = self.catalogue.schema_version_aliases.get(schema_version);
-                    mapping.tables.iter().filter_map(move |(table, mapping)| {
-                        (mapping.table_id == physical_table_id)
-                            .then(|| schema_alias.copied().map(|alias| (alias, table.clone())))
-                            .flatten()
-                    })
-                })
-                .collect::<BTreeSet<_>>();
-            let mut versions = Vec::new();
-            for (schema_alias, table) in aliases {
-                versions.extend(cached.versions_for_schema_table_row(
-                    schema_alias,
-                    &table,
-                    row_uuid,
-                ));
-            }
-            return Ok(versions);
-        }
-        let versions = self.query_versions_for_tx(tx_id).await?;
-        let mut matching = Vec::new();
-        for version in versions {
-            if version.row_uuid() == row_uuid
-                && self.physical_table_id_for_version(&version)? == physical_table_id
-            {
-                #[cfg(test)]
-                record_parent_version_lookup_materialized_rows(1);
-                matching.push(version);
-            }
-        }
-        Ok(matching)
     }
 
     pub(super) async fn query_versions_for_tx_rows_by_alias(
@@ -1235,19 +1125,6 @@ where
             .is_some())
     }
 
-    pub(super) async fn transaction_exists_memo(
-        &mut self,
-        tx_id: TxId,
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        if let Some(exists) = memo.tx_exists.get(&tx_id) {
-            return Ok(*exists);
-        }
-        let exists = self.transaction_exists(tx_id).await?;
-        memo.tx_exists.insert(tx_id, exists);
-        Ok(exists)
-    }
-
     pub(super) async fn transaction_made_at(&self, tx_id: TxId) -> Result<Option<TxTime>, Error> {
         if !self.node_aliases.contains_key(&tx_id.node) {
             return Ok(None);
@@ -1256,22 +1133,6 @@ where
             return Ok(Some(tx_id.time));
         }
         Ok(None)
-    }
-
-    pub(super) async fn transaction_made_at_memo(
-        &mut self,
-        tx_id: TxId,
-        memo: &mut IngestMemo,
-    ) -> Result<Option<TxTime>, Error> {
-        if let Some(made_at) = memo.tx_made_at.get(&tx_id) {
-            return Ok(*made_at);
-        }
-        let made_at = self.transaction_made_at(tx_id).await?;
-        memo.tx_made_at.insert(tx_id, made_at);
-        if made_at.is_some() {
-            memo.tx_exists.insert(tx_id, true);
-        }
-        Ok(made_at)
     }
 
     pub(super) async fn query_version_by_alias(

@@ -1945,7 +1945,7 @@ impl VersionRecord {
             table,
             schema_version,
             commit.row_uuid,
-            commit.parents.clone(),
+            Vec::new(),
             commit.made_by,
             commit.now_ms,
             commit.made_by,
@@ -3675,48 +3675,6 @@ pub(super) fn rejected_transaction_values(
     ])
 }
 
-pub(super) fn pending_edge_values(
-    child_alias: NodeAlias,
-    child: TxId,
-    parent_alias: NodeAlias,
-    parent: TxId,
-    coordinate: &ParentCoordinate,
-) -> Result<Vec<Value>, Error> {
-    Ok(vec![
-        Value::U64(child.time.0),
-        Value::U64(child_alias.0),
-        Value::U64(parent.time.0),
-        Value::U64(parent_alias.0),
-        Value::U64(coordinate.physical_table_id.0),
-        Value::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
-            Error::InvalidMergeableCommit("pending parent coordinate branch key is not canonical")
-        })?),
-        Value::Uuid(coordinate.row_uuid.0),
-        Value::Bytes(version_layer_string(coordinate.layer).into_bytes()),
-    ])
-}
-
-pub(super) fn pending_edge_primary_key(
-    child_alias: NodeAlias,
-    child: TxId,
-    parent_alias: NodeAlias,
-    parent: TxId,
-    coordinate: &ParentCoordinate,
-) -> Result<PrimaryKeyValue, Error> {
-    Ok(PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::U64(child.time.0),
-        PrimaryKeyValue::U64(child_alias.0),
-        PrimaryKeyValue::U64(parent.time.0),
-        PrimaryKeyValue::U64(parent_alias.0),
-        PrimaryKeyValue::U64(coordinate.physical_table_id.0),
-        PrimaryKeyValue::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
-            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
-        })?),
-        PrimaryKeyValue::Uuid(coordinate.row_uuid.0),
-        PrimaryKeyValue::Bytes(version_layer_string(coordinate.layer).into_bytes()),
-    ]))
-}
-
 pub(super) fn pending_edge_coordinate_from_record(
     record: BorrowedRecord<'_>,
 ) -> Result<ParentCoordinate, Error> {
@@ -3804,14 +3762,6 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
         (Fate::Accepted, Fate::Rejected(_)) | (Fate::Rejected(_), Fate::Accepted) => {
             Err(Error::ConflictingFate)
         }
-    }
-}
-
-pub(super) fn rejected_root_for(fate: &Fate, tx_id: TxId) -> Option<TxId> {
-    match fate {
-        Fate::Rejected(RejectionReason::Cascade { root }) => Some(*root),
-        Fate::Rejected(_) => Some(tx_id),
-        Fate::Pending | Fate::Accepted => None,
     }
 }
 
@@ -4771,34 +4721,6 @@ pub(super) fn validate_canonical_version_parts(
         .try_canonical_bytes()
         .map_err(|_| Error::InvalidMergeableCommit("row version branch key is not canonical"))?;
     validate_parent_tx_ids(parents)
-}
-
-pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {
-    Value::Array(heads.iter().copied().map(tx_id_value).collect())
-}
-
-pub(super) fn merge_heads_from_value(value: Value) -> Result<BTreeSet<TxId>, Error> {
-    // This is an intentional pre-v1 storage cut. Do not accept the former
-    // postcard-in-Bytes representation: this derived table has one
-    // schema-declared representation and can be rebuilt from history.
-    let Value::Array(values) = value else {
-        return Err(Error::InvalidStoredValue(
-            "merge heads must be an array of transaction ids",
-        ));
-    };
-    let mut heads = BTreeSet::new();
-    let mut previous = None;
-    for value in values {
-        let head = tx_id_from_value(value)?;
-        if previous.is_some_and(|previous| previous >= head) {
-            return Err(Error::InvalidStoredValue(
-                "merge heads must be strictly increasing",
-            ));
-        }
-        previous = Some(head);
-        heads.insert(head);
-    }
-    Ok(heads)
 }
 
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {

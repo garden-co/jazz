@@ -1300,27 +1300,6 @@ where
             .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            let parents = if write.refresh_parents_at_commit {
-                if write.deletion.is_none() {
-                    self.local_content_winner_tx_id_in_branch(
-                        &write.table,
-                        &write.branch,
-                        write.row_uuid,
-                    )
-                    .await?
-                } else {
-                    self.local_deletion_winner_tx_id_in_branch(
-                        &write.table,
-                        &write.branch,
-                        write.row_uuid,
-                    )
-                    .await?
-                }
-                .into_iter()
-                .collect()
-            } else {
-                write.parents
-            };
             let (cells, authored_columns) = match write.cells {
                 PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
@@ -1347,7 +1326,6 @@ where
             )
             .branch(write.branch)
             .made_by(made_by)
-            .parents(parents)
             .cells(cells);
             if let Some(inherited) = write.verified_inherited_cells.as_ref() {
                 commit = commit.verified_inherited_large_cells(inherited);
@@ -1381,25 +1359,11 @@ where
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        for (_, commit) in &commits {
-            for parent in &commit.parents {
-                self.merge_tx_time(parent.time);
-            }
-        }
         let made_at = match reserved {
             Some(reserved) => {
                 if reserved.node != self.node_uuid {
                     return Err(Error::InvalidMergeableCommit(
                         "reserved transaction identity belongs to another node",
-                    ));
-                }
-                if commits
-                    .iter()
-                    .flat_map(|(_, commit)| commit.parents.iter())
-                    .any(|parent| parent.time >= reserved.time)
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "reserved transaction identity must dominate every parent",
                     ));
                 }
                 self.merge_tx_time(reserved.time);

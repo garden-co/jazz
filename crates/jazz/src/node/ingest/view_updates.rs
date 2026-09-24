@@ -2,19 +2,14 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) async fn create_merge_versions_for(
+    /// Capture each accepted content row's global current state before a
+    /// Core decision, so [`Self::create_fold_versions_for`] can check the
+    /// linear fold afterwards.
+    pub(super) async fn fold_candidates_for_versions(
         &mut self,
         records: &[VersionRecord],
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        let rows = self.merge_rows_for_versions(records)?;
-        self.create_merge_versions_for_rows(rows).await
-    }
-
-    fn merge_rows_for_versions(
-        &mut self,
-        records: &[VersionRecord],
-    ) -> Result<Vec<(String, BranchKey, RowUuid)>, Error> {
-        let mut rows = Vec::with_capacity(records.len());
+    ) -> Result<Vec<FoldCandidate>, Error> {
+        let mut candidates = Vec::with_capacity(records.len());
         for record in records {
             if record.deletion().is_some() {
                 continue;
@@ -24,131 +19,110 @@ where
                 record.table(),
                 &mut BTreeMap::new(),
             )?;
-            // Synthetic merge versions are authored in the current write
-            // schema. An otherwise valid version in an unreconciled schema
-            // has its own physical lineage and merge-head set, but cannot be
-            // semantically merged into the write schema until a lens exists.
+            // Fold versions are authored in the current write schema. A
+            // version in an unreconciled schema has its own physical lineage
+            // and cannot be folded into the write schema until a lens exists.
             if projected_schema != self.catalogue.active_schema.schema {
                 continue;
             }
-            rows.push((table, record.branch_key().clone(), record.row_uuid()));
+            let previous = self
+                .query_global_layer_winner_in_branch(
+                    &table,
+                    record.branch_key(),
+                    record.row_uuid(),
+                    VersionLayer::Content,
+                )
+                .await?;
+            candidates.push(FoldCandidate {
+                table,
+                branch_key: record.branch_key().clone(),
+                row_uuid: record.row_uuid(),
+                previous,
+            });
         }
-        rows.sort_unstable();
-        rows.dedup();
-        Ok(rows)
+        Ok(candidates)
     }
 
-    pub(super) async fn create_merge_versions_for_rows(
+    /// Linear history: an accepted write applies exactly its authored columns
+    /// on top of the row Core held before it. Winner selection installs whole
+    /// versions, so when a concurrent or late write leaves the installed row
+    /// different from that fold, Core mints one parentless fold version that
+    /// carries the folded row. Nothing is minted in the common, uncontended
+    /// case.
+    pub(super) async fn create_fold_versions_for(
         &mut self,
-        rows: Vec<(String, BranchKey, RowUuid)>,
+        tx_id: TxId,
+        candidates: Vec<FoldCandidate>,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
-        for (table, branch_key, row_uuid) in rows {
-            let created = self
-                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
-                .await?;
+        if candidates.is_empty() {
+            return Ok(outcome);
+        }
+        let authored = self.query_versions_for_tx(tx_id).await?;
+        for candidate in candidates {
+            let Some(version) = authored.iter().find(|version| {
+                version.layer() == VersionLayer::Content
+                    && version.row_uuid() == candidate.row_uuid
+                    && version.branch_key() == &candidate.branch_key
+            }) else {
+                continue;
+            };
+            let created = self.create_fold_version_if_needed(candidate, version.clone()).await?;
             outcome.append_outcome(created);
         }
         Ok(outcome)
     }
 
-    #[cfg(test)]
-    pub(super) async fn create_merge_version_if_needed(
+    async fn create_fold_version_if_needed(
         &mut self,
-        table: &str,
-        row_uuid: RowUuid,
+        candidate: FoldCandidate,
+        authored: VersionRow,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid)
-            .await
-    }
-
-    async fn create_merge_version_if_needed_in_branch(
-        &mut self,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.active_schema.schema, table)?;
-        let head_tx_ids = self
-            .merge_head_tx_ids(table_id, branch_key, row_uuid)
-            .await?;
-        let table_schema =
-            self.table_in_schema(table, self.catalogue.active_schema.schema)?;
-        let has_gset_column = table_schema
-            .columns
-            .iter()
-            .any(|column| table_schema.merge_strategy(&column.name) == MergeStrategy::GSet);
-        if head_tx_ids.len() < 2 && !has_gset_column {
-            return Ok(PublicationOutcome::settled(Vec::new()));
-        }
-        let row_versions = self.query_physical_content_row_versions(
-            table_id,
+        let FoldCandidate {
             table,
             branch_key,
             row_uuid,
-        )
-        .await?;
-        let mut row_versions_by_tx = BTreeMap::new();
-        for version in row_versions {
-            row_versions_by_tx.insert(self.version_tx_id(&version)?, version);
-        }
-        let head_tx_ids = head_tx_ids.into_iter().collect::<Vec<_>>();
-        let raw_head_tx_ids = raw_merge_head_tx_ids(&row_versions_by_tx, &head_tx_ids)?;
-        // Physical heads may retain older merge caches whose raw inputs are
-        // already dominated by one ordinary edit. There is no concurrent
-        // content left to reconcile; merging that singleton would turn each
-        // synthetic child into the next raw head and never reach quiescence.
-        // GSet still needs its history-based materialization below.
-        if raw_head_tx_ids.len() < 2 && !has_gset_column {
+            previous,
+        } = candidate;
+        let table_schema = self.table_in_schema(&table, self.catalogue.active_schema.schema)?;
+        let Some(installed) = self
+            .query_global_layer_winner_in_branch(&table, &branch_key, row_uuid, VersionLayer::Content)
+            .await?
+        else {
             return Ok(PublicationOutcome::settled(Vec::new()));
-        }
-        let mut parents = raw_head_tx_ids.clone();
-        parents.sort();
-        if row_versions_by_tx.values().any(|version| {
-            version.layer() == VersionLayer::Content && {
-                let mut existing = version.parents();
-                existing.sort();
-                existing == parents
+        };
+        let authored_columns = self.authored_columns_for_version(&authored)?;
+        let mut folded = match previous.as_ref() {
+            Some(previous) => previous.cells(&table_schema)?,
+            None => BTreeMap::new(),
+        };
+        for column in &table_schema.columns {
+            if authored_columns
+                .as_ref()
+                .is_some_and(|columns| !columns.contains(&column.name))
+            {
+                continue;
             }
-        }) {
-            return Ok(PublicationOutcome::settled(Vec::new()));
+            if let Some(value) = authored.cell(&table_schema, &column.name)? {
+                folded.insert(column.name.clone(), value);
+            }
         }
-
-        let raw_heads = raw_head_tx_ids
+        let installed_cells = installed.cells(&table_schema)?;
+        let differing = table_schema
+            .columns
             .iter()
-            .map(|tx_id| {
-                row_versions_by_tx
-                    .get(tx_id)
-                    .cloned()
-                    .ok_or(Error::MissingTransaction(*tx_id))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        let cells = self
-            .merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)
-            .await?;
-        if raw_heads.len() == 1
-            && has_gset_column
-            && !gset_cells_need_materialization(&table_schema, &raw_heads[0], &cells)?
-        {
+            .filter(|column| folded.get(&column.name) != installed_cells.get(&column.name))
+            .map(|column| column.name.clone())
+            .collect::<BTreeSet<_>>();
+        if differing.is_empty() || folded.is_empty() {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        if cells.is_empty() {
-            return Ok(PublicationOutcome::settled(Vec::new()));
-        }
-        let mut head_times = Vec::with_capacity(raw_heads.len());
-        for version in &raw_heads {
-            head_times.push(self.version_made_at(version).await?);
-        }
-        let made_at = head_times
-            .into_iter()
-            .max_by_key(|made_at| made_at.sort_key(self.node_uuid))
-            .map(TxTime::tick_after)
-            .transpose()?
-            .ok_or(Error::InvalidStoredValue("merge requires heads"))?;
+        let installed_at = self.version_made_at(&installed).await?;
+        let authored_at = self.version_made_at(&authored).await?;
+        let made_at = installed_at.max(authored_at).tick_after()?;
         self.merge_tx_time(made_at);
-        let merge_tx_id = TxId::new(made_at, self.node_uuid);
-        if self.query_transaction(merge_tx_id).await?.is_some() {
+        let fold_tx_id = TxId::new(made_at, self.node_uuid);
+        if self.query_transaction(fold_tx_id).await?.is_some() {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         let schema = &self
@@ -158,369 +132,17 @@ where
             .expect("current write schema exists")
             .schema;
         let branch = schema
-            .branch_selector_for_key(&table_schema, branch_key)
+            .branch_selector_for_key(&table_schema, &branch_key)
             .map_err(Error::InvalidBranchKey)?;
-        let merge_commit = MergeableCommit::new(table, row_uuid, made_at.physical_ms())
+        let fold_commit = MergeableCommit::new(&table, row_uuid, made_at.physical_ms())
             .branch(branch)
-            .parents(parents)
-            .cells(cells);
-        let publication = self.commit_mergeable_at(merge_commit, made_at).await?;
-        let merge_tx = publication.tx_id;
-        let work = self.resident_commit_unit(merge_tx).await?;
-        Ok(PublicationOutcome::published_then(
-            Vec::new(),
-            publication,
-            work,
-        ))
+            .cells(folded)
+            .authored_columns(differing);
+        let publication = self.commit_mergeable_at(fold_commit, made_at).await?;
+        let work = self.resident_commit_unit(publication.tx_id).await?;
+        Ok(PublicationOutcome::published_then(Vec::new(), publication, work))
     }
 
-    async fn merge_cells_for_heads(
-        &mut self,
-        table_schema: &TableSchema,
-        heads: &[VersionRow],
-        row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
-    ) -> Result<BTreeMap<String, Value>, Error> {
-        let mut cells = BTreeMap::new();
-        for column in &table_schema.columns {
-            match table_schema.merge_strategy(&column.name) {
-                MergeStrategy::Lww => {
-                    let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
-                    for version in heads {
-                        if self
-                            .authored_columns_for_version(version)?
-                            .is_some_and(|columns| !columns.contains(&column.name))
-                        {
-                            continue;
-                        }
-                        let Some(value) = version.cell(table_schema, &column.name)? else {
-                            continue;
-                        };
-                        let tx_id = self.version_tx_id(version)?;
-                        let made_at = self.version_made_at(version).await?;
-                        let key = made_at.sort_key(tx_id.node);
-                        if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
-                            best = Some((key, value));
-                        }
-                    }
-                    if best.is_none() {
-                        let parent_union = heads
-                            .iter()
-                            .flat_map(VersionRow::parents)
-                            .collect::<BTreeSet<_>>();
-                        for parent in parent_union {
-                            let Some(version) = row_versions_by_tx.get(&parent) else {
-                                continue;
-                            };
-                            let Some(value) = version.cell(table_schema, &column.name)? else {
-                                continue;
-                            };
-                            let tx_id = self.version_tx_id(version)?;
-                            let made_at = self.version_made_at(version).await?;
-                            let key = made_at.sort_key(tx_id.node);
-                            if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
-                                best = Some((key, value));
-                            }
-                        }
-                    }
-                    if let Some((_, value)) = best {
-                        cells.insert(column.name.clone(), value);
-                    }
-                }
-                MergeStrategy::Counter => {
-                    let mut memo = BTreeMap::new();
-                    let value = counter_merge_value(
-                        table_schema,
-                        &column.name,
-                        row_versions_by_tx,
-                        &heads
-                            .iter()
-                            .map(|version| self.version_tx_id(version))
-                            .collect::<Result<Vec<_>, Error>>()?,
-                        &mut memo,
-                    )?;
-                    cells.insert(
-                        column.name.clone(),
-                        counter_value_from_i128(&column.column_type, value)?,
-                    );
-                }
-                MergeStrategy::GSet => {
-                    let value = gset_merge_value(
-                        table_schema,
-                        &column.name,
-                        row_versions_by_tx,
-                        &heads
-                            .iter()
-                            .map(|version| self.version_tx_id(version))
-                            .collect::<Result<Vec<_>, Error>>()?,
-                    )?;
-                    cells.insert(column.name.clone(), value);
-                }
-            }
-        }
-        Ok(cells)
-    }
-
-    async fn read_merge_heads(
-        &mut self,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<Option<BTreeSet<TxId>>, Error> {
-        let row = self.database.primary_key_get_raw(
-            MERGE_HEADS_TABLE,
-            &[
-                Value::U64(table_id.0),
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-            ],
-        )
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        merge_heads_from_value(row.record().get_idx(3)?).map(Some)
-    }
-
-    async fn read_merge_heads_in_batch(
-        &mut self,
-        batch: &DatabaseBatch,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<Option<BTreeSet<TxId>>, Error> {
-        let row = self.database.primary_key_get_raw_in_batch(
-            batch,
-            MERGE_HEADS_TABLE,
-            &[
-                Value::U64(table_id.0),
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-            ],
-        )
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        merge_heads_from_value(row.record().get_idx(3)?).map(Some)
-    }
-
-    async fn require_merge_heads(
-        &mut self,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        self.read_merge_heads(table_id, branch_key, row_uuid).await?
-            .ok_or(Error::InvalidStoredValue(
-                "merge head set missing for existing global current row",
-            ))
-    }
-
-    fn write_merge_heads(
-        batch: &mut DatabaseBatch,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        heads: &BTreeSet<TxId>,
-    ) -> Result<(), Error> {
-        batch.update(
-            MERGE_HEADS_TABLE,
-            vec![
-                Value::U64(table_id.0),
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-                merge_heads_value(heads),
-            ],
-        );
-        Ok(())
-    }
-
-    async fn query_physical_content_row_versions(
-        &mut self,
-        table_id: PhysicalTableId,
-        requested_table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let storage_table = physical_history_table_name(table_id);
-        let raws = self
-            .database
-            .primary_key_scan_raw(
-                &storage_table,
-                &[
-                    Value::Bytes(branch_key.canonical_bytes()),
-                    Value::Uuid(row_uuid.0),
-                ],
-            )
-            .await?
-            .into_iter()
-            .map(|raw| raw.owned_record())
-            .collect::<Vec<_>>();
-        let mut versions = raws
-            .into_iter()
-            .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
-            .collect::<Result<Vec<_>, Error>>()?;
-        let aliases = self.node_aliases.clone();
-        versions.sort_by_key(|version| {
-            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
-        });
-        Ok(versions)
-    }
-
-    async fn recompute_merge_heads_from_persisted_history(
-        &mut self,
-        table_id: PhysicalTableId,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let versions =
-            self.query_physical_content_row_versions(table_id, table, branch_key, row_uuid)
-                .await?;
-        let mut candidate_indices = Vec::new();
-        for (idx, version) in versions.iter().enumerate() {
-            let tx_id = self.version_tx_id(version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
-                candidate_indices.push(idx);
-            }
-        }
-        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
-        head_indices
-            .into_iter()
-            .map(|idx| self.version_tx_id(&versions[idx]))
-            .collect()
-    }
-
-    pub(super) async fn update_merge_heads_for_content_version(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        version: &VersionRow,
-        known_first_local_version: bool,
-    ) -> Result<(), Error> {
-        if version.layer() != VersionLayer::Content {
-            return Ok(());
-        }
-        let table_id = self.physical_table_id_for_version(version)?;
-        let new_tx = self.version_tx_id(version)?;
-        // Authored commits may skip the derived-index bootstrap only when the
-        // caller's physical-history lookup proved that this branch-local row
-        // has no persisted content version and this is its first occurrence
-        // in the still-uncommitted database batch.
-        let mut heads = if known_first_local_version {
-            BTreeSet::new()
-        } else {
-            match self
-                .read_merge_heads(table_id, version.branch_key(), version.row_uuid())
-                .await?
-            {
-                Some(existing) => existing,
-                // A redacted exclusive view fragment intentionally persists
-                // history without current indexes. If a later visible mergeable
-                // version reaches this replica, bootstrap the derived head index
-                // from every locally known eligible version before advancing it.
-                None => {
-                    self.recompute_merge_heads_from_persisted_history(
-                        table_id,
-                        version.table(),
-                        version.branch_key(),
-                        version.row_uuid(),
-                    )
-                    .await?
-                }
-            }
-        };
-        for parent in version.parents() {
-            heads.remove(&parent);
-        }
-        let mut dominated_by_existing_head = false;
-        for head in heads.iter().copied() {
-            if self
-                .content_version_reaches_tx_in_batch(
-                    batch,
-                    table_id,
-                    version.table(),
-                    version.branch_key(),
-                    version.row_uuid(),
-                    head,
-                    new_tx,
-                )
-                .await?
-            {
-                dominated_by_existing_head = true;
-                break;
-            }
-        }
-        if !dominated_by_existing_head {
-            heads.insert(new_tx);
-        }
-        Self::write_merge_heads(
-            batch,
-            table_id,
-            version.branch_key(),
-            version.row_uuid(),
-            &heads,
-        )
-    }
-
-    async fn update_merge_heads_for_content_version_in_batch(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        version: &VersionRow,
-    ) -> Result<(), Error> {
-        if version.layer() != VersionLayer::Content {
-            return Ok(());
-        }
-        let table_id = self.physical_table_id_for_version(version)?;
-        let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads_in_batch(
-            batch,
-            table_id,
-            version.branch_key(),
-            version.row_uuid(),
-        ).await? {
-            Some(existing) => existing,
-            // See the non-batched path above: missing derived state is valid
-            // after partial view-scoped history ingress.
-            None => self.recompute_merge_heads_from_persisted_history(
-                table_id,
-                version.table(),
-                version.branch_key(),
-                version.row_uuid(),
-            ).await?,
-        };
-        for parent in version.parents() {
-            heads.remove(&parent);
-        }
-        let mut dominated_by_existing_head = false;
-        for head in heads.iter().copied() {
-            if self
-                .content_version_reaches_tx(
-                    table_id,
-                    version.branch_key(),
-                    version.row_uuid(),
-                    head,
-                    new_tx,
-                )
-                .await?
-            {
-                dominated_by_existing_head = true;
-                break;
-            }
-        }
-        if !dominated_by_existing_head {
-            heads.insert(new_tx);
-        }
-        Self::write_merge_heads(
-            batch,
-            table_id,
-            version.branch_key(),
-            version.row_uuid(),
-            &heads,
-        )
-    }
 
     async fn query_global_layer_winner_in_batch(
         &mut self,
@@ -607,527 +229,6 @@ where
                 .map(Some);
         }
         Ok(None)
-    }
-
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_stage"))]
-    pub(crate) async fn write_merge_heads_for_bulk_content_versions(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        versions: &[VersionRow],
-    ) -> Result<(), Error> {
-        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
-            batch,
-            versions,
-            &BTreeSet::new(),
-        )
-        .await
-    }
-
-    /// `empty_history_tables` is a local, pre-batch physical storage proof,
-    /// never a sender claim or absence inferred from a derived current index.
-    /// Only reset ingest passes it: every supplied version belongs to a new
-    /// Accepted transaction, and the same canonical batch installs all rows.
-    async fn write_merge_heads_for_bulk_content_versions_with_empty_history(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        versions: &[VersionRow],
-        empty_history_tables: &BTreeSet<PhysicalTableId>,
-    ) -> Result<(), Error> {
-        let mut by_row = BTreeMap::<(PhysicalTableId, BranchKey, RowUuid), Vec<&VersionRow>>::new();
-        for version in versions {
-            if version.layer() == VersionLayer::Content {
-                let table_id = self.physical_table_id_for_version(version)?;
-                by_row
-                    .entry((table_id, version.branch_key().clone(), version.row_uuid()))
-                    .or_default()
-                    .push(version);
-            }
-        }
-        for ((table_id, branch_key, row_uuid), mut row_versions) in by_row {
-            if empty_history_tables.contains(&table_id) {
-                // Preserve the final staged value of each physical history
-                // primary key (branch, row, TxId), including schema aliases.
-                // There are no other persisted versions or fates to consult.
-                let mut by_tx = BTreeMap::new();
-                for version in row_versions {
-                    by_tx.insert(self.version_tx_id(version)?, version);
-                }
-                let versions = by_tx.into_values().cloned().collect::<Vec<_>>();
-                let candidates = (0..versions.len()).collect::<Vec<_>>();
-                let heads = content_head_indices(&versions, &candidates, &self.node_aliases)
-                    .into_iter()
-                    .map(|index| self.version_tx_id(&versions[index]))
-                    .collect::<Result<BTreeSet<_>, _>>()?;
-                Self::write_merge_heads(batch, table_id, &branch_key, row_uuid, &heads)?;
-                continue;
-            }
-            row_versions.sort_by_key(|version| {
-                let tx_id = self
-                    .version_tx_id(version)
-                    .expect("bulk content version must have node alias");
-                tx_id.time.sort_key(tx_id.node)
-            });
-            let mut heads = self
-                .read_merge_heads(table_id, &branch_key, row_uuid)
-                .await?
-                .unwrap_or_default();
-            let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
-            for version in &row_versions {
-                staged_parents.insert(self.version_tx_id(version)?, version.parents());
-            }
-            for version in row_versions {
-                let new_tx = self.version_tx_id(version)?;
-                for parent in version.parents() {
-                    heads.remove(&parent);
-                }
-                let mut ancestors_of_new = Vec::new();
-                for head in heads.iter().copied() {
-                    let reaches = match content_version_reaches_tx_in_staged_parents(
-                        new_tx,
-                        head,
-                        &staged_parents,
-                    ) {
-                        Some(reaches) => reaches,
-                        None => {
-                            self.content_version_reaches_tx(
-                                table_id,
-                                &branch_key,
-                                row_uuid,
-                                new_tx,
-                                head,
-                            )
-                            .await?
-                        }
-                    };
-                    ancestors_of_new.push((head, reaches));
-                }
-                for (head, is_ancestor) in ancestors_of_new {
-                    if is_ancestor {
-                        heads.remove(&head);
-                    }
-                }
-                let mut dominated_by_existing_head = false;
-                for head in heads.iter().copied() {
-                    let reaches = match content_version_reaches_tx_in_staged_parents(
-                        head,
-                        new_tx,
-                        &staged_parents,
-                    ) {
-                        Some(reaches) => reaches,
-                        None => {
-                            self.content_version_reaches_tx(
-                                table_id,
-                                &branch_key,
-                                row_uuid,
-                                head,
-                                new_tx,
-                            )
-                            .await?
-                        }
-                    };
-                    if reaches {
-                        dominated_by_existing_head = true;
-                        break;
-                    }
-                }
-                if !dominated_by_existing_head {
-                    heads.insert(new_tx);
-                }
-            }
-            Self::write_merge_heads(batch, table_id, &branch_key, row_uuid, &heads)?;
-        }
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_rebuild"))]
-    pub(crate) async fn rebuild_merge_heads_after_history_commit(
-        &mut self,
-        rows: &BTreeSet<(PhysicalTableId, String, BranchKey, RowUuid)>,
-    ) -> Result<(), Error> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut batch = self.database.open_batch();
-        for (table_id, table, branch_key, row_uuid) in rows {
-            let heads = self.recompute_merge_heads_from_persisted_history(
-                *table_id,
-                table,
-                branch_key,
-                *row_uuid,
-            )
-            .await?;
-            Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
-        }
-        let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted)?;
-        Ok(())
-    }
-
-    pub(super) async fn content_version_reaches_tx(
-        &mut self,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        start: TxId,
-        target: TxId,
-    ) -> Result<bool, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            self.merge_head_reachability_walks += 1;
-        }
-        if start == target {
-            return Ok(true);
-        }
-        if target.time >= start.time {
-            return Ok(false);
-        }
-
-        let key = ContentVersionReachabilityCacheKey {
-            table_id,
-            branch_key: branch_key.clone(),
-            row_uuid,
-            start,
-        };
-        if let Some(reaches) = self.cached_content_version_reachability(&key, target) {
-            return Ok(reaches);
-        }
-
-        let mut stack = vec![start];
-        let mut ancestors = FxHashSet::default();
-        let mut complete = true;
-        let mut reaches = false;
-        while let Some(tx_id) = stack.pop() {
-            if tx_id == target {
-                reaches = true;
-                // A witness is enough for this query, but the remaining
-                // ancestry was not inspected and must not be cached as a
-                // complete closure.
-                complete = false;
-                break;
-            }
-            if !ancestors.insert(tx_id) {
-                continue;
-            }
-            #[cfg(any(test, feature = "testing"))]
-            {
-                self.merge_head_reachability_nodes += 1;
-            }
-            // Reachability is row-local. Preserve the transaction-presence and
-            // resident-cache semantics without materializing its sibling rows.
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                complete = false;
-                continue;
-            };
-            let mut found_content_version = false;
-            if self.query.tx_versions_cache.contains_key(&tx_id) {
-                for version in self
-                    .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
-                    .await?
-                {
-                    if version.branch_key() == branch_key
-                        && version.layer() == VersionLayer::Content
-                    {
-                        found_content_version = true;
-                        stack.extend(version.parents());
-                    }
-                }
-            } else if let Some(version) = self
-                .query_exact_parent_version(
-                    tx_id,
-                    tx.node_alias,
-                    &ParentCoordinate {
-                        physical_table_id: table_id,
-                        branch_key: branch_key.clone(),
-                        row_uuid,
-                        layer: VersionLayer::Content,
-                    },
-                )
-                .await?
-            {
-                found_content_version = true;
-                stack.extend(version.parents());
-            }
-            if !found_content_version {
-                // A complete closure requires a witness for every transaction
-                // node. Missing history remains a valid non-cached answer.
-                complete = false;
-            }
-        }
-        if complete {
-            self.cache_content_version_reachability(key, ancestors);
-        }
-        Ok(reaches)
-    }
-
-    async fn content_version_reaches_tx_in_batch(
-        &mut self,
-        batch: &DatabaseBatch,
-        table_id: PhysicalTableId,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        start: TxId,
-        target: TxId,
-    ) -> Result<bool, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            self.merge_head_reachability_walks += 1;
-        }
-        let mut stack = vec![start];
-        let mut seen = BTreeSet::new();
-        while let Some(tx_id) = stack.pop() {
-            if tx_id == target {
-                return Ok(true);
-            }
-            if !seen.insert(tx_id) {
-                continue;
-            }
-            for version in self
-                .query_versions_for_tx_in_batch_for_row(
-                    batch,
-                    tx_id,
-                    table_id,
-                    table,
-                    branch_key,
-                    row_uuid,
-                )
-                .await?
-            {
-                if self.physical_table_id_for_version(&version)? == table_id
-                    && version.row_uuid() == row_uuid
-                    && version.layer() == VersionLayer::Content
-                {
-                    stack.extend(version.parents());
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    async fn query_versions_for_tx_in_batch_for_row(
-        &mut self,
-        batch: &DatabaseBatch,
-        tx_id: TxId,
-        table_id: PhysicalTableId,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let mut versions = Vec::new();
-        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
-            return Ok(versions);
-        };
-        let storage_table = physical_history_table_name(table_id);
-        if let Some(raw) = self.database.primary_key_get_raw_in_batch(
-            batch,
-            &storage_table,
-            &[
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-                Value::U64(tx_id.time.0),
-                Value::U64(tx_node_alias.0),
-            ],
-        ).await? {
-            versions.push(self.decode_history_owned_record(
-                table,
-                &storage_table,
-                raw.owned_record(),
-            )?);
-        }
-        Ok(versions)
-    }
-
-    async fn rewrite_merge_heads_excluding_tx(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        table_id: PhysicalTableId,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-        excluded_tx: TxId,
-    ) -> Result<(), Error> {
-        let versions = self.query_physical_content_row_versions(
-            table_id,
-            table,
-            branch_key,
-            row_uuid,
-        )
-        .await?;
-        let candidate_indices = versions
-            .iter()
-            .enumerate()
-            .filter(|(_, version)| {
-                version.layer() == VersionLayer::Content
-                    && self.version_tx_id(version).ok() != Some(excluded_tx)
-            })
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
-        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
-        let mut heads = BTreeSet::new();
-        for idx in head_indices {
-            heads.insert(self.version_tx_id(&versions[idx])?);
-        }
-        Self::write_merge_heads(batch, table_id, branch_key, row_uuid, &heads)
-    }
-
-    async fn merge_head_tx_ids(
-        &mut self,
-        table_id: PhysicalTableId,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        self.require_merge_heads(table_id, branch_key, row_uuid).await
-    }
-
-    #[cfg(test)]
-    fn physical_table_id_for_authored_test_table(
-        &self,
-        table: &str,
-    ) -> Result<PhysicalTableId, Error> {
-        let candidates = self
-            .catalogue
-            .physical_mappings
-            .values()
-            .filter_map(|mapping| mapping.tables.get(table).map(|table| table.table_id))
-            .collect::<BTreeSet<_>>();
-        match candidates.iter().copied().collect::<Vec<_>>().as_slice() {
-            [table_id] => Ok(*table_id),
-            [] => Err(Error::TableNotFound(table.to_owned())),
-            _ => Err(Error::InvalidStoredValue(
-                "authored test table name maps to multiple physical lineages",
-            )),
-        }
-    }
-
-    #[cfg(test)]
-    async fn recomputed_merge_heads_from_history_for_test(
-        &mut self,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let versions = self.query_physical_content_row_versions(
-            table_id,
-            table,
-            branch_key,
-            row_uuid,
-        )
-        .await?;
-        let mut candidate_indices = Vec::new();
-        for (idx, version) in versions.iter().enumerate() {
-            if version.layer() != VersionLayer::Content {
-                continue;
-            }
-            let tx_id = self.version_tx_id(version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
-                candidate_indices.push(idx);
-            }
-        }
-        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
-        let mut heads = BTreeSet::new();
-        for idx in head_indices {
-            heads.insert(self.version_tx_id(&versions[idx])?);
-        }
-        Ok(heads)
-    }
-
-    #[cfg(test)]
-    pub(super) async fn rebuild_merge_heads_from_history_for_test(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Result<(), Error> {
-        let branch_key = BranchKey::default();
-        let heads = self
-            .recomputed_merge_heads_from_history_for_test(table, &branch_key, row_uuid)
-            .await?;
-        let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let mut batch = self.database.open_batch();
-        Self::write_merge_heads(
-            &mut batch,
-            table_id,
-            &branch_key,
-            row_uuid,
-            &heads,
-        )?;
-        let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted)?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) async fn assert_merge_heads_match_history_for_test(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Result<(), Error> {
-        self.assert_merge_heads_match_history_in_branch_for_test(
-            table,
-            &BranchKey::default(),
-            row_uuid,
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    async fn assert_merge_heads_match_history_in_branch_for_test(
-        &mut self,
-        table: &str,
-        branch_key: &BranchKey,
-        row_uuid: RowUuid,
-    ) -> Result<(), Error> {
-        let expected = self
-            .recomputed_merge_heads_from_history_for_test(table, branch_key, row_uuid)
-            .await?;
-        let table_id = self.physical_table_id_for_authored_test_table(table)?;
-        let actual = self
-            .require_merge_heads(table_id, branch_key, row_uuid)
-            .await?;
-        if actual != expected {
-            let stored_versions = self
-                .query_physical_content_row_versions(table_id, table, branch_key, row_uuid)
-                .await?;
-            let mut versions = Vec::with_capacity(stored_versions.len());
-            for version in stored_versions {
-                let tx_id = self.version_tx_id(&version)?;
-                let fate = self
-                    .query_transaction(tx_id)
-                    .await?
-                    .map(|tx| tx.fate)
-                    .unwrap_or(Fate::Pending);
-                versions.push(format!(
-                    "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
-                    version.layer(),
-                    version.parents()
-                ));
-            }
-            panic!(
-                "stored merge heads diverged from history for {table}/{branch_key:?}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    async fn assert_merge_head_rows_match_history_for_test(
-        &mut self,
-        rows: &BTreeSet<(String, BranchKey, RowUuid)>,
-    ) -> Result<(), Error> {
-        for (table, branch_key, row_uuid) in rows {
-            self.assert_merge_heads_match_history_in_branch_for_test(
-                table,
-                branch_key,
-                *row_uuid,
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     #[cfg(test)]

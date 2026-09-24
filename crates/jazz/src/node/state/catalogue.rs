@@ -1348,11 +1348,4 @@ self.database.finish_persistence(persisted)?;
         }
     }
 
-    fn prune_child_edges(&mut self, child: TxId) {
-        self.rejections.child_txs_by_parent.retain(|_, children| {
-            children.remove(&child);
-            !children.is_empty()
-        });
-    }
-
 }
