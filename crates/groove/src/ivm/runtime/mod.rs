@@ -471,6 +471,8 @@ pub enum IvmRuntimeError {
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]
     UnsupportedIndexIntersectionScan,
+    #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
+    UnsupportedIndexCandidateFilter,
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
