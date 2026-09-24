@@ -1346,6 +1346,7 @@ impl ServerRuntimeHandle {
             NodeRole::Core,
             None,
             false,
+            false,
         )
     }
 
@@ -1364,6 +1365,32 @@ impl ServerRuntimeHandle {
             role,
             edge_cache_budget,
             true,
+            false,
+        )
+    }
+
+    /// Start a runtime whose schema comes from a dynamic administrative
+    /// catalogue.
+    ///
+    /// `schema` is used for a fresh store and whenever the existing store
+    /// already holds it. An existing store that never admitted `schema`
+    /// reopens with its own current schema instead of failing startup; the
+    /// caller then re-applies its durable selection as usual.
+    pub fn start_with_catalogue_schema(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
+        role: NodeRole,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+    ) -> Result<Self, String> {
+        Self::start_with_storage_config_and_permissions(
+            schema,
+            storage_config,
+            storage_factory,
+            role,
+            edge_cache_budget,
+            true,
+            true,
         )
     }
 
@@ -1374,6 +1401,7 @@ impl ServerRuntimeHandle {
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
+        reopen_with_durable_schema: bool,
     ) -> Result<Self, String> {
         let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
         let (started_tx, started_rx) = std_mpsc::channel();
@@ -1396,6 +1424,11 @@ impl ServerRuntimeHandle {
                 .with_row_id_seed(0x5e)
                 .with_runtime_schema_bootstrap()
                 .with_role(role);
+                let config = if reopen_with_durable_schema {
+                    config.with_durable_reopen_schema()
+                } else {
+                    config
+                };
                 let config = match storage_factory {
                     Some(factory) => config.with_storage_factory(factory),
                     None => config,

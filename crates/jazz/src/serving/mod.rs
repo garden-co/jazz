@@ -127,6 +127,10 @@ pub struct InMemoryServerShellConfig {
     /// catalogue if the opened store does not already carry a durable write
     /// pointer for it.
     pub bootstrap_runtime_schema: bool,
+    /// Whether a durable store that does not hold the constructor schema
+    /// reopens with its own current schema instead of failing its genesis
+    /// check. Fresh stores still open with the constructor schema.
+    pub reopen_with_durable_schema: bool,
     /// Target-shell factory used when [`StorageConfig`] selects durable storage.
     pub storage_factory: Option<Arc<dyn StorageFactory>>,
 }
@@ -142,6 +146,7 @@ impl InMemoryServerShellConfig {
             large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
+            reopen_with_durable_schema: false,
             storage_factory: None,
         }
     }
@@ -187,6 +192,15 @@ impl InMemoryServerShellConfig {
         self.bootstrap_runtime_schema = true;
         self
     }
+
+    /// Reopen an existing durable store with its own current schema when it
+    /// does not hold the constructor schema. A dynamic-schema server uses this
+    /// because its administrative catalogue can name a schema its runtime
+    /// store never admitted; a fixed-schema server keeps the strict check.
+    pub fn with_durable_reopen_schema(mut self) -> Self {
+        self.reopen_with_durable_schema = true;
+        self
+    }
 }
 
 impl fmt::Debug for InMemoryServerShellConfig {
@@ -202,6 +216,10 @@ impl fmt::Debug for InMemoryServerShellConfig {
             )
             .field("role", &self.role)
             .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
+            .field(
+                "reopen_with_durable_schema",
+                &self.reopen_with_durable_schema,
+            )
             .field(
                 "storage_factory",
                 &self.storage_factory.as_ref().map(|_| "configured"),
@@ -926,16 +944,24 @@ impl InMemoryServerShell {
                         "durable server storage requires a target-shell storage factory".into(),
                     )
                 })?;
-                let mut db_config = DbConfig::new(
-                    config.schema,
-                    crate::db::block_on(factory.open(
-                        path.clone(),
-                        refs,
-                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                    ))
-                    .map_err(db_storage_error)?,
-                    config.identity,
-                );
+                let storage = crate::db::block_on(factory.open(
+                    path.clone(),
+                    refs,
+                    epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                ))
+                .map_err(db_storage_error)?;
+                let (storage, schema) = if config.reopen_with_durable_schema {
+                    crate::db::block_on(
+                        crate::node::NodeState::<BoxedStorage>::select_durable_reopen_schema(
+                            storage,
+                            config.schema,
+                        ),
+                    )
+                    .map_err(|error| ShellError::Db(error.to_string()))?
+                } else {
+                    (storage, config.schema)
+                };
+                let mut db_config = DbConfig::new(schema, storage, config.identity);
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
