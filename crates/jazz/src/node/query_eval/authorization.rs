@@ -265,7 +265,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         let access_paths = BTreeMap::from([(
             root_source_id(policy_shape.query().table.as_str()),
@@ -490,7 +490,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         // A primary-key access path addresses the physical row UUID without
         // overloading public `id`, which may be a declared user column.
@@ -743,7 +743,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         let candidate = current_row_from_cells_with_explicit_provenance(
             table, row_uuid, cells, provenance, None,
@@ -1111,7 +1111,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-            ),
+            )?,
         })
     }
 
@@ -1306,7 +1306,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-            ),
+            )?,
         };
         self.query
             .read_policy_authorization_request_cache

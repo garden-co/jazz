@@ -37,19 +37,19 @@ use super::query_engine::{
     OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
     PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
     ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
-    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
-    SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
-    SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
-    StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
-    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
-    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
-    route_param_field, user_column_field,
+    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramCompilation,
+    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
+    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
+    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
+    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
+    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
+    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
+    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
+    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
+    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
+    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
+    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
+    right_field, route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -229,8 +229,8 @@ pub(crate) fn take_required_sink_deltas(
 
 mod lowering;
 
-pub(crate) use lowering::PolicyAuthorizationGraph;
 use lowering::*;
+pub(crate) use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
 
 enum CurrentQueryProgramOutput {
     AppRows,
@@ -491,6 +491,33 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
+    }
+
+    fn current_query_program_request_and_access_paths(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
         let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
@@ -518,8 +545,7 @@ where
                     .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
             );
         }
-        self.compile_query_program_request_with_access_paths(request, access_paths)
-            .await
+        Ok((request, access_paths))
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -607,7 +633,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -643,7 +669,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -694,7 +720,10 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                shape.query(),
+            )?,
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -762,7 +791,7 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, lowered_shape.query()),
+            output: current_query_output_request(output, lowered_shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -1047,7 +1076,7 @@ where
             )?,
             shape: input_shape,
         };
-        let mut output_request = current_query_output_request(output, shape.query());
+        let mut output_request = current_query_output_request(output, shape.query())?;
         if storage_backed_result_materialization {
             // A simple current root query carries the exact visible content
             // transaction in its result-member terminal.  Keeping every
@@ -1100,6 +1129,8 @@ where
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
     }
 
     #[cfg(test)]
@@ -1592,13 +1623,16 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        // Tree collectors own relation fields such as `posts` in their public
-        // app-row descriptor. Those fields are not columns of the root
-        // table, so normalizing a structured result against that table would
-        // silently discard the recursive payload before the client can read
-        // it. Flat rows still need this boundary to remove materializer-only
-        // physical fields.
-        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+        // Relation terminals and tree collectors own their public fields in
+        // the app-row descriptor. Those fields are not necessarily columns of
+        // the root table, so normalizing such output against that table would
+        // silently discard aliases or recursive payload before the client can
+        // read it. Flat rows still need this boundary to remove
+        // materializer-only physical fields.
+        if query.relation.is_none()
+            && query.flat_join.is_none()
+            && query.array_subqueries.is_empty()
+        {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
@@ -3027,17 +3061,19 @@ where
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view_in_authorization_mode(
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            None,
             authorization_mode,
-        )
-        .await
-        .map(|_| ())
+            PreparedClaimBindingMode::Strict,
+        )?;
+        self.ensure_query_program_request_supported(request, access_paths)
+            .await
     }
 
     pub(crate) fn mark_peer_maintained_query_shape_cache(
@@ -3259,6 +3295,20 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection_if_present)
+                .transpose()?
+                .flatten(),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),

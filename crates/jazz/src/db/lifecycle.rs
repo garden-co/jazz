@@ -626,6 +626,14 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Number of admitted owner operations (mutations, fenced reads and
+    /// cleanups) that have not finished yet. Bindings bound their direct
+    /// mutation admission with it.
+    #[doc(hidden)]
+    pub fn queued_mutation_count(&self) -> usize {
+        self.node.queued_mutation_count()
+    }
+
     /// Order a binding read after mutations already admitted on this owner.
     /// This only waits for local command execution, not persistence or sync,
     /// and later writes cannot extend the wait.
@@ -1435,6 +1443,15 @@ where
     /// Test/bench-only snapshot of sync-path counters.
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only count of compiler executions, excluding cache hits.
+    pub fn query_program_compilations_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .query_program_compilations_for_test()
     }
 
     #[cfg(any(test, feature = "testing"))]

@@ -1,6 +1,9 @@
 use super::*;
 use crate::protocol::ProgramSourceId;
+mod arguments;
 mod collect_layout;
+mod templates;
+use arguments::{LoweringContext, ProgramArgumentRecipes};
 use collect_layout::*;
 use groove::ivm::{
     AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
@@ -9,6 +12,7 @@ use groove::ivm::{
     TopByLimit, TopByOrder,
 };
 use groove::records::{ValueType, collect_by_ordered_scalar};
+pub(crate) use templates::QueryProgramTemplateCache;
 
 mod closure;
 use closure::{
@@ -54,6 +58,49 @@ pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
 /// Owned declarative Groove inputs prepared before pure Jazz lowering.
 pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
 
+/// One compilation's analyzed structure and exact source requirements.
+///
+/// Own the request with its analysis: policy dependency preparation, source
+/// binding and terminal lowering must not independently reconstruct (or mix)
+/// them. This artifact contains no resolved storage sources or live runtime
+/// handles. It is not yet a cross-binding cache: some terminal lowering still
+/// consumes concrete values from the request.
+#[derive(Clone)]
+pub(crate) struct QueryProgramCompilation {
+    request: QueryProgramRequest,
+    plan: Box<AnalyzedQueryPlan>,
+    sources: Vec<SourceRequest>,
+}
+
+impl QueryProgramCompilation {
+    pub(crate) fn analyze(request: QueryProgramRequest) -> CapabilityResult<Self> {
+        let plan = analyze_query_plan(&request).map_err(|gaps| {
+            let mut explain = ExplainPlan::default();
+            explain
+                .capabilities
+                .push("only current-source row-set lowering is implemented".to_owned());
+            Box::new(CapabilityReport {
+                gaps,
+                explain: explain_with_request(&request, explain),
+            })
+        })?;
+        let sources = source_requests_for_plan(&request, &plan)?;
+        Ok(Self {
+            request,
+            plan: Box::new(plan),
+            sources,
+        })
+    }
+
+    pub(crate) fn request(&self) -> &QueryProgramRequest {
+        &self.request
+    }
+
+    pub(crate) fn sources(&self) -> &[SourceRequest] {
+        &self.sources
+    }
+}
+
 /// Analyze the logical source requests for one program without preparing or
 /// lowering any source. Compilation orchestration uses this to discover
 /// dependent policy programs before source preparation begins.
@@ -66,8 +113,15 @@ pub(crate) fn query_program_source_requests(
             explain: explain_with_request(request, ExplainPlan::default()),
         })
     })?;
-    let source_visibilities = source_visibilities(&plan);
-    source_requirements(request, &plan)?
+    source_requests_for_plan(request, &plan)
+}
+
+fn source_requests_for_plan(
+    request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
+) -> CapabilityResult<Vec<SourceRequest>> {
+    let source_visibilities = source_visibilities(plan);
+    source_requirements(request, plan)?
         .into_iter()
         .map(|(source, requirements)| {
             Ok(SourceRequest {
@@ -114,33 +168,29 @@ pub(crate) fn authorized_deletion_preimage_source_request(
 /// physical-layout preparation remain async. Runtime production code calls
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
 pub(crate) async fn prepare_and_lower_query_program(
-    request: QueryProgramRequest,
+    compilation: QueryProgramCompilation,
     source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
+    let (sources, explain) = prepare_query_program_sources(&compilation, source_preparer).await?;
+    lower_resolved_query_program(compilation, sources, explain)
+}
+
+pub(crate) async fn prepare_query_program_sources(
+    compilation: &QueryProgramCompilation,
+    source_preparer: &mut impl SourceGraphPreparer,
+) -> CapabilityResult<(ResolvedQuerySources, ExplainPlan)> {
     let mut explain = ExplainPlan::default();
 
-    let _plan = match analyze_query_plan(&request) {
-        Ok(plan) => plan,
-        Err(gaps) => {
-            explain
-                .capabilities
-                .push("only current-source row-set lowering is implemented".to_owned());
-            return Err(Box::new(CapabilityReport {
-                gaps,
-                explain: explain_with_request(&request, explain),
-            }));
-        }
-    };
-
+    let request = compilation.request();
     let mut resolved_sources = BTreeMap::new();
-    for source_request in query_program_source_requests(&request)? {
+    for source_request in compilation.sources() {
         let source = source_request.source.clone();
         // Source preparation is the remaining async compatibility boundary.
         // Policy programs have already been prepared by compilation
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
         let mut resolved_source =
-            match Box::pin(source_preparer.prepare_source_graph(&source_request)).await {
+            match Box::pin(source_preparer.prepare_source_graph(source_request)).await {
                 Ok(resolved_source) => resolved_source,
                 Err(err) => {
                     let mut failure_explain = explain.clone();
@@ -155,7 +205,7 @@ pub(crate) async fn prepare_and_lower_query_program(
             };
         if resolved_source.deletion_register.is_some()
             && let Some(preimage_request) =
-                authorized_deletion_preimage_source_request(&source_request)
+                authorized_deletion_preimage_source_request(source_request)
         {
             let preimage = Box::pin(source_preparer.prepare_source_graph(&preimage_request))
                 .await
@@ -174,7 +224,10 @@ pub(crate) async fn prepare_and_lower_query_program(
                         ),
                     })
                 })?;
-            resolved_source.authorized_deletion_preimage = Some(preimage.graph);
+            resolved_source.authorized_deletion_preimage = Some(AuthorizedDeletionPreimage {
+                graph: preimage.graph,
+                routing_fields: preimage.routing_fields,
+            });
         }
         // A receiver-local maintained subscription may replace an
         // authority-approved source closure through runtime-owned input
@@ -189,7 +242,7 @@ pub(crate) async fn prepare_and_lower_query_program(
         ));
         resolved_sources.insert(source, resolved_source);
     }
-    lower_resolved_query_program(request, resolved_sources, explain)
+    Ok((resolved_sources, explain))
 }
 
 /// Purely lower a Jazz request whose Groove sources have already been prepared.
@@ -197,21 +250,30 @@ pub(crate) async fn prepare_and_lower_query_program(
 /// This function performs no storage access, hydration, registration, or
 /// evaluation and therefore must remain synchronous.
 pub(crate) fn lower_resolved_query_program(
-    request: QueryProgramRequest,
+    compilation: QueryProgramCompilation,
+    resolved_sources: ResolvedQuerySources,
+    explain: ExplainPlan,
+) -> QueryCompileResult {
+    lower_resolved_query_program_with_source_parameters(
+        compilation,
+        resolved_sources,
+        explain,
+        &BTreeMap::new(),
+        None,
+    )
+}
+
+fn lower_resolved_query_program_with_source_parameters(
+    compilation: QueryProgramCompilation,
     resolved_sources: ResolvedQuerySources,
     mut explain: ExplainPlan,
+    source_parameters: &BTreeMap<u32, ParameterDomain>,
+    arguments: Option<&std::cell::RefCell<ProgramArgumentRecipes>>,
 ) -> QueryCompileResult {
-    let plan = match analyze_query_plan(&request) {
-        Ok(plan) => plan,
-        Err(gaps) => {
-            explain
-                .capabilities
-                .push("only current-source row-set lowering is implemented".to_owned());
-            return Err(Box::new(CapabilityReport {
-                gaps,
-                explain: explain_with_request(&request, explain),
-            }));
-        }
+    let QueryProgramCompilation { request, plan, .. } = compilation;
+    let context = match arguments {
+        Some(arguments) => LoweringContext::compiling(&request, arguments),
+        None => LoweringContext::concrete(&request),
     };
     let resolved_root = resolved_sources
         .get(plan.root_source())
@@ -232,7 +294,7 @@ pub(crate) fn lower_resolved_query_program(
         &plan,
         &resolved_root,
         &resolved_sources,
-        &request,
+        &context,
     )
     .map_err(|gap| {
         Box::new(CapabilityReport {
@@ -247,7 +309,7 @@ pub(crate) fn lower_resolved_query_program(
             explain: explain_with_request(&request, explain.clone()),
         })
     })?;
-    collect_binding_source_params(&lowered.graph, &mut parameters);
+    collect_binding_source_params_with_slots(&lowered.graph, &mut parameters, source_parameters);
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
@@ -260,7 +322,7 @@ pub(crate) fn lower_resolved_query_program(
     .then(|| lowered.graph.clone());
     let terminals = lowered_terminals(
         lowered.graph,
-        &request,
+        &context,
         &plan,
         &resolved_root,
         &resolved_sources,
@@ -286,7 +348,11 @@ pub(crate) fn lower_resolved_query_program(
     let covered_input_source_descriptors = covered_input_source_descriptors(&terminals)?;
 
     for terminal in &terminals {
-        collect_binding_source_params(&terminal.graph, &mut parameters);
+        collect_binding_source_params_with_slots(
+            &terminal.graph,
+            &mut parameters,
+            source_parameters,
+        );
     }
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
@@ -366,7 +432,8 @@ pub(crate) async fn lower_query_program(
     request: QueryProgramRequest,
     source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
-    prepare_and_lower_query_program(request, source_preparer).await
+    prepare_and_lower_query_program(QueryProgramCompilation::analyze(request)?, source_preparer)
+        .await
 }
 
 fn verify_routed_terminal_outputs(
@@ -433,6 +500,10 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 .clone()
         };
         let fields = match node {
+            GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output),
+            GraphBuilder::TypedTemplate { program, .. } => {
+                descriptor_named_fields(&program.output_descriptor())
+            }
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
@@ -793,7 +864,34 @@ fn source_value_ref(value: &NormalizedValueRef) -> bool {
 }
 
 fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
+    collect_binding_source_params_with_slots(graph, domain, &BTreeMap::new());
+}
+
+fn collect_binding_source_params_with_slots(
+    graph: &GraphBuilder,
+    domain: &mut ParameterDomain,
+    slots: &BTreeMap<u32, ParameterDomain>,
+) {
     for node in graph_builder_postorder(graph) {
+        if let GraphBuilder::TemplateInput { slot, .. } = node {
+            if let Some(parameters) = slots.get(slot) {
+                for (name, ty) in &parameters.user_params {
+                    domain
+                        .user_params
+                        .entry(name.clone())
+                        .or_insert_with(|| ty.clone());
+                }
+                for (name, claim) in &parameters.claim_params {
+                    domain
+                        .claim_params
+                        .entry(name.clone())
+                        .or_insert_with(|| claim.clone());
+                }
+                domain
+                    .routing_params
+                    .extend(parameters.routing_params.iter().cloned());
+            }
+        }
         let GraphBuilder::BindingSource { output, .. } = node else {
             continue;
         };
@@ -846,6 +944,14 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
         }
         pending.push((node, true));
         match node {
+            GraphBuilder::TypedTemplate { inputs, .. } => {
+                pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
+            }
+            GraphBuilder::TemplateInput { input, .. } => {
+                if let Some(input) = input {
+                    pending.push((input, false));
+                }
+            }
             GraphBuilder::Recursive {
                 seed,
                 step,
@@ -1026,6 +1132,8 @@ pub(crate) fn retained_projection_graph_for_test(
         &mut BTreeSet::new(),
     )
     .unwrap();
-    let lowered = lower_relation_input_for_contributor(&plan, sources, request).unwrap();
+    let lowered =
+        lower_relation_input_for_contributor(&plan, sources, &LoweringContext::concrete(request))
+            .unwrap();
     (lowered.graph, lowered.nullable_field_depths)
 }

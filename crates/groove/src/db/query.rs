@@ -1,6 +1,15 @@
 use super::*;
 
 impl Database {
+    /// Describe one concrete input to an immutable query template. No source
+    /// is installed, retained or authorized by this operation.
+    pub fn describe_template_input(
+        &self,
+        graph: GraphBuilder,
+    ) -> Result<crate::ivm::TemplateGraphInput, Error> {
+        let output = self.graph_output_descriptor(&graph)?;
+        Ok(crate::ivm::TemplateGraphInput::new(graph, output))
+    }
     /// Infer the exact output contract without installing or executing a graph.
     pub fn graph_output_descriptor(&self, graph: &GraphBuilder) -> Result<RecordDescriptor, Error> {
         self.ensure_not_poisoned()?;
@@ -183,6 +192,15 @@ impl Database {
     /// polling this work until the runtime reaches a terminal state.
     pub fn has_pending_progress(&self) -> bool {
         self.ivm_runtime.has_pending_incremental()
+    }
+
+    /// Whether already-admitted work can still change this subscription's
+    /// terminal. This does not poll, consume queued results, or predict future
+    /// writes. A caller must drain the receiver before treating it as current.
+    /// Missing/failed subscription IDs return true rather than proving readiness.
+    pub fn subscription_has_pending_progress(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_progress(subscription)
     }
 
     /// Drive every suspended incremental evaluation until the runtime is

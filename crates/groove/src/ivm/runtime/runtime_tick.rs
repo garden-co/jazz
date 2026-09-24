@@ -50,7 +50,7 @@ struct EvaluationSession<'a> {
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -79,10 +79,10 @@ pub(super) struct IncrementalEvaluation<'a> {
     work_queue: EvaluationWorkQueue,
     /// Graph slice whose state is staged by this evaluation. Unrelated
     /// runtime state remains live and is merged only when the tick commits.
-    relevant_nodes: HashSet<NodeId>,
+    relevant_nodes: Arc<HashSet<NodeId>>,
     published_subscriptions: HashSet<SubscriptionId>,
     affected_subscriptions: HashSet<SubscriptionId>,
-    affected_nodes: HashSet<NodeId>,
+    affected_nodes: Arc<HashSet<NodeId>>,
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
@@ -98,7 +98,7 @@ pub(super) struct IncrementalEvaluation<'a> {
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -322,133 +322,188 @@ impl PendingIncrementalEvaluation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EvaluationEntry {
     Waiting(usize),
+    Fused,
     Runnable,
     Complete,
 }
 
 struct EvaluationWorkQueue {
-    pending: VecDeque<NodeId>,
-    visited: HashSet<NodeId>,
-    entries: HashMap<NodeId, EvaluationEntry>,
-    dependents: HashMap<NodeId, Vec<NodeId>>,
+    unary_batches: HashMap<NodeId, evaluator::PendingUnaryBatch>,
+    pipelines: HashMap<NodeId, Arc<[NodeId]>>,
+    pipeline_batches: HashMap<NodeId, pipeline::PendingPipeline>,
+    task_slots: Vec<usize>,
+    layout: Arc<crate::ivm::execution_layout::ExecutionLayout>,
+    entries: Vec<EvaluationEntry>,
     request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
     runnable: VecDeque<NodeId>,
-    roots: HashSet<NodeId>,
     completed_events: Vec<NodeId>,
-    temporal_waiting: HashMap<NodeId, usize>,
+    temporal_waiting: Vec<usize>,
 }
 
 impl EvaluationWorkQueue {
-    fn new(roots: impl IntoIterator<Item = NodeId>) -> Self {
-        let roots = roots.into_iter().collect::<VecDeque<_>>();
-        Self {
-            pending: roots.clone(),
-            visited: HashSet::default(),
-            entries: HashMap::default(),
-            dependents: HashMap::default(),
+    fn discover(
+        graph: &IvmGraph,
+        node_meta: &HashMap<NodeId, NodeRuntimeMeta>,
+        roots: impl IntoIterator<Item = NodeId>,
+        hydrate_sources: bool,
+    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
+        let queue = Self::discover_frame(graph, node_meta, roots, hydrate_sources)?;
+        Ok((queue.layout.nodes.iter().copied().collect(), queue))
+    }
+
+    fn discover_frame(
+        graph: &IvmGraph,
+        node_meta: &HashMap<NodeId, NodeRuntimeMeta>,
+        roots: impl IntoIterator<Item = NodeId>,
+        hydrate_sources: bool,
+    ) -> Result<Self, IvmRuntimeError> {
+        let layout = graph
+            .execution_layout(roots)
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let mut queue = Self {
+            unary_batches: HashMap::default(),
+            pipelines: HashMap::default(),
+            pipeline_batches: HashMap::default(),
+            task_slots: (0..layout.nodes.len()).collect(),
+            entries: layout
+                .input_counts
+                .iter()
+                .copied()
+                .map(EvaluationEntry::Waiting)
+                .collect(),
+            temporal_waiting: vec![0; layout.nodes.len()],
+            layout,
             request_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
-            roots: roots.into_iter().collect(),
             completed_events: Vec::new(),
-            temporal_waiting: HashMap::default(),
+        };
+        // Contract physical tasks, not graph identity. A globally shared or
+        // explicitly retained intermediate remains independently executable.
+        let predecessors = queue
+            .layout
+            .pipeline_predecessors
+            .iter()
+            .map(|predecessor| {
+                predecessor.filter(|slot| {
+                    let id = queue.layout.nodes[*slot];
+                    let node = graph.node(id).expect("layout node");
+                    !node.is_durable()
+                        && node.children.len() == 1
+                        && node_meta
+                            .get(&id)
+                            .is_none_or(|meta| meta.retainers.is_empty())
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut interior = vec![false; queue.layout.nodes.len()];
+        for slot in predecessors.iter().flatten() {
+            interior[*slot] = true;
         }
-    }
-
-    fn discover_hydration(
-        self,
-        graph: &IvmGraph,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        self.discover(graph, true, std::collections::BTreeMap::new())
-    }
-
-    fn discover_incremental(
-        self,
-        graph: &IvmGraph,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        self.discover(graph, false, std::collections::BTreeMap::new())
-    }
-
-    fn discover(
-        mut self,
-        graph: &IvmGraph,
-        hydrate_sources: bool,
-        request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
-    ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        let mut request_dependencies_by_node = HashMap::<NodeId, usize>::default();
-        for nodes in request_dependents.values() {
-            for node in nodes {
-                *request_dependencies_by_node.entry(*node).or_default() += 1;
-            }
-        }
-        self.request_dependents = request_dependents;
-        while let Some(node_id) = self.pending.pop_front() {
-            if !self.visited.insert(node_id) {
+        for tail in 0..queue.layout.nodes.len() {
+            if interior[tail] || predecessors[tail].is_none() {
                 continue;
             }
-            let node = graph
-                .node(node_id)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
-            self.pending.extend(node.descriptor.inputs.iter().copied());
-            for input in &node.descriptor.inputs {
-                self.dependents.entry(*input).or_default().push(node_id);
+            let mut members = vec![queue.layout.nodes[tail]];
+            let mut cursor = tail;
+            while let Some(previous) = predecessors[cursor] {
+                queue.task_slots[previous] = tail;
+                queue.entries[previous] = EvaluationEntry::Fused;
+                members.push(queue.layout.nodes[previous]);
+                cursor = previous;
             }
-            let request = if hydrate_sources {
-                match &node.descriptor.operator {
+            members.reverse();
+            queue
+                .pipelines
+                .insert(queue.layout.nodes[tail], members.into());
+        }
+        if hydrate_sources {
+            for &slot in &queue.layout.source_slots {
+                let node_id = queue.layout.nodes[slot];
+                let node = graph
+                    .node(node_id)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(node_id))?;
+                let request = match &node.descriptor.operator {
                     OpType::TableSource(source) => NodeState::table_source_request(source)?,
                     OpType::IndexSource(source) => NodeState::index_source_request(source)?,
-                    _ => None,
+                    _ => unreachable!("layout source slot is not a storage source"),
+                };
+                if let Some(request) = request {
+                    queue
+                        .request_dependents
+                        .entry(EvaluationRequestKey::Storage(request))
+                        .or_default()
+                        .push(node_id);
+                    queue.entries[slot] = EvaluationEntry::Waiting(1);
                 }
-                .map(EvaluationRequestKey::Storage)
-            } else {
-                None
-            };
-            if let Some(request) = request {
-                self.request_dependents
-                    .entry(request)
-                    .or_default()
-                    .push(node_id);
-                self.entries.insert(node_id, EvaluationEntry::Waiting(1));
-            } else {
-                self.entries.insert(
-                    node_id,
-                    EvaluationEntry::Waiting(
-                        node.descriptor.inputs.len()
-                            + request_dependencies_by_node
-                                .get(&node_id)
-                                .copied()
-                                .unwrap_or_default(),
-                    ),
-                );
             }
         }
-        let initially_ready = self
-            .entries
-            .iter()
-            .filter_map(|(node, entry)| (*entry == EvaluationEntry::Waiting(0)).then_some(*node))
-            .collect::<Vec<_>>();
-        for node in initially_ready {
-            self.make_runnable(node);
+        for slot in 0..queue.entries.len() {
+            if queue.entries[slot] == EvaluationEntry::Waiting(0) {
+                queue.make_slot_runnable(slot);
+            }
         }
-        let relevant_nodes = self.visited.clone();
-        Ok((relevant_nodes, self))
+        Ok(queue)
     }
 
     fn requests(&self) -> impl Iterator<Item = &EvaluationRequestKey> {
         self.request_dependents.keys()
     }
 
+    /// Dispatch with direct compiled input slots. Registers belong to this
+    /// private frame, never the graph cache. Producer state remains a live
+    /// requirement: missing/stale registers use the normal scoped resolver.
+    fn poll_node(
+        &mut self,
+        evaluator: &mut TickEvaluator<'_>,
+        node: NodeId,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        let slot = self.layout.slots[&node];
+        if let Some(pipeline) = self.pipelines.get(&node) {
+            let head = self.layout.slots[&pipeline[0]];
+            evaluator.poll_pipeline(
+                pipeline,
+                &mut self.pipeline_batches,
+                evaluator::FrameInputs {
+                    slots: self.layout.inputs(head),
+                },
+                cx,
+            )
+        } else {
+            evaluator.poll_ready_node(
+                node,
+                &mut self.unary_batches,
+                evaluator::FrameInputs {
+                    slots: self.layout.inputs(slot),
+                },
+                cx,
+            )
+        }
+    }
+
+    fn dependency_ready(&mut self, node: NodeId) {
+        if let Some(&slot) = self.layout.slots.get(&node) {
+            self.slot_dependency_ready(slot);
+        }
+    }
+
+    fn slot_dependency_ready(&mut self, slot: usize) {
+        let slot = self.task_slots[slot];
+        let EvaluationEntry::Waiting(remaining) = &mut self.entries[slot] else {
+            return;
+        };
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            self.make_slot_runnable(slot);
+        }
+    }
+
     fn requests_ready(&mut self, requests: impl IntoIterator<Item = EvaluationRequestKey>) {
-        let ready_nodes = requests
-            .into_iter()
-            .flat_map(|request| self.request_dependents.remove(&request).unwrap_or_default())
-            .collect::<Vec<_>>();
-        for node in ready_nodes {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(node);
+        for request in requests {
+            if let Some(nodes) = self.request_dependents.remove(&request) {
+                for node in nodes {
+                    self.dependency_ready(node);
+                }
             }
         }
     }
@@ -467,13 +522,7 @@ impl EvaluationWorkQueue {
             !dependents.is_empty()
         });
         for node in ready_nodes {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(node);
-            }
+            self.dependency_ready(node);
         }
     }
 
@@ -483,8 +532,7 @@ impl EvaluationWorkQueue {
         requests: impl IntoIterator<Item = EvaluationRequestKey>,
     ) {
         let requests = requests.into_iter().collect::<Vec<_>>();
-        self.entries
-            .insert(node, EvaluationEntry::Waiting(requests.len()));
+        self.entries[self.layout.slots[&node]] = EvaluationEntry::Waiting(requests.len());
         for request in requests {
             let dependents = self.request_dependents.entry(request).or_default();
             if !dependents.contains(&node) {
@@ -493,73 +541,77 @@ impl EvaluationWorkQueue {
         }
     }
 
-    fn make_runnable(&mut self, node: NodeId) {
+    fn make_slot_runnable(&mut self, slot: usize) {
         if matches!(
-            self.entries.get(&node),
-            Some(EvaluationEntry::Runnable | EvaluationEntry::Complete)
+            self.entries[slot],
+            EvaluationEntry::Runnable | EvaluationEntry::Complete
         ) {
             return;
         }
-        self.entries.insert(node, EvaluationEntry::Runnable);
-        self.runnable.push_back(node);
+        self.entries[slot] = EvaluationEntry::Runnable;
+        self.runnable.push_back(self.layout.nodes[slot]);
     }
 
     fn complete(&mut self, node: NodeId) {
-        self.entries.insert(node, EvaluationEntry::Complete);
-        self.completed_events.push(node);
-        let dependents = self.dependents.get(&node).cloned().unwrap_or_default();
-        for dependent in dependents {
-            let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&dependent) else {
-                continue;
-            };
-            *remaining = remaining.saturating_sub(1);
-            if *remaining == 0 {
-                self.make_runnable(dependent);
+        let slot = self.layout.slots[&node];
+        // Publish completion only after the entire task succeeds. In
+        // particular, temporal waiters must not observe an interior prefix.
+        if let Some(members) = self.pipelines.get(&node) {
+            for member in members.iter().copied() {
+                self.entries[self.layout.slots[&member]] = EvaluationEntry::Complete;
+                self.completed_events.push(member);
             }
+        } else {
+            self.completed_events.push(node);
+        }
+        self.entries[slot] = EvaluationEntry::Complete;
+        // Read compact slots directly without cloning a dependent list or
+        // changing the shared layout's reference count per completed node.
+        for index in 0..self.layout.dependents(slot).len() {
+            let dependent = self.layout.dependents(slot)[index];
+            self.slot_dependency_ready(dependent);
         }
     }
 
-    /// Retain a runnable node at the front of the queue after its private step
-    /// deliberately yields. The step future itself is disposable; resumable
-    /// operators keep their bounded continuation in operator state.
+    /// Retain a runnable node after its private step deliberately yields.
+    /// The disposable future is not the continuation; operator state is.
     fn requeue_yielded(&mut self, node: NodeId) {
-        self.entries.insert(node, EvaluationEntry::Runnable);
+        self.entries[self.layout.slots[&node]] = EvaluationEntry::Runnable;
         self.runnable.push_front(node);
     }
 
-    /// A runnable node is an explicit in-memory evaluator continuation.
-    /// Requests are represented separately as `Waiting`, so an eager cold
-    /// storage wake cannot be mistaken for CPU work.
     fn has_resident_continuation(&self) -> bool {
         !self.runnable.is_empty()
     }
 
     fn is_root(&self, node: NodeId) -> bool {
-        self.roots.contains(&node)
+        self.layout.roots.binary_search(&node).is_ok()
     }
 
     fn is_complete(&self, node: NodeId) -> bool {
-        self.entries.get(&node) == Some(&EvaluationEntry::Complete)
+        self.layout
+            .slots
+            .get(&node)
+            .is_some_and(|&slot| self.entries[slot] == EvaluationEntry::Complete)
     }
 
     fn roots_complete(&self) -> bool {
-        self.roots.iter().all(|node| self.is_complete(*node))
+        self.layout.roots.iter().all(|node| self.is_complete(*node))
     }
 
     fn incomplete_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.entries
-            .iter()
-            .filter_map(|(node, entry)| (*entry != EvaluationEntry::Complete).then_some(*node))
+        self.entries.iter().enumerate().filter_map(|(slot, entry)| {
+            (*entry != EvaluationEntry::Complete).then_some(self.layout.nodes[slot])
+        })
     }
 
-    /// Every node registered with a snapshot hydration is a single temporal
-    /// barrier: successors may use none of its isolated state until install.
+    /// A hydration's entire graph slice remains a temporal barrier until install.
     fn registered_nodes(&self) -> Vec<NodeId> {
-        self.entries.keys().copied().collect()
+        self.layout.nodes.clone()
     }
 
     fn overlaps(&self, nodes: &HashSet<NodeId>) -> bool {
-        self.entries.keys().any(|node| nodes.contains(node))
+        self.layout.nodes.iter().any(|node| nodes.contains(node))
     }
 
     fn downstream_closure(&self, roots: impl IntoIterator<Item = NodeId>) -> HashSet<NodeId> {
@@ -569,7 +621,14 @@ impl EvaluationWorkQueue {
             if !affected.insert(node) {
                 continue;
             }
-            pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
+            if let Some(&slot) = self.layout.slots.get(&node) {
+                pending.extend(
+                    self.layout
+                        .dependents(slot)
+                        .iter()
+                        .map(|&slot| self.layout.nodes[slot]),
+                );
+            }
         }
         affected
     }
@@ -606,57 +665,58 @@ impl EvaluationWorkQueue {
     }
 
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
+        self.unary_batches.retain(|node, _| !nodes.contains(node));
+        self.pipeline_batches
+            .retain(|node, _| !nodes.contains(node));
         self.runnable.retain(|node| !nodes.contains(node));
         self.request_dependents
             .retain(|_, dependents| !dependents.iter().all(|node| nodes.contains(node)));
         for node in nodes {
-            if self.entries.contains_key(node) {
-                self.entries.insert(*node, EvaluationEntry::Complete);
-                self.temporal_waiting.remove(node);
+            if let Some(&slot) = self.layout.slots.get(node) {
+                if let Some(members) = self.pipelines.get(node) {
+                    for member in members.iter() {
+                        self.entries[self.layout.slots[member]] = EvaluationEntry::Complete;
+                    }
+                }
+                self.entries[slot] = EvaluationEntry::Complete;
+                self.temporal_waiting[slot] = 0;
             }
         }
     }
 
     fn add_temporal_blockers(&mut self, blockers: &HashMap<NodeId, usize>) {
-        let blocked = self
-            .entries
-            .keys()
-            .filter_map(|node| blockers.get(node).map(|count| (*node, *count)))
-            .collect::<Vec<_>>();
-        for (node, count) in blocked {
+        for slot in 0..self.entries.len() {
+            let node = self.layout.nodes[slot];
+            let count = blockers.get(&node).copied().unwrap_or_default();
             if count == 0 {
                 continue;
             }
-            self.temporal_waiting.insert(node, count);
-            match self.entries.get(&node).copied() {
-                Some(EvaluationEntry::Runnable) => {
-                    self.runnable.retain(|candidate| *candidate != node);
-                    self.entries.insert(node, EvaluationEntry::Waiting(count));
+            self.temporal_waiting[slot] = count;
+            let task_slot = self.task_slots[slot];
+            match self.entries[task_slot] {
+                EvaluationEntry::Runnable => {
+                    self.runnable
+                        .retain(|candidate| *candidate != self.layout.nodes[task_slot]);
+                    self.entries[task_slot] = EvaluationEntry::Waiting(count);
                 }
-                Some(EvaluationEntry::Waiting(remaining)) => {
-                    self.entries
-                        .insert(node, EvaluationEntry::Waiting(remaining + count));
+                EvaluationEntry::Waiting(remaining) => {
+                    self.entries[task_slot] = EvaluationEntry::Waiting(remaining + count);
                 }
-                Some(EvaluationEntry::Complete) | None => {}
+                EvaluationEntry::Complete => {}
+                EvaluationEntry::Fused => unreachable!("canonical task slot"),
             }
         }
     }
 
     fn temporal_ready(&mut self, node: NodeId) {
-        let Some(temporal_remaining) = self.temporal_waiting.get_mut(&node) else {
+        let Some(&slot) = self.layout.slots.get(&node) else {
             return;
         };
-        *temporal_remaining = temporal_remaining.saturating_sub(1);
-        if *temporal_remaining == 0 {
-            self.temporal_waiting.remove(&node);
-        }
-        let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
+        if self.temporal_waiting[slot] == 0 {
             return;
-        };
-        *remaining = remaining.saturating_sub(1);
-        if *remaining == 0 {
-            self.make_runnable(node);
         }
+        self.temporal_waiting[slot] -= 1;
+        self.slot_dependency_ready(slot);
     }
 
     fn drain_completed_events(&mut self) -> Vec<NodeId> {
@@ -737,6 +797,7 @@ impl<'a> IncrementalEvaluation<'a> {
         self.discarded = nodes.is_empty()
             || self
                 .work_queue
+                .layout
                 .roots
                 .iter()
                 .all(|root| nodes.contains(root));
@@ -758,8 +819,8 @@ impl<'a> IncrementalEvaluation<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         self.node_meta.retain(|node, _| !nodes.contains(node));
-        self.relevant_nodes.retain(|node| !nodes.contains(node));
-        self.affected_nodes.retain(|node| !nodes.contains(node));
+        Arc::make_mut(&mut self.relevant_nodes).retain(|node| !nodes.contains(node));
+        Arc::make_mut(&mut self.affected_nodes).retain(|node| !nodes.contains(node));
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
@@ -813,15 +874,24 @@ impl<'a> IncrementalEvaluation<'a> {
             .arrangement_keys_by_input
             .extend(std::mem::take(&mut self.arrangement_keys_by_input));
 
-        runtime
-            .eval_memo
-            .extend(std::mem::take(&mut self.eval_memo));
-        runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
+        // Tick deltas belong to the frame, not the retained hydration cache.
+        // Previously we hashed/copied them into runtime only to evict them at
+        // the end of publication. Retain only actual hydration reuse entries.
+        for (key, entry) in std::mem::take(&mut self.eval_memo).into_entries() {
+            if key.tick_epoch.is_none() {
+                runtime.eval_memo_bytes =
+                    runtime.eval_memo_bytes.saturating_add(entry.payload_bytes);
+                if let Some(old) = runtime.eval_memo.insert(key, entry) {
+                    runtime.eval_memo_bytes =
+                        runtime.eval_memo_bytes.saturating_sub(old.payload_bytes);
+                }
+            }
+        }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         // Retainers are owned by graph lifecycle operations, not by this
         // evaluation snapshot. Preserve their current live value when a
         // suspended continuation resumes after lifecycle activity.
-        for node in &self.relevant_nodes {
+        for node in self.relevant_nodes.iter() {
             match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
                 (Some(meta), Some(live)) => {
                     meta.retainers = live.retainers.clone();
@@ -895,10 +965,7 @@ impl<'a> IncrementalEvaluation<'a> {
 
         let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
-            let result = {
-                let mut future = evaluator.update_node(node);
-                Pin::new(&mut future).poll(cx)
-            };
+            let result = self.work_queue.poll_node(&mut evaluator, node, cx);
             match result {
                 Poll::Ready(Ok(_)) => self.work_queue.complete(node),
                 Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)) => {
@@ -1254,8 +1321,12 @@ impl<'a> EvaluationSession<'a> {
         roots: VecDeque<NodeId>,
         storage: OwnedStorage<'a>,
     ) -> Result<Self, IvmRuntimeError> {
-        let (relevant_nodes, mut work_queue) =
-            EvaluationWorkQueue::new(roots.iter().copied()).discover_hydration(&runtime.graph)?;
+        let (relevant_nodes, mut work_queue) = EvaluationWorkQueue::discover(
+            &runtime.graph,
+            &runtime.node_meta,
+            roots.iter().copied(),
+            true,
+        )?;
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated
@@ -1290,12 +1361,14 @@ impl<'a> EvaluationSession<'a> {
                 }
             }
         }
-        let eval_memo = runtime
-            .eval_memo
-            .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut eval_memo = EvaluationMemo::for_layout(Arc::clone(&work_queue.layout));
+        eval_memo.extend(
+            runtime
+                .eval_memo
+                .iter()
+                .filter(|(key, _)| relevant_nodes.contains(&key.node))
+                .map(|(key, entry)| (key.clone(), entry.clone())),
+        );
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
         let node_meta = relevant_nodes
             .iter()
@@ -1457,9 +1530,7 @@ impl<'a> EvaluationSession<'a> {
                         terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
-                    let mut evaluation = evaluator.update_node(node);
-                    let poll = Pin::new(&mut evaluation).poll(cx);
-                    drop(evaluation);
+                    let poll = self.work_queue.poll_node(&mut evaluator, node, cx);
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                     match poll {
                         // A future which cooperatively yielded has not registered a
@@ -1644,7 +1715,11 @@ impl<'a> EvaluationSession<'a> {
         runtime
             .eval_memo
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime.eval_memo.extend(self.eval_memo);
+        runtime.eval_memo.extend(
+            self.eval_memo
+                .into_entries()
+                .filter(|(key, _)| key.tick_epoch.is_none()),
+        );
         runtime.eval_memo_bytes = runtime
             .eval_memo
             .values()
@@ -2294,6 +2369,46 @@ impl IvmRuntime {
         self.pending_incremental.is_pending()
     }
 
+    /// Whether an admitted evaluation can still change this receiver's
+    /// terminal. An already-consumed initial batch is not a progress fence:
+    /// later storage publications may still be suspended. Check the actual
+    /// consumer, not global runtime idleness (an unrelated cold graph must
+    /// not hold a ready subscription's opening hostage).
+    pub(crate) fn subscription_has_pending_progress(&self, id: SubscriptionId) -> bool {
+        // A missing/failed receiver cannot prove a completed terminal.
+        if self.pending_incremental_polling
+            || self
+                .multisink_subscriptions
+                .get(&id)
+                .is_none_or(|s| s.failed)
+        {
+            return true;
+        }
+        self.pending_incremental
+            .0
+            .borrow()
+            .evaluations
+            .values()
+            .any(|evaluation| {
+                match evaluation {
+                    PendingEvaluation::SubscriptionHydration(hydration) => {
+                        hydration.subscription_id == id
+                    }
+                    // Even computed output may still be buffered until the
+                    // evaluation commits. Do not use published_subscriptions as
+                    // evidence that the receiver has actually received it.
+                    PendingEvaluation::Incremental(evaluation) => {
+                        evaluation.affected_subscriptions.contains(&id)
+                    }
+                }
+            })
+            || self.deferred_notifications.values().any(|notifications| {
+                notifications
+                    .iter()
+                    .any(|(subscription, _)| *subscription == id)
+            })
+    }
+
     /// Whether the last suspended owner turn retained a cooperative CPU
     /// continuation rather than a cold storage request.
     pub(crate) fn has_resident_continuation(&self) -> bool {
@@ -2426,16 +2541,19 @@ impl IvmRuntime {
             .iter()
             .map(|delta| &delta.key)
             .collect::<HashSet<_>>();
-        let affected_nodes = self.graph.affected_nodes(
-            changed_tables.iter().copied(),
-            changed_bindings.iter().copied(),
-        );
+        let activation = self
+            .graph
+            .activation_plan(
+                changed_tables.iter().copied(),
+                changed_bindings.iter().copied(),
+            )
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let affected_nodes = Arc::clone(&activation.affected);
         // Capture only the graph slice reached from changed inputs. The
         // evaluator may need unchanged sibling inputs (for example the other
         // side of a join), so discovery walks ancestors of every affected
         // node, while unrelated graph state remains in the live runtime.
-        let (relevant_nodes, _) = EvaluationWorkQueue::new(affected_nodes.iter().copied())
-            .discover_incremental(&self.graph)?;
+        let relevant_nodes = Arc::clone(&activation.relevant);
         // Capture by graph key, never by filtering global retained maps. Root
         // state is the only durable evaluator state; recursive child scopes
         // are scratch and are removed before publication.
@@ -2454,7 +2572,7 @@ impl IvmRuntime {
             .collect::<HashMap<_, _>>();
         let mut arrangement_states = HashMap::default();
         let mut arrangement_keys_by_input = HashMap::default();
-        for input in &relevant_nodes {
+        for input in relevant_nodes.iter() {
             let Some(keys) = self.arrangement_keys_by_input.get(input) else {
                 continue;
             };
@@ -2470,7 +2588,7 @@ impl IvmRuntime {
         }
         // Tick memo entries are disposable. Recomputing the affected graph is
         // bounded by that graph slice and avoids a global memo scan.
-        let mut eval_memo = HashMap::default();
+        let mut eval_memo = EvaluationMemo::default();
         let mut eval_memo_bytes = 0;
         let mut memo_use_clock = self.memo_use_clock;
         let mut node_meta = relevant_nodes
@@ -2479,22 +2597,14 @@ impl IvmRuntime {
             .collect::<HashMap<_, _>>();
         let mut table_frontiers = HashMap::default();
         let mut binding_frontiers = HashMap::default();
-        for node in &relevant_nodes {
-            let Some(graph_node) = self.graph.node(*node) else {
-                continue;
-            };
-            match &graph_node.descriptor.operator {
-                OpType::TableSource(source) => {
-                    if let Some(frontier) = self.table_frontiers.get(&source.table) {
-                        table_frontiers.insert(source.table.clone(), *frontier);
-                    }
-                }
-                OpType::BindingSource(source) => {
-                    if let Some(frontier) = self.binding_frontiers.get(&source.key) {
-                        binding_frontiers.insert(source.key.clone(), *frontier);
-                    }
-                }
-                _ => {}
+        for table in &activation.tables {
+            if let Some(frontier) = self.table_frontiers.get(table) {
+                table_frontiers.insert(table.clone(), *frontier);
+            }
+        }
+        for binding in &activation.bindings {
+            if let Some(frontier) = self.binding_frontiers.get(binding) {
+                binding_frontiers.insert(binding.clone(), *frontier);
             }
         }
         let current_tick = self.current_tick + 1;
@@ -2505,7 +2615,7 @@ impl IvmRuntime {
             .sum::<usize>();
         self.tick_durable_nodes(
             &table_deltas,
-            &affected_nodes,
+            &activation.durable,
             current_tick,
             storage.as_ref(),
             &mut operator_states,
@@ -2563,21 +2673,18 @@ impl IvmRuntime {
                 }
             }
         }
-        let mut retained_roots = affected_nodes
+        let retained_roots = activation
+            .ephemeral
             .iter()
             .filter(|node| {
                 self.node_meta.get(node).is_some_and(|meta| {
                     meta.retainers
                         .iter()
                         .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
-                }) && self
-                    .graph
-                    .node(**node)
-                    .is_some_and(|node| !node.is_durable())
+                })
             })
             .copied()
             .collect::<Vec<_>>();
-        retained_roots.sort_unstable();
         let mut active_roots = affected_subscriptions
             .iter()
             .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
@@ -2590,15 +2697,12 @@ impl IvmRuntime {
                     .flatten()
             })
             .collect::<Vec<_>>();
-        active_roots.sort_unstable();
-        active_roots.dedup();
         active_roots.extend(retained_roots.iter().copied());
-        active_roots.sort_unstable();
-        active_roots.dedup();
         let requests = EvaluationRequests::new();
         let evaluation_inputs = Some(EvaluationInputs::default());
-        let (_, work_queue) =
-            EvaluationWorkQueue::new(active_roots).discover_incremental(&self.graph)?;
+        let work_queue =
+            EvaluationWorkQueue::discover_frame(&self.graph, &self.node_meta, active_roots, false)?;
+        eval_memo.set_layout(Arc::clone(&work_queue.layout));
         Ok(IncrementalEvaluation {
             table_deltas,
             binding_deltas,
@@ -2847,13 +2951,13 @@ impl IvmRuntime {
     async fn tick_durable_nodes(
         &self,
         table_deltas: &[TableDelta],
-        affected_nodes: &std::collections::HashSet<NodeId>,
+        durable_nodes: &[NodeId],
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
         operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
         arrangement_states: &mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
         arrangement_keys_by_input: &mut HashMap<NodeId, HashSet<ArrangementKey>>,
-        eval_memo: &mut HashMap<EvalMemoKey, EvalMemoEntry>,
+        eval_memo: &mut EvaluationMemo,
         eval_memo_bytes: &mut usize,
         memo_use_clock: &mut u64,
         node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
@@ -2861,19 +2965,10 @@ impl IvmRuntime {
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
         durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
-        let durable_nodes = affected_nodes
-            .iter()
-            .copied()
-            .filter(|node| {
-                self.graph
-                    .node(*node)
-                    .is_some_and(|graph_node| graph_node.is_durable())
-            })
-            .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
         let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
-        for node in durable_nodes {
+        for &node in durable_nodes {
             let graph_node = self
                 .graph
                 .node(node)
@@ -3039,10 +3134,13 @@ fn bump_input_frontiers_staged(
     if changed_tables.is_empty() && changed_bindings.is_empty() {
         return;
     }
-    for node in graph.affected_nodes(
-        changed_tables.iter().copied(),
-        changed_bindings.iter().copied(),
-    ) {
+    for &node in graph
+        .affected_nodes(
+            changed_tables.iter().copied(),
+            changed_bindings.iter().copied(),
+        )
+        .iter()
+    {
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
     }
@@ -3055,6 +3153,122 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
     };
     use crate::storage::MemoryStorage;
+
+    // Internal publication receipt: observing the final rows cannot detect
+    // inserting every tick memo into runtime and immediately evicting it again.
+    #[futures_test::test]
+    async fn publication_retains_only_hydration_memos_with_exact_replacement_accounting() {
+        let mut runtime = IvmRuntime::new(DatabaseSchema::new([])).unwrap();
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let node = runtime
+            .add_dedup_graph(
+                &GraphBuilder::values(descriptor.clone(), [vec![Value::U64(1)]]).unwrap(),
+            )
+            .unwrap()
+            .node;
+        let hydration_key = EvalMemoKey {
+            scope: ScopeId::root(),
+            node,
+            input_signature_hash: 1,
+            tick_epoch: None,
+            sub_tick: 0,
+            context_digest: 0,
+        };
+        let make_entry = |bytes| {
+            EvalMemoEntry::new(
+                Arc::new(RecordDeltas::empty(descriptor.clone())),
+                0,
+                bytes,
+                0,
+            )
+        };
+        runtime
+            .eval_memo
+            .insert(hydration_key.clone(), make_entry(3));
+        runtime.eval_memo_bytes = 3;
+        let storage = Rc::new(MemoryStorage::new(&[]).unwrap());
+        let mut evaluation = runtime
+            .begin_tick_with_params(Vec::new(), Vec::new(), OwnedStorage::new(storage), None)
+            .await
+            .unwrap();
+        evaluation
+            .eval_memo
+            .set_layout(runtime.graph.execution_layout([node]).unwrap());
+        evaluation
+            .eval_memo
+            .insert(hydration_key.clone(), make_entry(7));
+        evaluation.eval_memo.insert(
+            EvalMemoKey {
+                tick_epoch: Some(evaluation.current_tick),
+                ..hydration_key.clone()
+            },
+            make_entry(11),
+        );
+        evaluation.eval_memo_bytes = 18;
+        evaluation.install(&mut runtime);
+        assert_eq!(runtime.eval_memo.len(), 1);
+        assert!(runtime.eval_memo.keys().all(|key| key.tick_epoch.is_none()));
+        assert_eq!(
+            runtime.eval_memo.get(&hydration_key).unwrap().payload_bytes,
+            7
+        );
+        assert_eq!(runtime.eval_memo_bytes, 7);
+    }
+
+    // Internal mechanism receipt: identical public rows cannot prove that the
+    // queue removed intermediate tasks, or that live sharing invalidates that
+    // choice without invalidating immutable graph topology.
+    #[test]
+    fn physical_pipeline_contraction_respects_live_retained_and_shared_boundaries() {
+        let mut runtime = IvmRuntime::new(DatabaseSchema::new([])).unwrap();
+        let input = GraphBuilder::values(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            [vec![Value::U64(1)]],
+        )
+        .unwrap();
+        let prefix = input.filter(PredicateExpr::gt("id", Value::U64(0)));
+        let root = runtime
+            .add_dedup_graph(
+                &prefix
+                    .clone()
+                    .filter(PredicateExpr::gt("id", Value::U64(0))),
+            )
+            .unwrap()
+            .node;
+        let middle = runtime.graph.node(root).unwrap().descriptor.inputs[0];
+        let discover = |runtime: &IvmRuntime| {
+            EvaluationWorkQueue::discover(&runtime.graph, &runtime.node_meta, [root], false)
+                .unwrap()
+                .1
+        };
+        let mut queue = discover(&runtime);
+        assert_eq!(queue.pipelines[&root].as_ref(), &[middle, root]);
+        assert_eq!(
+            queue.entries[queue.layout.slots[&middle]],
+            EvaluationEntry::Fused
+        );
+        assert!(!queue.is_complete(middle));
+        queue.complete(root);
+        assert!(queue.is_complete(middle));
+        assert_eq!(queue.drain_completed_events(), [middle, root]);
+
+        runtime.add_retainer(middle, Retainer::PreparedShape("observer".into()));
+        assert!(discover(&runtime).pipelines.is_empty());
+        runtime.remove_retainer(middle, &Retainer::PreparedShape("observer".into()));
+        assert!(!discover(&runtime).pipelines.is_empty());
+        let old_layout = runtime.graph.execution_layout([root]).unwrap();
+        runtime
+            .add_dedup_graph(&prefix.filter(PredicateExpr::gt("id", Value::U64(2))))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &old_layout,
+            &runtime.graph.execution_layout([root]).unwrap()
+        ));
+        assert!(
+            discover(&runtime).pipelines.is_empty(),
+            "a consumer outside this layout still owns the intermediate"
+        );
+    }
 
     #[futures_test::test]
     async fn resumed_install_preserves_live_retainer_changes() {

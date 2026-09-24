@@ -60,3 +60,20 @@ export function assertDeviceReceipt(output, expected) {
   }
   return results;
 }
+
+/** One line per measured scenario, for the CI log and the PR's receipt. */
+export function deviceMetricsLines(results) {
+  return results
+    .filter((item) => item.metrics)
+    .map(
+      (item) =>
+        "JAZZ_DEVICE_METRICS " +
+        JSON.stringify({
+          scenario: item.scenario,
+          platform: item.receipt.platform,
+          deviceIdentifier: item.receipt.deviceIdentifier,
+          runNonce: item.receipt.runNonce,
+          metrics: item.metrics,
+        }),
+    );
+}

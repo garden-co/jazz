@@ -293,6 +293,14 @@ where
             .materialize_local_maintained_view_result_member_unbound(local, member)
             .await?;
         if let Some(row) = &mut row {
+            if let Some(columns) = local.relation_projection_for_member(member)? {
+                let table = self.table(local.result_table.as_str())?.clone();
+                *row = row.project_relation(&table, columns)?;
+                Self::bind_app_row_schema_fields(
+                    row,
+                    local.terminal_schemas.direct_app_row_schema()?,
+                )?;
+            }
             self.bind_current_row_columns_in_schema(local.result_schema_version, row)?;
         }
         Ok(row)
@@ -469,13 +477,19 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "flat joined result member is missing its tuple payload",
                 ))?;
-            return self
-                .current_row_from_result_payload(
-                    &table,
-                    payload,
-                    local.terminal_schemas.current_payload_schema()?,
-                )
-                .map(Some);
+            let mut row = self.current_row_from_result_payload(
+                &table,
+                payload,
+                local.terminal_schemas.current_payload_schema()?,
+            )?;
+            if let Some(columns) = local.relation_projection_for_member(member)? {
+                row = row.project_relation(&table, columns)?;
+                Self::bind_app_row_schema_fields(
+                    &mut row,
+                    local.terminal_schemas.direct_app_row_schema()?,
+                )?;
+            }
+            return Ok(Some(row));
         }
         let tx_versions = self
             .local_maintained_tx_versions(local, entry.2, cache)
@@ -508,7 +522,6 @@ where
             };
             version.clone()
         };
-        let _ = cache;
         self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             &version,
@@ -1014,13 +1027,11 @@ where
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
         for row in &mut rows {
-            if shape.query().array_subqueries.is_empty() {
-                self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
-            } else {
-                Self::bind_compiled_app_row_fields(row, program)?;
-            }
+            Self::bind_compiled_app_row_fields(row, program)?;
         }
-        self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
+        if shape.query().relation.is_none() {
+            self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -1120,18 +1131,17 @@ where
             apply_query_window(query, rows);
             return Ok(());
         }
+        if query.relation.is_some() {
+            // Relation terminals have already applied source-bound ordering.
+            // Their public rows contain aliases only, so re-reading order keys
+            // from the root table would compare `None` values and replace the
+            // engine's order.
+            return Ok(());
+        }
         // Groove lowering owns membership/windowing, but one-shot APIs still
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
-        let mut presentation_query = query.clone();
-        if presentation_query.order_by.is_empty() {
-            if let Some(relation) = &presentation_query.relation {
-                if let Some(order_by) = crate::query::relation_union_presentation_order(relation) {
-                    presentation_query.order_by = order_by;
-                }
-            }
-        }
-        self.apply_query_order_in_schema(&presentation_query, schema_version, rows)
+        self.apply_query_order_in_schema(query, schema_version, rows)
     }
 
     pub(super) fn query_output_table(
@@ -1312,7 +1322,26 @@ where
         if query.aggregate.is_some() || query.flat_join.is_some() {
             return Ok(true);
         }
+        let relation_projection = query
+            .relation
+            .as_ref()
+            .map(crate::query::relation_output_projection_if_present)
+            .transpose()?
+            .flatten();
         for (index, row) in snapshot.rows.iter().enumerate() {
+            if index < snapshot.root_count
+                && row.table() == query.table
+                && let Some(columns) = relation_projection.as_deref()
+                && columns
+                    .iter()
+                    .all(|column| row.raw_field(&column.alias).is_some())
+            {
+                // A projected nullable value is materialized when its field is
+                // present, including an explicit `Nullable(None)` value.
+                // Supporting rows from joined sources do not carry the
+                // relation aliases and are checked against their own schema.
+                continue;
+            }
             let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
             let projection = (index < snapshot.root_count && row.table() == query.table)
                 .then_some(query.select.as_deref())
@@ -1411,6 +1440,23 @@ where
                 &mut rows,
                 &mut root_occurrence_ids,
             )?;
+        }
+        if local.result_relation_projections.is_some() {
+            let table = self.table(local.result_table.as_str())?.clone();
+            let schema = local.terminal_schemas.direct_app_row_schema()?;
+            for (row, occurrence) in rows.iter_mut().zip(&root_occurrence_ids) {
+                if let Some(columns) = local.relation_projection_for_occurrence(occurrence)? {
+                    *row = row.project_relation(&table, columns)?;
+                    Self::bind_app_row_schema_fields(row, schema)?;
+                }
+            }
+        } else if let Some(columns) = &local.result_relation_projection {
+            let table = self.table(local.result_table.as_str())?.clone();
+            let schema = local.terminal_schemas.direct_app_row_schema()?;
+            for row in &mut rows {
+                *row = row.project_relation(&table, columns)?;
+                Self::bind_app_row_schema_fields(row, schema)?;
+            }
         }
         self.apply_projection(&local.result_query, &mut rows)?;
         let root_count = rows.len();

@@ -1,6 +1,38 @@
 import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.ts";
 
 export const w1Benchmarks: BenchmarkMetadata[] = [];
+for (const [rows, lists] of [
+  [600, 0],
+  [600, 10],
+  [600, 60],
+  [6000, 60],
+]) {
+  w1Benchmarks.push({
+    name: `subscription_fanout_memory[(${rows}, ${lists})]`,
+    title: `Permissioned dashboard: overview + ${lists} keyed lists`,
+    description:
+      "Open independent subscriptions through Core, a scope-isolated relay and a foreground; wait for every list to settle.",
+    fixture: `Two teams of ${rows} tasks each; 60 boards per team. Inherited team-member permission excludes the other team's rows. One overview plus ${lists} separately opened board queries.`,
+    includes: [
+      "Query preparation and subscription admission",
+      "Core, relay and foreground progress",
+      "Initial result consumption",
+    ],
+    excludes: [
+      "Seeding, database opening and connection setup",
+      "Teardown, mutation correctness checks",
+      "Serialization, network latency, IndexedDB and React",
+    ],
+    storage: "Three independent in-memory Jazz runtimes",
+    work: {
+      count: lists + 1,
+      unit: "subscriptions/s",
+      explanation:
+        "All initial settled subscriptions per measured dashboard opening; not row throughput.",
+    },
+    source: "examples/benchmarks/w1/benches/reads_memory_walltime.rs",
+  });
+}
 const profileS = "3,000 tasks, 12,000 comments and 9,000 activity rows, plus users/projects.";
 type Backend = "memory" | "rocksdb";
 function add(

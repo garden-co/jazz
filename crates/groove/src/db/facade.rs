@@ -393,6 +393,7 @@ impl Database {
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             immutable_batch_owner: Rc::new(()),
+            batch_preparation_owner: Rc::new(()),
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
@@ -2006,6 +2007,11 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Lifetime topology-cache counters, independent of transactional state.
+    pub fn execution_layout_stats(&self) -> crate::ivm::ExecutionLayoutStats {
+        self.ivm_runtime.execution_layout_stats()
     }
 
     pub(super) fn durable_indices_store_with_storage<'a, T>(

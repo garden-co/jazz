@@ -2,12 +2,6 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   // #region schema-todo-client-ts
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { todos: s.reverse("todos", "project") },
-  ),
   todos: s.table(
     {
       title: s.string(),
@@ -20,9 +14,15 @@ const schema = {
     },
     {
       parent: s.rel("todos", "parentId"),
-      children: s.reverse("todos", "parent"),
       project: s.rel("projects", "projectId"),
+      children: s.reverse("todos", "parent"),
     },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
   ),
   // #endregion schema-todo-client-ts
 };

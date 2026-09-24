@@ -244,6 +244,10 @@ While the transaction is open, a point read records either
 binding_id, binding_values }` carrying the inline shape. Snapshot reads stay
 stable after later commits and observe the transaction's own pending writes
 (`INV-TX-14`, `INV-TX-15`).
+An explicit-id `insert` is create-only in an exclusive transaction: it performs
+the same authoritative point read as `upsert` (recording the `RowRead` or
+`AbsentRead`) and rejects rather than replacing a visible, deleted, or
+already-staged target (ch. 13, `INV-API-36`).
 
 Commit closes the exclusive transaction and makes its writes syncable.
 `commit_exclusive` mints the `TxId`, stores the writes locally as
@@ -333,6 +337,21 @@ recorded reads against current global state:
 _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
+
+Before publication, local validation compares a single-table source-row
+predicate's `(RowUuid, TxId)` output at the fixed base snapshot against a
+comparison snapshot that also covers newly visible non-rejected transactions,
+including local writes without an authority receipt. A row outside the
+predicate does not cause a conflict; a matching insert, removal, or changed
+output-row version does. For example, a read of `bucket = "destination"`
+may commit after an insert into `bucket = "unrelated"`, but must reject
+after an insert into `bucket = "destination"`.
+
+This local comparison only advances root-table history. Relational predicates,
+aggregate predicates, and degenerate whole-table predicates retain conservative
+local conflict detection. An aggregate input rewrite therefore conflicts
+locally even if its aggregate payload is unchanged. Authority validation still
+compares aggregate group identities and public payloads as described above.
 
 Schema migrations must preserve the physical identity used by these checks.
 Predicate validation resolves the recorded shape against its matching retained

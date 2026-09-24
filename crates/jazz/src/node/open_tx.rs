@@ -239,6 +239,44 @@ where
         Ok(result)
     }
 
+    /// Classify an explicit exclusive insert target that the transaction's
+    /// overlaid point read reports as absent: a committed or staged deletion
+    /// still occupies the id. The staged overlay is keyed by `(table, row)`,
+    /// so the same row UUID in another table never counts.
+    pub(crate) async fn tx_insert_target_state_in_schema(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<TransactionInsertTargetState, Error> {
+        let cached = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&(schema_version, table.to_owned(), row_uuid))
+            .cloned();
+        let snapshot_row = match cached {
+            Some(snapshot_row) => snapshot_row,
+            None => {
+                let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                    .await?
+            }
+        };
+        let staged = self
+            .open_tx(tx_id)?
+            .writes
+            .iter()
+            .any(|write| write.table == table && write.row_uuid == row_uuid);
+        Ok(
+            if snapshot_row.content_cells.is_some() || snapshot_row.deleted || staged {
+                TransactionInsertTargetState::Deleted
+            } else {
+                TransactionInsertTargetState::Absent
+            },
+        )
+    }
+
     /// Read all current rows inside an exclusive transaction.
     pub async fn tx_current_rows(
         &mut self,
@@ -1105,6 +1143,7 @@ where
             }
         }
         for predicate in &open_tx.predicate_reads {
+            let mut comparison: Option<Snapshot> = None;
             for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
@@ -1112,6 +1151,45 @@ where
                     .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
+                    if comparison.is_none() {
+                        let query = &predicate.shape;
+                        // This comparison advances only root-table history.
+                        // Preserve conservative rejection for relational reads
+                        // and aggregates, whose output hides input rewrites.
+                        if query.aggregate.is_some()
+                            || !query.joins.is_empty()
+                            || query.flat_join.is_some()
+                            || !query.policy_branches.is_empty()
+                            || !query.reachable.is_empty()
+                            || !query.inherits.is_empty()
+                            || !query.includes.is_empty()
+                            || !query.array_subqueries.is_empty()
+                            || query.relation.is_some()
+                            || self.predicate_read_is_degenerate_whole_table(predicate)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    comparison
+                        .get_or_insert_with(|| open_tx.base_snapshot.clone())
+                        .dots
+                        .push(tx_id);
+                }
+            }
+            if let Some(mut current) = comparison {
+                current.dots.sort_unstable();
+                current.dots.dedup();
+                // A newer row outside the filter is not a phantom. Retain the
+                // fixed base and compare against every newly visible version,
+                // including local writes that have no authority receipt yet.
+                if self
+                    .shape_predicate_outputs_differ(
+                        predicate,
+                        &open_tx.base_snapshot,
+                        Some(&current),
+                    )
+                    .await?
+                {
                     return Ok(false);
                 }
             }
@@ -1686,6 +1764,12 @@ pub(crate) enum TransactionBranchRowState {
     PendingDeletion,
     /// Neither committed nor staged content exists in the exact branch.
     Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionInsertTargetState {
+    Absent,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -2,6 +2,196 @@
 
 use super::*;
 
+#[futures_test::test]
+async fn repeated_source_ticks_include_new_consumers_and_survive_subscription_churn() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    let primary = db.subscribe_one_sink(graph.clone()).await.unwrap();
+    assert!(primary.recv().unwrap().to_values().unwrap().is_empty());
+    let mut previous = None;
+    for stamp in [10, 20, 30] {
+        // The second consumer is attached after earlier ticks warmed activation
+        // planning for this exact table source. It must not miss later writes.
+        let extra = db
+            .subscribe_one_sink(
+                graph
+                    .clone()
+                    .filter(PredicateExpr::gt("stamp", Value::U64(0))),
+            )
+            .await
+            .unwrap();
+        let row = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+        assert_eq!(
+            extra.recv().unwrap().to_values().unwrap(),
+            previous
+                .map(|stamp| vec![(row(stamp), 1)])
+                .unwrap_or_default()
+        );
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "value"));
+        db.commit_batch(batch).await.unwrap();
+        for changes in [primary.recv().unwrap(), extra.recv().unwrap()] {
+            let changes = changes.to_values().unwrap();
+            assert_eq!(changes.len(), if previous.is_some() { 2 } else { 1 });
+            assert!(changes.contains(&(row(stamp), 1)));
+            if let Some(old) = previous {
+                assert!(changes.contains(&(row(old), -1)));
+            }
+        }
+        assert!(db.unsubscribe(extra.id()));
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(row(stamp), 1)]
+        );
+        previous = Some(stamp);
+    }
+}
+
+/// Exact public results cover shared producer state; the test-only allocation
+/// counter additionally proves that resident stateful kernels do not silently
+/// fall back to an async interpreter (result equality cannot prove this).
+#[futures_test::test]
+async fn resident_stateful_batches_share_inputs_without_async_node_frames() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let winners =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"]);
+    let joined = GraphBuilder::join(winners.clone(), winners, ["row"], ["row"]).project_fields([
+        ProjectField::renamed("left.row", "row"),
+        ProjectField::renamed("right.stamp", "stamp"),
+    ]);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::union([joined.clone(), joined]),
+        ["row", "stamp"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("copies".to_owned()),
+            output_identity: None,
+        }],
+    );
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "baseline"));
+    db.commit_batch(batch).await.unwrap();
+    let subscription = db.subscribe_one_sink(graph.clone()).await.unwrap();
+    let row = |stamp| vec![Value::U64(1), Value::U64(stamp), Value::U64(2)];
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(row(10), 1)]
+    );
+    crate::ivm::runtime::take_async_node_frame_count();
+    for stamp in [20, 30, 40] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "replacement"));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(10), -1)));
+        assert!(changes.contains(&(row(stamp), 1)));
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(row(stamp), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, stamp, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(stamp), -1)));
+        assert!(changes.contains(&(row(10), 1)));
+        assert_eq!(crate::ivm::runtime::take_async_node_frame_count(), 0);
+    }
+}
+
+/// Cached structural requirements must still check live producer state behind
+/// a deep stateless suffix, across mutation, one-shot probes and detachment.
+#[futures_test::test]
+async fn deep_shared_readiness_frontiers_recheck_winners_after_detach() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let mut graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    for _ in 0..48 {
+        graph = graph.filter(PredicateExpr::gt("stamp", Value::U64(0)));
+    }
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let prepared = db
+        .prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("deep_row", params),
+                graph.clone(),
+                ["row"],
+                ["row"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.row", "row"),
+                ProjectField::renamed("right.stamp", "stamp"),
+            ]),
+            "deep_row",
+            params,
+            ["row"],
+        )
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first baseline"));
+    batch.insert("history", history_values(2, 15, 1, "second baseline"));
+    db.commit_batch(batch).await.unwrap();
+    let row = |id, stamp| vec![Value::U64(id), Value::U64(stamp)];
+    let other = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(2)])
+        .await
+        .unwrap();
+    assert_eq!(
+        other.recv().unwrap().to_values().unwrap(),
+        [(row(2, 15), 1)]
+    );
+    for stamp in [20, 30, 40] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, stamp, 1, "new winner"));
+        db.commit_batch(batch).await.unwrap();
+        let snapshot = db
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.contains(&(row(1, stamp), 1)));
+        assert!(snapshot.contains(&(row(2, 15), 1)));
+        let subscription = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            [(row(1, stamp), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, stamp, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(row(1, stamp), -1)));
+        assert!(changes.contains(&(row(1, 10), 1)));
+        assert!(matches!(other.try_recv(), Err(TryRecvError::Empty)));
+        assert!(db.unsubscribe(subscription.id()));
+    }
+}
+
 /// Alice takes first results before and alongside Bob's retained extrema
 /// subscription, using the exact same graph and prepared parameter domain.
 /// probe -> bind -> probe other binding -> delete winner -> probe -> delete runner-up.

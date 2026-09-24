@@ -92,6 +92,7 @@ pub(super) fn source_requirements(
             &mut root_requirements.app_fields,
             match &app_rows.projection {
                 PayloadProjection::ShapeDefault => FieldRequirement::All,
+                PayloadProjection::Relation(_) => FieldRequirement::All,
                 PayloadProjection::Tree(tree) => tree.fields.clone().into(),
             },
         );
@@ -464,7 +465,8 @@ fn collect_value_requirements(
         }
         NormalizedValueRef::Param(_)
         | NormalizedValueRef::Claim(_)
-        | NormalizedValueRef::Literal(_) => {}
+        | NormalizedValueRef::Literal(_)
+        | NormalizedValueRef::TemplateLiteral(_) => {}
         NormalizedValueRef::FrontierColumn { .. }
         | NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => {}
     }

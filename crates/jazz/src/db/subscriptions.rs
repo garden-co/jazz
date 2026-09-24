@@ -1200,7 +1200,8 @@ where
             && propagates_upstream
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         // Even a warm, empty foreground graph is provisional until its owner
-        // has answered. Refresh initializes the published graph from those inputs.
+        // has answered. Refresh drains those inputs through this same graph
+        // and fences its admitted work before publishing the opening snapshot.
         let pending_initial_local_snapshot =
             pending_initial_owner_result || !subscription.initial_snapshot_received();
         let settled = settled && !pending_initial_owner_result;

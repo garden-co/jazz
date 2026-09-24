@@ -100,6 +100,30 @@ async fn pending_publication_fixture() -> (
     (database, control, old, publication, ready)
 }
 
+/// Receiving an earlier empty snapshot does not make a later cold update
+/// ready. A progress fence must follow the admitted write through its chunks
+/// and notification, even after the base publication has become durable.
+#[futures_test::test]
+async fn subscription_progress_fences_cold_update_after_initial_snapshot() {
+    let (mut database, _control, subscription, publication, ready) =
+        pending_publication_fixture().await;
+    assert!(database.subscription_has_pending_progress(subscription.id()));
+    assert!(subscription.try_recv().is_err());
+    database
+        .finish_persistence(publication.persist().await)
+        .unwrap();
+    database.drive_ready_progress().await.unwrap();
+    assert!(database.subscription_has_pending_progress(subscription.id()));
+    assert!(subscription.try_recv().is_err());
+    ready.set(true);
+    database.drive_progress().await.unwrap();
+    assert!(!database.subscription_has_pending_progress(subscription.id()));
+    let rows = expect_try_recv_vals(&subscription);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, 1);
+    assert!(subscription.try_recv().is_err());
+}
+
 /// Alice commits an indexed row while its checksum waits for unavailable
 /// content. Its index must already be durable when the publication settles,
 /// before any later query progress or runtime replacement.

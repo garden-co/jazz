@@ -39,14 +39,14 @@ s.definePermissions(app, ({ policy, allowedTo, session }) => {
   policy.projects.allowDelete.where({ "$createdBy.account": session.user.account });
 
   // Tasks: inherit from project
-  policy.tasks.allowRead.where(allowedTo.read("projectId"));
-  policy.tasks.allowInsert.where(allowedTo.read("projectId"));
-  policy.tasks.allowUpdate.where(allowedTo.update("projectId"));
-  policy.tasks.allowDelete.where(allowedTo.delete("projectId"));
+  policy.tasks.allowRead.where(allowedTo.read("project"));
+  policy.tasks.allowInsert.where(allowedTo.read("project"));
+  policy.tasks.allowUpdate.where(allowedTo.update("project"));
+  policy.tasks.allowDelete.where(allowedTo.delete("project"));
 
   // Comments: inherit from task
-  policy.comments.allowRead.where(allowedTo.read("taskId"));
-  policy.comments.allowInsert.where(allowedTo.read("taskId"));
+  policy.comments.allowRead.where(allowedTo.read("task"));
+  policy.comments.allowInsert.where(allowedTo.read("task"));
   policy.comments.allowUpdate.where({ "$createdBy.account": session.user.account });
   policy.comments.allowDelete.where({ "$createdBy.account": session.user.account });
 });

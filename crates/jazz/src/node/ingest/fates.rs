@@ -300,6 +300,18 @@ where
         predicate: &PredicateRead,
         snapshot: &Snapshot,
     ) -> Result<bool, Error> {
+        self.shape_predicate_outputs_differ(predicate, snapshot, None)
+            .await
+    }
+
+    /// Authority checks use current global output; local checks include their
+    /// newly visible pending transactions in an explicit comparison snapshot.
+    pub(super) async fn shape_predicate_outputs_differ(
+        &mut self,
+        predicate: &PredicateRead,
+        snapshot: &Snapshot,
+        comparison_snapshot: Option<&Snapshot>,
+    ) -> Result<bool, Error> {
         // Shape IDs include the authoring schema. A migration must not make an
         // unchanged read conflict merely because this authority uses another view.
         let shape = predicate
@@ -332,17 +344,28 @@ where
             let at_base = self
                 .query_rows_at_snapshot(&shape, &binding, snapshot)
                 .await?;
-            let at_now = self
-                .query_rows(&shape, &binding, DurabilityTier::Global)
-                .await?;
-            return Ok(!Self::aggregate_query_outputs_equivalent(
-                &at_base, &at_now,
-            ));
+            let at_now = match comparison_snapshot {
+                Some(current) => {
+                    self.query_rows_at_snapshot(&shape, &binding, current)
+                        .await?
+                }
+                None => {
+                    self.query_rows(&shape, &binding, DurabilityTier::Global)
+                        .await?
+                }
+            };
+            return Ok(!Self::aggregate_query_outputs_equivalent(&at_base, &at_now));
         }
         let at_base = self
             .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
             .await?;
-        let at_now = self.shape_output_tx_set_now(&shape, &binding).await?;
+        let at_now = match comparison_snapshot {
+            Some(current) => {
+                self.shape_output_tx_set_at_snapshot(&shape, &binding, current)
+                    .await?
+            }
+            None => self.shape_output_tx_set_now(&shape, &binding).await?,
+        };
         Ok(at_base != at_now)
     }
 

@@ -321,6 +321,44 @@ async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
     );
 }
 
+/// Output inference for a plain table must follow registry evolution: an
+/// evolved enum case has to be admissible in the table's inferred rows.
+#[futures_test::test]
+async fn plain_table_output_descriptor_follows_enum_registry_evolution() {
+    let old_scalar = ValueType::EnumTag(
+        ScalarEnumSchema::new("phase", ["one", "two"])
+            .unwrap()
+            .with_registry_id(47),
+    );
+    let next_scalar = ValueType::EnumTag(
+        ScalarEnumSchema::new("phase", ["one", "two", "three"])
+            .unwrap()
+            .with_registry_id(47),
+    );
+    let schema = DatabaseSchema::new([TableSchema::new_with_bound_registries(
+        "items",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("phase", old_scalar),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let table = GraphBuilder::table("items");
+    let before = database.graph_output_descriptor(&table).unwrap();
+    database
+        .evolve_table_variant_registries("items", &[ColumnSchema::new("phase", next_scalar)])
+        .unwrap();
+    let after = database.graph_output_descriptor(&table).unwrap();
+    assert_ne!(before, after);
+    assert_eq!(
+        after,
+        database.table_schema("items").unwrap().record_schema()
+    );
+}
+
 /// A registry may only append cases. Reordering, renaming, changing an
 /// existing payload, changing its arity, or replacing a registry identity must
 /// leave the live descriptor untouched and fail before a new layout is staged.

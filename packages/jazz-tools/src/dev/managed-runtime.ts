@@ -603,6 +603,7 @@ export class ManagedDevRuntime {
           this.serverHandle = await startLocalJazzServer({
             appId,
             port: serverConfig.port ?? 0,
+            host: serverConfig.host,
             adminSecret,
             backendSecret: options.backendSecret,
             allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,

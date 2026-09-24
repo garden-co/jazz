@@ -1627,20 +1627,19 @@ impl MaintainedSubscriptionView {
             // fact, so it has no Stream B history-row witness.
             return true;
         };
-        // Existence does not require owning or deduplicating the transaction's
-        // rows. Keep selected deletion witnesses in the same candidate union.
-        self.versions
-            .rows_by_tx(tx_id)
-            .chain(
-                self.selected_deletion_witnesses
-                    .iter()
-                    .filter_map(|(fact, version)| (fact.version.tx == tx_id).then_some(version)),
-            )
-            .any(|version| {
-                version.table() == table.as_str()
-                    && version.row_uuid() == row_uuid
-                    && !version.is_deleted()
-            })
+        // The retained index already orders by table, row and layer within
+        // each transaction. Do not scan the entire transaction for each member:
+        // a batched initial snapshot would otherwise do quadratic identity work.
+        self.versions.has_content_witness(tx_id, table, row_uuid)
+            || self
+                .selected_deletion_witnesses
+                .iter()
+                .any(|(fact, version)| {
+                    fact.version.tx == tx_id
+                        && version.table() == table.as_str()
+                        && version.row_uuid() == row_uuid
+                        && !version.is_deleted()
+                })
             || self
                 .replacement_for(table.as_str(), row_uuid)
                 .0
@@ -1809,8 +1808,9 @@ fn covered_input_for_version(
 
 /// Rebind a runtime terminal operation to its early-bound prepared layout.
 ///
-/// The runtime may tighten a root field from `Nullable(T)` to `T` after an
-/// inner proof.  That is not an alternate public layout: the prepared layout
+/// The runtime may tighten one or more nullable layers of a root field after
+/// an inner proof. Optional cells have both cell-presence and schema-null
+/// layers. That is not an alternate public layout: the prepared layout
 /// is the subscription's immutable decoding contract.  Re-encode only a
 /// root-level payload into that contract, preserving the source value as a
 /// present nullable cell. Nested edits address named collections and stable
@@ -1897,7 +1897,7 @@ fn terminal_descriptor_can_rebind_to_layout(
 
 fn terminal_field_can_rebind_to_layout(source: &ValueType, target: &ValueType) -> bool {
     source == target
-        || matches!(target, ValueType::Nullable(inner) if source == inner.as_ref())
+        || matches!(target, ValueType::Nullable(inner) if terminal_field_can_rebind_to_layout(source, inner))
         || RecordProjector::new_registry_rebound(
             RecordDescriptor::new([("value", source.clone())]),
             RecordDescriptor::new([("value", target.clone())]),
@@ -1938,9 +1938,11 @@ fn rebind_terminal_value(
         return Ok(value);
     }
     if let ValueType::Nullable(inner) = target
-        && source == inner.as_ref()
+        && terminal_field_can_rebind_to_layout(source, inner)
     {
-        return Ok(Value::Nullable(Some(Box::new(value))));
+        return Ok(Value::Nullable(Some(Box::new(rebind_terminal_value(
+            value, source, inner,
+        )?))));
     }
     if !terminal_field_can_rebind_to_layout(source, target) {
         return Err(super::Error::InvalidStoredValue(
@@ -2025,6 +2027,17 @@ impl MaintainedTerminalSchemas {
             })
             .ok_or(super::Error::InvalidStoredValue(
                 "maintained result has no compiled payload schema",
+            ))
+    }
+    pub(in crate::node) fn direct_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::DirectAppRows(output) => Some(output),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained direct result has no compiler-owned app-row schema",
             ))
     }
 
@@ -3254,6 +3267,31 @@ fn field_idx_in_descriptor(
 }
 
 impl WeightedVersionIndex {
+    fn has_content_witness(
+        &self,
+        tx_id: TxId,
+        table: groove::Intern<String>,
+        row_uuid: RowUuid,
+    ) -> bool {
+        let Some(rows) = self.by_tx.get(&tx_id) else {
+            return false;
+        };
+        // Empty bytes are the inclusive lower bound of all complete record
+        // identities at this prefix. Inspect only its first candidate; content
+        // records sort before deletion records and only positive weights remain
+        // in this index. These keys were decoded from the immutable row when
+        // it entered the index, so lookup need not decode the same bytes again.
+        let lower = VersionSortKey {
+            table,
+            row_uuid,
+            layer: WitnessLayer::Content,
+            raw_record: Arc::default(),
+        };
+        rows.range(lower..).next().is_some_and(|(key, _)| {
+            key.table == table && key.row_uuid == row_uuid && key.layer == WitnessLayer::Content
+        })
+    }
+
     fn footprint_bytes(&self) -> usize {
         btree_map_bytes(self.by_tx.len()) + btree_map_bytes(self.entry_count) + self.entry_bytes
     }
@@ -4145,6 +4183,69 @@ mod tests {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x72).0)))),
             ]
         );
+    }
+
+    #[test]
+    // Internal boundary fixture: public query syntax cannot require a particular
+    // optimized terminal descriptor. An optional cell has both the CurrentRow
+    // presence wrapper and its schema null wrapper; inner joins can prove both.
+    fn terminal_operation_rebinds_fully_tightened_optional_cell() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_child",
+                ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Uuid)))),
+            ),
+        ]);
+        let row_uuid = row(0x71);
+        let child = row(0x72);
+        for insert in [true, false] {
+            let value = source
+                .create(&[Value::Uuid(row_uuid.0), Value::Uuid(child.0)])
+                .unwrap();
+            let key = row_uuid.0.as_bytes().to_vec();
+            let operation = TerminalOperation {
+                root_descriptor: source,
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: if insert {
+                    TerminalEdit::Insert {
+                        index: 0,
+                        key,
+                        value,
+                    }
+                } else {
+                    TerminalEdit::Update { key, value }
+                },
+            };
+            let rebound = rebind_terminal_operation_to_layout(operation, &layout(target)).unwrap();
+            assert_eq!(rebound.root_descriptor, target);
+            let value = match rebound.edit {
+                TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => value,
+                _ => panic!("payload edit retained"),
+            };
+            assert_eq!(
+                target.bind(&value).to_values().unwrap(),
+                vec![
+                    Value::Uuid(row_uuid.0),
+                    Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(
+                        Value::Uuid(child.0)
+                    )))))),
+                ]
+            );
+        }
+        assert!(!terminal_field_can_rebind_to_layout(
+            &ValueType::String,
+            &target.fields()[1].value_type
+        ));
+        assert!(!terminal_field_can_rebind_to_layout(
+            &target.fields()[1].value_type,
+            &ValueType::Uuid
+        ));
     }
 
     #[test]
@@ -5798,6 +5899,88 @@ mod tests {
             index.by_tx[&payloads[0].tx_id][&payloads[0].sort_key].weight,
             1
         );
+    }
+
+    // Internal oracle: arbitrary signed witness-role weights and coexisting
+    // raw identities cannot be prescribed through the public query API. Compare
+    // the seek against the previous independent scan after every mutation.
+    // The public fanout fixture separately checks rows, updates and revocation.
+    #[test]
+    fn content_witness_seek_matches_scan_across_prefixes_and_retractions() {
+        for size in [16, 1024] {
+            let mut index = WeightedVersionIndex::default();
+            let aliases = aliases();
+            let tables = [
+                groove::Intern::new("todos".to_owned()),
+                groove::Intern::new("archive".to_owned()),
+            ];
+            let target = RowUuid::from_bytes((size as u128 / 2).to_be_bytes());
+            for i in 0..size {
+                let mut row = version(RowUuid::from_bytes((i as u128).to_be_bytes()), 10, "seed");
+                row.table = tables[i % 2];
+                let identity = VersionIdentity::for_row(&row);
+                index.apply_delta(
+                    VersionPayload::prepare(row, &identity, &aliases).unwrap(),
+                    1,
+                );
+            }
+            let mut variants = Vec::new();
+            for table in tables {
+                for time in [10, 11] {
+                    for mut row in [
+                        version(target, time, "first"),
+                        version(target, time, "second"),
+                        deletion(target, time),
+                    ] {
+                        row.table = table;
+                        let identity = VersionIdentity::for_row(&row);
+                        variants.push(VersionPayload::prepare(row, &identity, &aliases).unwrap());
+                    }
+                }
+            }
+            for step in 0..120 {
+                let payload = Arc::clone(&variants[(step * 7) % variants.len()]);
+                let weight = [2, -1, -3, 1, 1][step % 5];
+                index.apply_delta(payload, weight);
+                for table in tables
+                    .into_iter()
+                    .chain([groove::Intern::new("missing".to_owned())])
+                {
+                    for time in [10, 11, 12] {
+                        for row_uuid in [
+                            target,
+                            RowUuid::from_bytes(((size + 1) as u128).to_be_bytes()),
+                        ] {
+                            let tx = tx(1, time);
+                            let expected = index.rows_by_tx(tx).any(|row| {
+                                row.table() == table.as_str()
+                                    && row.row_uuid() == row_uuid
+                                    && row.deletion().is_none()
+                            });
+                            assert_eq!(
+                                index.has_content_witness(tx, table, row_uuid),
+                                expected,
+                                "size={size} step={step} table={table:?} tx={tx:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            // A deletion-only row is not content, even when it is exactly the
+            // first entry at the sought prefix. Retract the last content, then
+            // restore it while keeping the deletion independently retained.
+            let mut isolated = WeightedVersionIndex::default();
+            let content = Arc::clone(&variants[0]);
+            let tombstone = Arc::clone(&variants[2]);
+            isolated.apply_delta(Arc::clone(&content), 2);
+            isolated.apply_delta(tombstone, 1);
+            isolated.apply_delta(Arc::clone(&content), -1);
+            assert!(isolated.has_content_witness(tx(1, 10), tables[0], target));
+            isolated.apply_delta(Arc::clone(&content), -1);
+            assert!(!isolated.has_content_witness(tx(1, 10), tables[0], target));
+            isolated.apply_delta(content, 1);
+            assert!(isolated.has_content_witness(tx(1, 10), tables[0], target));
+        }
     }
 
     #[test]

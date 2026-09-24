@@ -89,6 +89,18 @@ const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
 /// waiting for peer I/O. Each operation retains only one local future and is
 /// owned by exactly one foreground alias.
 const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
+/// Admitted-but-unapplied owner operations one foreground may queue behind its
+/// direct mutations. Admission at the cap applies bounded backpressure: it
+/// drives that foreground's queue inline, and rejects without admitting when
+/// the queue cannot make progress. See `ensure_direct_mutation_capacity`.
+const NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX: usize = NATIVE_RELAY_FOREGROUND_PENDING_MAX;
+/// Inline queue polls one at-cap admission may spend before it reports
+/// backpressure instead of blocking the calling JS turn further.
+const NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS: usize = 8;
+/// Queued mutations one owner drive turn applies per foreground before its
+/// single IVM/relay pump. A later turn continues a longer burst, so a JS
+/// command never waits behind more than one bounded turn.
+const NATIVE_RELAY_DRIVE_MUTATIONS_PER_TURN: usize = 16;
 /// Foreground commands are copied across the JSI/C boundary and decoded before
 /// they reach a foreground owner. Keep this independent from both peer-frame
 /// and trusted-admission budgets.
@@ -3261,11 +3273,32 @@ pub struct NativeRelayClient {
 }
 
 impl NativeRelayClient {
+    /// The platform tick. Pumping happens in owner drive turns, never while a
+    /// JS caller waits: a foreground with a wake scheduler is driven by its
+    /// Db's own tick requests. Only the core's manual-driving mode (no
+    /// scheduler, so no wake can follow) asks for a turn here.
     fn pump_foreground(&self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            worker.pump()?;
+            // Admission is this foreground's own lifecycle gate, not relay
+            // work: report a delayed admission failure on its next tick.
+            let waker = Waker::from(Arc::clone(&worker.wake));
+            if let Some(client) = worker.clients.get_mut(&id) {
+                client.poll_admission(&waker);
+            }
             worker.foreground_client(id)?;
+            if let Some(error) = worker.drive_error.take() {
+                return Err(error);
+            }
+            let manual = !worker
+                .wake
+                .foregrounds
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&id);
+            if manual {
+                worker.drive.request(0);
+            }
             Ok(())
         })
     }
@@ -3301,10 +3334,7 @@ impl NativeRelayClient {
                 pending: worker.pending_foreground_wakes.clone(),
                 generation,
                 expected_generation,
-                owner_wake: OwnerWakeNotifier {
-                    commands: worker.owner_commands.clone(),
-                    queued: worker.owner_wake_queued.clone(),
-                },
+                owner_wake: worker.wake.owner.clone(),
             });
             let has_foreground_scheduler = {
                 let mut foregrounds = worker
@@ -3621,13 +3651,81 @@ impl NativeRelayClient {
 // entry never crosses into a later registration's operation.
 type PendingForegroundWakes = Arc<Mutex<BTreeMap<u64, PendingForegroundWake>>>;
 
+/// Work the owner thread must drive by itself, off the JS thread: applying
+/// admitted direct mutations, Db ticks (IVM), and relay/persistence IO. Any
+/// thread may request a drive; only the owner loop consumes it.
+struct OwnerDrive {
+    requested: AtomicBool,
+    /// Milliseconds after `origin` of the earliest delayed drive, or `u64::MAX`.
+    deadline_ms: AtomicU64,
+    origin: std::time::Instant,
+}
+
+impl Default for OwnerDrive {
+    fn default() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            deadline_ms: AtomicU64::new(u64::MAX),
+            origin: std::time::Instant::now(),
+        }
+    }
+}
+
+impl OwnerDrive {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+    }
+
+    fn request(&self, delay_ms: u64) {
+        if delay_ms == 0 {
+            self.requested.store(true, Ordering::Release);
+        } else {
+            let deadline = self.now_ms().saturating_add(delay_ms).min(u64::MAX - 1);
+            self.deadline_ms.fetch_min(deadline, Ordering::AcqRel);
+        }
+    }
+
+    /// Consume a due drive request.
+    fn take_due(&self) -> bool {
+        if self.requested.swap(false, Ordering::AcqRel) {
+            return true;
+        }
+        let deadline = self.deadline_ms.load(Ordering::Acquire);
+        deadline != u64::MAX
+            && deadline <= self.now_ms()
+            && self
+                .deadline_ms
+                .compare_exchange(deadline, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
+    fn is_due(&self) -> bool {
+        self.requested.load(Ordering::Acquire) || self.wait().is_some_and(|wait| wait.is_zero())
+    }
+
+    /// Time until the earliest delayed drive, if any.
+    fn wait(&self) -> Option<std::time::Duration> {
+        let deadline = self.deadline_ms.load(Ordering::Acquire);
+        (deadline != u64::MAX)
+            .then(|| std::time::Duration::from_millis(deadline.saturating_sub(self.now_ms())))
+    }
+}
+
 #[derive(Clone)]
 struct OwnerWakeNotifier {
     commands: Weak<mpsc::SyncSender<RelayCommand>>,
     queued: Arc<AtomicBool>,
+    drive: Arc<OwnerDrive>,
 }
 
 impl OwnerWakeNotifier {
+    /// Ask the owner thread to drive its foregrounds, waking its loop if it is
+    /// parked. Safe from any thread and from inside an owner operation.
+    fn request_drive(&self, delay_ms: u64) {
+        self.drive.request(delay_ms);
+        self.signal();
+    }
+
     fn signal(&self) {
         if self.queued.swap(true, Ordering::AcqRel) {
             return;
@@ -3663,6 +3761,13 @@ struct ForegroundWakeScheduler {
     owner_wake: OwnerWakeNotifier,
 }
 impl ForegroundWakeScheduler {
+    /// A Db tick request: the owner drives the tick itself, and the platform
+    /// callback still learns that this foreground may have new results.
+    fn schedule(&self, kind: u8, delay_ms: u64) {
+        self.owner_wake.request_drive(delay_ms);
+        self.wake(kind, delay_ms);
+    }
+
     fn wake(&self, kind: u8, delay_ms: u64) {
         // A retained Context waker can outlive callback replacement. Do not
         // let its inert registration occupy this foreground's coalescing slot.
@@ -3715,7 +3820,7 @@ impl ForegroundWakeScheduler {
 }
 impl TickScheduler for ForegroundWakeScheduler {
     fn schedule_tick(&self, urgency: TickUrgency) {
-        self.wake(
+        self.schedule(
             match urgency {
                 TickUrgency::Immediate => FOREGROUND_WAKE_IMMEDIATE,
                 TickUrgency::Deferred => FOREGROUND_WAKE_DEFERRED,
@@ -3728,7 +3833,7 @@ impl TickScheduler for ForegroundWakeScheduler {
         )
     }
     fn schedule_tick_after(&self, delay_ms: u64) {
-        self.wake(FOREGROUND_WAKE_AFTER, delay_ms)
+        self.schedule(FOREGROUND_WAKE_AFTER, delay_ms)
     }
 
     fn query_runtime_waker(&self) -> Option<Waker> {
@@ -3742,7 +3847,7 @@ impl Wake for ForegroundWakeScheduler {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        ForegroundWakeScheduler::wake(self, FOREGROUND_WAKE_AFTER, 0);
+        ForegroundWakeScheduler::schedule(self, FOREGROUND_WAKE_AFTER, 0);
     }
 }
 
@@ -3750,13 +3855,21 @@ impl Wake for ForegroundWakeScheduler {
 /// started its tick has closed. Wake all remaining leases of this scope;
 /// each platform callback already coalesces turns and has an inert teardown
 /// guard. Never keep the registry mutex held while calling the platform.
-#[derive(Default)]
 struct RelayWake {
     foregrounds: Mutex<BTreeMap<u64, ForegroundWakeScheduler>>,
+    owner: OwnerWakeNotifier,
 }
 
 impl RelayWake {
+    fn new(owner: OwnerWakeNotifier) -> Self {
+        Self {
+            foregrounds: Mutex::default(),
+            owner,
+        }
+    }
+
     fn signal(&self, delay_ms: u64) {
+        self.owner.request_drive(delay_ms);
         let foregrounds = self
             .foregrounds
             .lock()
@@ -5115,13 +5228,17 @@ type UpstreamTransition = Pin<
 
 struct RelayWorker {
     wake: Arc<RelayWake>,
+    drive: Arc<OwnerDrive>,
+    /// A failure from an owner drive turn, reported by the next foreground tick.
+    drive_error: Option<RelayError>,
+    #[cfg(test)]
+    drive_turns: u64,
     persistent: Rc<Db<SqliteStorage>>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     upstream_attached: bool,
     socket_generation: u64,
@@ -5196,13 +5313,21 @@ impl RelayWorker {
             session_context: None,
         })));
         let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire);
-        let wake = Arc::new(RelayWake::default());
+        let drive = Arc::new(OwnerDrive::default());
+        let wake = Arc::new(RelayWake::new(OwnerWakeNotifier {
+            commands: owner_commands,
+            queued: Arc::clone(&owner_wake_queued),
+            drive: Arc::clone(&drive),
+        }));
         Ok(Self {
             wake,
+            drive,
+            drive_error: None,
+            #[cfg(test)]
+            drive_turns: 0,
             pending_foreground_wakes: Arc::default(),
             foreground_wake_generations: BTreeMap::new(),
             owner_wake_queued,
-            owner_commands,
             persistent,
             persistent_tick: None,
             upstream_io,
@@ -5480,7 +5605,74 @@ impl RelayWorker {
             self.clients.remove(&id);
             return Err(error);
         }
+        // Admit already-persisted rows into the new peer on the owner's next
+        // turn rather than inside the first JS read.
+        self.drive.request(0);
         Ok(id)
+    }
+
+    /// One bounded owner drive turn, run on the owner thread after a JS call
+    /// has already returned. It applies a bounded slice of each foreground's
+    /// admitted direct mutations, runs one ordinary relay pump (Db ticks, and
+    /// so IVM, plus relay/persistence IO), and then tells every foreground
+    /// with a consumer that already-computed results may be ready.
+    fn drive_turn(&mut self) {
+        self.drive.take_due();
+        #[cfg(test)]
+        {
+            self.drive_turns += 1;
+        }
+        let mut applied = BTreeSet::new();
+        let mut more = false;
+        for (id, client) in &self.clients {
+            if client.admission_error.is_some() {
+                continue;
+            }
+            for _ in 0..NATIVE_RELAY_DRIVE_MUTATIONS_PER_TURN {
+                let before = client.db.queued_mutation_count();
+                if before == 0 {
+                    break;
+                }
+                client.db.drive_queued_mutation_once();
+                if client.db.queued_mutation_count() >= before {
+                    // Cold or remote work: its waker requests the next turn.
+                    break;
+                }
+                applied.insert(*id);
+            }
+            more |= applied.contains(id) && client.db.queued_mutation_count() > 0;
+        }
+        if let Err(error) = self.pump() {
+            self.drive_error.get_or_insert(error);
+        }
+        if more {
+            self.drive.request(0);
+        }
+        let consumers = self
+            .clients
+            .iter()
+            .filter(|(id, client)| {
+                applied.contains(id)
+                    || !client.subscriptions.is_empty()
+                    || !client.pending_subscriptions.is_empty()
+                    || !client.pending_operations.is_empty()
+                    || client.mutations.has_errors()
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        {
+            let foregrounds = self
+                .wake
+                .foregrounds
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for id in consumers {
+                if let Some(foreground) = foregrounds.get(&id) {
+                    foreground.wake(FOREGROUND_WAKE_IMMEDIATE, 0);
+                }
+            }
+        }
+        self.flush_foreground_wakes();
     }
 
     fn pump(&mut self) -> Result<(), RelayError> {
@@ -5584,8 +5776,19 @@ impl RelayWorker {
             let client = self.foreground_client(client)?;
             Rc::clone(&client.db)
         };
+        // Direct mutations are applied in later owner turns. A plain read
+        // admitted after them observes them (read-your-writes), while a
+        // transaction read keeps its transaction-local ordering below.
+        let mutation_barrier = open_tx.is_none().then(|| db.queued_mutation_barrier());
+        self.drive.request(0);
         let read_db = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
+            if let Some(barrier) = mutation_barrier {
+                barrier
+                    .await
+                    .map_err(|_| RelayError::Closed)?
+                    .map_err(RelayError::Db)?;
+            }
             let release_db = Rc::clone(&read_db);
             let result = read_db
                 .all_serialized_query(
@@ -5651,7 +5854,15 @@ impl RelayWorker {
         let client_id = client;
         let client = self.foreground_client_mut(client)?;
         let db = Rc::clone(&client.db);
+        // Fence the first frame behind every direct mutation admitted before
+        // this subscription, exactly like a plain read.
+        let mutation_barrier = db.queued_mutation_barrier();
+        self.drive.request(0);
         let opener: ForegroundSubscriptionOpen = Box::pin(async move {
+            mutation_barrier
+                .await
+                .map_err(|_| RelayError::Closed)?
+                .map_err(RelayError::Db)?;
             db.subscribe_serialized_query(
                 &query,
                 opts,
@@ -6544,17 +6755,37 @@ impl NativeRelay {
                     }
                 };
                 loop {
-                    let command = if worker.closing.is_empty() {
+                    // A due drive turn alternates with at most one queued
+                    // command, so a JS call waits behind at most one bounded
+                    // turn and a command burst cannot starve the drive.
+                    let command = if worker.drive.is_due() {
+                        match receiver.try_recv() {
+                            Ok(command) => Ok(command),
+                            Err(mpsc::TryRecvError::Empty) => {
+                                worker.drive_turn();
+                                continue;
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                Err(mpsc::RecvTimeoutError::Disconnected)
+                            }
+                        }
+                    } else if !worker.closing.is_empty() {
+                        receiver.recv_timeout(std::time::Duration::from_millis(1))
+                    } else if let Some(wait) = worker.drive.wait() {
+                        receiver.recv_timeout(wait)
+                    } else {
                         receiver
                             .recv()
                             .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                    } else {
-                        receiver.recv_timeout(std::time::Duration::from_millis(1))
                     };
                     let command = match command {
                         Ok(command) => command,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = worker.pump();
+                            if worker.drive.is_due() {
+                                worker.drive_turn();
+                            } else {
+                                let _ = worker.pump();
+                            }
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -6572,7 +6803,9 @@ impl NativeRelay {
                             _normal_permit,
                         } => {
                             job(&mut worker);
-                            if !worker.closing.is_empty() {
+                            if worker.drive.is_due() {
+                                worker.drive_turn();
+                            } else if !worker.closing.is_empty() {
                                 let _ = worker.pump();
                             }
                         }
@@ -10027,6 +10260,411 @@ mod tests {
         client.close().unwrap();
     }
 
+    /// A foreground with a registered platform wake callback, which is how
+    /// every RN host runs it: its Db tick requests reach the owner as drives.
+    fn attached_write_client(
+        name: &str,
+        author: u8,
+    ) -> (
+        tempfile::TempDir,
+        NativeRelay,
+        NativeRelayClient,
+        Arc<QueuedNativeWake>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join(format!("{name}.sqlite")),
+            Some(name),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let wake = Arc::new(QueuedNativeWake::active());
+        client
+            .set_foreground_wake_callback(
+                1,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+        (directory, relay, client, wake)
+    }
+
+    fn hold_foreground_owner(relay: &NativeRelay, id: u64) -> u64 {
+        let holder = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        let ForegroundOperationPoll::Pending { operation } = holder else {
+            unreachable!()
+        };
+        operation
+    }
+
+    fn admit_title(
+        relay: &NativeRelay,
+        id: u64,
+        title: String,
+    ) -> Result<(TransactionId, RowUuid), RelayError> {
+        relay.run(move |worker| {
+            worker.direct_foreground_mutation(
+                id,
+                ForegroundMutationKind::Insert,
+                "todos".into(),
+                None,
+                encoded_title_cells(&title),
+                "{}".into(),
+            )
+        })
+    }
+
+    /// Poll a foreground read without any platform tick or explicit pump:
+    /// only the owner's own drive turns may make it progress.
+    fn owner_driven_rows(
+        client: &NativeRelayClient,
+        mut read: ForegroundOperationPoll,
+    ) -> Vec<RowUuid> {
+        for _ in 0..2_000 {
+            match read {
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) => {
+                    let batches: Vec<DecodedForegroundRowBatch> =
+                        postcard::from_bytes(&rows).unwrap();
+                    return batches
+                        .into_iter()
+                        .flat_map(|batch| batch.rows.into_iter().map(|row| row.row_id))
+                        .collect();
+                }
+                ForegroundOperationPoll::Pending { operation } => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    read = client.poll_foreground_operation(operation).unwrap();
+                }
+                _ => panic!("foreground read failed"),
+            }
+        }
+        panic!("owner drive turns did not complete the foreground read");
+    }
+
+    /// Emulate the RN JS reactor for one subscription: only a queued platform
+    /// wake makes JS tick and drain (until an empty batch); nothing polls on a
+    /// timer. Returns the first delivered frame that contains `row`, or `None`
+    /// when no further wake arrives within `quiet` (a lost wake).
+    fn wake_driven_frame_with_row(
+        client: &NativeRelayClient,
+        wake: &QueuedNativeWake,
+        subscription: u64,
+        row: RowUuid,
+        quiet: Duration,
+    ) -> Option<usize> {
+        let mut drains = 0usize;
+        let mut pending: Option<u64> = None;
+        loop {
+            // One JS turn: tick, then drain until an empty batch or a pending op.
+            client.pump_foreground().unwrap();
+            loop {
+                drains += 1;
+                let poll = match pending.take() {
+                    Some(operation) => client.poll_foreground_operation(operation).unwrap(),
+                    None => client.drain_foreground_subscription(subscription).unwrap(),
+                };
+                match poll {
+                    ForegroundOperationPoll::Ready(
+                        ForegroundOperationResult::SubscriptionEvents(events),
+                    ) => {
+                        if events.is_empty() {
+                            break;
+                        }
+                        if events.iter().any(|event| match event {
+                            ForegroundSubscriptionEvent::Delta { delta, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta { delta, .. } => delta
+                                .windows(16)
+                                .any(|candidate| candidate == row.as_bytes()),
+                            _ => false,
+                        }) {
+                            return Some(drains);
+                        }
+                    }
+                    ForegroundOperationPoll::Pending { operation } => {
+                        // JS retries a pending drain after a setTimeout(0).
+                        pending = Some(operation);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    _ => panic!("subscription drain failed"),
+                }
+            }
+            // Park like the idle JS thread until the platform delivers a wake.
+            let deadline = std::time::Instant::now() + quiet;
+            loop {
+                if !std::mem::take(&mut *wake.queued.lock().unwrap()).is_empty() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    // Internal receipt (#3273, device typing-composer open stall): a fresh
+    // foreground opens a subscription and then admits a write in the same JS
+    // turn. Driven only by platform wakes, the write must reach that
+    // subscription; a lost wake would park JS forever.
+    fn attach_with_wake(
+        relay: &NativeRelay,
+        author: u8,
+    ) -> (NativeRelayClient, Arc<QueuedNativeWake>) {
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let wake = Arc::new(QueuedNativeWake::active());
+        client
+            .set_foreground_wake_callback(
+                1,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+        (client, wake)
+    }
+
+    #[test]
+    fn same_turn_subscribe_then_insert_on_a_used_scope_reaches_subscription_through_wakes() {
+        let (_directory, relay, sibling, _sibling_wake) = attached_write_client("wake-used", 0x40);
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        admit_title(&relay, sibling.id, "seed".into()).unwrap();
+        for round in 0..30u8 {
+            // An earlier public client: subscribe, observe a write, close.
+            let (earlier, earlier_wake) = attach_with_wake(&relay, 0x50 + (round % 8));
+            let subscription = earlier
+                .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
+                .unwrap();
+            let (_, row) = admit_title(&relay, earlier.id, format!("earlier-{round}")).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &earlier,
+                    &earlier_wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: earlier client never observed its write"
+            );
+            earlier.close().unwrap();
+            // The composer client: subscribe, then insert in the same turn.
+            let (composer, composer_wake) = attach_with_wake(&relay, 0x60 + (round % 8));
+            let subscription = composer
+                .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
+                .unwrap();
+            let (_, row) = admit_title(&relay, composer.id, String::new()).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &composer,
+                    &composer_wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: the same-turn write never reached its subscription through wakes"
+            );
+            composer.close().unwrap();
+        }
+        sibling.close().unwrap();
+    }
+
+    #[test]
+    fn same_turn_subscribe_then_insert_reaches_subscription_through_wakes_alone() {
+        for round in 0..40u8 {
+            let (_directory, relay, client, wake) =
+                attached_write_client(&format!("wake-open-{round}"), 0x70 + (round % 8));
+            let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+            let subscription = client
+                .subscribe_foreground_query_with_options(query, ReadOpts::default())
+                .unwrap();
+            let (_tx, row) = admit_title(&relay, client.id, String::new()).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &client,
+                    &wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: the same-turn write never reached its subscription through wakes"
+            );
+            client.close().unwrap();
+        }
+    }
+
+    // Internal receipt (#3273): "admitted but not yet applied" and the owner's
+    // self-driven turns are not observable through the public JS API. The RN
+    // public-API harness pins the same fence through `Db` in
+    // packages/jazz-tools/tests/react-native/write-contract.test.ts.
+    #[test]
+    fn direct_mutations_return_before_apply_and_fence_reads_and_subscriptions() {
+        let (_directory, relay, client, _wake) = attached_write_client("fence", 0x61);
+        let id = client.id;
+        let holder = hold_foreground_owner(&relay, id);
+        let (tx_id, row_id) = admit_title(&relay, id, "fenced".into()).unwrap();
+        assert_eq!(
+            relay
+                .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
+                .unwrap(),
+            "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}",
+            "admission returns before the owner applies the write"
+        );
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query.clone(), "{}".into(), None)
+            .unwrap();
+        assert!(
+            matches!(read, ForegroundOperationPoll::Pending { .. }),
+            "a read admitted after an unapplied write waits for it"
+        );
+        let subscription = client
+            .subscribe_foreground_query_with_options(query, ReadOpts::default())
+            .unwrap();
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+
+        assert_eq!(owner_driven_rows(&client, read), vec![row_id]);
+        let mut first_frame = None;
+        let mut pending = None;
+        for _ in 0..2_000 {
+            let poll = match pending.take() {
+                Some(operation) => client.poll_foreground_operation(operation).unwrap(),
+                None => client.drain_foreground_subscription(subscription).unwrap(),
+            };
+            match poll {
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
+                    events,
+                )) if !events.is_empty() => {
+                    first_frame = Some(events);
+                    break;
+                }
+                ForegroundOperationPoll::Pending { operation } => pending = Some(operation),
+                ForegroundOperationPoll::Ready(_) => {}
+                _ => panic!("subscription drain failed"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let first_frame = first_frame.expect("the owner delivers the first subscription frame");
+        assert!(
+            first_frame.iter().any(|event| match event {
+                ForegroundSubscriptionEvent::Delta { delta, .. }
+                | ForegroundSubscriptionEvent::StructuredDelta { delta, .. } => delta
+                    .windows(16)
+                    .any(|candidate| candidate == row_id.as_bytes()),
+                _ => false,
+            }),
+            "the first frame of a same-turn subscription contains the write"
+        );
+        client.close().unwrap();
+    }
+
+    // Internal receipt (#3273): the per-foreground owner-queue depth is not a
+    // public API value. The public burst scenario lives in write-contract.test.ts.
+    #[test]
+    fn direct_mutation_queue_rejects_without_admitting_when_it_cannot_progress() {
+        let (_directory, relay, client, _wake) = attached_write_client("cap-held", 0x62);
+        let id = client.id;
+        let holder = hold_foreground_owner(&relay, id);
+        let mut admitted = Vec::new();
+        for index in 0..NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
+            admitted.push(admit_title(&relay, id, format!("held-{index}")).unwrap().1);
+        }
+        let error = admit_title(&relay, id, "over the cap".into()).unwrap_err();
+        assert!(
+            error.to_string().contains("backpressure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.queued_mutation_count()))
+                .unwrap(),
+            NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
+            "a rejected admission enqueues nothing"
+        );
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        let mut rows = owner_driven_rows(&client, read);
+        rows.sort();
+        admitted.sort();
+        assert_eq!(rows, admitted, "every admitted write is applied");
+        client.close().unwrap();
+    }
+
+    // Internal receipt (#3273), as above: a burst admitted inside one owner
+    // turn (no drive turn can interleave) is bounded by inline backpressure.
+    #[test]
+    fn direct_mutation_burst_stays_within_the_queue_cap_and_loses_nothing() {
+        let (_directory, relay, client, _wake) = attached_write_client("cap-burst", 0x63);
+        let id = client.id;
+        let burst = 3 * NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX;
+        let (mut admitted, max_depth) = relay
+            .run(move |worker| {
+                let mut admitted = Vec::new();
+                let mut max_depth = 0;
+                for index in 0..burst {
+                    let (_, row) = worker.direct_foreground_mutation(
+                        id,
+                        ForegroundMutationKind::Insert,
+                        "todos".into(),
+                        None,
+                        encoded_title_cells(&format!("burst-{index}")),
+                        "{}".into(),
+                    )?;
+                    admitted.push(row);
+                    max_depth =
+                        max_depth.max(worker.foreground_client(id)?.db.queued_mutation_count());
+                }
+                Ok((admitted, max_depth))
+            })
+            .unwrap();
+        assert!(
+            max_depth <= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
+            "queue depth {max_depth} exceeded the cap"
+        );
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        let mut rows = owner_driven_rows(&client, read);
+        rows.sort();
+        admitted.sort();
+        assert_eq!(rows.len(), burst);
+        assert_eq!(rows, admitted, "no write is lost or duplicated");
+        client.close().unwrap();
+    }
+
     // Internal receipt: deterministic owner contention is not exposed by the public JS API.
     #[test]
     fn standalone_mutation_queues_behind_a_held_owner() {
@@ -10821,6 +11459,34 @@ mod tests {
     // A retained semantic owner and native capability teardown are host
     // boundaries. Keep the contention deterministic with the existing owner
     // suspension hook, then assert real C-ABI opens, writes, close and revoke.
+    /// Request one owner drive turn and wait until it has run: the owner
+    /// runs a due turn after the requesting job, before the next command.
+    fn drive_owner_turn(relay: &NativeRelay) {
+        relay
+            .run(|worker| {
+                worker.drive.request(0);
+                Ok(())
+            })
+            .unwrap();
+        relay.run(|_| Ok(())).unwrap();
+    }
+
+    /// Wait until the owner stops scheduling its own drive turns.
+    fn settle_owner(relay: &NativeRelay) -> u64 {
+        let mut last = u64::MAX;
+        for _ in 0..1_000 {
+            let (turns, due) = relay
+                .run(|worker| Ok((worker.drive_turns, worker.drive.is_due())))
+                .unwrap();
+            if turns == last && !due {
+                return turns;
+            }
+            last = turns;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("owner drive turns did not reach quiescence");
+    }
+
     fn hold_persistent_owner(relay: &NativeRelay) {
         relay
             .run(|worker| {
@@ -11095,32 +11761,32 @@ mod tests {
             assert!(client.cancel_foreground_operation(operation).unwrap());
         }
         let id = client.id;
-        for remaining in (0..7).rev() {
-            assert!(
-                wake.queued() > 0,
-                "the remaining cleanup batch must have a scheduled owner turn"
-            );
-            // Simulate the platform consuming every coalesced notification.
-            wake.queued.lock().unwrap().clear();
-            let queued = client
+        // #3273: the owner drives each bounded cleanup turn itself instead of
+        // waiting for the platform to tick, one attachment per turn, and keeps
+        // requesting turns until the batch is empty.
+        let mut remaining = usize::MAX;
+        for _ in 0..1_000 {
+            remaining = client
                 .relay
                 .run(move |worker| {
-                    let waker = Waker::from(Arc::clone(&worker.wake));
-                    let client = worker.foreground_client_mut(id)?;
-                    client.poll_read_cleanup(&waker);
-                    assert!(
-                        client.read_cleanup.is_none(),
-                        "resident detach finishes in its turn"
-                    );
-                    let queued = client.read_cleanups.borrow().len();
-                    Ok(queued)
+                    let client = worker.foreground_client(id)?;
+                    Ok(client.read_cleanups.borrow().len()
+                        + usize::from(client.read_cleanup.is_some()))
                 })
                 .unwrap();
-            assert_eq!(
-                queued, remaining,
-                "each cleanup turn drains exactly one attachment"
-            );
+            if remaining == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert_eq!(
+            remaining, 0,
+            "owner drive turns drain the whole cleanup batch without a platform tick"
+        );
+        assert!(
+            wake.queued() > 0,
+            "cleanup scheduling still notifies the platform callback"
+        );
         assert_eq!(
             client
                 .with_db(|db| Ok(db.query_coverage_attachment_counts_for_test()))
@@ -11186,7 +11852,8 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        fixture.tick(a);
+        // #3273: the platform tick no longer pumps; an owner drive turn does.
+        drive_owner_turn(&client.relay);
         let waker = captured
             .lock()
             .unwrap()
@@ -11518,10 +12185,7 @@ mod tests {
                     pending: worker.pending_foreground_wakes.clone(),
                     expected_generation: generation.load(Ordering::Acquire),
                     generation,
-                    owner_wake: OwnerWakeNotifier {
-                        commands: worker.owner_commands.clone(),
-                        queued: worker.owner_wake_queued.clone(),
-                    },
+                    owner_wake: worker.wake.owner.clone(),
                 };
                 assert!(on_pthread_stack());
                 stacker::grow(8 * 1024 * 1024, || {
@@ -11608,10 +12272,7 @@ mod tests {
                     pending: worker.pending_foreground_wakes.clone(),
                     expected_generation: generation.load(Ordering::Acquire) - 1,
                     generation,
-                    owner_wake: OwnerWakeNotifier {
-                        commands: worker.owner_commands.clone(),
-                        queued: worker.owner_wake_queued.clone(),
-                    },
+                    owner_wake: worker.wake.owner.clone(),
                 };
                 stale.schedule_tick(TickUrgency::Immediate);
                 worker.clients[&client_id]
@@ -12379,13 +13040,9 @@ mod tests {
             1,
             "coalesced storage wakes queue one native owner callback"
         );
-        assert_eq!(
-            relay
-                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
-                .unwrap(),
-            baseline_dirty_epoch,
-            "the callback is not allowed to mutate thread-affine state"
-        );
+        // #3273: the owner consumes the wake in its own drive turn instead of
+        // waiting for the platform callback to tick it.
+        settle_owner(&relay);
         reader_wake.deliver_queued();
         reader.pump_foreground().unwrap();
         assert_eq!(

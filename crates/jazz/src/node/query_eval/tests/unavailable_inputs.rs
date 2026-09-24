@@ -80,6 +80,185 @@ fn parent_ids(
         .collect()
 }
 
+/// The internal admission seam and compilation counter are necessary to prove
+/// that installation consumes a compiler product rather than recompiling it.
+/// Results still use the ordinary maintained opening and public query builders.
+#[test]
+fn admitted_program_handoff_preserves_live_inputs_and_reader_isolation() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let bob = author(2);
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    node.set_local_row_unavailable(&scope, "parents", row(1), true)
+        .unwrap();
+    for reader in [alice, bob] {
+        node.ensure_peer_maintained_subscription_view_supported(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            reader,
+            &ReadViewSpec::default(),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    }
+    let compiled = node.query_program_compilations_for_test();
+    // Admission is not a result snapshot: inputs can change before installation.
+    node.set_local_row_unavailable(&scope, "parents", row(1), false)
+        .unwrap();
+    node.set_local_row_unavailable(&scope, "parents", row(2), true)
+        .unwrap();
+    let (alice_subscription, alice_rows) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(
+        node.query_program_compilations_for_test(),
+        compiled,
+        "exact admission must hand its compiler output to installation"
+    );
+    assert_eq!(
+        alice_rows
+            .rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    let (bob_subscription, bob_rows) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            bob,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(node.query_program_compilations_for_test(), compiled);
+    assert_eq!(
+        bob_rows
+            .rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(1), row(2)])
+    );
+    node.database
+        .unsubscribe(alice_subscription.subscription.id());
+    node.database
+        .unsubscribe(bob_subscription.subscription.id());
+
+    // Retiring the underlying input invalidates unused handoffs as well as
+    // ordinary cached plans; reopening must never refer to a retired input ID.
+    let shape = Query::from("parents").limit(1).validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    node.ensure_peer_maintained_subscription_view_supported(
+        &shape,
+        &binding,
+        DurabilityTier::Local,
+        alice,
+        &ReadViewSpec::default(),
+        QueryAuthorizationMode::ClientLocal,
+    )
+    .unwrap();
+    node.retire_local_availability_scope_inputs(&scope).unwrap();
+    assert!(node.query.supported_query_program_requests.is_empty());
+    let compiled = node.query_program_compilations_for_test();
+    let (subscription, rows) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert!(node.query_program_compilations_for_test() > compiled);
+    assert_eq!(
+        rows.rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    let compiled = node.query_program_compilations_for_test();
+    node.ensure_peer_maintained_subscription_view_supported(
+        &shape,
+        &binding,
+        DurabilityTier::Local,
+        alice,
+        &ReadViewSpec::default(),
+        QueryAuthorizationMode::ClientLocal,
+    )
+    .unwrap();
+    assert_eq!(
+        node.query_program_compilations_for_test(),
+        compiled,
+        "installation before wire admission must also reuse its capability proof"
+    );
+    node.database.unsubscribe(subscription.subscription.id());
+}
+
+/// Exercise abandoned admissions beyond the executable budget through real
+/// compilation/installation, rather than asserting the cache's representation.
+#[test]
+fn admitted_program_eviction_recompiles_without_rejecting_queries() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let mut queries = Vec::new();
+    for index in 0..40 {
+        let shape = Query::from("parents")
+            .filter(eq(col("label"), lit(format!("missing-{index}"))))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        node.ensure_peer_maintained_subscription_view_supported(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            alice,
+            &ReadViewSpec::default(),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+        queries.push((shape, binding));
+    }
+    for (index, should_compile) in [(39, false), (0, true)] {
+        let (shape, binding) = &queries[index];
+        let compiled = node.query_program_compilations_for_test();
+        let (subscription, rows) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                shape,
+                binding,
+                alice,
+                DurabilityTier::Local,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        assert!(rows.rows.is_empty());
+        assert_eq!(
+            node.query_program_compilations_for_test() > compiled,
+            should_compile
+        );
+        node.database.unsubscribe(subscription.subscription.id());
+    }
+}
+
 /// Alice's exact claim snapshot is unavailable; Bob, Alice's other snapshot,
 /// and the SYSTEM storage owner keep their ordinary cached rows.
 /// alice/blue ──mark row 1──► blue source only

@@ -1361,6 +1361,10 @@ pub struct Database {
     stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, RecordDescriptor>>>,
     next_publication_id: u64,
     immutable_batch_owner: Rc<()>,
+    /// Rotated whenever physical record admission can change. Batches may be
+    /// read on another database or survive schema rollback without reusing an
+    /// obsolete descriptor/key proof.
+    batch_preparation_owner: Rc<()>,
     durable_publication_frontier: Option<PublicationId>,
     resident_publications: BTreeMap<PublicationId, Rc<RefCell<StagedWriteState>>>,
     persisted_publications: BTreeSet<PublicationId>,

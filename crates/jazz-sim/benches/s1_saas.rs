@@ -11,7 +11,9 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
-use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
+use jazz::peer::{
+    MaintainedSubscriptionViewMetrics, MaintainedSubscriptionViewMetricsFootprint, PeerState,
+};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::JazzSchema;
@@ -485,6 +487,7 @@ struct HighFanOutSummary {
     by_tx_index_seeks: u64,
     history_scan_fallbacks: u64,
     maintained_subscription_view_metrics: MaintainedSubscriptionViewMetrics,
+    maintained_subscription_view_footprint: Option<MaintainedSubscriptionViewMetricsFootprint>,
     full_diff_recomputes: u64,
 }
 
@@ -1102,12 +1105,26 @@ fn high_fan_out_hydration_summary(
         assert_eq!(local, oracle, "high fan-out child result mismatch");
     }
 
+    // Inspect after stopping the timer. Explicitly select the last hydrated
+    // child (or the parent for an empty fixture), matching the old last-updated
+    // diagnostic without making every publication scan retained state.
+    let hydration_complete_us = start.elapsed().as_micros() as u64;
+    let (footprint_shape, footprint_binding) = active_bindings
+        .last()
+        .map(|binding| (&child_shape, binding))
+        .unwrap_or((&parent_shape, &parent_binding));
+    let maintained_subscription_view_footprint = peer
+        .inspect_maintained_subscription_view_footprint(SubscriptionKey {
+            shape_id: footprint_shape.shape_id(),
+            binding_id: footprint_binding.binding_id(),
+            read_view: Default::default(),
+        });
     HighFanOutSummary {
         fanout,
         parents: parents.len(),
         children: parents.len() * fanout,
         subscriptions: parents.len() + 1,
-        hydration_complete_us: start.elapsed().as_micros() as u64,
+        hydration_complete_us,
         hydration_bytes,
         hydration_floor_bytes,
         result_set_rows,
@@ -1116,6 +1133,7 @@ fn high_fan_out_hydration_summary(
         by_tx_index_seeks,
         history_scan_fallbacks,
         maintained_subscription_view_metrics: peer.maintained_subscription_view_metrics(),
+        maintained_subscription_view_footprint,
         full_diff_recomputes: 0,
     }
 }
@@ -2390,36 +2408,32 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
         "maintained_subscription_view_footprint_result_rows".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .result_rows
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.result_rows)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_version_identities".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .version_identities
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.version_identities)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_version_tx_entries".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .version_tx_entries
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.version_tx_entries)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_replacement_entries".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .replacement_entries
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.replacement_entries)
         ),
     );
     fields.insert(

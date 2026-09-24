@@ -46,7 +46,7 @@ use crate::node::{
     CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    RowProvenance, TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -3230,6 +3230,13 @@ fn row_already_deleted(row: RowUuid) -> Error {
     )
 }
 
+fn row_already_exists(table: &str, row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("row already exists in table {table}: {}", row.0),
+    )
+}
+
 fn read_for_write_denied(operation: &str, table: &str) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
@@ -4336,7 +4343,14 @@ where
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .stage_exclusive_insert(
+                self.tx_id(),
+                table,
+                row,
+                cells,
+                options.updated_at_ms,
+                options.row_id.is_some(),
+            )
             .await?;
         Ok(row)
     }
@@ -5747,11 +5761,11 @@ fn apply_maintained_update_to_snapshot(
             LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
                 format!("flat:add={} remove={}", added.len(), removed.len())
             }
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot,
                 occurrence_ids,
             } => format!(
-                "aggregate-window:roots={} occurrences={}",
+                "ordered-window:roots={} occurrences={}",
                 snapshot.root_count,
                 occurrence_ids.len()
             ),
@@ -5762,7 +5776,7 @@ fn apply_maintained_update_to_snapshot(
         );
     }
     match update {
-        LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+        LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
             snapshot: current,
             occurrence_ids,
         } => {

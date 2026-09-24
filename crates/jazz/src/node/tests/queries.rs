@@ -3587,3 +3587,83 @@ fn compiled_subscription_cache_excludes_branch_read_views() {
         assert!(core.query.compiled_query_program_cache.is_empty(), "branch programs must not enter the current-source cache");
     }
 }
+
+// The reuse count needs the compiler seam; exact results still come from the
+// ordinary maintained API. Indexed parameters must bind fresh probes, not make
+// a previous literal's row visible through a reused operator template.
+#[test]
+fn query_templates_bind_distinct_prepared_probes_without_reusing_authority() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xe1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xe2), schema);
+    let (first, second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let reader = user(0xe3);
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".to_owned(), Value::Uuid(owner.test_uuid()))]));
+    let shape = Query::from("docs").filter(eq(col("status"), crate::query::param("status"))).validate(&core.catalogue.schema).unwrap();
+    let read = |core: &mut NodeState<RocksDbStorage>, status: &str| {
+        let binding = shape.bind(BTreeMap::from([("status".to_owned(), Value::String(status.to_owned()))])).unwrap();
+        let (receiver, maintained, ..) = core.open_seeded_maintained_subscription_view(&shape, &binding, reader, DurabilityTier::Global, &crate::protocol::ReadViewSpec::default()).unwrap();
+        let rows = maintained.active_result_members().iter().filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .filter_map(|(table, row, _)| (table.as_str() == "docs").then_some(row)).collect::<Vec<_>>();
+        core.unsubscribe_groove_subscription(receiver.id());
+        rows
+    };
+    let before = core.query.query_program_templates.hits;
+    for status in ["open", "closed", "missing", "open"] {
+        assert_eq!(read(&mut core, status),
+            if status == "open" { vec![first] } else { Vec::new() });
+    }
+    assert!(core.query.query_program_templates.hits > before, "exercise cross-binding template reuse, not only exact-request cache hits");
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".to_owned(), Value::Uuid(user(0xb2).test_uuid()))]));
+    assert_eq!(read(&mut core, "closed"), vec![second]);
+    assert!(read(&mut core, "open").is_empty());
+}
+
+// This compiler-seam test needs the internal reuse counter: exact results
+// alone could pass by declining parameterization on every query. Schema and
+// queries still use the public builders, and all row checks use ordinary reads.
+#[test]
+fn query_template_arguments_rebind_residual_predicates_and_isolate_claims() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xf1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xf2), schema);
+    let (first, second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let reader = user(0xf3);
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".into(), Value::Uuid(owner.test_uuid()))]));
+    // Non-equality remains a residual predicate even in a prepared program;
+    // it cannot be implemented just by retaining the equality binding join.
+    let shape = Query::from("docs")
+        .filter(crate::query::gt(col("status"), crate::query::param("floor")))
+        .validate(&core.catalogue.schema).unwrap();
+    let read = |core: &mut NodeState<RocksDbStorage>, floor: &str| {
+        let binding = shape.bind(BTreeMap::from([("floor".into(), Value::String(floor.into()))])).unwrap();
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader).unwrap()
+            .into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>()
+    };
+    let before = core.query.query_program_templates.argument_hits;
+    assert_eq!(read(&mut core, "a"), vec![first]);
+    assert!(read(&mut core, "z").is_empty());
+    assert_eq!(read(&mut core, "b"), vec![first]);
+    assert!(core.query.query_program_templates.argument_hits > before, "exercise reusable argument recipes, not concrete fallback");
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".into(), Value::Uuid(user(0xb2).test_uuid()))]));
+    assert_eq!(read(&mut core, "b"), vec![second]);
+    assert!(read(&mut core, "m").is_empty());
+}
+
+// The counter proves reuse across *different public literal query identities*;
+// ordinary query results alone could also pass on the uncached fallback.
+#[test]
+fn literal_query_families_keep_values_out_of_the_reusable_program() {
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xf4), access_path_schema());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xf5), access_path_schema());
+    let (first, second, _) = seed_access_path_docs(&mut writer, &mut core);
+    let read = |core: &mut NodeState<RocksDbStorage>, status: &str| {
+        query_rows_by_uuid(core, Query::from("docs").filter(eq(col("status"), lit(status))), DurabilityTier::Global).0
+    };
+    assert_eq!(read(&mut core, "open"), vec![first]);
+    let before = core.query.query_program_templates.argument_hits;
+    assert_eq!(read(&mut core, "closed"), vec![second]);
+    assert!(core.query.query_program_templates.argument_hits > before, "literal facade identities must not prevent compiler reuse");
+    assert!(read(&mut core, "missing").is_empty());
+    assert_eq!(read(&mut core, "open"), vec![first]);
+}
