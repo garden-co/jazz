@@ -33,15 +33,177 @@ pub(super) fn output_is_structured_collect_by(
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
     window: &[WindowedRecord],
+    key_fields: &[usize],
     positions: &mut BTreeMap<Vec<u8>, usize>,
 ) -> Result<(), IvmRuntimeError> {
     let mut index = 0usize;
     for (record, copies) in window {
-        let key = encoded_record_key_part(descriptor, record, &[0])?;
+        let key = encoded_record_key_part(descriptor, record, key_fields)?;
         positions.entry(key).or_insert(index);
         index = index.saturating_add(usize::try_from(*copies).unwrap_or(usize::MAX));
     }
     Ok(())
+}
+
+/// Row identity of a TopBy's output: its group fields plus its tie fields,
+/// which are declared to identify a row within its group. A row whose order
+/// value changes keeps its identity, so it is an update plus a move. With no
+/// tie fields, the order fields stand in.
+pub(super) fn top_by_identity_fields(top_by: &TopByOp) -> Vec<usize> {
+    let order_len = top_by.order_fields.len();
+    let tie = &top_by.sort_field_indices[order_len.min(top_by.sort_field_indices.len())..];
+    let identity = if tie.is_empty() {
+        &top_by.sort_field_indices[..]
+    } else {
+        tie
+    };
+    let mut fields = top_by.group_field_indices.clone();
+    for index in identity {
+        if !fields.contains(index) {
+            fields.push(*index);
+        }
+    }
+    fields
+}
+
+/// Identity fields of a plain output; the first `group_len` of them are the
+/// TopBy group fields.
+pub(super) struct RootIdentity {
+    pub(super) fields: Vec<usize>,
+    pub(super) group_len: usize,
+}
+
+/// Terminal key fields of a plain output ordered by `ordering` (#3290).
+///
+/// When the output reaches its TopBy only through filters and field-copying
+/// projections, its roots are keyed by the TopBy identity mapped into the
+/// output, so every window slot is a distinct root. Otherwise (a join,
+/// aggregate or computed field in between) there is no proven identity and
+/// the output keeps field 0, whose uniqueness is the producer's contract.
+pub(super) fn root_identity_fields(
+    graph: &IvmGraph,
+    output: NodeId,
+    ordering: NodeId,
+) -> Result<Option<RootIdentity>, IvmRuntimeError> {
+    let mut chain = Vec::new();
+    let mut node = output;
+    while node != ordering {
+        let current = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if !matches!(
+            current.descriptor.operator,
+            OpType::Filter(_) | OpType::MapProject(_)
+        ) {
+            return Ok(None);
+        }
+        let [input] = current.descriptor.inputs.as_slice() else {
+            return Ok(None);
+        };
+        chain.push(node);
+        node = *input;
+    }
+    let top_by = graph
+        .node(ordering)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(ordering))?;
+    let OpType::TopBy(top_by) = &top_by.descriptor.operator else {
+        return Ok(None);
+    };
+    let mut fields = top_by_identity_fields(top_by);
+    let group_len = top_by.group_field_indices.len();
+    for id in chain.into_iter().rev() {
+        let current = graph
+            .node(id)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
+        let OpType::MapProject(project) = &current.descriptor.operator else {
+            continue;
+        };
+        let input = current.descriptor.inputs[0];
+        let input_output = graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor
+            .output
+            .records();
+        let mut mapped = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let position = project.expressions.iter().position(|expression| {
+                matches!(
+                    &expression.expression,
+                    ProjectExpr::Field(source)
+                        if resolve_field_ref(&input_output, source).ok() == Some(*field)
+                )
+            });
+            let Some(position) = position else {
+                return Ok(None);
+            };
+            mapped.push(position);
+        }
+        fields = mapped;
+    }
+    Ok(Some(RootIdentity { fields, group_len }))
+}
+
+/// Root ordering for one group's window: like
+/// [`apply_root_ordering_operations`], but only this group's roots take part,
+/// and indices are positions within the group.
+pub(super) fn apply_group_root_ordering_operations(
+    before: &BTreeMap<Vec<u8>, usize>,
+    after: &BTreeMap<Vec<u8>, usize>,
+    root_descriptor: RecordDescriptor,
+    terminal: &mut TerminalDeltas,
+) {
+    let in_group = |key: &[u8]| before.contains_key(key) || after.contains_key(key);
+    let mut current = before
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    current.sort_by_key(|(index, _)| *index);
+    let mut current = current.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
+    for operation in &mut terminal.operations {
+        if !operation.path.is_empty() || !in_group(&operation.root_key) {
+            continue;
+        }
+        match &mut operation.edit {
+            TerminalEdit::Insert { index, key, .. } => {
+                if let Some(actual) = after.get(key) {
+                    *index = *actual;
+                }
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+                current.insert((*index).min(current.len()), key.clone());
+            }
+            TerminalEdit::Remove { key } => {
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+            }
+            TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
+        }
+    }
+    let mut desired = after
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    desired.sort_by_key(|(index, _)| *index);
+    for (after_index, key) in desired {
+        if current.get(after_index) != Some(&key)
+            && let Some(existing) = current.iter().position(|candidate| candidate == &key)
+        {
+            current.remove(existing);
+            current.insert(after_index.min(current.len()), key.clone());
+            terminal.operations.push(TerminalOperation {
+                root_descriptor,
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key,
+                    index: after_index,
+                },
+            });
+        }
+    }
 }
 
 pub(super) fn apply_root_ordering_operations(

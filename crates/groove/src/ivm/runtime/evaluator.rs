@@ -680,8 +680,22 @@ pub(super) fn validate_arg_by_primary_key_indices(
 /// Single-tick evaluator over a deduplicated graph.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RootOrderingWindows {
+    /// Positions keyed by output field 0, for outputs with no proven identity.
     pub(super) before: BTreeMap<Vec<u8>, usize>,
     pub(super) after: BTreeMap<Vec<u8>, usize>,
+    /// Each touched group's before/after window records (#3290). Identity
+    /// positions are built only for the groups an output's own deltas reach,
+    /// so a subscriber never replays another route's window, and a group no
+    /// output reaches costs only this record-handle copy.
+    pub(super) groups: BTreeMap<Vec<u8>, GroupWindow>,
+    pub(super) descriptor: Option<RecordDescriptor>,
+    pub(super) identity: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct GroupWindow {
+    pub(super) before: Vec<WindowedRecord>,
+    pub(super) after: Vec<WindowedRecord>,
 }
 
 /// Ephemeral lookup inputs, not a cached proof of producer readiness. A miss
@@ -1191,12 +1205,39 @@ impl TickEvaluator<'_> {
         &self,
         ordering_node: NodeId,
         root_descriptor: RecordDescriptor,
+        identity_groups: Option<&BTreeSet<Vec<u8>>>,
         terminal: &mut TerminalDeltas,
     ) -> Result<(), IvmRuntimeError> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
             return Ok(());
         };
-        apply_root_ordering_operations(&windows.before, &windows.after, root_descriptor, terminal);
+        let Some(groups) = identity_groups else {
+            apply_root_ordering_operations(
+                &windows.before,
+                &windows.after,
+                root_descriptor,
+                terminal,
+            );
+            return Ok(());
+        };
+        let Some(descriptor) = windows.descriptor else {
+            return Ok(());
+        };
+        for group in groups {
+            let Some(window) = windows.groups.get(group) else {
+                continue;
+            };
+            let mut before = BTreeMap::new();
+            let mut after = BTreeMap::new();
+            extend_root_window_positions(
+                descriptor,
+                &window.before,
+                &windows.identity,
+                &mut before,
+            )?;
+            extend_root_window_positions(descriptor, &window.after, &windows.identity, &mut after)?;
+            apply_group_root_ordering_operations(&before, &after, root_descriptor, terminal);
+        }
         Ok(())
     }
 
@@ -2419,8 +2460,19 @@ impl TickEvaluator<'_> {
                 top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
             let position_records = before.len().saturating_add(after.len());
             if let Some(windows) = self.root_ordering_windows.get_mut(&node) {
-                extend_root_window_positions(output_desc, &before, &mut windows.before)?;
-                extend_root_window_positions(output_desc, &after, &mut windows.after)?;
+                extend_root_window_positions(output_desc, &before, &[0], &mut windows.before)?;
+                extend_root_window_positions(output_desc, &after, &[0], &mut windows.after)?;
+                if windows.descriptor.is_none() {
+                    windows.descriptor = Some(output_desc);
+                    windows.identity = top_by_identity_fields(top_by);
+                }
+                windows.groups.insert(
+                    group_prefix.clone(),
+                    GroupWindow {
+                        before: before.clone(),
+                        after: after.clone(),
+                    },
+                );
                 self.metrics.root_ordering_position_records += position_records;
             } else {
                 self.metrics.root_ordering_position_records_skipped += position_records;
