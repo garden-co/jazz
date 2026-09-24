@@ -3,9 +3,10 @@
 //!
 //! Question under test: once subscriptions are open, is it cheaper to maintain
 //! them incrementally (Groove IVM) or to re-run each invalidated query and diff?
-//! Each benchmark iteration applies one single-row write and brings every
-//! subscriber's cached result up to date. Setup, seeding and initial
-//! subscription hydration are outside the timing.
+//! Each benchmark iteration applies 10 consecutive single-row writes, bringing
+//! every subscriber's cached result up to date after each one; divide reported
+//! times by 10 for per-write cost. Setup, seeding and initial subscription
+//! hydration are outside the timing.
 //!
 //! Workloads (all results are non-trivial; writes keep table sizes stable):
 //! - `tasks`: each subscriber watches its own 300 tasks. A write bumps one
@@ -146,9 +147,15 @@ fn post_title(author: u64, post: u64) -> String {
 /// Deterministic write sequence. Every write changes a value, so it always
 /// produces a real delta for every affected subscriber.
 fn write_at(workload: Workload, subs: u64, step: u64) -> Write {
+    // Each timed iteration is `WRITES_PER_ITERATION` consecutive steps. Spread
+    // those writes evenly over the subscriber range and rotate the anchor per
+    // round, so every iteration sees the same representative fan-out mix.
+    let round = step / WRITES_PER_ITERATION;
+    let lane = step % WRITES_PER_ITERATION;
+    let anchor = (lane * subs / WRITES_PER_ITERATION + round) % subs;
     match workload {
         Workload::Tasks => Write::TaskRev {
-            owner: step % subs,
+            owner: anchor,
             id: (step * 7919) % TASKS_PER_OWNER,
             rev: 1_000_000 + step,
         },
@@ -156,7 +163,7 @@ fn write_at(workload: Workload, subs: u64, step: u64) -> Write {
             // Always edit a post by someone a subscriber follows, so every
             // write lands in watched data (and reaches that author's other
             // subscribed followers too).
-            let author = followee(step % subs, (step / subs) % FOLLOWS_PER_USER);
+            let author = followee(anchor, round % FOLLOWS_PER_USER);
             Write::PostCreated {
                 author,
                 id: author * POSTS_PER_USER + step % POSTS_PER_USER,
@@ -798,9 +805,19 @@ fn verify_engines_agree() {
     }
 }
 
+/// Writes per timed iteration. How many subscribers one feed write touches is
+/// skewed per write, so a single-write sample mostly measures the common
+/// one-subscriber case; a fixed batch averages the mix inside every sample.
+const WRITES_PER_ITERATION: u64 = 10;
+
 fn bench(bencher: divan::Bencher, kind: EngineKind, workload: Workload, subs: u64) {
     let engine = RefCell::new(Engine::new(kind, workload, subs));
-    bencher.bench_local(|| engine.borrow_mut().step());
+    bencher.bench_local(|| {
+        let mut engine = engine.borrow_mut();
+        for _ in 0..WRITES_PER_ITERATION {
+            engine.step();
+        }
+    });
 }
 
 macro_rules! workload_benches {
