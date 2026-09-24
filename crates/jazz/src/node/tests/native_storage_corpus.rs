@@ -2406,3 +2406,141 @@ fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
         version.row_uuid() == row(44)
         && version.cell(&table, "body").unwrap() == Some(v("current main writer"))));
 }
+
+/// Current storage reads the retired Edge durability tag exactly as the actual
+/// npm alpha.56 binary wrote it. The fixture is the published client's own
+/// RocksDB root after an alpha.56 edge acknowledged a write that Core never
+/// saw; see `published-alpha56-legacy-edge-receipt.md` for how it was made.
+/// This internal adapter receipt is needed because the retired tag cannot be
+/// authored through any current API, and the resend scan is not public.
+#[test]
+fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent() {
+    let provenance: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/published-alpha56-legacy-edge-receipt.json"
+    ))
+    .unwrap();
+    let text = |pointer: &str| {
+        provenance
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("provenance {pointer}"))
+            .to_owned()
+    };
+    let hex_at = |pointer: &str| hex::decode(text(pointer)).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let archive = decode_native_physical_fixture(
+        include_str!("../../../fixtures/published-alpha56-legacy-edge-receipt-rocksdb.tar.gz.base64"),
+        &text("/archive/sha256"),
+        "published alpha.56 legacy edge receipt RocksDB",
+    )
+    .unwrap();
+    let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
+    let edge_key = hex_at("/transactionRecords/edgeAccepted/keyHex");
+    let edge_value = hex_at("/transactionRecords/edgeAccepted/valueHex");
+    let core_key = hex_at("/transactionRecords/coreConfirmed/keyHex");
+    let core_value = hex_at("/transactionRecords/coreConfirmed/valueHex");
+    // Physical, read-only and below Jazz: the alpha.56 bytes are exactly the
+    // pinned transaction records, before and after current code reopens them.
+    let stored_record = |key: &[u8]| {
+        let options = rocksdb::Options::default();
+        let families = rocksdb::DB::list_cf(&options, &path).unwrap();
+        let db = rocksdb::DB::open_cf_for_read_only(&options, &path, &families, false).unwrap();
+        let family = db.cf_handle("__groove_class_meta").unwrap();
+        db.get_cf(family, key).unwrap()
+    };
+    assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
+    assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+    ));
+    let table = schema.tables().iter().find(|table| table.name == "todos").unwrap().clone();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = YieldingStorage::wrap(
+        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            RocksDurability::FullSync,
+            &epoch_1_storage_codec_profile().unwrap(),
+        )
+        .expect("current adapter opens the published alpha.56 client root"),
+    );
+    let author = AuthorSubject::from_canonical(&text("/receipt/author")).unwrap();
+    let tx_at = |record: &str| {
+        TxId::new(
+            TxTime(
+                provenance
+                    .pointer(&format!("/transactionRecords/{record}/txTime"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap(),
+            ),
+            NodeUuid(text(&format!("/transactionRecords/{record}/txNode")).parse().unwrap()),
+        )
+    };
+    let edge_tx = tx_at("edgeAccepted");
+    let core_tx = tx_at("coreConfirmed");
+    let edge_row = RowUuid(text("/receipt/edgeAccepted/rowId").parse().unwrap());
+    let core_row = RowUuid(text("/receipt/confirmed/rowId").parse().unwrap());
+    {
+        let mut state =
+            crate::db::block_on(NodeState::new(node(0x56), schema.clone(), storage)).unwrap();
+        // The stored fields really are the legacy shape: Accepted, tag 2, no
+        // global time. Decoding, not a migration, turns that into Pending.
+        let unsettled = crate::db::block_on(state.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_time",
+            &[Value::Nullable(None)],
+        ))
+        .unwrap();
+        assert_eq!(unsettled.len(), 1, "only the edge-accepted write lacks a global time");
+        let record = unsettled[0].record();
+        assert_eq!(record.get_enum(TransactionRowRecord::FIELD_FATE_IDX).unwrap(), 1);
+        assert_eq!(record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX).unwrap(), 2);
+        drop(unsettled);
+
+        let audit = crate::db::block_on(state.transaction_record(edge_tx)).unwrap();
+        assert_eq!(audit.tx_id, edge_tx);
+        assert_eq!(audit.made_by, author);
+        assert_eq!(audit.kind, TxKind::Mergeable);
+        assert_eq!(audit.n_total_writes, 1);
+        assert_eq!(audit.fate, Fate::Pending);
+        assert_eq!(audit.global_time, None);
+        assert_eq!(audit.durability, DurabilityTier::Local);
+        assert_eq!(
+            crate::db::block_on(state.transaction_state(edge_tx)),
+            Some((Fate::Pending, None, DurabilityTier::Local))
+        );
+        let versions = crate::db::block_on(state.query_versions_for_tx(edge_tx)).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].row_uuid(), edge_row);
+        assert_eq!(
+            versions[0].cell(&table, "title").unwrap(),
+            Some(v("published alpha.56 edge-accepted write"))
+        );
+
+        // Replay is author-scoped: the author's resend scan recovers exactly
+        // the edge-accepted write, and nobody else's scan sees it.
+        assert_eq!(
+            crate::db::block_on(state.pending_transaction_ids_for_author(author)).unwrap(),
+            vec![edge_tx]
+        );
+        assert!(
+            crate::db::block_on(state.pending_transaction_ids_for_author(AuthorSubject::SYSTEM))
+                .unwrap()
+                .is_empty()
+        );
+
+        // The Core-confirmed control keeps its Accepted/Global outcome.
+        let (fate, global_time, durability) =
+            crate::db::block_on(state.transaction_state(core_tx)).unwrap();
+        assert_eq!((fate, durability), (Fate::Accepted, DurabilityTier::Global));
+        assert!(global_time.is_some());
+        let core_versions = crate::db::block_on(state.query_versions_for_tx(core_tx)).unwrap();
+        assert_eq!(core_versions.len(), 1);
+        assert_eq!(core_versions[0].row_uuid(), core_row);
+    }
+    // Reopening only read the records; the alpha.56 bytes are unchanged.
+    assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
+    assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+}
