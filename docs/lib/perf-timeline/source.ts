@@ -6,8 +6,8 @@ import { resolveReleaseAncestors } from "./releases";
 // the browser's rotating persisted-query hashes or an embedded user token.
 // One query for every run's results times out at CodSpeed's gateway (HTTP 502
 // at ~400 runs / ~23k results), and `runs` takes no pagination arguments. So
-// list runs without results, then fetch results only for runs the timeline can
-// admit, a few runs per request.
+// list runs without results, then fetch results one run at a time, only for
+// runs the timeline can admit. Per-run requests let settled runs stay cached.
 const runsQuery = `query JazzWallclockRuns {
   repository(owner: "garden-co", name: "jazz") {
     runs {
@@ -16,16 +16,19 @@ const runsQuery = `query JazzWallclockRuns {
     }
   }
 }`;
-// CodSpeed rejects queries with more than 15 aliases.
-const runsPerResultsQuery = 15;
-const concurrentResultsQueries = 4;
+const listRevalidateSeconds = 300;
+// Results can still be processing shortly after a run, and re-running a CI job
+// can replace results inside an existing run, so settled runs expire daily.
+const settledAfterMs = 2 * 60 * 60 * 1000;
+const settledRevalidateSeconds = 86400;
+const concurrentResultQueries = 6;
 
-async function codspeed<T>(query: string, timeoutMs: number): Promise<T> {
+async function codspeed<T>(query: string, revalidate: number, timeoutMs: number): Promise<T> {
   const response = await fetch("https://gql.codspeed.io/", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
-    next: { revalidate: 300 },
+    next: { revalidate },
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`CodSpeed is unavailable (HTTP ${response.status}).`);
@@ -37,32 +40,26 @@ async function codspeed<T>(query: string, timeoutMs: number): Promise<T> {
 }
 
 async function runResults(
-  ids: string[],
+  runs: Pick<RawRun, "id" | "date">[],
   deadline: number,
 ): Promise<Map<string, RawRun["results"]>> {
-  const batches: string[][] = [];
-  for (let i = 0; i < ids.length; i += runsPerResultsQuery)
-    batches.push(ids.slice(i, i + runsPerResultsQuery));
   const results = new Map<string, RawRun["results"]>();
   let next = 0;
   const worker = async () => {
-    while (next < batches.length) {
-      const fields = batches[next++]
-        .map(
-          (id, i) =>
-            `r${i}: run(id: ${JSON.stringify(id)}) { id results { id benchmark { id name } walltime { min median max } } }`,
-        )
-        .join("\n");
+    while (next < runs.length) {
+      const run = runs[next++];
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("CodSpeed result fetch deadline exceeded.");
-      const repository = await codspeed<Record<string, Pick<RawRun, "id" | "results"> | null>>(
-        `query JazzWallclockResults { repository(owner: "garden-co", name: "jazz") { ${fields} } }`,
-        Math.min(remaining, 20000),
+      const settled = Date.now() - Date.parse(run.date) > settledAfterMs;
+      const repository = await codspeed<{ run: Pick<RawRun, "results"> | null }>(
+        `query JazzWallclockRunResults { repository(owner: "garden-co", name: "jazz") { run(id: ${JSON.stringify(run.id)}) { results { id benchmark { id name } walltime { min median max } } } } }`,
+        settled ? settledRevalidateSeconds : listRevalidateSeconds,
+        Math.min(remaining, 15000),
       );
-      for (const run of Object.values(repository)) if (run) results.set(run.id, run.results ?? []);
+      results.set(run.id, repository.run?.results ?? []);
     }
   };
-  await Promise.all(Array.from({ length: concurrentResultsQueries }, worker));
+  await Promise.all(Array.from({ length: concurrentResultQueries }, worker));
   return results;
 }
 
@@ -106,14 +103,16 @@ export async function loadTimeline(): Promise<Timeline> {
     (tags) => ({ tags, warning: null }),
     (error: Error) => ({ tags: [] as Release[], warning: error.message }),
   );
-  const listed = await codspeed<{ runs: Omit<RawRun, "results">[] }>(runsQuery, 20000);
+  const listed = await codspeed<{ runs: Omit<RawRun, "results">[] }>(
+    runsQuery,
+    listRevalidateSeconds,
+    20000,
+  );
   if (!Array.isArray(listed.runs)) {
     throw new Error("CodSpeed could not return benchmark history. Please retry shortly.");
   }
   const { tags, warning } = await tagsPromise;
-  const admissible = listed.runs
-    .filter((run) => mayBeAdmitted(run, tags, historicalBackfills))
-    .map((run) => run.id);
+  const admissible = listed.runs.filter((run) => mayBeAdmitted(run, tags, historicalBackfills));
   const results = await runResults(admissible, deadline - 5000);
   // Runs the timeline cannot admit keep an empty result list; buildTimeline
   // excludes them before reading results, so its output is unchanged.

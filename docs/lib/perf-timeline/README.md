@@ -66,11 +66,11 @@ receipt table exposes exact seconds for keyboard and assistive-technology users.
 `lib/source.ts` uses ordinary unauthenticated GraphQL at
 `https://gql.codspeed.io/`. It first lists `repository.runs` with
 `commit.branch.pullRequest` metadata but no results, then fetches walltime
-distributions via `repository.run(id:)` only for runs the timeline can admit
-(main, open PRs, exact tags and registered backfills), 15 runs per request (the
-API's alias limit). Asking for every run's results at once exceeded CodSpeed's
-gateway timeout at ~400 runs. `runs` takes no pagination arguments; the UI
-reports the actual returned count, not a claim of exhaustive retention. This public web API is not
+distributions via `repository.run(id:)`, one run per request, only for runs the
+timeline can admit (main, open PRs, exact tags and registered backfills).
+Asking for every run's results at once exceeded CodSpeed's gateway timeout at
+~400 runs. `runs` takes no pagination arguments; the UI reports the actual
+returned count, not a claim of exhaustive retention. This public web API is not
 a pinned SDK contract: API errors fail visibly rather than returning demo data.
 See also `../../../dev/benchmarks/CODSPEED_GQL.md` for profile access.
 
@@ -88,11 +88,17 @@ budgets visibly warn that remaining main release statuses are unverified. No PR
 trial is reclassified through ancestry, and missing evidence never fabricates a
 release measurement.
 
-Upstream CodSpeed fetch and CDN responses are cached for five minutes; the CDN
-can serve stale responses for another ten minutes while revalidating. GitHub
-tags cache for one hour. Refresh reads that cache; it does not bypass rate
-protection. No credentials, callgraph presigned URLs, or private data reach the
-browser. A failed CodSpeed fetch returns HTTP 502 with a retry UI.
+The run list is cached for five minutes. A run's results are cached for five
+minutes while the run is under two hours old, then for a day: results can still
+be processing right after a run, and re-running a CI job can replace results
+inside an existing run, so even settled runs expire daily. A warm refresh
+therefore asks CodSpeed for the run list plus only new runs. The API response is
+CDN-cached for 30 minutes and may be served stale for up to a day while it
+revalidates. GitHub tags cache for one hour. Refresh reads that cache; it does
+not bypass rate protection. No credentials, callgraph presigned URLs, or private
+data reach the browser. When CodSpeed fails, a server instance that already
+built a timeline returns it with a warning naming when it was retrieved; a
+cold instance returns HTTP 502 with a retry UI.
 
 ## Docs route and deployment
 
