@@ -608,6 +608,129 @@ describe("RecordPlayer authenticated playlist topology", () => {
     expect(receipt.status).toBe("passed");
   }, 30_000);
 
+  // #2288: under the former policy, an owner's old row passed the owner branch
+  // while the new row passed the recipient-accepted branch, so the owner of one
+  // playlist could transfer an invitation onto somebody else's playlist and
+  // accept it for themselves.
+  it("rejects an owner transferring an invitation onto another owner's playlist", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-invitation-transfer"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [ownerAToken, ownerBToken, recipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-transfer-owner-a", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-transfer-owner-b", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-transfer-recipient", undefined, server.appId),
+    ]);
+    const ownerAAuthor = await accountIdFor(server, ownerAToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
+    const ownerA = await openClient(server, "transfer-owner-a", ownerAToken);
+    const ownerB = await openClient(server, "transfer-owner-b", ownerBToken);
+    const recipient = await openClient(server, "transfer-recipient", recipientToken);
+
+    const playlistA = await ownerA
+      .insert(app.playlists, { name: "owner A playlist" })
+      .wait({ tier: "global" });
+    const playlistB = await ownerB
+      .insert(app.playlists, { name: "owner B playlist" })
+      .wait({ tier: "global" });
+    const inviteOnA = await ownerA
+      .insert(app.invitations, {
+        playlist_id: playlistA.id,
+        subject: recipientAuthor,
+        role: "listener",
+        status: "pending",
+      })
+      .wait({ tier: "global" });
+    const album = await ownerA
+      .insert(app.albums, { title: "Transfer", artist: "Jazz" })
+      .wait({ tier: "global" });
+    const track = await ownerA
+      .insert(app.tracks, { album_id: album.id, title: "Boundary", ordinal: 0, duration_ms: 1 })
+      .wait({ tier: "global" });
+
+    await expect(
+      ownerA
+        .update(app.invitations, inviteOnA.id, {
+          playlist_id: playlistB.id,
+          subject: ownerAAuthor,
+          role: "editor",
+          status: "accepted",
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      ownerA
+        .update(app.invitations, inviteOnA.id, { playlist_id: playlistB.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      waitForQuery(
+        ownerA,
+        app.invitations.where({ id: inviteOnA.id }),
+        (rows) => rows.length === 1 && rows[0]?.playlist_id === playlistA.id,
+        "rejected invitation transfers roll back",
+        15_000,
+        "global",
+      ),
+    ).resolves.toEqual([inviteOnA]);
+    await expect(
+      ownerA
+        .insert(app.playlist_entries, {
+          playlist_id: playlistB.id,
+          track_id: track.id,
+          position: 1,
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      ownerB.all(app.invitations.where({ playlist_id: playlistB.id }), { tier: "global" }),
+    ).resolves.toEqual([]);
+
+    // Positive controls: the owner still manages invitations on their own
+    // playlist, and the recipient still accepts their own pending invitation.
+    await ownerA
+      .insert(app.playlist_entries, { playlist_id: playlistA.id, track_id: track.id, position: 1 })
+      .wait({ tier: "global" });
+    await ownerA.update(app.invitations, inviteOnA.id, { role: "editor" }).wait({ tier: "global" });
+    await waitForQuery(
+      recipient,
+      app.invitations.where({ subject: recipientAuthor }),
+      (rows) => rows[0]?.id === inviteOnA.id && rows[0]?.role === "editor",
+      "recipient observes owner-managed pending invitation",
+      15_000,
+      "global",
+    );
+    await recipient
+      .update(app.invitations, inviteOnA.id, { status: "accepted" })
+      .wait({ tier: "global" });
+    await recipient
+      .insert(app.playlist_entries, { playlist_id: playlistA.id, track_id: track.id, position: 2 })
+      .wait({ tier: "global" });
+    await expect(
+      waitForQuery(
+        ownerA,
+        app.invitations.where({ id: inviteOnA.id }),
+        (rows) => rows[0]?.status === "accepted",
+        "owner observes recipient acceptance",
+        15_000,
+        "global",
+      ),
+    ).resolves.toEqual([
+      {
+        id: inviteOnA.id,
+        playlist_id: playlistA.id,
+        subject: recipientAuthor,
+        role: "editor",
+        status: "accepted",
+      },
+    ]);
+  }, 60_000);
+
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
