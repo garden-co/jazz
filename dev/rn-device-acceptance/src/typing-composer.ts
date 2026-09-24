@@ -73,6 +73,8 @@ export interface ComposerDriver {
   observedTexts(): readonly string[];
   now(): number;
   yieldTurn(): Promise<void>;
+  /** Record which phase is running, so a device failure names it. */
+  stage?(phase: "keystroke" | "burst" | "order"): void;
 }
 
 const ECHO_DEADLINE_MS = 10_000;
@@ -96,6 +98,7 @@ export async function measureTypingComposer(
   const blocked: number[] = [];
   const echo: number[] = [];
   let text = "";
+  driver.stage?.("keystroke");
   for (const character of single) {
     text += character;
     const started = driver.now();
@@ -105,6 +108,7 @@ export async function measureTypingComposer(
     if (echoedAt === null) throw new Error("typing composer keystroke never echoed locally");
     echo.push(echoedAt - started);
   }
+  driver.stage?.("burst");
   const burstStarted = driver.now();
   for (const character of burst) {
     text += character;
@@ -114,6 +118,7 @@ export async function measureTypingComposer(
   }
   const burstEchoedAt = await waitForEcho(driver, text);
   if (burstEchoedAt === null) throw new Error("typing composer burst never echoed locally");
+  driver.stage?.("order");
   const analysis = analyzeComposerEcho(text, driver.observedTexts());
   const metrics: TypingComposerMetrics = {
     keystrokes: single.length + burst.length,

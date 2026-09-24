@@ -87,6 +87,10 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "scope-reopen-failed",
     "public-client-restart-failed",
     "receipt-write-failed",
+    "typing-composer-open-failed",
+    "typing-composer-keystroke-failed",
+    "typing-composer-burst-failed",
+    "typing-composer-order-failed",
   )
   override fun getName() = "JazzDeviceFixture"
 

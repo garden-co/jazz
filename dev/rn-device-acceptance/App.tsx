@@ -156,8 +156,7 @@ async function observeTrustedAdmissionLifecycleInner(
   // the first proof that the seed escaped its in-memory UI preview.
   markFailure("public-client-relay-readback-failed");
   await proveHighLevelForegroundRelayReadback(scopeA, receipt.runNonce);
-  markFailure("public-client-write-failed");
-  metrics["typing-composer"] = receiptMetrics(await proveTypingComposer(scopeA));
+  metrics["typing-composer"] = receiptMetrics(await proveTypingComposer(scopeA, markFailure));
   markFailure("scope-isolation-failed");
   await proveForegroundScopeIsolation(
     foregroundFactory,

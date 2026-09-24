@@ -170,10 +170,14 @@ export async function proveHighLevelForegroundRestart(
  * checks live in `typing-composer.ts`; this only binds them to a real
  * `createJazzClient` foreground on the admitted relay.
  */
-export async function proveTypingComposer(admitted: {
-  capability: Uint8Array;
-  account: JazzClientConfig["account"];
-}): Promise<TypingComposerMetrics> {
+export async function proveTypingComposer(
+  admitted: {
+    capability: Uint8Array;
+    account: JazzClientConfig["account"];
+  },
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+): Promise<TypingComposerMetrics> {
+  markFailure("typing-composer-open-failed");
   const client = await createJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
@@ -200,6 +204,7 @@ export async function proveTypingComposer(admitted: {
       observedTexts: () => observed,
       now: () => performance.now(),
       yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      stage: (phase) => markFailure(`typing-composer-${phase}-failed`),
     });
   } catch (error) {
     failed = true;
