@@ -1,4 +1,4 @@
-import { assertMigrationMatchesCanonicalBundle } from "./catalogue.js";
+import { resolveCanonicalMigrationForward } from "./catalogue.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
@@ -350,7 +350,7 @@ describe("migration stub generation", () => {
         expect(migration.forward).toEqual([]);
         expect(s.defineMigration({ from, to, migrate: {} }).forward).toEqual([]);
         expect(() =>
-          assertMigrationMatchesCanonicalBundle(migration, {
+          resolveCanonicalMigrationForward(migration, {
             fromHash: "aaaaaaaaaaaa",
             toHash: "bbbbbbbbbbbb",
             fromSchema: s.defineApp(from).wasmSchema,
@@ -429,7 +429,7 @@ describe("migration stub generation", () => {
     const canonicalFrom = s.defineApp({ users, records: s.table(columns(true), {}) }).wasmSchema;
     const canonicalTo = s.defineApp(to).wasmSchema;
     expect(() =>
-      assertMigrationMatchesCanonicalBundle(migration, {
+      resolveCanonicalMigrationForward(migration, {
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         fromSchema: canonicalFrom,
