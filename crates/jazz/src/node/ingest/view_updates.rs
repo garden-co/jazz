@@ -211,7 +211,9 @@ where
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,) -> Result<Option<VersionRow>, Error> {
-        let mut winner = None::<(VersionRow, TxId, TxTime)>;
+        // History holds post-images: the accepted image with the newest seq
+        // is the row.
+        let mut winner = None::<(VersionRow, GlobalTime)>;
         for version in self
             .query_row_versions_in_branch(table, branch_key, row_uuid)
             .await?
@@ -221,18 +223,14 @@ where
             let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
-            if !matches!(tx.fate, Fate::Accepted) || tx.global_time.is_none() {
+            let (Fate::Accepted, Some(global_time)) = (&tx.fate, tx.global_time) else {
                 continue;
-            }
-            let made_at = self.version_made_at(&version).await?;
-            let previous = winner
-                .as_ref()
-                .map(|(version, tx_id, made_at)| (version, *tx_id, *made_at));
-            if version_wins_over_open_winner(&version, tx_id, made_at, previous) {
-                winner = Some((version, tx_id, made_at));
+            };
+            if winner.as_ref().is_none_or(|(_, best)| *best < global_time) {
+                winner = Some((version, global_time));
             }
         }
-        Ok(winner.map(|(version, _, _)| version))
+        Ok(winner.map(|(version, _)| version))
     }
 
     #[cfg(test)]
