@@ -1064,6 +1064,11 @@ fn validate_flat_join(
     Ok(())
 }
 
+fn join_has_created_source(join: &JoinVia) -> bool {
+    join.source_mode != CandidateSourceMode::AcceptedOnly
+        || join.nested_joins.iter().any(join_has_created_source)
+}
+
 fn validate_join(
     schema: &RuntimeSchema,
     root: &TableSchema,
@@ -1072,6 +1077,26 @@ fn validate_join(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let join_table = schema_table(schema, &join.table)?;
+    if join.source_mode == CandidateSourceMode::IncludeAuthorizedCreatedV1 {
+        let source_column = join.source_column.as_deref().unwrap_or("id");
+        let source_type = planner_column_type(root, source_column)?;
+        let target_type = planner_column_type(&join_table, &join.on_column)?;
+        let source_ref = source_column == "id" || root.references.contains_key(source_column);
+        let target_ref =
+            join.target == JoinTarget::RowId || join_table.references.contains_key(&join.on_column);
+        if join.target == JoinTarget::Uncorrelated
+            || join.source_lookup.is_some()
+            || !source_ref
+            || !target_ref
+            || !matches!(non_null_column_type(source_type), ColumnType::Uuid)
+            || !matches!(non_null_column_type(target_type), ColumnType::Uuid)
+        {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "authorized-created source requires a scalar declared-reference correlation"
+                    .to_owned(),
+            ));
+        }
+    }
     if join.target == JoinTarget::Uncorrelated {
         if !join.on_column.is_empty()
             || join.source_column.is_some()

@@ -41,6 +41,7 @@ pub(super) fn rewrite_claim_join_for_binding(
         table: join.table,
         on_column: join.on_column,
         target: join.target,
+        source_mode: join.source_mode,
         source_column: join.source_column,
         source_lookup: join.source_lookup,
         correlated_filters: join.correlated_filters,

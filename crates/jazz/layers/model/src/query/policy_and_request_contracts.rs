@@ -375,34 +375,143 @@ impl Include {
     }
 }
 
+/// Evidence visible to one policy source occurrence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum CandidateSourceMode {
+    /// Only authority-accepted rows are visible.
+    #[default]
+    AcceptedOnly,
+    /// Also admit independently authorized root inserts from the same exclusive commit.
+    IncludeAuthorizedCreatedV1,
+}
+
 /// Junction traversal.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JoinVia {
     /// Junction table.
     pub table: String,
+    /// Evidence capability of this exact source occurrence, never its sibling sources.
+    pub source_mode: CandidateSourceMode,
     /// Column on the junction/target table. For [`JoinTarget::RowId`], this is
     /// the public row-id name and execution uses the table's internal row UUID.
     /// Empty for [`JoinTarget::Uncorrelated`].
     pub on_column: String,
     /// How the target relation is matched.
-    #[serde(default)]
     pub target: JoinTarget,
     /// Optional root-table column used for row-correlated policy joins.
-    #[serde(default)]
     pub source_column: Option<String>,
     /// Optional parent-row lookup used when a policy inherited through a
     /// reference needs to correlate through a column on the referenced row.
-    #[serde(default)]
     pub source_lookup: Option<JoinSourceLookup>,
     /// Additional equality correlations from joined-table columns to columns
     /// on the source row currently being checked.
-    #[serde(default)]
     pub correlated_filters: Vec<JoinCorrelation>,
     /// Filters evaluated on the junction table.
     pub filters: Vec<Predicate>,
     /// Additional joins evaluated relative to the joined row.
-    #[serde(default)]
     pub nested_joins: Vec<JoinVia>,
+}
+
+// Keep the original eight-field JoinVia grammar in every serde format.
+// Capability-bearing targets append enum tags so old readers reject them;
+// an unknown extra struct field would instead be silently ignored by JSON.
+mod join_via_serde {
+    use super::{
+        CandidateSourceMode, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Predicate,
+    };
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
+
+    #[derive(Default, Deserialize, Serialize)]
+    enum WireTarget {
+        #[default]
+        Column,
+        RowId,
+        Uncorrelated,
+        AuthorizedCreatedColumnV1,
+        AuthorizedCreatedRowIdV1,
+    }
+
+    #[derive(Deserialize)]
+    struct WireJoin {
+        table: String,
+        on_column: String,
+        #[serde(default)]
+        target: WireTarget,
+        #[serde(default)]
+        source_column: Option<String>,
+        #[serde(default)]
+        source_lookup: Option<JoinSourceLookup>,
+        #[serde(default)]
+        correlated_filters: Vec<JoinCorrelation>,
+        filters: Vec<Predicate>,
+        #[serde(default)]
+        nested_joins: Vec<JoinVia>,
+    }
+
+    impl Serialize for JoinVia {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let target = match (self.source_mode, self.target) {
+                (CandidateSourceMode::AcceptedOnly, JoinTarget::Column) => WireTarget::Column,
+                (CandidateSourceMode::AcceptedOnly, JoinTarget::RowId) => WireTarget::RowId,
+                (CandidateSourceMode::AcceptedOnly, JoinTarget::Uncorrelated) => {
+                    WireTarget::Uncorrelated
+                }
+                (CandidateSourceMode::IncludeAuthorizedCreatedV1, JoinTarget::Column) => {
+                    WireTarget::AuthorizedCreatedColumnV1
+                }
+                (CandidateSourceMode::IncludeAuthorizedCreatedV1, JoinTarget::RowId) => {
+                    WireTarget::AuthorizedCreatedRowIdV1
+                }
+                (CandidateSourceMode::IncludeAuthorizedCreatedV1, JoinTarget::Uncorrelated) => {
+                    return Err(serde::ser::Error::custom(
+                        "authorized-created sources require a correlated target",
+                    ));
+                }
+            };
+            let mut record = serializer.serialize_struct("JoinVia", 8)?;
+            record.serialize_field("table", &self.table)?;
+            record.serialize_field("on_column", &self.on_column)?;
+            record.serialize_field("target", &target)?;
+            record.serialize_field("source_column", &self.source_column)?;
+            record.serialize_field("source_lookup", &self.source_lookup)?;
+            record.serialize_field("correlated_filters", &self.correlated_filters)?;
+            record.serialize_field("filters", &self.filters)?;
+            record.serialize_field("nested_joins", &self.nested_joins)?;
+            record.end()
+        }
+    }
+
+    impl<'de> Deserialize<'de> for JoinVia {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let wire = WireJoin::deserialize(deserializer)?;
+            let (target, source_mode) = match wire.target {
+                WireTarget::Column => (JoinTarget::Column, CandidateSourceMode::AcceptedOnly),
+                WireTarget::RowId => (JoinTarget::RowId, CandidateSourceMode::AcceptedOnly),
+                WireTarget::Uncorrelated => {
+                    (JoinTarget::Uncorrelated, CandidateSourceMode::AcceptedOnly)
+                }
+                WireTarget::AuthorizedCreatedColumnV1 => (
+                    JoinTarget::Column,
+                    CandidateSourceMode::IncludeAuthorizedCreatedV1,
+                ),
+                WireTarget::AuthorizedCreatedRowIdV1 => (
+                    JoinTarget::RowId,
+                    CandidateSourceMode::IncludeAuthorizedCreatedV1,
+                ),
+            };
+            Ok(Self {
+                table: wire.table,
+                source_mode,
+                on_column: wire.on_column,
+                target,
+                source_column: wire.source_column,
+                source_lookup: wire.source_lookup,
+                correlated_filters: wire.correlated_filters,
+                filters: wire.filters,
+                nested_joins: wire.nested_joins,
+            })
+        }
+    }
 }
 
 /// Additional row correlation required by a [`JoinVia`] traversal.

@@ -252,6 +252,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
@@ -275,6 +276,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
@@ -297,6 +299,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
@@ -340,6 +343,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: on_column.into(),
             target,
@@ -361,6 +365,7 @@ impl Query {
         nested_joins: impl IntoIterator<Item = JoinVia>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
@@ -383,6 +388,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: "id".to_owned(),
             target: JoinTarget::RowId,
@@ -404,6 +410,7 @@ impl Query {
         filters: impl IntoIterator<Item = Predicate>,
     ) -> Self {
         self.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: table.into(),
             on_column: "id".to_owned(),
             target: JoinTarget::RowId,
@@ -691,6 +698,16 @@ impl Query {
 
     /// Validate and canonicalize this query against a Jazz schema.
     pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
+        if self.joins.iter().any(join_has_created_source)
+            || self
+                .policy_branches
+                .iter()
+                .any(|branch| branch.joins.iter().any(join_has_created_source))
+        {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "authorized-created sources are supported only in INSERT policies".to_owned(),
+            ));
+        }
         self.validate_runtime(schema.runtime())
     }
 

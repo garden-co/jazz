@@ -1060,9 +1060,9 @@ pub fn validate_permissions_relation_unions(
 fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
     match policy {
         PolicyExpr::ExistsRel { rel } => validate_relation_union_labels(rel),
-        PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
-            validate_policy_relation_unions(condition)
-        }
+        PolicyExpr::Exists { condition, .. }
+        | PolicyExpr::ExistsIncludingCreated { condition, .. }
+        | PolicyExpr::Not(condition) => validate_policy_relation_unions(condition),
         PolicyExpr::And(expressions) | PolicyExpr::Or(expressions) => {
             for expression in expressions {
                 validate_policy_relation_unions(expression)?;
@@ -1984,6 +1984,9 @@ const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
 const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
 const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
 const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
+// V1 authorized-created capability: the existing string + child-expression framing.
+// Append-only: older decoders reject tag 22 rather than treating it as ordinary EXISTS.
+const POLICY_EXPR_EXISTS_INCLUDING_CREATED: u8 = 22;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -2360,6 +2363,11 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             write_string(buf, table);
             encode_policy_expr(buf, condition);
         }
+        PolicyExpr::ExistsIncludingCreated { table, condition } => {
+            buf.push(POLICY_EXPR_EXISTS_INCLUDING_CREATED);
+            write_string(buf, table);
+            encode_policy_expr(buf, condition);
+        }
         PolicyExpr::ExistsRel { rel } => {
             buf.push(POLICY_EXPR_EXISTS_REL);
             encode_canonical_relation_expr(buf, rel);
@@ -2445,6 +2453,12 @@ fn decode_policy_expr(
                         condition: Box::new(expression),
                     };
                 }
+                PolicyDecodeFrame::ExistsIncludingCreated { table } => {
+                    expression = PolicyExpr::ExistsIncludingCreated {
+                        table,
+                        condition: Box::new(expression),
+                    };
+                }
                 PolicyDecodeFrame::Not => {
                     expression = PolicyExpr::Not(Box::new(expression));
                 }
@@ -2493,6 +2507,9 @@ enum DecodedPolicyNode {
 
 enum PolicyDecodeFrame {
     Exists {
+        table: String,
+    },
+    ExistsIncludingCreated {
         table: String,
     },
     And {
@@ -2611,6 +2628,12 @@ fn decode_policy_expr_node(
             Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Exists {
                 table,
             }))
+        }
+        POLICY_EXPR_EXISTS_INCLUDING_CREATED => {
+            let table = read_string(data, offset, "policy_exists_including_created_table")?;
+            Ok(DecodedPolicyNode::Children(
+                PolicyDecodeFrame::ExistsIncludingCreated { table },
+            ))
         }
         POLICY_EXPR_EXISTS_REL => {
             let rel = decode_canonical_relation_expr(data, offset, budget)?;
@@ -3842,6 +3865,54 @@ mod tests {
             decoded.get(&TableName::new("todos")),
             permissions.get(&TableName::new("todos"))
         );
+    }
+
+    #[test]
+    fn authorized_created_policy_v1_canonical_bytes_and_rejections() {
+        // Codec-level coverage is intentional: the catalogue byte grammar is
+        // authoritative and cannot be observed through row visibility alone.
+        let expression = PolicyExpr::exists_including_created("p", PolicyExpr::True);
+        // Tag 22, u32 little-endian table byte length, UTF-8 table, TRUE tag 10.
+        let canonical = [22, 1, 0, 0, 0, b'p', 10];
+        let mut encoded = Vec::new();
+        encode_policy_expr(&mut encoded, &expression);
+        assert_eq!(encoded, canonical);
+        let mut offset = 0;
+        assert_eq!(
+            decode_policy_expr(
+                &canonical,
+                &mut offset,
+                &mut PolicyExpressionDecodeBudget::default()
+            )
+            .expect("decode authorized-created v1"),
+            expression,
+        );
+        assert_eq!(offset, canonical.len());
+        for length in 0..canonical.len() {
+            assert!(
+                decode_policy_expr(
+                    &canonical[..length],
+                    &mut 0,
+                    &mut PolicyExpressionDecodeBudget::default(),
+                )
+                .is_err(),
+                "truncated at {length}"
+            );
+        }
+        for malformed in [
+            [23, 1, 0, 0, 0, b'p', 10],
+            [22, 1, 0, 0, 0, 0xff, 10],
+            [22, 1, 0, 0, 0, b'p', 0xff],
+        ] {
+            assert!(
+                decode_policy_expr(
+                    &malformed,
+                    &mut 0,
+                    &mut PolicyExpressionDecodeBudget::default(),
+                )
+                .is_err()
+            );
+        }
     }
 
     fn nested_policy_expression(nodes: usize) -> PolicyExpr {
