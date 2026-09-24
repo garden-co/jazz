@@ -904,10 +904,17 @@ where
         let table_schema = self.table_in_schema(table, schema_version)?;
         // Deletion is stamped into the row image: the "deletion winner" is the
         // current image's transaction while that image is deleted.
-        Ok(self
-            .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+        // The newest local image is one ordered point read of history.
+        let Some(image) = self
+            .query_local_winner_in_branch(&table_schema.name, &BranchKey::default(), row_uuid)
             .await?
-            .and_then(|(_, (time, node), deleted)| deleted.then(|| TxId::new(time, node))))
+        else {
+            return Ok(None);
+        };
+        if image.deletion() != Some(DeletionEvent::Deleted) {
+            return Ok(None);
+        }
+        self.version_tx_id(&image).map(Some)
     }
 
     async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
