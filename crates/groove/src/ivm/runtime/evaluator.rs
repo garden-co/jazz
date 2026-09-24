@@ -688,11 +688,10 @@ pub(super) struct RootOrderingWindows {
     /// Field-0 positions across all groups, for outputs without a proven
     /// identity: built once, first position wins, as before.
     field_zero: std::cell::OnceCell<RootPositions>,
-    /// Group-relative identity positions (#3290), built once per group an
-    /// output's own deltas reach, so no subscriber replays another route's
-    /// window and unreached groups cost only a record-handle copy.
-    identity_groups: std::cell::RefCell<HashMap<Vec<u8>, std::rc::Rc<RootPositions>>>,
 }
+
+/// A group's before and after window records.
+type WindowPair<'a> = (&'a [WindowedRecord], &'a [WindowedRecord]);
 
 #[derive(Clone, Debug, Default)]
 struct GroupWindow {
@@ -762,23 +761,16 @@ impl RootOrderingWindows {
         Ok(self.field_zero.get_or_init(|| positions))
     }
 
-    fn identity_group(&self, group: &[u8]) -> Result<std::rc::Rc<RootPositions>, IvmRuntimeError> {
-        if let Some(positions) = self.identity_groups.borrow().get(group) {
-            return Ok(std::rc::Rc::clone(positions));
-        }
-        let positions = std::rc::Rc::new(
-            self.positions(
-                self.entries
-                    .iter()
-                    .filter(|(candidate, _)| candidate == group)
-                    .map(|(_, window)| window),
-                &self.identity,
-            )?,
-        );
-        self.identity_groups
-            .borrow_mut()
-            .insert(group.to_vec(), std::rc::Rc::clone(&positions));
-        Ok(positions)
+    /// A group's window across this tick: its first before and last after.
+    fn group_window(&self, group: &[u8]) -> Option<WindowPair<'_>> {
+        let mut entries = self
+            .entries
+            .iter()
+            .filter(|(candidate, _)| candidate == group)
+            .map(|(_, window)| window);
+        let first = entries.next()?;
+        let last = entries.next_back().unwrap_or(first);
+        Some((&first.before, &last.after))
     }
 }
 
@@ -1305,17 +1297,14 @@ impl TickEvaluator<'_> {
             );
             return Ok(());
         };
+        let Some(descriptor) = windows.descriptor else {
+            return Ok(());
+        };
+        let key_of = |record: &[u8]| encoded_record_key_part(descriptor, record, &windows.identity);
         for group in groups {
-            let positions = windows.identity_group(group)?;
-            if positions.before.is_empty() && positions.after.is_empty() {
-                continue;
+            if let Some((before, after)) = windows.group_window(group) {
+                apply_group_window_ordering(before, after, &key_of, root_descriptor, terminal)?;
             }
-            apply_group_root_ordering_operations(
-                &positions.before,
-                &positions.after,
-                root_descriptor,
-                terminal,
-            );
         }
         Ok(())
     }
