@@ -149,7 +149,7 @@ pub(super) fn collect_layout(
     })
 }
 
-fn collect_unwrapped_output_type(
+pub(super) fn collect_unwrapped_output_type(
     source: &ResolvedSource,
     source_field: &str,
     fallback: &ValueType,
