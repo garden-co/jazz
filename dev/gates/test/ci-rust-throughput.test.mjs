@@ -2030,7 +2030,13 @@ test("parallel TypeScript runner waits for both suites and combines their failur
 
 test("bounded browser runner completes dependent suites after a failure", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-browser-continuation-"));
-  const packages = ["jazz-tools", "inspector", "auth-workos-chat"];
+  const packages = [
+    "jazz-tools",
+    "inspector",
+    "band-chat-nextjs-betterauth",
+    "record-player-next-betterauth",
+    "auth-workos-chat",
+  ];
   try {
     fs.writeFileSync(path.join(fixture, "package.json"), JSON.stringify({ private: true }));
     fs.writeFileSync(path.join(fixture, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
