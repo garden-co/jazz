@@ -5430,12 +5430,13 @@ impl SubscriptionStream {
                 // Anything before the window's opening reset (its link wake,
                 // receipt-only transitions) describes no published view.
                 Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
-                Poll::Ready(Some(event)) => {
-                    // A rejection or close ends the window; the fallback
-                    // keeps serving the cached page.
-                    drop(event);
-                    break;
+                // A rejected window is reported like any rejected read; the
+                // fallback keeps serving the cached page afterwards.
+                Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                    return Poll::Ready(Some(event));
                 }
+                // A closed window leaves the fallback serving.
+                Poll::Ready(Some(SubscriptionEvent::Closed)) => break,
                 Poll::Ready(None) | Poll::Pending => break,
             }
         }

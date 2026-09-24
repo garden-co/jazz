@@ -55,7 +55,9 @@ appear as they sync.
 
 Queries with an `offset` are the exception. A partly synced local cache would apply the offset to
 the wrong rows, so under `"local-first-unless-empty"` an offset window reads the server's page
-whenever the server can answer, and the local page only when it cannot.
+whenever the server can answer, and the local page only when it cannot. A window showing the local
+page switches to the server's page as soon as the server answers, so rows can shift at that moment
+(for example after a local insert).
 
 Losing remote access does not erase cached data: local-first reads may still show it. An actual
 synced deletion, however, hides the row from local reads too.
