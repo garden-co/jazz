@@ -1,6 +1,7 @@
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { initialRecipientIds } from "../e2ee/space-lifecycle.js";
+import { acceptInitialHistory, discardInitialHistory } from "../e2ee/accepted-history.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
@@ -1371,20 +1372,32 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       txId = ownerClient.commitTransaction(openTransactionId).txId;
     }
     this.committing = true;
-    const requiresInitialAcceptance = initialisingTransactions.has(this);
+    const initialRoots: SpaceRoot[] | undefined = initialisingTransactions.has(this)
+      ? []
+      : undefined;
     const finishCommit = () => {
       this.committing = false;
-      this.clearInitialSpaceKeys();
+      if (initialRoots)
+        for (const { root } of this.initialSpaceKeys.values()) initialRoots.push(root);
+      this.clearInitialSpaceKeys(true);
     };
     // Observe completion without delaying application waits on the transaction ID.
     void txId.then(finishCommit, finishCommit);
-    if (requiresInitialAcceptance) {
-      // Local durability cannot authorise a provisional epoch. Preserve this
-      // acceptance floor through callback and mapped write handles as well.
-      txId = txId.then(async (id) => {
-        await ownerClient.waitForExclusiveTransaction(id, "global");
-        return id;
-      });
+    if (initialRoots) {
+      // Local durability cannot authorise a provisional epoch. Keeping the
+      // acceptance floor on txId also preserves it through callback/map handles.
+      txId = txId
+        .then(async (id) => {
+          await ownerClient.waitForExclusiveTransaction(id, "global");
+          // Cache preparation with its accepted identity. The cache cannot reject
+          // this receipt and does not perform another authority read.
+          for (const root of initialRoots) await acceptInitialHistory(this.e2ee!.db, root, id);
+          return id;
+        })
+        .catch((error) => {
+          for (const root of initialRoots) discardInitialHistory(this.e2ee!.db, root);
+          throw error;
+        });
     }
     if (this.kind === "exclusive") {
       return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
@@ -1408,8 +1421,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return ownerClient.rollbackTransaction(openTransactionId);
   }
 
-  private clearInitialSpaceKeys(): void {
-    for (const { secret } of this.initialSpaceKeys.values()) secret.fill(0);
+  private clearInitialSpaceKeys(committing = false): void {
+    for (const { secret, root } of this.initialSpaceKeys.values()) {
+      secret.fill(0);
+      if (!committing && this.e2ee) discardInitialHistory(this.e2ee.db, root);
+    }
     this.initialSpaceKeys.clear();
     this.encryptedScopes.clear();
   }
@@ -1477,6 +1493,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private async retainInitialSpaceKey(secret: Uint8Array, root: SpaceRoot): Promise<void> {
     if (this.cancelled) {
+      if (this.e2ee) discardInitialHistory(this.e2ee.db, root);
       throw new Error("Transaction was rolled back during E2EE preparation");
     }
     this.initialSpaceKeys.set(`${root.scopeId}:${root.identifier}`, {
@@ -1592,7 +1609,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
-        await withSpaceKeys(db, scope, identifier.value, stage, false);
+        await withSpaceKeys(db, scope, identifier.value, stage, false, true);
       }
     });
     const logicalRow = {
@@ -1959,7 +1976,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
-        await withSpaceKeys(db, scope, identifier, stage, false);
+        await withSpaceKeys(db, scope, identifier, stage, false, true);
       }
     });
   }

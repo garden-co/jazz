@@ -693,7 +693,9 @@ export class DeviceApproval {
    * Authority transactions require global acceptance; observations prove only retained history.
    */
   async deviceStates(transaction?: E2eeHistoryReader) {
-    this.throwBackgroundError();
+    // A supplied snapshot is independent of the background online responder.
+    // Keep its error pending for an explicit device operation, not local replay.
+    if (!transaction) this.throwBackgroundError();
     const snapshot = await this.currentSnapshot(transaction);
     const offline = await this.db.e2eeIsExplicitlyOffline();
     for (const challenge of transaction || offline ? [] : snapshot.challenges) {
