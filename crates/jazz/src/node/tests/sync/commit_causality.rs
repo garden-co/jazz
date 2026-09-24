@@ -190,20 +190,14 @@ fn m2_writer_core_reader_converges_against_oracle() {
                 panic!("expected view update");
             };
             assert!(!payload.peer_payload_inventory.opening_pending);
-            assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-                matches!(
-                    fact,
-                    input
-                        if input.row == row_a
-                            && input.version.tx == tx_id
-                            && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-                )
+            // The deleted row leaves the result and ships its deleted image.
+            assert!(version_bundles_for_update(&update).iter().any(|bundle| {
+                bundle.tx.tx_id == tx_id
+                    && bundle.versions.iter().any(|version| {
+                        version.row_uuid() == row_a
+                            && version.deletion() == Some(DeletionEvent::Deleted)
+                    })
             }));
-            assert!(
-                version_bundles_for_update(&update)
-                    .iter()
-                    .any(|bundle| bundle.tx.tx_id == tx_id)
-            );
         }
         reader.apply_sync_message_settled(update).unwrap();
         assert_current_rows_match_oracle(&mut reader, &oracle);

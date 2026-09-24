@@ -1189,21 +1189,49 @@ where
                 "add result row missing deletion replacement witness",
             ));
         }
-        for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
+        let mut storage_deletion_txs = BTreeSet::<TxId>::new();
+        // Rows that left the result or its covered sources. A deleted row
+        // simply leaves; its deleted image is shipped so the reader's store
+        // learns the deletion.
+        let removed_row_candidates = row_result_removes
+            .iter()
+            .map(|(table, row, tx)| (table.to_string(), *row, *tx, true))
+            .chain(supporting_update.removed_rows().iter().filter_map(|row| {
+                let table = *logical_tables.get(&row.physical_table)?;
+                Some((table.to_owned(), row.row, row.version.tx, false))
+            }))
+            .fold(
+                BTreeMap::<(String, RowUuid), (TxId, bool)>::new(),
+                |mut acc, (table, row, tx, is_member)| {
+                    let entry = acc.entry((table, row)).or_insert((tx, is_member));
+                    entry.1 |= is_member;
+                    acc
+                },
+            );
+        for ((entry_table, row_uuid), (old_tx_id, is_member)) in &removed_row_candidates {
+            let entry_table = entry_table.as_str();
             let (content_winner, retained_deletion_winner) =
                 maintained_facts.replacement_for(entry_table, *row_uuid);
+            let content_winner = content_winner.filter(|_| *is_member);
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback => {
-                    self.storage_backed_maintained_deletion_winner(
-                        entry_table,
-                        *row_uuid,
-                        tier,
-                        &mut context,
-                    )
-                    .await?
+                None => {
+                    let winner = self
+                        .storage_backed_maintained_deletion_winner(
+                            entry_table,
+                            *row_uuid,
+                            tier,
+                            &mut context,
+                        )
+                        .await?;
+                    let winner = winner.filter(|winner| {
+                        winner.deletion() == Some(crate::tx::DeletionEvent::Deleted)
+                    });
+                    if let Some(winner) = &winner {
+                        storage_deletion_txs.insert(self.version_tx_id(winner)?);
+                    }
+                    winner
                 }
-                None => None,
             };
             for (version, missing_witness) in [
                 (
@@ -1250,7 +1278,7 @@ where
             if winners.iter().any(|(_, _, winner, _)| {
                 !maintained_view_tx_versions_contain_winner(tx_versions, winner)
             }) {
-                if !allow_storage_witness_fallback {
+                if !allow_storage_witness_fallback && !storage_deletion_txs.contains(&tx_id) {
                     let (_, _, _, missing_witness) = winners
                         .iter()
                         .find(|(_, _, winner, _)| {

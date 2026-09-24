@@ -389,15 +389,11 @@ fn supporting_rows_deduplicate_same_table_self_join_source_roles() {
     else {
         panic!("expected self-join deletion snapshot")
     };
-    assert!(
-        payload
-            .supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == shared
-                && input.version.tx == deletion_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion)
-    );
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        shared,
+        deletion_tx
+    ));
     assert!(
         !payload
             .supporting_rows
@@ -674,17 +670,16 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     fresh.declare_known_state(subscription, known(2, 1));
     let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        supporting_rows, ..
+        version_carriers, ..
     }) = revoke_update
     else {
         panic!("expected view update");
     };
-    assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == live && input.version.tx == deleted_tx)
-    );
+    assert!(carriers_ship_deleted_image(
+        &version_carriers,
+        live,
+        deleted_tx
+    ));
 }
 
 #[test]
@@ -1604,6 +1599,23 @@ fn register_shape_binding_for_receiver_with_opts(
 fn register_whole_table_receiver(node: &mut NodeState<RocksDbStorage>, table: &str) {
     let (shape, binding) = node.whole_table_shape_binding(table).unwrap();
     register_shape_binding_for_receiver(node, &shape, &binding);
+}
+
+/// A deleted row leaves the result; the update ships its deleted image.
+fn carriers_ship_deleted_image(
+    carriers: &[crate::protocol::VersionCarrier],
+    row: RowUuid,
+    tx: TxId,
+) -> bool {
+    crate::protocol::expand_version_carriers(carriers)
+        .expect("test update carriers should expand")
+        .iter()
+        .any(|bundle| {
+            bundle.tx.tx_id == tx
+                && bundle.versions.iter().any(|version| {
+                    version.row_uuid() == row && version.deletion() == Some(DeletionEvent::Deleted)
+                })
+        })
 }
 
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
@@ -2598,6 +2610,7 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         supporting_rows: program_fact_adds,
+        version_carriers,
         ..
     }) = update.clone()
     else {
@@ -2617,16 +2630,10 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         }
     }));
     assert!(
-        program_fact_adds.added_rows().iter().any(|fact| {
-            {
-                let input = fact;
-                input.row == first_row
-                    && input.version.tx == delete_first_tx
-                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-            }
-        }),
-        "the authorized deletion witness clears cached state without restoring the deleted content input"
+        carriers_ship_deleted_image(&version_carriers, first_row, delete_first_tx),
+        "the deleted row leaves the result and ships its deleted image"
     );
+
     assert!(
         !program_fact_adds.added_rows().iter().any(|fact| {
             {
@@ -4999,14 +5006,11 @@ fn policy_visible_delete_carries_tombstone_and_clears_receiver_current_row() {
     let SyncMessage::ViewUpdate(payload) = &delete else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-        {
-            let input = fact;
-            input.row == doc
-                && input.version.tx == delete_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-        }
-    }));
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        doc,
+        delete_tx
+    ));
     reader.apply_sync_message_settled(delete).unwrap();
     assert!(
         reader
@@ -5085,14 +5089,11 @@ fn concurrent_policy_revoke_cannot_cross_authorize_another_rows_tombstone() {
     let SyncMessage::ViewUpdate(payload) = &mixed else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-        {
-            let input = fact;
-            input.row == deleted_doc
-                && input.version.tx == delete_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-        }
-    }));
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        deleted_doc,
+        delete_tx
+    ));
     assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{
             let input = fact;
