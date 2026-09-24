@@ -58,7 +58,6 @@ use groove::storage::MemoryStorage;
 /// Table sizes: posts = users * 20, follows = users * 30. Per-user result
 /// sizes are fixed, so a scale-independent engine stays flat across sizes.
 const USER_COUNTS: [u64; 2] = [500, 5_000];
-const VERIFY_USERS: u64 = 500;
 const POSTS_PER_USER: u64 = 20;
 const FOLLOWS_PER_USER: u64 = 30;
 const TOP_K: usize = 20;
@@ -349,7 +348,14 @@ fn multiset(rows: Rows) -> BTreeMap<String, usize> {
 }
 
 fn verify_engines_agree() {
-    let users = VERIFY_USERS;
+    // Every benchmarked size is checked, so no timed case can get faster by
+    // returning a different result (INV-PERF-2).
+    for users in USER_COUNTS {
+        verify_engines_agree_at(users);
+    }
+}
+
+fn verify_engines_agree_at(users: u64) {
     let mut database = seeded_database(users);
     for scenario in Scenario::ALL {
         let shape = prepare(&mut database, scenario);

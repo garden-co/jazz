@@ -162,8 +162,12 @@ fn write_at(workload: Workload, subs: u64, step: u64) -> Write {
         Workload::Feed | Workload::FeedTop20 => {
             // Always edit a post by someone a subscriber follows, so every
             // write lands in watched data (and reaches that author's other
-            // subscribed followers too).
-            let author = followee(anchor, round % FOLLOWS_PER_USER);
+            // subscribed followers too). Each lane keeps a fixed fan-out (the
+            // number of subscribers following its author) and rotates through
+            // the authors with exactly that fan-out, so every iteration
+            // touches the same number of subscribers at every size.
+            let authors = &feed_lane_authors(subs)[lane as usize];
+            let author = authors[(round % authors.len() as u64) as usize];
             Write::PostCreated {
                 author,
                 id: author * POSTS_PER_USER + step % POSTS_PER_USER,
@@ -171,6 +175,31 @@ fn write_at(workload: Workload, subs: u64, step: u64) -> Write {
             }
         }
     }
+}
+
+/// Per write lane, the authors whose subscribed-follower count equals that of
+/// the lane's round-zero author (`followee(anchor, 0)`), in author order.
+fn feed_lane_authors(subs: u64) -> std::sync::Arc<Vec<Vec<u64>>> {
+    type Plans = BTreeMap<u64, std::sync::Arc<Vec<Vec<u64>>>>;
+    static PLANS: std::sync::Mutex<Plans> = std::sync::Mutex::new(BTreeMap::new());
+    let mut plans = PLANS.lock().expect("feed lane plans");
+    plans
+        .entry(subs)
+        .or_insert_with(|| {
+            let fixture = Fixture::new(subs);
+            let fan_out = |author: u64| fixture.followers[author as usize].len();
+            let lanes = (0..WRITES_PER_ITERATION)
+                .map(|lane| {
+                    let anchor = lane * subs / WRITES_PER_ITERATION;
+                    let target = fan_out(followee(anchor, 0));
+                    (0..USERS)
+                        .filter(|author| fan_out(*author) == target)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            std::sync::Arc::new(lanes)
+        })
+        .clone()
 }
 
 /// Reverse follow index restricted to subscribers: author -> followers.
@@ -774,7 +803,40 @@ fn drain_ivm(store: &mut Store, caches: &mut [Cache]) {
 }
 
 fn verify_engines_agree() {
-    let subs = SUBSCRIBER_COUNTS[0];
+    // Every benchmarked size is checked, so no timed case can get faster by
+    // returning a different result (INV-PERF-2).
+    for subs in SUBSCRIBER_COUNTS {
+        verify_engines_agree_at(subs);
+    }
+}
+
+/// Every write iteration touches the same number of subscribers, so each
+/// timed sample does the same amount of work wherever it falls.
+fn verify_constant_fan_out(subs: u64) {
+    let fixture = Fixture::new(subs);
+    for workload in [Workload::Tasks, Workload::Feed, Workload::FeedTop20] {
+        let touched = |round: u64| {
+            (0..WRITES_PER_ITERATION)
+                .map(|lane| {
+                    let step = round * WRITES_PER_ITERATION + lane;
+                    fixture.touched(write_at(workload, subs, step)).len()
+                })
+                .sum::<usize>()
+        };
+        let first = touched(0);
+        assert!(first > 0, "{workload:?} subs={subs} touches no subscriber");
+        for round in 1..(2 * USERS) {
+            assert_eq!(
+                touched(round),
+                first,
+                "{workload:?} subs={subs} round {round} fan-out"
+            );
+        }
+    }
+}
+
+fn verify_engines_agree_at(subs: u64) {
+    verify_constant_fan_out(subs);
     for workload in [Workload::Tasks, Workload::Feed, Workload::FeedTop20] {
         let mut reference: Option<Vec<Cache>> = None;
         for kind in EngineKind::ALL {
