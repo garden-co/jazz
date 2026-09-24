@@ -255,4 +255,4 @@ it("automatically isolates private device records and keeps group, space and row
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);

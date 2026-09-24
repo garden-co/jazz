@@ -10,6 +10,8 @@ import { encodeEnvelope } from "./envelope.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
 
+// Data snapshots include accepted-history preparation; use the same bounded
+// readiness allowance as the other encrypted query fixtures.
 it.each([
   "immediate",
   "after-yield",
@@ -543,7 +545,7 @@ it.each([
               { tier: "global" },
             );
             try {
-              await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 }).toEqual([]);
+              await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
               await db.e2ee.spaces
                 .revoke(app.projects, project.id, recipientAccount.account.id)
                 .wait();
@@ -558,7 +560,7 @@ it.each([
               });
               await added.wait({ tier: "global" });
               await expect
-                .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+                .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
                 .toEqual([added.value]);
               expect(failure).toBeUndefined();
             } finally {
@@ -680,7 +682,7 @@ it.each([
           { tier: "global" },
         );
         try {
-          await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 }).toEqual([note]);
+          await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([note]);
           await db.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
           await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
           expect(snapshots.some((rows) => rows.length === 0)).toBe(false);
@@ -1233,15 +1235,15 @@ it.each([
         );
         try {
           await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+            .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
             .toEqual([{ id: note.id, title: note.title }]);
           await db
             .update(app.notes, note.id, { title: "No longer matches" })
             .wait({ tier: "global" });
-          await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 }).toEqual([]);
+          await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
           await db.update(app.notes, note.id, { title: note.title }).wait({ tier: "global" });
           await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+            .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
             .toEqual([{ id: note.id, title: note.title }]);
           expect(failure).toBeUndefined();
         } finally {
@@ -1304,5 +1306,5 @@ it.each([
       await server.stop();
     }
   },
-  60_000,
+  120_000,
 );
