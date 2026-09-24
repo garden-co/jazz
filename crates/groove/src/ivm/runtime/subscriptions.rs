@@ -3814,10 +3814,11 @@ impl IvmRuntime {
     }
 
     /// Mark a bound terminal's route filter as a route barrier (#3288), so a
-    /// write activates this binding only when the shared terminal's delta
-    /// carries its route key. Returns the barrier, or `None` when the binding
-    /// keeps ordinary activation (collectors, unroutable types, or a bound
-    /// graph that is not exactly `Project(Filter(shared terminal))`).
+    /// write activates this binding only when the shared node's delta carries
+    /// its route key. Returns the barrier, or `None` when the binding keeps
+    /// ordinary activation (unroutable types, or a bound graph that is neither
+    /// `Project(Filter(shared terminal))` nor a collector over
+    /// `Filter(shared input)`).
     fn register_route_barrier(
         &mut self,
         terminal: &RoutedMultisinkTerminal,
@@ -3825,24 +3826,19 @@ impl IvmRuntime {
         bound: &CompiledNode,
         binding_values: &[Value],
     ) -> Option<NodeId> {
-        if terminal.route_fields.is_empty()
-            || matches!(terminal.graph, GraphBuilder::CollectBy { .. })
-        {
+        if terminal.route_fields.is_empty() {
             return None;
         }
-        let project = self.graph.node(bound.node)?;
-        if !matches!(project.descriptor.operator, OpType::MapProject(_)) {
-            return None;
-        }
-        let [barrier] = project.descriptor.inputs.as_slice() else {
-            return None;
-        };
-        let filter = self.graph.node(*barrier)?;
-        if !matches!(filter.descriptor.operator, OpType::Filter(_))
-            || filter.descriptor.inputs.as_slice() != [shared.node]
-        {
-            return None;
-        }
+        let (barrier, shared_node, shared_output) =
+            if matches!(terminal.graph, GraphBuilder::CollectBy { .. }) {
+                self.collector_route_filter(bound.node)?
+            } else {
+                (
+                    self.flat_route_filter(shared.node, bound.node)?,
+                    shared.node,
+                    shared.output,
+                )
+            };
         let mut field_indices = Vec::with_capacity(terminal.route_fields.len());
         let mut field_types = Vec::with_capacity(terminal.route_fields.len());
         let mut values = Vec::with_capacity(terminal.route_fields.len());
@@ -3851,8 +3847,8 @@ impl IvmRuntime {
             .iter()
             .zip(&terminal.route_value_indices)
         {
-            let index = shared.output.field_index(field)?;
-            let value_type = shared.output.fields()[index].value_type.clone();
+            let index = shared_output.field_index(field)?;
+            let value_type = shared_output.fields()[index].value_type.clone();
             if !crate::ivm::routes::is_routable_type(&value_type) {
                 return None;
             }
@@ -3861,9 +3857,20 @@ impl IvmRuntime {
             values.push(binding_values.get(*value_index)?.clone());
         }
         let key = crate::ivm::routes::encode_route_key(&values, &field_types)?;
-        let barrier = *barrier;
+        // One table keys one shared node's delta by one field list. Another
+        // shape may route the same shared node (commonly a collector input)
+        // by different fields; that binding keeps ordinary activation rather
+        // than being looked up under the wrong key.
+        if self
+            .graph
+            .routes()
+            .table(shared_node)
+            .is_some_and(|table| table.field_indices != field_indices)
+        {
+            return None;
+        }
         self.graph.add_route_barrier(
-            shared.node,
+            shared_node,
             barrier,
             field_indices,
             field_types,
@@ -3871,6 +3878,59 @@ impl IvmRuntime {
             bound.root_ordering_node,
         );
         Some(barrier)
+    }
+
+    /// The route filter of a flat binding: `bound` must be exactly
+    /// `Project(Filter(shared))`.
+    fn flat_route_filter(&self, shared: NodeId, bound: NodeId) -> Option<NodeId> {
+        let project = self.graph.node(bound)?;
+        if !matches!(project.descriptor.operator, OpType::MapProject(_)) {
+            return None;
+        }
+        let [barrier] = project.descriptor.inputs.as_slice() else {
+            return None;
+        };
+        let filter = self.graph.node(*barrier)?;
+        if !matches!(filter.descriptor.operator, OpType::Filter(_))
+            || filter.descriptor.inputs.as_slice() != [shared]
+        {
+            return None;
+        }
+        Some(*barrier)
+    }
+
+    /// The route filter of a collector binding (#3308). A bound collector is
+    /// `CollectBy(Arrange(Filter(input)))`: the route predicate sits below the
+    /// binding's private collector, so the filter's input is the node every
+    /// binding of the shape shares. Returns the filter, that shared node and
+    /// its record descriptor.
+    ///
+    /// The filter may carry conjuncts besides the route equality (the graph
+    /// builder can fuse it with a filter at the top of the input). Routing
+    /// stays sound: a record whose route key differs from the binding's
+    /// cannot pass the route conjunct, so skipping the barrier drops nothing.
+    fn collector_route_filter(&self, bound: NodeId) -> Option<(NodeId, NodeId, RecordDescriptor)> {
+        let collector = self.graph.node(bound)?;
+        if !matches!(collector.descriptor.operator, OpType::CollectBy(_)) {
+            return None;
+        }
+        let mut current = collector;
+        loop {
+            let [input] = current.descriptor.inputs.as_slice() else {
+                return None;
+            };
+            current = self.graph.node(*input)?;
+            match current.descriptor.operator {
+                OpType::Arrange(_) => continue,
+                OpType::Filter(_) => break,
+                _ => return None,
+            }
+        }
+        let [shared] = current.descriptor.inputs.as_slice() else {
+            return None;
+        };
+        let shared_output = self.graph.node(*shared)?.descriptor.output.records();
+        Some((current.id, *shared, shared_output))
     }
 
     fn index_subscription_outputs(

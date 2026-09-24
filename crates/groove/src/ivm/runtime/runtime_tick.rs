@@ -799,6 +799,7 @@ impl<'a> IncrementalEvaluation<'a> {
         touched: HashSet<NodeId>,
     ) -> Result<(), IvmRuntimeError> {
         let closure = runtime.graph.downstream_through_routes(touched);
+        self.stage_newly_relevant_state(runtime, &closure)?;
         let mut roots = self.work_queue.layout.roots.clone();
         for node in &closure {
             let mut meta = self
@@ -854,6 +855,51 @@ impl<'a> IncrementalEvaluation<'a> {
         queue.completed_events = self.work_queue.drain_completed_events();
         self.eval_memo.set_layout(Arc::clone(&queue.layout));
         self.work_queue = queue;
+        Ok(())
+    }
+
+    /// The first frame staged state only for the nodes its activation plan
+    /// reached, and installation replaces exactly `relevant_nodes`. Barriers
+    /// activated now (with their ancestors) must bring their live state into
+    /// this evaluation first: a stateful node below a barrier, such as a
+    /// binding's private collector (#3308), would otherwise evaluate from
+    /// empty state and install that over its live state.
+    fn stage_newly_relevant_state(
+        &mut self,
+        runtime: &IvmRuntime,
+        closure: &HashSet<NodeId>,
+    ) -> Result<(), IvmRuntimeError> {
+        let layout = runtime
+            .graph
+            .execution_layout(closure.iter().copied())
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let relevant = Arc::make_mut(&mut self.relevant_nodes);
+        for node in layout.nodes.iter().copied() {
+            if !relevant.insert(node) {
+                continue;
+            }
+            let key = OperatorStateKey {
+                scope: ScopeId::root(),
+                node,
+            };
+            if let Some(state) = runtime.operator_states.get(&key) {
+                self.operator_states.insert(key, state.clone());
+            }
+            if let Some(keys) = runtime.arrangement_keys_by_input.get(&node) {
+                for key in keys {
+                    if let Some(state) = runtime.arrangement_states.get(key) {
+                        self.arrangement_states.insert(key.clone(), state.clone());
+                        self.arrangement_keys_by_input
+                            .entry(node)
+                            .or_default()
+                            .insert(key.clone());
+                    }
+                }
+            }
+            if let Some(meta) = runtime.node_meta.get(&node) {
+                self.node_meta.entry(node).or_insert_with(|| meta.clone());
+            }
+        }
         Ok(())
     }
 
