@@ -185,14 +185,36 @@ export async function proveTypingComposer(
   const client = await createJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
+  let stopMutationErrors = () => {};
   try {
     const echo = composerEcho();
-    unsubscribe = client.db.subscribe(app.todos, (todos) => echo.onSnapshot(todos));
+    // Diagnostics only: tell a subscription that never delivered anything
+    // from one that delivered without the composer row, and from a write the
+    // owner rejected, without changing what the receipt measures.
+    let deliveries = 0;
+    let rejected = false;
+    stopMutationErrors = client.db.onMutationError(() => {
+      rejected = true;
+    });
+    markFailure("typing-composer-subscribe-failed");
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      deliveries += 1;
+      echo.onSnapshot(todos);
+    });
     return await measureTypingComposer({
       async open() {
+        markFailure("typing-composer-insert-failed");
         const { value } = client.db.insert(app.todos, { title: "" });
         echo.follow(value.id);
+        markFailure("typing-composer-snapshot-failed");
         if (!(await waitForPublication(() => echo.observed.length > 0))) {
+          markFailure(
+            rejected
+              ? "typing-composer-insert-rejected-failed"
+              : deliveries > 0
+                ? "typing-composer-echo-failed"
+                : "typing-composer-snapshot-failed",
+          );
           throw new Error("typing composer row never reached its subscription");
         }
         echo.observed.length = 0;
@@ -210,6 +232,7 @@ export async function proveTypingComposer(
     failed = true;
     throw error;
   } finally {
+    stopMutationErrors();
     await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }
