@@ -60,13 +60,13 @@ describe("startLocalJazzServer via JazzServer", () => {
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
   }, 30_000);
-  it("binds and advertises an explicit concrete host", async () => {
+  it("binds and advertises an explicit loopback host", async () => {
     handle = await startLocalJazzServer({
-      host: "127.0.0.2",
+      host: "127.0.0.1",
       inMemory: true,
     });
 
-    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.2:[1-9]\d*$/);
+    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:[1-9]\d*$/);
     expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
   }, 30_000);
   it.each(["0.0.0.0", "::", "127.0.0.1:1234", "http://127.0.0.1"])(

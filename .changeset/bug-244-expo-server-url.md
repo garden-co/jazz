@@ -3,4 +3,4 @@
 "jazz-napi": patch
 ---
 
-Preserve managed development-server options and expose an Expo-reachable server URL for local devices.
+Preserve managed development-server storage and auth options, and add a `server.host` option that binds and advertises an explicitly configured IP address (for example a LAN IP reachable from an Expo device).

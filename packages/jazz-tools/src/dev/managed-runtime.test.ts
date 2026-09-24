@@ -140,12 +140,12 @@ describe("ManagedDevRuntime", () => {
       await runtime.initialize({
         appId,
         schemaDir,
-        server: { port: 19884, host: "127.0.0.2", adminSecret: "bootstrap-admin" },
+        server: { port: 19884, host: "192.0.2.10", adminSecret: "bootstrap-admin" },
       });
 
       expect(envAtServerStartup).toContain(`VITE_JAZZ_APP_ID=${appId}`);
       expect(startLocalJazzServer).toHaveBeenCalledWith(
-        expect.objectContaining({ host: "127.0.0.2" }),
+        expect.objectContaining({ host: "192.0.2.10" }),
       );
     } finally {
       await runtime.dispose();
@@ -182,14 +182,14 @@ describe("ManagedDevRuntime", () => {
         appId,
         schemaDir: projectRoot,
         server: {
-          host: "127.0.0.2",
+          host: "127.0.0.1",
           dataDir,
           adminSecret,
         },
       });
 
       expect(first.adminSecret).toBe(adminSecret);
-      expect(first.serverUrl).toMatch(/^http:\/\/127\.0\.0\.2:[1-9]\d*$/);
+      expect(first.serverUrl).toMatch(/^http:\/\/127\.0\.0\.1:[1-9]\d*$/);
       expect((await fetch(`${first.serverUrl}/health`)).ok).toBe(true);
 
       const firstCatalogue = await fetchSchemaHashes(first.serverUrl, {
@@ -220,7 +220,7 @@ describe("ManagedDevRuntime", () => {
         appId,
         schemaDir: projectRoot,
         server: {
-          host: "127.0.0.2",
+          host: "127.0.0.1",
           dataDir,
           adminSecret,
         },

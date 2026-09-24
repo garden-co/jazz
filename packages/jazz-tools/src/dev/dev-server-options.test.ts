@@ -16,7 +16,7 @@ describe("startLocalJazzServer option forwarding", () => {
     mocks.start.mockResolvedValue({
       appId: "forwarding-app",
       port: 19886,
-      url: "http://127.0.0.2:19886",
+      url: "http://192.0.2.10:19886",
       dataDir: "/tmp/jazz-forwarding-data",
       adminSecret: "forwarding-admin",
       backendSecret: "forwarding-backend",
@@ -29,18 +29,19 @@ describe("startLocalJazzServer option forwarding", () => {
     const adminSecret = "forwarding-admin";
 
     const handle = await startLocalJazzServer({
-      host: "127.0.0.2",
+      host: "192.0.2.10",
       dataDir,
       adminSecret,
     });
 
     expect(mocks.start).toHaveBeenCalledWith(
       expect.objectContaining({
-        host: "127.0.0.2",
+        host: "192.0.2.10",
         dataDir,
         adminSecret,
       }),
     );
+    expect(handle.url).toBe("http://192.0.2.10:19886");
     await handle.stop();
   });
 });

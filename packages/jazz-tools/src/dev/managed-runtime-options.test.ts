@@ -32,7 +32,7 @@ describe("ManagedDevRuntime server option forwarding", () => {
     mocks.startLocalJazzServer.mockResolvedValue({
       appId: "managed-forwarding-app",
       port: 19887,
-      url: "http://127.0.0.2:19887",
+      url: "http://192.0.2.10:19887",
       dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
       adminSecret: "managed-forwarding-admin",
       backendSecret: "managed-forwarding-backend",
@@ -57,12 +57,12 @@ describe("ManagedDevRuntime server option forwarding", () => {
       await runtime.initialize({
         appId: "managed-forwarding-app",
         schemaDir,
-        server: { host: "127.0.0.2", adminSecret },
+        server: { host: "192.0.2.10", adminSecret },
       });
 
       expect(mocks.startLocalJazzServer).toHaveBeenCalledWith(
         expect.objectContaining({
-          host: "127.0.0.2",
+          host: "192.0.2.10",
           dataDir,
           adminSecret,
         }),

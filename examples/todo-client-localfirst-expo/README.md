@@ -18,8 +18,13 @@ Account preparation happens outside the database context. The app creates or res
 - Server URL defaults for local development:
   - iOS simulator: `http://127.0.0.1:1625`
   - Android emulator: `http://10.0.2.2:1625`
-- Physical devices require an externally provided, device-trusted HTTPS/WSS endpoint; the embedded managed server does not provide physical-device TLS termination.
-- Set both `EXPO_PUBLIC_JAZZ_APP_ID` and the trusted external `EXPO_PUBLIC_JAZZ_SERVER_URL` before starting Metro for physical-device use.
+- The managed server started by `withJazz` from `jazz-tools/dev/expo` binds and advertises exactly `server.host`
+  (default `127.0.0.1`). It does not discover your LAN address; `server.host` must be a concrete IP
+  address, and wildcard addresses such as `0.0.0.0` are rejected.
+- Physical devices: either set `server.host` to your machine's LAN IP (plain HTTP; the device must be on
+  the same network and allow cleartext traffic), or provide an externally hosted, device-trusted
+  HTTPS/WSS endpoint. The embedded managed server does not terminate TLS.
+- When not using the managed server, set both `EXPO_PUBLIC_JAZZ_APP_ID` and a device-reachable `EXPO_PUBLIC_JAZZ_SERVER_URL` before starting Metro.
 - `JazzSessionProvider` from `jazz-tools/expo` owns secure account preparation and the native client, with app/server-scoped Expo SecureStore persistence.
 - Todos carry `owner_id`, and mutations are authorized against `session.user.account`; ownership columns use UUIDs.
 
