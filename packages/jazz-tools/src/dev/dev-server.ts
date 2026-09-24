@@ -3,6 +3,7 @@ import {
   type CompiledPermissionsMap,
 } from "../schema-permissions.js";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,8 +14,20 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
+function validateServerHost(host: string | undefined): string | undefined {
+  if (host === undefined) return undefined;
+  if (isIP(host) === 0) {
+    throw new Error(`Invalid Jazz server host "${host}". Expected a concrete IP address.`);
+  }
+  if (host === "0.0.0.0" || host === "::") {
+    throw new Error(`Invalid Jazz server host "${host}". Wildcard addresses are not supported.`);
+  }
+  return host;
+}
 
 interface LocalJazzServerOptions {
+  /** Concrete IP address used for both listener binding and the advertised URL. */
+  host?: string;
   appId?: string;
   port?: number;
   dataDir?: string;
@@ -77,6 +90,7 @@ export async function startLocalJazzServer(
       "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
     );
   }
+  const host = validateServerHost(options.host);
   const schema =
     options.schema === undefined
       ? undefined
@@ -98,6 +112,7 @@ export async function startLocalJazzServer(
     server = await JazzServer.start({
       appId,
       port,
+      host,
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,

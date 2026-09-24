@@ -4536,6 +4536,7 @@ fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
 struct JazzServerStartOptions {
     app_id: String,
     port: Option<u16>,
+    host: Option<String>,
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
@@ -4676,7 +4677,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -4751,6 +4752,7 @@ impl JazzServer {
         let server = CoreJazzServer::from_built(
             built,
             opts.port,
+            opts.host,
             app_id,
             ServerDataDir::from_path(data_dir_path),
             opts.admin_secret.clone(),
@@ -5262,6 +5264,7 @@ mod tests {
     ) -> JazzServer {
         let server = jazz_server::JazzServer::from_built(
             built,
+            None,
             None,
             app_id,
             jazz_server::ServerDataDir::in_memory(),
