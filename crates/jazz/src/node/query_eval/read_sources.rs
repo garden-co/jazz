@@ -4258,6 +4258,22 @@ where
                     }
                 }
             }
+            if matches!(
+                request.reads.primary.source_current_tier(&root),
+                Some(DurabilityTier::Global | DurabilityTier::Local)
+            ) && let Some(CurrentAccessPath::Index {
+                maintained,
+                intersections,
+                ..
+            }) = paths.get_mut(&root)
+                && !intersections.is_empty()
+            {
+                // A first-result owner retires this graph after hydration.
+                // Intersect durable index keys before fetching complete rows;
+                // retained consumers still use live IVM semi-joins so later
+                // writes can enter or leave either equality prefix.
+                *maintained = false;
+            }
             if query.joins.len() == 1
                 && query.flat_join.is_none()
                 && query.policy_branches.is_empty()
