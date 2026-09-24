@@ -1,5 +1,12 @@
 # jazz-napi
 
+## 2.0.0-alpha.56
+
+### Patch Changes
+
+- 3ab44b2: Build Linux native Node packages on an AL2023-compatible userspace and publish Linux ARM64 GNU bindings alongside x64. Keep native compiler provenance and build caches tied to the selected Linux baseline.
+- eb031db: Preserve native loader error causes and codes, and distinguish incompatible installed binaries from missing artifacts in startup diagnostics.
+
 ## 2.0.0-alpha.55
 
 ### Patch Changes

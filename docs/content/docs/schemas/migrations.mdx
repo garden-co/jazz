@@ -1,6 +1,6 @@
 ---
 title: Migrations
-description: Structural schema evolution workflow and reviewed migration edges.
+description: Change your schema while keeping older clients working.
 reviewedAt: "b29b48d1a"
 ---
 
@@ -13,12 +13,6 @@ reviewedAt: "b29b48d1a"
 Most migration systems are one-way: rewrite every row to the new shape, then cut over. That assumes you can stop the world long enough to upgrade&hairsp;—&hairsp;which doesn't hold when your clients are local-first, frequently offline, and updating their app on their own schedule.
 
 Jazz keeps every schema version usable and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
-
-## Adding relations to existing UUID columns
-
-Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
-
-The generated schema witnesses include the referenced tables and preserve their structural defaults, including bigint, timestamp, bytes, arrays, JSON, enum, UUID and nullable defaults. Both witnesses must match their canonical schemas exactly; missing or altered defaults are rejected. The automatic reference-addition path requires otherwise unchanged column defaults. Ordinary default-only changes affect future writes and need no row transform; each witness must retain its own endpoint defaults. Branch-bound column invariants still apply. Timestamp defaults must be exactly representable as JavaScript Dates. Generated witnesses for payload-enum and row-valued columns are not yet supported. CLI-computed hashes for defaults and branch bindings match the existing server schema identities; stored identities are unchanged. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
 
 ## Schemas and lenses
 
@@ -70,13 +64,18 @@ In practice, this lets you:
    permission-only changes need no migration; compatible schema changes can use an
    inferred migration. Changes requiring row transformations need a reviewed migration path.
 
-   `deploy` walks through the publish pipeline in one go:
-   1. Before publishing, it checks that permissions and any required migrations are present.
-   2. Publishes the current schema if the server does not already have it.
-   3. If the server is on an older schema hash, asks the server whether
-      it already has a migration path between the two hashes. If not, pushes the local migration
-      file that closes the gap (and fails with a helpful message if you haven't created one yet).
-   4. Publishes the current permissions, attached to the current schema hash.
+   `deploy` handles the release in this order:
+   1. Loads and validates the schema and permissions, then checks the migration path from
+      the currently deployed schema. Missing required migrations fail before publication.
+   2. Stores any missing schemas and migrations. A reviewed local chain can span multiple
+      schema versions; an existing server path or an inferred compatible migration can also
+      satisfy the transition.
+   3. Publishes the permissions for the target schema last, checking that another deploy
+      has not changed the permissions head in the meantime.
+
+   A network failure can leave schemas or migrations stored without advancing the permissions
+   head. Retrying reuses stored artifacts. If another deploy wins the permissions-head check,
+   review that release before retrying yours.
 
 Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
@@ -126,14 +125,19 @@ When a newer schema drops a column that older clients still expect, define a bac
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
+### Adding relations to existing UUID columns
+
+To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged.
+
 ## Migrating historical schemas
 
-Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
-Existing data will still be stored in the database, but you will not be able to read it until you create a migration.
+If your database already contains rows under a historical schema that is disconnected from
+other schema versions, those rows remain stored but cannot be read through a schema with no
+migration path to them. Create a migration to connect that historical schema to the schema
+your app uses.
 
-This is particularly useful when you are iterating on a feature that is not yet ready to be released.
-
-The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
+This is a recovery workflow for existing disconnected schemas. `deploy` requires a complete
+migration path when changing the deployed schema; it does not let you skip a required migration.
 
 To do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
