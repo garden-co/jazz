@@ -1992,15 +1992,8 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         .unwrap();
     let tx = db.exclusive_tx().unwrap();
     let pending_a = cells("selected", "table A pending");
-    tx.insert(
-        "table_a",
-        pending_a.clone(),
-        crate::db::InsertOptions {
-            row_id: Some(shared_row),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    tx.upsert("table_a", shared_row, pending_a.clone(), Default::default())
+        .unwrap();
 
     assert_reads(
         &tx,
@@ -2016,15 +2009,8 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
     );
 
     let pending_b = cells("selected", "table B pending");
-    tx.insert(
-        "table_b",
-        pending_b.clone(),
-        crate::db::InsertOptions {
-            row_id: Some(shared_row),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    tx.upsert("table_b", shared_row, pending_b.clone(), Default::default())
+        .unwrap();
     assert_reads(
         &tx,
         "table_a",
