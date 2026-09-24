@@ -214,12 +214,18 @@ pub struct FullDiffFallbackMetrics {
     pub query_reopens: u64,
     /// A published authorization-support view was retired and rehydrated.
     pub authorization_support_reopens: u64,
+    /// A published view was republished as a complete successor closure
+    /// because the Groove runtime or physical row identities changed.
+    pub runtime_resets: u64,
 }
 
 impl FullDiffFallbackMetrics {
     /// All full-diff fallbacks regardless of purpose.
     pub fn total(&self) -> u64 {
-        self.membership_reconciliations + self.query_reopens + self.authorization_support_reopens
+        self.membership_reconciliations
+            + self.query_reopens
+            + self.authorization_support_reopens
+            + self.runtime_resets
     }
 
     /// Accumulate another peer's counters.
@@ -227,6 +233,7 @@ impl FullDiffFallbackMetrics {
         self.membership_reconciliations += other.membership_reconciliations;
         self.query_reopens += other.query_reopens;
         self.authorization_support_reopens += other.authorization_support_reopens;
+        self.runtime_resets += other.runtime_resets;
     }
 }
 

@@ -2416,6 +2416,10 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
         json!(fallbacks.authorization_support_reopens),
     );
     fields.insert(
+        "maintained_subscription_view_runtime_resets_out".to_owned(),
+        json!(fallbacks.runtime_resets),
+    );
+    fields.insert(
         "maintained_subscription_view_delta_batches_in".to_owned(),
         json!(
             summary
