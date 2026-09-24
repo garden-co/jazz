@@ -193,9 +193,41 @@ pub struct MaintainedSubscriptionViewMetrics {
     pub unsupported_skips_out: u64,
     /// Non-empty Groove delta batches drained by maintained subscription views.
     pub delta_batches_in: u64,
+    /// Full rehydrate-and-diff recomputes of an already-published maintained view.
+    pub full_diff_fallbacks: FullDiffFallbackMetrics,
     /// New maintained subscription rehydrations started after readiness.
     #[cfg(any(test, feature = "testing"))]
     pub rehydrate_attempts: u64,
+}
+
+/// Full rehydrate-and-diff recomputes, split by why the incremental path was left.
+///
+/// Opening a maintained view is not counted: only a recompute that replaces or
+/// reconciles a view whose initial result was already published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FullDiffFallbackMetrics {
+    /// A silent incremental result with a deletion witness forced a one-shot
+    /// membership reconciliation.
+    pub membership_reconciliations: u64,
+    /// A published query view was retired and rehydrated, e.g. after a claim
+    /// or policy change.
+    pub query_reopens: u64,
+    /// A published authorization-support view was retired and rehydrated.
+    pub authorization_support_reopens: u64,
+}
+
+impl FullDiffFallbackMetrics {
+    /// All full-diff fallbacks regardless of purpose.
+    pub fn total(&self) -> u64 {
+        self.membership_reconciliations + self.query_reopens + self.authorization_support_reopens
+    }
+
+    /// Accumulate another peer's counters.
+    pub fn add(&mut self, other: Self) {
+        self.membership_reconciliations += other.membership_reconciliations;
+        self.query_reopens += other.query_reopens;
+        self.authorization_support_reopens += other.authorization_support_reopens;
+    }
 }
 
 impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionViewMetricsFootprint {

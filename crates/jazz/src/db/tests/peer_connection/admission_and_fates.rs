@@ -2327,6 +2327,88 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     );
 }
 
+/// Full-diff fallback counters (#3292). The serving link's counter is the
+/// same one the server shell reports as `subscription_full_diff_fallbacks`;
+/// it is read from the link because no client API exposes a server's
+/// recompute strategy.
+///
+/// alice opens todos ─► initial reset          (not a fallback)
+/// server inserts a row ─► incremental delta  (not a fallback)
+/// alice's claims change ─► retire + reopen    (one query reopen)
+#[test]
+fn claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let first = server
+        .insert("todos", cells("first", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims = test_provider_claims(allowed_owner);
+    let denied_claims = test_provider_claims(denied_owner);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+    let query = Query::from("todos");
+    let tick_all = || {
+        for _ in 0..32 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            subscriber.borrow_mut().tick().unwrap();
+            upstream.borrow_mut().tick().unwrap();
+        }
+    };
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    tick_all();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![first]
+    );
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "opening a maintained view is ordinary hydration"
+    );
+
+    let second = server
+        .insert("todos", cells("second", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    tick_all();
+    let mut expected = vec![first, second];
+    expected.sort();
+    let mut visible = row_ids(&prepared_all(&client, &query, global_subscribe_opts()));
+    visible.sort();
+    assert_eq!(visible, expected);
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "an incremental delta is not a fallback"
+    );
+
+    client.set_test_provider_claims(session_subject, denied_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims);
+    tick_all();
+    assert!(
+        prepared_all(&client, &query, global_subscribe_opts()).is_empty(),
+        "the refreshed subscription must lose the old claims' rows"
+    );
+    let fallbacks = subscriber.borrow().full_diff_fallbacks();
+    assert_eq!(fallbacks.query_reopens, 1, "{fallbacks:?}");
+    assert_eq!(fallbacks.total(), 1, "{fallbacks:?}");
+}
+
 /// The maintained-group cursor consumes each accepted replacement reset once.
 /// The public admission contract normally gives one connection one exact
 /// `SubscriptionKey` per coverage group; this white-box pair exercises the

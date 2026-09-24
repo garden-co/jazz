@@ -1185,6 +1185,10 @@ impl PeerState {
                 .ok_or(Error::InvalidStoredValue(
                     "maintained subscription view is missing prepared state",
                 ))?;
+            self.metrics
+                .maintained_subscription_view
+                .full_diff_fallbacks
+                .membership_reconciliations += 1;
             return self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -2166,6 +2170,37 @@ impl PeerState {
         )
         .await
     }
+    /// Count a full rehydrate-and-diff that retires `subscription`'s view.
+    ///
+    /// Retiring a view that already published its initial result replaces
+    /// incremental maintenance with a full recompute. A first open or a retry
+    /// of a still-cold view is ordinary hydration and is not counted.
+    fn note_full_diff_reopen(
+        &mut self,
+        subscription: SubscriptionKey,
+        purpose: RehydratePurpose,
+    ) {
+        let published = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .is_some_and(|maintained| maintained.initial_received);
+        if !published {
+            return;
+        }
+        let fallbacks = &mut self.metrics.maintained_subscription_view.full_diff_fallbacks;
+        match purpose {
+            RehydratePurpose::Query => fallbacks.query_reopens += 1,
+            RehydratePurpose::AuthorizationSupport => fallbacks.authorization_support_reopens += 1,
+        }
+    }
+
+    /// Count a claim refresh that retires a published direct query view; its
+    /// replacement coverage key is opened cold.
+    pub(crate) fn note_claim_refresh_full_diff(&mut self, subscription: SubscriptionKey) {
+        self.note_full_diff_reopen(subscription, RehydratePurpose::Query);
+    }
+
     async fn rehydrate_query_for_subscription_with_purpose<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -2211,6 +2246,7 @@ impl PeerState {
         {
             self.metrics.maintained_subscription_view.rehydrate_attempts += 1;
         }
+        self.note_full_diff_reopen(subscription, purpose);
         self.clear_stale_groove_runtime_handles(node, subscription);
         let previous_member_result_set = self
             .publication_states

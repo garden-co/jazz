@@ -1134,7 +1134,10 @@ fn high_fan_out_hydration_summary(
         history_scan_fallbacks,
         maintained_subscription_view_metrics: peer.maintained_subscription_view_metrics(),
         maintained_subscription_view_footprint,
-        full_diff_recomputes: 0,
+        full_diff_recomputes: peer
+            .maintained_subscription_view_metrics()
+            .full_diff_fallbacks
+            .total(),
     }
 }
 
@@ -2395,7 +2398,22 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
     );
     fields.insert(
         "maintained_subscription_view_full_recomputes_out".to_owned(),
-        json!(0),
+        json!(summary.full_diff_recomputes),
+    );
+    let fallbacks = summary
+        .maintained_subscription_view_metrics
+        .full_diff_fallbacks;
+    fields.insert(
+        "maintained_subscription_view_membership_reconciliations_out".to_owned(),
+        json!(fallbacks.membership_reconciliations),
+    );
+    fields.insert(
+        "maintained_subscription_view_query_reopens_out".to_owned(),
+        json!(fallbacks.query_reopens),
+    );
+    fields.insert(
+        "maintained_subscription_view_authorization_support_reopens_out".to_owned(),
+        json!(fallbacks.authorization_support_reopens),
     );
     fields.insert(
         "maintained_subscription_view_delta_batches_in".to_owned(),
