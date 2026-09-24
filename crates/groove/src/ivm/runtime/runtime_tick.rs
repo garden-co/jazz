@@ -1088,7 +1088,11 @@ impl<'a> IncrementalEvaluation<'a> {
         }
         if !self.routed_terminals.is_empty() && self.work_queue.roots_complete() {
             let routed = std::mem::take(&mut self.routed_terminals);
-            let touched = touched_route_barriers(&mut evaluator, &runtime.graph, &routed, cx);
+            let mut touched = touched_route_barriers(&mut evaluator, &runtime.graph, &routed, cx);
+            // A barrier that reaches durable state was already activated and
+            // evaluated in the first frame; activating it again would bump its
+            // input generation and re-evaluate it.
+            touched.retain(|barrier| !self.affected_nodes.contains(barrier));
             if !touched.is_empty() {
                 self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                 self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
@@ -1098,12 +1102,28 @@ impl<'a> IncrementalEvaluation<'a> {
             }
         }
 
+        // Until phase B has activated this tick's route barriers, a routed
+        // subscription's barrier-gated sinks have not produced their deltas.
+        // Publishing its other sinks now would mark it published, and phase B
+        // would then skip it, losing the routed delta (#3288).
+        let routes_pending = !self.routed_terminals.is_empty();
+        let awaits_route_barriers = |subscription: &MultisinkSubscriptionState| {
+            routes_pending
+                && matches!(
+                    &subscription.target,
+                    MultisinkSubscriptionTarget::RoutedShape { route_barriers, .. }
+                        if !route_barriers.is_empty()
+                )
+        };
         let mut terminal_consumers = HashMap::<NodeId, usize>::default();
         for subscription_id in &self.affected_subscriptions {
             let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
                 continue;
             };
-            if subscription.failed || self.published_subscriptions.contains(subscription_id) {
+            if subscription.failed
+                || self.published_subscriptions.contains(subscription_id)
+                || awaits_route_barriers(subscription)
+            {
                 continue;
             }
             for output in subscription
@@ -1123,6 +1143,7 @@ impl<'a> IncrementalEvaluation<'a> {
             };
             if subscription.failed
                 || self.published_subscriptions.contains(subscription_id)
+                || awaits_route_barriers(subscription)
                 || subscription
                     .outputs
                     .values()
@@ -3218,6 +3239,15 @@ fn touched_route_barriers(
             touched.extend(table.barriers());
             continue;
         };
+        // Route fields are indices into the terminal's compiled output. A
+        // delta in any other layout cannot be keyed by them safely.
+        let layout_matches = graph
+            .node(*terminal)
+            .is_some_and(|node| node.descriptor.output.records() == records.descriptor);
+        if !layout_matches {
+            touched.extend(table.barriers());
+            continue;
+        }
         for delta in &records.deltas {
             let record = crate::records::BorrowedRecord::new(&delta.record, &records.descriptor);
             match table.key_of_record(&record) {
