@@ -974,6 +974,18 @@ impl PeerState {
                         generation != node.physical_identity_generation()
                     })
             });
+        if metadata_was_stale
+            && self
+                .publication_states
+                .get(&subscription)
+                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .is_some_and(|maintained| maintained.initial_received)
+        {
+            self.metrics
+                .maintained_subscription_view
+                .full_diff_fallbacks
+                .runtime_resets += 1;
+        }
         self.clear_stale_groove_runtime_handles(node, subscription);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         self.ensure_query_subscription_registered(
