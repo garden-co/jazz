@@ -47,20 +47,22 @@ pub(super) fn extend_root_window_positions(
 
 /// Row identity of a TopBy's output: its group fields plus its tie fields,
 /// which are declared to identify a row within its group. A row whose order
-/// value changes keeps its identity, so it is an update plus a move. With no
-/// tie fields, the order fields stand in.
-pub(super) fn top_by_identity_fields(top_by: &TopByOp) -> Vec<usize> {
+/// value changes keeps its identity, so it is an update plus a move. Without
+/// tie fields nothing identifies a row within its group (two rows may share
+/// every order value), so the whole record is its key: an order change is
+/// then a remove plus an insert. `width` is the TopBy output's field count.
+pub(super) fn top_by_identity_fields(top_by: &TopByOp, width: usize) -> Vec<usize> {
     let order_len = top_by.order_fields.len();
     let tie = &top_by.sort_field_indices[order_len.min(top_by.sort_field_indices.len())..];
-    let identity = if tie.is_empty() {
-        &top_by.sort_field_indices[..]
-    } else {
-        tie
-    };
     let mut fields = top_by.group_field_indices.clone();
+    let identity = if tie.is_empty() {
+        (0..width).collect::<Vec<_>>()
+    } else {
+        tie.to_vec()
+    };
     for index in identity {
-        if !fields.contains(index) {
-            fields.push(*index);
+        if !fields.contains(&index) {
+            fields.push(index);
         }
     }
     fields
@@ -71,6 +73,11 @@ pub(super) fn top_by_identity_fields(top_by: &TopByOp) -> Vec<usize> {
 pub(super) struct RootIdentity {
     pub(super) fields: Vec<usize>,
     pub(super) group_len: usize,
+    /// The nodes between the TopBy and the output, TopBy side first, when
+    /// any of them is a filter: window rows it drops are not output roots, so
+    /// they must be dropped before window positions are taken. Empty when
+    /// every window row reaches the output.
+    pub(super) filter_chain: Vec<NodeId>,
 }
 
 /// Terminal key fields of a plain output ordered by `ordering` (#3290).
@@ -78,40 +85,64 @@ pub(super) struct RootIdentity {
 /// When the output reaches its TopBy only through filters and field-copying
 /// projections, its roots are keyed by the TopBy identity mapped into the
 /// output, so every window slot is a distinct root. Otherwise (a join,
-/// aggregate or computed field in between) there is no proven identity and
-/// the output keeps field 0, whose uniqueness is the producer's contract.
+/// aggregate or computed field in between, or a filter reading a stored
+/// scalar that cannot be evaluated on a window row) there is no proven
+/// identity and the output keeps field 0, whose uniqueness is the producer's
+/// contract.
 pub(super) fn root_identity_fields(
     graph: &IvmGraph,
     output: NodeId,
     ordering: NodeId,
 ) -> Result<Option<RootIdentity>, IvmRuntimeError> {
     let mut chain = Vec::new();
+    let mut filtered = false;
     let mut node = output;
     while node != ordering {
         let current = graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if !matches!(
-            current.descriptor.operator,
-            OpType::Filter(_) | OpType::MapProject(_)
-        ) {
-            return Ok(None);
-        }
         let [input] = current.descriptor.inputs.as_slice() else {
             return Ok(None);
         };
+        match &current.descriptor.operator {
+            OpType::MapProject(_) => {}
+            OpType::Filter(filter) => {
+                let input_output = graph
+                    .node(*input)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(*input))?
+                    .descriptor
+                    .output
+                    .records();
+                let mut referenced = BTreeSet::new();
+                filter.predicate.referenced_fields(&mut referenced);
+                let evaluable = referenced.iter().all(|field| {
+                    resolve_field_name(&input_output, field).is_some_and(|index| {
+                        !input_output.fields()[index]
+                            .value_type
+                            .may_contain_stored_scalar()
+                    })
+                });
+                if !evaluable {
+                    return Ok(None);
+                }
+                filtered = true;
+            }
+            _ => return Ok(None),
+        }
         chain.push(node);
         node = *input;
     }
     let top_by = graph
         .node(ordering)
         .ok_or(IvmRuntimeError::GraphNodeNotFound(ordering))?;
+    let width = top_by.descriptor.output.records().fields().len();
     let OpType::TopBy(top_by) = &top_by.descriptor.operator else {
         return Ok(None);
     };
-    let mut fields = top_by_identity_fields(top_by);
+    let mut fields = top_by_identity_fields(top_by, width);
     let group_len = top_by.group_field_indices.len();
-    for id in chain.into_iter().rev() {
+    chain.reverse();
+    for &id in &chain {
         let current = graph
             .node(id)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
@@ -141,7 +172,58 @@ pub(super) fn root_identity_fields(
         }
         fields = mapped;
     }
-    Ok(Some(RootIdentity { fields, group_len }))
+    let filter_chain = if filtered { chain } else { Vec::new() };
+    Ok(Some(RootIdentity {
+        fields,
+        group_len,
+        filter_chain,
+    }))
+}
+
+/// Whether a TopBy window record survives `chain` (see
+/// [`RootIdentity::filter_chain`]) and so is a root of the output.
+pub(super) fn window_record_reaches_output(
+    graph: &IvmGraph,
+    chain: &[NodeId],
+    descriptor: RecordDescriptor,
+    record: &Bytes,
+) -> Result<bool, IvmRuntimeError> {
+    let mut current = RecordDeltas {
+        descriptor,
+        deltas: vec![RecordDelta {
+            record: record.clone(),
+            weight: 1,
+        }],
+    };
+    for &id in chain {
+        let node = graph
+            .node(id)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
+        match &node.descriptor.operator {
+            OpType::Filter(filter) => {
+                let Some(delta) = current.deltas.first() else {
+                    return Ok(false);
+                };
+                if !filter
+                    .predicate
+                    .matches(delta.borrowed(&current.descriptor), filter.comparison)?
+                {
+                    return Ok(false);
+                }
+            }
+            OpType::MapProject(project) => {
+                current = NodeState::update_map_project(
+                    project,
+                    node.descriptor.output.records(),
+                    &current,
+                    None,
+                    false,
+                )?;
+            }
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        }
+    }
+    Ok(!current.deltas.is_empty())
 }
 
 /// Encodes a window record's terminal root key.

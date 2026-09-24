@@ -716,7 +716,7 @@ impl RootOrderingWindows {
     ) {
         if self.descriptor.is_none() {
             self.descriptor = Some(descriptor);
-            self.identity = top_by_identity_fields(top_by);
+            self.identity = top_by_identity_fields(top_by, descriptor.fields().len());
         }
         self.entries.push((
             group.to_vec(),
@@ -1282,6 +1282,7 @@ impl TickEvaluator<'_> {
         ordering_node: NodeId,
         root_descriptor: RecordDescriptor,
         identity_groups: Option<&BTreeSet<Vec<u8>>>,
+        filter_chain: &[NodeId],
         terminal: &mut TerminalDeltas,
     ) -> Result<(), IvmRuntimeError> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
@@ -1302,9 +1303,27 @@ impl TickEvaluator<'_> {
         };
         let key_of = |record: &[u8]| encoded_record_key_part(descriptor, record, &windows.identity);
         for group in groups {
-            if let Some((before, after)) = windows.group_window(group) {
+            let Some((before, after)) = windows.group_window(group) else {
+                continue;
+            };
+            if filter_chain.is_empty() {
                 apply_group_window_ordering(before, after, &key_of, root_descriptor, terminal)?;
+                continue;
             }
+            // Indices are positions among the output's roots, so window rows
+            // a filter after the TopBy drops take no position.
+            let reaching = |window: &[WindowedRecord]| {
+                let mut kept = Vec::with_capacity(window.len());
+                for entry in window {
+                    if window_record_reaches_output(self.graph, filter_chain, descriptor, &entry.0)?
+                    {
+                        kept.push(entry.clone());
+                    }
+                }
+                Ok::<_, IvmRuntimeError>(kept)
+            };
+            let (before, after) = (reaching(before)?, reaching(after)?);
+            apply_group_window_ordering(&before, &after, &key_of, root_descriptor, terminal)?;
         }
         Ok(())
     }

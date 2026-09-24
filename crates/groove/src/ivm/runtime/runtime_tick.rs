@@ -1379,6 +1379,9 @@ impl<'a> IncrementalEvaluation<'a> {
                                 root_ordering_node,
                                 output.output,
                                 identity_groups.as_ref(),
+                                identity
+                                    .as_ref()
+                                    .map_or(&[][..], |identity| &identity.filter_chain),
                                 &mut terminal,
                             )?;
                         }
