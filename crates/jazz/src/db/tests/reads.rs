@@ -410,6 +410,134 @@ fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorSubject) {
     .unwrap();
 }
 
+/// A one-shot read pinned to one issue probes the junction's issue index while
+/// preserving the policy-scoped join result across unrelated links and deletion.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// alice: seed two issues and links -> bob reads one issue -> delete its link -> bob reads
+#[test]
+fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
+    let write_grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::eq_literal(
+                        "title",
+                        PublicValue::Text("target".to_owned()),
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let alice = AuthorSubject::SYSTEM;
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xa7; 16]),
+            author: alice,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xa7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "target"), (row(2), "other")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            alice,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for (id, issue, tag) in [
+        (row(20), row(1), "wanted"),
+        (row(21), row(1), "other"),
+        (row(22), row(2), "wanted"),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            alice,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(issue.0)),
+                ("tag".to_owned(), Value::String(tag.to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    let read = |prepared| {
+        row_ids(
+            &block_on(db.all_for_identity(
+                prepared,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Deferred,
+                    propagation: Propagation::LocalOnly,
+                    include_deleted: false,
+                    ..ReadOpts::default()
+                },
+                bob,
+            ))
+            .unwrap(),
+        )
+    };
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    assert_eq!(read(&prepared), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the first result should probe the indexed issue foreign key"
+    );
+    let hidden = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(2).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    assert!(read(&hidden).is_empty(), "bob cannot read the other issue");
+
+    let deleted = block_on(db.delete("issue_tags", row(20), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
+        .unwrap();
+    assert!(read(&prepared).is_empty());
+
+    db.seed_settled_mergeable_for_bootstrap(
+        "issue_tags",
+        row(23),
+        alice,
+        BTreeMap::from([
+            ("issue".to_owned(), Value::Uuid(row(1).0)),
+            ("tag".to_owned(), Value::String("wanted".to_owned())),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(read(&prepared), vec![row(1)]);
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();

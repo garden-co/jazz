@@ -5,8 +5,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts, RowCells,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -18,7 +18,8 @@ use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey,
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+    ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
+    TableSchema as PublicTableSchema,
 };
 use jazz::tx::DurabilityTier;
 use jazz_sim::distributions::Lcg;
@@ -62,6 +63,10 @@ fn main() {
         return;
     }
     let config = Config::from_env();
+    if std::env::var_os("JAZZ_S1_READ_RECEIPT").is_some() {
+        db_read_receipt(&config);
+        return;
+    }
     let phase_selection = PhaseSelection::from_env();
     let profile = PeerProfile::new(
         config.profile.clone(),
@@ -320,6 +325,190 @@ pub fn db_surface_smoke() {
     assert_eq!(subscription1_rows, oracle.query1(&plan));
 
     let _ = db.one(&prepared_query1).expect("db one q1");
+}
+
+fn db_read_receipt(config: &Config) {
+    let setup_start = Instant::now();
+    let read_policy = std::env::var_os("JAZZ_S1_READ_POLICY").is_some();
+    let mut public_schema = schema().public_schema().clone();
+    for table in public_schema.values_mut() {
+        let policies = TablePolicies::new()
+            .with_insert(PolicyExpr::True)
+            .with_delete(PolicyExpr::True);
+        table.policies = if read_policy {
+            policies.with_select(PolicyExpr::True)
+        } else {
+            policies
+        };
+    }
+    let schema = compile_public_schema(public_schema);
+    let fixture = build_fixture(config);
+    let plan = representative_plan(&fixture);
+    let (_dir, db) = open_db(node(70), AuthorSubject::for_test_uuid(plan.user.0), schema);
+    let mut oracle = DbS1Oracle::default();
+    let seed_start = Instant::now();
+    for batch in fixture.commits.chunks(5_000) {
+        let tx = block_on(db.mergeable_tx()).expect("open fixture transaction");
+        for commit in batch {
+            block_on(tx.insert(
+                &commit.table,
+                commit.cells.clone(),
+                jazz::db::InsertOptions {
+                    row_id: Some(commit.row_uuid),
+                    ..Default::default()
+                },
+            ))
+            .expect("db fixture insert");
+            oracle.apply_insert(commit);
+        }
+        let tx_id = block_on(tx.commit()).expect("commit fixture batch");
+        db.finalize_local_mergeable_commit_for_test(tx_id)
+            .expect("settle fixture batch");
+        assert!(
+            matches!(
+                db.write_state(tx_id).expect("fixture fate").fate,
+                jazz::tx::Fate::Accepted
+            ),
+            "fixture batch must be globally accepted"
+        );
+    }
+    emit_json_line(
+        "s1_saas_read",
+        &json!({
+            "phase": "seed",
+            "read_policy": read_policy,
+            "setup_ms": setup_start.elapsed().as_millis(),
+            "seed_ms": seed_start.elapsed().as_millis(),
+            "rows": fixture.commits.len(),
+            "issues": config.issues(),
+            "issue_tags": fixture.commits.iter().filter(|commit| commit.table == ISSUE_TAGS).count(),
+        })
+        .to_string(),
+    );
+    let tagged_issue = fixture
+        .commits
+        .iter()
+        .find(|commit| commit.table == ISSUE_TAGS)
+        .and_then(|commit| cell_uuid(commit, "issue"))
+        .expect("tagged issue");
+    let tagged_tag = fixture
+        .commits
+        .iter()
+        .find(|commit| commit.table == ISSUE_TAGS)
+        .and_then(|commit| cell_uuid(commit, "tag"))
+        .expect("tagged tag");
+    let unrelated_deletion_count = env_usize("JAZZ_S1_UNRELATED_DELETIONS", 0);
+    if unrelated_deletion_count > 0 {
+        let deletion_start = Instant::now();
+        let unrelated = fixture
+            .commits
+            .iter()
+            .filter(|commit| {
+                commit.table == ISSUE_TAGS && cell_uuid(commit, "issue") != Some(tagged_issue)
+            })
+            .take(unrelated_deletion_count)
+            .collect::<Vec<_>>();
+        assert_eq!(unrelated.len(), unrelated_deletion_count);
+        for batch in unrelated.chunks(5_000) {
+            let tx = block_on(db.mergeable_tx()).expect("open deletion transaction");
+            for commit in batch {
+                block_on(tx.delete(ISSUE_TAGS, commit.row_uuid, Default::default()))
+                    .expect("delete unrelated issue tag");
+                oracle.apply_delete(ISSUE_TAGS, commit.row_uuid);
+            }
+            let tx_id = block_on(tx.commit()).expect("commit unrelated deletions");
+            db.finalize_local_mergeable_commit_for_test(tx_id)
+                .expect("settle unrelated deletions");
+            assert!(matches!(
+                db.write_state(tx_id).expect("deletion fate").fate,
+                jazz::tx::Fate::Accepted
+            ));
+        }
+        emit_json_line(
+            "s1_saas_read",
+            &json!({
+                "phase": "delete",
+                "unrelated_deletions": unrelated.len(),
+                "delete_ms": deletion_start.elapsed().as_millis(),
+            })
+            .to_string(),
+        );
+    }
+    let point_join = Query::from(ISSUES)
+        .filter(eq(col("id"), lit(Value::Uuid(tagged_issue.0))))
+        .join_via(
+            ISSUE_TAGS,
+            "issue",
+            [eq(col("tag"), lit(Value::Uuid(tagged_tag.0)))],
+        )
+        .include("project");
+    for (name, query, expected) in [
+        (
+            "point_join",
+            point_join,
+            BTreeSet::from([(ISSUES.to_owned(), tagged_issue)]),
+        ),
+        ("q1", db_query1(&plan), oracle.query1(&plan)),
+        ("q2_join", db_query2(&plan), oracle.query2(&plan)),
+    ] {
+        let start = Instant::now();
+        let prepared = db.prepare_query(&query).expect("prepare receipt query");
+        let prepare_us = start.elapsed().as_micros();
+        for sample in 0..7 {
+            let start = Instant::now();
+            let global_rows = block_on(db.all_for_identity(
+                &prepared,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Deferred,
+                    propagation: Propagation::LocalOnly,
+                    ..ReadOpts::default()
+                },
+                AuthorSubject::for_test_uuid(plan.user.0),
+            ))
+            .expect("global receipt query");
+            let global_us = start.elapsed().as_micros();
+            let actual = row_set(global_rows);
+            assert!(
+                actual == expected,
+                "global receipt {name} mismatch: expected {} rows, got {}",
+                expected.len(),
+                actual.len()
+            );
+            let start = Instant::now();
+            let (rows, p) = db.read_profiled(&prepared).expect("profile receipt query");
+            let outer_us = start.elapsed().as_micros();
+            let actual = row_set(rows);
+            assert!(
+                actual == expected,
+                "profiled receipt {name} mismatch: expected {} rows, got {}",
+                expected.len(),
+                actual.len()
+            );
+            emit_json_line(
+                "s1_saas_read",
+                &json!({
+                    "phase": "read",
+                    "read_policy": read_policy,
+                    "query": name,
+                    "sample": sample,
+                    "expected_rows": expected.len(),
+                    "prepare_us": prepare_us,
+                    "global_us": global_us,
+                    "local_profiled_us": outer_us,
+                    "total_us": p.total.as_micros(),
+                    "resolve_us": p.resolve_view.as_micros(),
+                    "compile_us": p.compile_program.as_micros(),
+                    "select_us": p.select_plan.as_micros(),
+                    "execute_us": p.execute_plan.as_micros(),
+                    "decode_us": p.decode_materialize.as_micros(),
+                    "finish_us": p.finish_rows.as_micros(),
+                    "projection_us": p.apply_projection.as_micros(),
+                })
+                .to_string(),
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1958,6 +2147,7 @@ fn schema() -> JazzSchema {
             "todo".to_owned(),
             "in_progress".to_owned(),
             "done".to_owned(),
+            "archived".to_owned(),
         ],
     };
     compile_public_schema(
@@ -2115,6 +2305,14 @@ impl DbS1Oracle {
             .entry(commit.table.clone())
             .or_default()
             .insert(commit.row_uuid, commit.cells.clone());
+    }
+
+    fn apply_delete(&mut self, table: &str, row_uuid: RowUuid) {
+        self.tables
+            .get_mut(table)
+            .expect("oracle deletion table")
+            .remove(&row_uuid)
+            .expect("oracle deleted row");
     }
 
     fn apply_patch(&mut self, table: &str, row_uuid: RowUuid, patch: RowCells) {
