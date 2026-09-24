@@ -1313,7 +1313,34 @@ impl<'a> IncrementalEvaluation<'a> {
                 let structured = evaluator.output_is_structured_collect_by(output.node)?;
                 let public_root = evaluator.output_has_public_root(output.node)?;
                 let terminal_owned = output.root_ordering_node.is_some() || structured;
+                let identity = match output.root_ordering_node {
+                    Some(ordering) if !structured => {
+                        root_identity_fields(evaluator.graph, output.node, ordering)?
+                    }
+                    _ => None,
+                };
+                let key_fields = identity
+                    .as_ref()
+                    .map_or(&[0][..], |identity| identity.fields.as_slice());
                 let records = records.as_ref().clone();
+                // Only the groups this output's own deltas reach take part in
+                // its root ordering; the group fields lead the identity.
+                let identity_groups = identity
+                    .as_ref()
+                    .map(|identity| {
+                        records
+                            .deltas
+                            .iter()
+                            .map(|delta| {
+                                encoded_record_key_part(
+                                    records.descriptor,
+                                    delta.raw(),
+                                    &identity.fields[..identity.group_len],
+                                )
+                            })
+                            .collect::<Result<BTreeSet<_>, _>>()
+                    })
+                    .transpose()?;
                 if terminal_owned {
                     let terminal = if structured {
                         if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
@@ -1332,7 +1359,7 @@ impl<'a> IncrementalEvaluation<'a> {
                             None
                         }
                     } else if !records.is_empty() {
-                        Some(terminal_deltas_from_record_deltas(&records)?)
+                        Some(terminal_deltas_keyed_by(&records, key_fields)?)
                     } else if output.root_ordering_node.is_some() {
                         Some(TerminalDeltas {
                             operations: Vec::new(),
@@ -1351,6 +1378,7 @@ impl<'a> IncrementalEvaluation<'a> {
                             evaluator.apply_root_ordering(
                                 root_ordering_node,
                                 output.output,
+                                identity_groups.as_ref(),
                                 &mut terminal,
                             )?;
                         }

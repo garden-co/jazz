@@ -78,10 +78,18 @@ pub enum TerminalEdit {
 pub(super) fn terminal_deltas_from_record_deltas(
     deltas: &RecordDeltas,
 ) -> Result<TerminalDeltas, IvmRuntimeError> {
+    terminal_deltas_keyed_by(deltas, &[0])
+}
+
+/// Terminal edits whose root keys are the encoded `key_fields`.
+pub(super) fn terminal_deltas_keyed_by(
+    deltas: &RecordDeltas,
+    key_fields: &[usize],
+) -> Result<TerminalDeltas, IvmRuntimeError> {
     let mut before = BTreeMap::<Vec<u8>, OwnedRecord>::new();
     let mut after = BTreeMap::<Vec<u8>, OwnedRecord>::new();
     for delta in &deltas.deltas {
-        let key = encoded_record_key_part(deltas.descriptor, delta.raw(), &[0])?;
+        let key = encoded_record_key_part(deltas.descriptor, delta.raw(), key_fields)?;
         let record = OwnedRecord::new(delta.raw().to_vec(), deltas.descriptor);
         if delta.weight < 0 {
             before.insert(key, record);
@@ -203,6 +211,8 @@ fn diff_terminal_record(
     if scalar_changed {
         let key = match path.last() {
             Some(TerminalPathSegment::Key(key)) => key.clone(),
+            // A root update addresses its root, whatever fields key it.
+            None => root_key.to_vec(),
             _ => encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?,
         };
         operations.push(TerminalOperation {
