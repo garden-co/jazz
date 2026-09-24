@@ -547,12 +547,6 @@ mod relay_topology {
     /// ```
     #[test]
     fn detaching_the_upstream_keeps_subscription_held_until_reconnected_authority_confirms() {
-        for tier in [DurabilityTier::Global, DurabilityTier::Global] {
-            assert_detached_subscription_waits_for_authority(tier);
-        }
-    }
-
-    fn assert_detached_subscription_waits_for_authority(tier: DurabilityTier) {
         let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);
         let (upstream_transport, _held_far_end) = duplex();
@@ -571,7 +565,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier,
+                tier: DurabilityTier::Global,
                 ..ReadOpts::default()
             },
         ))
@@ -581,7 +575,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "{tier:?} subscription must stay held while the upstream is silent"
+            "Global subscription must stay held while the upstream is silent"
         );
 
         assert!(node.detach_connection(&upstream));
@@ -590,7 +584,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "detaching must not release the held {tier:?} subscription"
+            "detaching must not release the held Global subscription"
         );
         let local_rows = node.read(&documents).expect("Local read after detach");
         assert_eq!(local_rows.len(), 1);
@@ -608,7 +602,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "reattaching alone must not settle the {tier:?} subscription"
+            "reattaching alone must not settle the Global subscription"
         );
 
         let mut events = Vec::new();
@@ -636,11 +630,14 @@ mod relay_topology {
         assert_eq!(
             settled.len(),
             1,
-            "authority confirmation must deliver one settled {tier:?} answer: {events:?}"
+            "authority confirmation must deliver one settled Global answer: {events:?}"
         );
         let (reset, delivered_tier, added) = settled[0];
         assert!(*reset, "the initial answer must replace prior membership");
-        assert!(*delivered_tier >= tier, "the answer must satisfy {tier:?}");
+        assert!(
+            *delivered_tier >= DurabilityTier::Global,
+            "the answer must satisfy Global"
+        );
         assert_eq!(
             added.len(),
             1,
@@ -654,7 +651,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "the confirmed {tier:?} answer must not be delivered twice"
+            "the confirmed Global answer must not be delivered twice"
         );
     }
 }

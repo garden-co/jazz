@@ -889,7 +889,7 @@ describe("raw websocket private read gate", () => {
         bob,
         app.messages.where({ chat_id: publicChat.id }),
         (rows) => rows.some((row) => row.id === bobMessage.id),
-        "Bob should read his member message after an global-confirmed membership",
+        "Bob should read his member message after a global-confirmed membership",
         15_000,
         "global",
       ),

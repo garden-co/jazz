@@ -1963,7 +1963,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         config.seed,
         &profile.name,
     );
-    acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
+    acceptance.insert("phase".to_owned(), json!("core_mergeable_acceptance"));
     acceptance.insert(
         "acceptance_p50_us".to_owned(),
         json!(jazz.relay_acceptance.value_at_quantile(0.50)),
@@ -1972,7 +1972,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         "acceptance_p95_us".to_owned(),
         json!(jazz.relay_acceptance.value_at_quantile(0.95)),
     );
-    acceptance.insert("durability_tier".to_owned(), json!("Edge"));
+    acceptance.insert("durability_tier".to_owned(), json!("Global"));
     acceptance.insert("clients".to_owned(), json!(config.clients));
     emit_json_line(
         "s4_order_processing",
@@ -1985,7 +1985,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         config.seed,
         &profile.name,
     );
-    hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
+    hydration.insert("phase".to_owned(), json!("core_permission_scope_hydration"));
     hydration.insert("scope".to_owned(), json!("order_processing_table_surface"));
     hydration.insert(
         "hydration_bytes".to_owned(),

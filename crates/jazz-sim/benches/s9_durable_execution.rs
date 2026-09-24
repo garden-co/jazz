@@ -169,7 +169,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         config.seed,
         &profile.name,
     );
-    acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
+    acceptance.insert("phase".to_owned(), json!("core_mergeable_acceptance"));
     acceptance.insert(
         "acceptance_p50_us".to_owned(),
         json!(jazz.transition_latency.value_at_quantile(0.50)),
@@ -178,7 +178,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         "acceptance_p95_us".to_owned(),
         json!(jazz.transition_latency.value_at_quantile(0.95)),
     );
-    acceptance.insert("durability_tier".to_owned(), json!("Edge"));
+    acceptance.insert("durability_tier".to_owned(), json!("Global"));
     acceptance.insert("api_surface".to_owned(), json!("db"));
     emit_json_line(
         "s9_durable_execution",
@@ -191,7 +191,7 @@ fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jaz
         config.seed,
         &profile.name,
     );
-    hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
+    hydration.insert("phase".to_owned(), json!("core_permission_scope_hydration"));
     hydration.insert("scope".to_owned(), json!("workflow_table_surface"));
     hydration.insert("hydration_bytes".to_owned(), json!(jazz.sync_bytes));
     hydration.insert("hydration_floor_bytes".to_owned(), json!(jazz.sync_bytes));

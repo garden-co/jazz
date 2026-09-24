@@ -1790,7 +1790,6 @@ fn global_current_rows_exclude_purely_local_pending_writes() {
     );
 }
 
-
 #[test]
 fn global_fate_cleans_ahead_current_overlay() {
     let (_temp_dir, mut node) = open_node();
@@ -1873,7 +1872,6 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
         vec![(row, title_cells("optimistic"))]
     );
 }
-
 
 #[test]
 fn late_lower_hlc_child_is_rejected_at_admission() {

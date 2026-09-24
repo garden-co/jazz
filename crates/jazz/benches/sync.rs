@@ -377,19 +377,19 @@ impl SyncBench {
             serde_json::json!(self.metrics.view_refresh.value_at_quantile(0.95)),
         );
         fields.insert(
-            "core_edge_version_bundles_out".to_owned(),
+            "core_relay_version_bundles_out".to_owned(),
             serde_json::json!(self.core_to_relay.metrics.version_bundles_out),
         );
         fields.insert(
-            "core_edge_complete_tx_payload_refs_out".to_owned(),
+            "core_relay_complete_tx_payload_refs_out".to_owned(),
             serde_json::json!(self.core_to_relay.metrics.complete_tx_payload_refs_out),
         );
         fields.insert(
-            "edge_worker_version_bundles_out".to_owned(),
+            "relay_worker_version_bundles_out".to_owned(),
             serde_json::json!(self.relay_to_worker.metrics.version_bundles_out),
         );
         fields.insert(
-            "edge_worker_complete_tx_payload_refs_out".to_owned(),
+            "relay_worker_complete_tx_payload_refs_out".to_owned(),
             serde_json::json!(self.relay_to_worker.metrics.complete_tx_payload_refs_out),
         );
         fields.insert(
@@ -434,7 +434,7 @@ impl SyncBench {
         );
         insert_node_metrics(&mut fields, "ui", &self.ui);
         insert_node_metrics(&mut fields, "worker", &self.worker);
-        insert_node_metrics(&mut fields, "edge", &self.relay);
+        insert_node_metrics(&mut fields, "relay", &self.relay);
         insert_node_metrics(&mut fields, "core", &self.core);
         emit_json_line("sync", fields);
     }

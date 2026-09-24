@@ -4873,10 +4873,6 @@ mod tests {
             core_write_tier(DurabilityTier::GlobalServer),
             CoreDurabilityTier::Global
         );
-        assert_eq!(
-            core_write_tier(DurabilityTier::GlobalServer),
-            CoreDurabilityTier::Global
-        );
     }
 
     fn declared_todo_schema() -> Schema {

@@ -168,27 +168,11 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_message])
     );
-    assert_eq!(
-        core.query_rows(&public_shape, &public_binding, DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([public_message])
-    );
 
     let shape = Query::from("messages")
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([public_message, private_message])
-    );
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()

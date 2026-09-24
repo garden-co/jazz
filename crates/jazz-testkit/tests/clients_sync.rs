@@ -554,13 +554,6 @@ async fn wait_for_transaction_reaches_global_tier() {
                     DurabilityTier::GlobalServer,
                 )
                 .await
-                .expect("first wait_for_transaction should resolve from scheduled core progress");
-            alice
-                .wait_for_transaction(
-                    transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::GlobalServer,
-                )
-                .await
                 .expect("global wait_for_transaction should resolve from scheduled core progress");
 
             alice.shutdown().await.expect("shutdown alice");

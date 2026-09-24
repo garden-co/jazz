@@ -202,7 +202,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "local" });
   });
 
-  it("does not fall back to local when an remote read fails or times out", async () => {
+  it("does not fall back to local when a remote read fails or times out", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {

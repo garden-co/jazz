@@ -610,13 +610,6 @@ fn current_rows_reject_deletion_only_readable_receipt() {
     );
 }
 
-/// Alice repairs an exact older body through a partial relay. Core authorizes
-/// the row first; a later Core-only owner change blocks the relay's stale grant.
-/// Alice -> relay cached body -> Core current-read receipt -> exact repair.
-
-/// Unknown Core evidence stays pending. Removing either physical link cancels
-/// its active nonce; cached bytes never become a fallback authorization source.
-
 /// A trusted backend's own SYSTEM local-first query repairs its retained cache after
 /// reconnect. No downstream client or client-context exclusion participates.
 /// This uses admitted links and the native codec, not a WebSocket server.

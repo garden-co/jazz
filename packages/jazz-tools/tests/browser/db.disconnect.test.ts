@@ -209,86 +209,81 @@ describe("Db disconnect/reconnect", () => {
   }, 60_000);
 
   describe("server-backed subscriptions", () => {
-    it.each(["global"] as const)(
-      "keeps a disconnected %s subscription pending, then hydrates its local write",
-      async (tier) => {
-        const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
-        const serverTitle = "existing server row";
-        await withTimeout(
-          peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "global" }),
-          SYNC_OPERATION_TIMEOUT_MS,
-          "server row did not settle globally",
-        );
-        await waitForTodos(
-          db,
-          (rows) => rows.some((row) => row.title === serverTitle),
-          "db did not receive the existing server row",
-          SYNC_OPERATION_TIMEOUT_MS,
-          "global",
-        );
-        await db.disconnect();
+    it("keeps a disconnected global subscription pending, then hydrates its local write", async () => {
+      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+      const serverTitle = "existing server row";
+      await withTimeout(
+        peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "global" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not settle globally",
+      );
+      await waitForTodos(
+        db,
+        (rows) => rows.some((row) => row.title === serverTitle),
+        "db did not receive the existing server row",
+        SYNC_OPERATION_TIMEOUT_MS,
+        "global",
+      );
+      await db.disconnect();
 
-        const title = "pending optimistic write";
-        const snapshots: Array<{
-          rows: Todo[];
-          globalSettled: boolean;
-          afterReconnect: boolean;
-        }> = [];
-        let globalSettled = false;
-        let reconnectRequested = false;
-        const unsubscribe = ctx.trackSubscription(
-          db.subscribe(
-            app.todos,
-            (rows) => {
-              snapshots.push({
-                rows,
-                globalSettled,
-                afterReconnect: reconnectRequested,
-              });
-            },
-            { tier },
+      const title = "pending optimistic write";
+      const snapshots: Array<{
+        rows: Todo[];
+        globalSettled: boolean;
+        afterReconnect: boolean;
+      }> = [];
+      let globalSettled = false;
+      let reconnectRequested = false;
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribe(
+          app.todos,
+          (rows) => {
+            snapshots.push({
+              rows,
+              globalSettled,
+              afterReconnect: reconnectRequested,
+            });
+          },
+          { tier: "global" },
+        ),
+      );
+
+      const write = db.insert(todos, { title, done: false });
+      const globalWait = write.wait({ tier: "global" }).then(() => {
+        globalSettled = true;
+      });
+      await withTimeout(
+        write.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local write did not become visible",
+      );
+      await expectStillPending(
+        write.wait({ tier: "global" }),
+        PENDING_ASSERTION_MS,
+        "global write settled before the delayed server snapshot was allowed to arrive",
+      );
+      expect(snapshots).toEqual([]);
+      reconnectRequested = true;
+      await db.reconnect();
+      await waitForCondition(
+        async () =>
+          snapshots.some(
+            ({ rows, afterReconnect }) => afterReconnect && rows.some((row) => row.title === title),
           ),
-        );
+        SYNC_OPERATION_TIMEOUT_MS,
+        "global subscription did not publish its authoritative snapshot after reconnect",
+      );
+      const beforeAcceptance = snapshots.at(-1)!.rows;
+      await withTimeout(
+        globalWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local write did not settle at global after reconnect",
+      );
 
-        const write = db.insert(todos, { title, done: false });
-        const globalWait = write.wait({ tier }).then(() => {
-          globalSettled = true;
-        });
-        await withTimeout(
-          write.wait({ tier: "local" }),
-          LOCAL_OPERATION_TIMEOUT_MS,
-          "local write did not become visible",
-        );
-        await expectStillPending(
-          write.wait({ tier }),
-          PENDING_ASSERTION_MS,
-          `${tier} write settled before the delayed server snapshot was allowed to arrive`,
-        );
-        expect(snapshots).toEqual([]);
-        reconnectRequested = true;
-        await db.reconnect();
-        await waitForCondition(
-          async () =>
-            snapshots.some(
-              ({ rows, afterReconnect }) =>
-                afterReconnect && rows.some((row) => row.title === title),
-            ),
-          SYNC_OPERATION_TIMEOUT_MS,
-          `${tier} subscription did not publish its authoritative snapshot after reconnect`,
-        );
-        const beforeAcceptance = snapshots.at(-1)!.rows;
-        await withTimeout(
-          globalWait,
-          SYNC_OPERATION_TIMEOUT_MS,
-          `local write did not settle at ${tier} after reconnect`,
-        );
-
-        expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
-        expect(snapshots[0]!.afterReconnect).toBe(true);
-        unsubscribe();
-      },
-      60_000,
-    );
+      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+      expect(snapshots[0]!.afterReconnect).toBe(true);
+      unsubscribe();
+    }, 60_000);
 
     it("keeps a global subscription pending while disconnected, then hydrates its local update", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
@@ -722,35 +717,21 @@ describe("Db disconnect/reconnect", () => {
         () => phase,
       );
 
-      const firstGlobalWait = db
-        .insert(todos, { title: "first global wait", done: false })
+      const globalWait = db
+        .insert(todos, { title: "global wait", done: false })
         .wait({ tier: "global" });
       await expectStillPending(
-        firstGlobalWait,
+        globalWait,
         PENDING_ASSERTION_MS,
-        "worker mode: first global wait while disconnected",
-      );
-
-      const secondGlobalWait = db
-        .insert(todos, { title: "second global wait", done: false })
-        .wait({ tier: "global" });
-      await expectStillPending(
-        secondGlobalWait,
-        PENDING_ASSERTION_MS,
-        "worker mode: second global wait while disconnected",
+        "worker mode: global wait while disconnected",
       );
 
       await db.reconnect();
 
       await withTimeout(
-        firstGlobalWait,
+        globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: first global wait did not settle after reconnect",
-      );
-      await withTimeout(
-        secondGlobalWait,
-        SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: second global wait did not settle after reconnect",
+        "worker mode: global wait did not settle after reconnect",
       );
     }, 60_000);
 

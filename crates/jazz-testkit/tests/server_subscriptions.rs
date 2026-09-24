@@ -174,50 +174,6 @@ async fn subscription_orders_by_unprojected_field() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn remote_public_subscription_opens_and_receives_rows() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone())
-                .await
-                .expect("start test server");
-            let client = TestingClient::builder()
-                .with_server(&server)
-                .with_schema(schema)
-                .with_user_id("00000000-0000-4000-8000-000000000001")
-                .ready_on("todos", Duration::from_secs(30))
-                .connect()
-                .await;
-
-            let query = jazz::query::Query::from("todos");
-            let mut stream = client
-                .subscribe(query)
-                .await
-                .expect("remote public subscription should open");
-            let mut log = Vec::new();
-
-            let (todo_id, _, transaction_id) = client
-                .insert("todos", row_input!("title" => "visible", "done" => false))
-                .expect("insert todo");
-            support::wait_for_global_txs(
-                &client,
-                &[transaction_id.expect("ordinary mutation commits immediately")],
-            )
-            .await;
-
-            wait_for_subscription_update(
-                &mut stream,
-                &mut log,
-                Duration::from_secs(10),
-                "remote public subscription receives inserted row",
-                |deltas| has_added_id(deltas, todo_id),
-            )
-            .await;
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn maintained_unordered_limit_and_offset_windows_open_offline() {
     tokio::task::LocalSet::new()
         .run_until(async {

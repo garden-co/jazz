@@ -155,9 +155,6 @@ fn merge_heads_match_history_for_ordinary_concurrent_units() {
         .unwrap();
 }
 
-
-
-
 #[test]
 fn merge_heads_match_history_for_relay_pending_then_global_fate() {
     let schema = two_column_schema();

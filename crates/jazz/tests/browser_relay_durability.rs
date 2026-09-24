@@ -3169,9 +3169,8 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
 /// alice main ──remote structured subscribe──► worker ──Global──► core
 /// alice main ◄──complete reset (roots + sender facts)── worker ◄── core
 /// ```
-fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-    foreground_tier: DurabilityTier,
-) {
+#[test]
+fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
     let schema = included_relation_schema();
     let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
     let main_thread = open_db(0x24, alice, &schema);
@@ -3238,7 +3237,7 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: foreground_tier,
+            tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
     ))
@@ -3332,20 +3331,6 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
             Ok(Value::String(name)) if name == *expected_sender
         ));
     }
-}
-
-#[test]
-fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
-    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-        DurabilityTier::Global,
-    );
-}
-
-#[test]
-fn cold_browser_relay_global_structured_reset_materializes_ordered_sender_facts() {
-    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-        DurabilityTier::Global,
-    );
 }
 
 /// A reopened browser tab receives a new Global receipt after the persistent

@@ -4086,11 +4086,6 @@ fn authority_query_delegation_requires_explicit_host_admission() {
 // Observe raw native delivery/rejection because a client facade cannot express
 // the unsupported remote propagation option or delegated transport scope.
 #[derive(Clone, Copy, Debug)]
-enum QueryTestHost {
-    Core,
-}
-
-#[derive(Clone, Copy, Debug)]
 enum QueryTestClient {
     Session,
     System,
@@ -4100,7 +4095,6 @@ enum QueryTestClient {
 fn remote_query_delivery(
     propagate_upstream: bool,
     tier: DurabilityTier,
-    _host: QueryTestHost,
     client_scope: QueryTestClient,
 ) -> (bool, bool) {
     let schema = owner_read_schema();
@@ -4217,24 +4211,18 @@ fn remote_query_delivery(
 
 #[test]
 fn remote_queries_cannot_disable_upstream_propagation() {
-    for host in [QueryTestHost::Core] {
-        for client in [
-            QueryTestClient::Session,
-            QueryTestClient::System,
-            QueryTestClient::Delegated,
-        ] {
-            assert_eq!(
-                remote_query_delivery(false, DurabilityTier::Global, host, client),
-                (false, true),
-                "{host:?} {client:?}"
-            );
-        }
+    for client in [
+        QueryTestClient::Session,
+        QueryTestClient::System,
+        QueryTestClient::Delegated,
+    ] {
+        assert_eq!(
+            remote_query_delivery(false, DurabilityTier::Global, client),
+            (false, true),
+            "{client:?}"
+        );
     }
 }
-
-// Internal transport fixture isolates local serving from upstream hydration:
-// no Core is connected. The serving node must evaluate cached data under the admitted
-// reader instead of waiting for a selected Core result for this exact query.
 
 // Rust equivalent of a memory-only browser foreground: LocalOnly can read its
 // own pending data but may not ask the worker (or any node) for a local view.

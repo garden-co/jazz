@@ -1,6 +1,6 @@
 use super::*;
 use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+    FutureResolveExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,8 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
 use crate::protocol::{
-    BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage,
-    VersionRecord,
+    BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage, VersionRecord,
 };
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
@@ -1253,7 +1252,6 @@ fn aggregate_access_policy_schema() -> JazzSchema {
     )
 }
 
-
 fn session_seed_write_policy_schema() -> JazzSchema {
     let policy = crate::test_public_schema::seeded_recursive_access_policy(
         "resourceAccess",
@@ -1295,7 +1293,6 @@ fn session_seed_write_policy_schema() -> JazzSchema {
             ),
     )
 }
-
 
 #[test]
 fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
@@ -1342,14 +1339,6 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         "an unseeded session must not inherit SYSTEM bypass: {denied:?}"
     );
 }
-
-
-/// Deferred server fates own their support receiver by the exact admission
-/// snapshot, not merely by the canonical policy clause. A later authenticated
-/// refresh for the same author must park beside the old fate without replacing
-/// its support view.
-
-
 
 fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -1406,10 +1395,6 @@ fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<Roc
     open_node_with_schema(node_uuid, schema)
 }
 
-/// Permission-scope cache retention is maintenance, not authority admission.
-/// The receipt drives the public server ingest path because a direct eviction
-/// call would not prove that ingress keeps the two clocks separate.
-
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     core.apply_fate_update(
         tx_id,
@@ -1421,8 +1406,7 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
 }
 
 fn accept_confirmed(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
-    core.finalize_local_mergeable_commit_settled(tx_id)
-        .unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 }
 
 fn title_shape_binding(title: &str) -> (ValidatedQuery, Binding) {
@@ -1630,33 +1614,6 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
             .expect("test update carriers should expand"),
         _ => Vec::new(),
     }
-}
-
-#[test]
-fn non_global_peer_query_subscriptions_use_maintained_path() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x44));
-    let (shape, binding) = title_shape_binding("match");
-    let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Global,
-        ..RegisterShapeOptions::default()
-    };
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: opts.read_view_key(),
-    };
-    let mut peer = PeerState::new();
-
-    peer.rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
-        .unwrap();
-    assert!(
-        peer.publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_some()
-    );
-    peer.query_update_for_subscription_with_opts(&mut core, subscription, &shape, &binding, opts)
-        .unwrap();
 }
 
 /// A served publication is a local owner of its shape even though it did not
