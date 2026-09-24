@@ -10361,6 +10361,167 @@ mod tests {
         panic!("owner drive turns did not complete the foreground read");
     }
 
+    /// Emulate the RN JS reactor for one subscription: only a queued platform
+    /// wake makes JS tick and drain (until an empty batch); nothing polls on a
+    /// timer. Returns the first delivered frame that contains `row`, or `None`
+    /// when no further wake arrives within `quiet` (a lost wake).
+    fn wake_driven_frame_with_row(
+        client: &NativeRelayClient,
+        wake: &QueuedNativeWake,
+        subscription: u64,
+        row: RowUuid,
+        quiet: Duration,
+    ) -> Option<usize> {
+        let mut drains = 0usize;
+        let mut pending: Option<u64> = None;
+        loop {
+            // One JS turn: tick, then drain until an empty batch or a pending op.
+            client.pump_foreground().unwrap();
+            loop {
+                drains += 1;
+                let poll = match pending.take() {
+                    Some(operation) => client.poll_foreground_operation(operation).unwrap(),
+                    None => client.drain_foreground_subscription(subscription).unwrap(),
+                };
+                match poll {
+                    ForegroundOperationPoll::Ready(
+                        ForegroundOperationResult::SubscriptionEvents(events),
+                    ) => {
+                        if events.is_empty() {
+                            break;
+                        }
+                        if events.iter().any(|event| match event {
+                            ForegroundSubscriptionEvent::Delta { delta, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta { delta, .. } => delta
+                                .windows(16)
+                                .any(|candidate| candidate == row.as_bytes()),
+                            _ => false,
+                        }) {
+                            return Some(drains);
+                        }
+                    }
+                    ForegroundOperationPoll::Pending { operation } => {
+                        // JS retries a pending drain after a setTimeout(0).
+                        pending = Some(operation);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    _ => panic!("subscription drain failed"),
+                }
+            }
+            // Park like the idle JS thread until the platform delivers a wake.
+            let deadline = std::time::Instant::now() + quiet;
+            loop {
+                if !std::mem::take(&mut *wake.queued.lock().unwrap()).is_empty() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    // Internal receipt (#3273, device typing-composer open stall): a fresh
+    // foreground opens a subscription and then admits a write in the same JS
+    // turn. Driven only by platform wakes, the write must reach that
+    // subscription; a lost wake would park JS forever.
+    fn attach_with_wake(
+        relay: &NativeRelay,
+        author: u8,
+    ) -> (NativeRelayClient, Arc<QueuedNativeWake>) {
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let wake = Arc::new(QueuedNativeWake::active());
+        client
+            .set_foreground_wake_callback(
+                1,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+        (client, wake)
+    }
+
+    #[test]
+    fn same_turn_subscribe_then_insert_on_a_used_scope_reaches_subscription_through_wakes() {
+        let (_directory, relay, sibling, _sibling_wake) = attached_write_client("wake-used", 0x40);
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        admit_title(&relay, sibling.id, "seed".into()).unwrap();
+        for round in 0..30u8 {
+            // An earlier public client: subscribe, observe a write, close.
+            let (earlier, earlier_wake) = attach_with_wake(&relay, 0x50 + (round % 8));
+            let subscription = earlier
+                .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
+                .unwrap();
+            let (_, row) = admit_title(&relay, earlier.id, format!("earlier-{round}")).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &earlier,
+                    &earlier_wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: earlier client never observed its write"
+            );
+            earlier.close().unwrap();
+            // The composer client: subscribe, then insert in the same turn.
+            let (composer, composer_wake) = attach_with_wake(&relay, 0x60 + (round % 8));
+            let subscription = composer
+                .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
+                .unwrap();
+            let (_, row) = admit_title(&relay, composer.id, String::new()).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &composer,
+                    &composer_wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: the same-turn write never reached its subscription through wakes"
+            );
+            composer.close().unwrap();
+        }
+        sibling.close().unwrap();
+    }
+
+    #[test]
+    fn same_turn_subscribe_then_insert_reaches_subscription_through_wakes_alone() {
+        for round in 0..40u8 {
+            let (_directory, relay, client, wake) =
+                attached_write_client(&format!("wake-open-{round}"), 0x70 + (round % 8));
+            let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+            let subscription = client
+                .subscribe_foreground_query_with_options(query, ReadOpts::default())
+                .unwrap();
+            let (_tx, row) = admit_title(&relay, client.id, String::new()).unwrap();
+            assert!(
+                wake_driven_frame_with_row(
+                    &client,
+                    &wake,
+                    subscription,
+                    row,
+                    Duration::from_secs(2)
+                )
+                .is_some(),
+                "round {round}: the same-turn write never reached its subscription through wakes"
+            );
+            client.close().unwrap();
+        }
+    }
+
     // Internal receipt (#3273): "admitted but not yet applied" and the owner's
     // self-driven turns are not observable through the public JS API. The RN
     // public-API harness pins the same fence through `Db` in
