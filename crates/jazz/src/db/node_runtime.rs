@@ -1485,11 +1485,9 @@ where
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
                 state.scalar_reconciliation = ScalarReconciliation::default();
-                (
-                    state.local_subscription_cleanup.take(),
-                    std::mem::take(&mut state.upstream_subscription_handles),
-                    owner,
-                )
+                let mut upstream = std::mem::take(&mut state.upstream_subscription_handles);
+                upstream.append(&mut state.authority_witness);
+                (state.local_subscription_cleanup.take(), upstream, owner)
             } else {
                 (
                     command.opening_local.take(),
@@ -3300,7 +3298,39 @@ where
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
+        self.resolve_authority_witnesses().await;
         Ok(stats)
+    }
+
+    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// inputs were folded into every stream, and retire the witness coverage
+    /// of every gate that has released.
+    async fn resolve_authority_witnesses(&self) {
+        if !self.remote_link.has_witnesses() {
+            return;
+        }
+        let retired = {
+            let owner = self.node.lock().await;
+            self.remote_link.resolve_witnesses(|handles| {
+                !handles.is_empty()
+                    && handles.iter().all(|handle| {
+                        owner
+                            .authority_result_key_for_subscription(handle.subscription)
+                            .is_ok_and(|key| {
+                                owner.has_settled_authority_result(&key)
+                                    && !owner.opening_pending_for_authority_result(&key)
+                            })
+                    })
+            })
+        };
+        if !retired.is_empty() {
+            self.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                state: None,
+                opening_upstream: retired,
+                opening_local: None,
+                acknowledgement: None,
+            });
+        }
     }
 
     /// Both public local-first queries and relay-owned upstream scopes use

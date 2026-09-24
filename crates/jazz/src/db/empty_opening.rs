@@ -39,7 +39,11 @@ pub enum EmptyOpening {
     /// propagation; other reads ignore it. While the remote could answer:
     /// - a subscription publishes nothing until its own stream settles, holds
     ///   a row, is rejected, or the remote can no longer answer, and then
-    ///   behaves exactly like local-first;
+    ///   behaves exactly like local-first. A non-durable foreground's stream
+    ///   settles at its storage owner's local answer, so there the gate
+    ///   instead waits for a `Global` witness coverage of the same read,
+    ///   answered by the authority through the owner, and retires the witness
+    ///   once it releases;
     /// - a one-shot read returns a non-empty local result as is, and otherwise
     ///   the strict remote result, falling back to the empty local result if
     ///   the remote read fails or the remote can no longer answer;
@@ -121,6 +125,12 @@ pub(super) struct OpeningGate {
     pub(super) route: OpeningRoute,
     /// An otherwise publishable opening was withheld by this gate.
     pub(super) withheld: bool,
+    /// The stream's own `settled` bit cannot witness the authority (a
+    /// non-durable foreground settles at its storage owner's local answer),
+    /// so the gate instead waits for the stream's authority witness coverage.
+    pub(super) witnessed: bool,
+    /// The authority witness coverage has its settled authority answer.
+    pub(super) witness_answered: bool,
 }
 
 /// Remote reachability shared by every read of one `Db` runtime.
@@ -133,6 +143,8 @@ pub(super) struct RemoteLinkTracker {
     attempt_expiry_observed: Cell<bool>,
     scheduler: SharedTickScheduler,
     gated: RefCell<Vec<Weak<RefCell<SubscriptionState>>>>,
+    /// Streams still owning authority witness coverage.
+    witnessed: RefCell<Vec<Weak<RefCell<SubscriptionState>>>>,
     wakers: RefCell<Vec<Waker>>,
 }
 
@@ -145,6 +157,7 @@ impl RemoteLinkTracker {
             attempt_expiry_observed: Cell::new(false),
             scheduler,
             gated: RefCell::new(Vec::new()),
+            witnessed: RefCell::new(Vec::new()),
             wakers: RefCell::new(Vec::new()),
         }
     }
@@ -267,6 +280,8 @@ impl RemoteLinkTracker {
                 retained.push(weak);
             } else {
                 state_ref.release_opening_gate();
+                // The next owner turn retires the released witness coverage.
+                busy |= !state_ref.authority_witness.is_empty();
             }
         }
         self.gated.borrow_mut().extend(retained);
@@ -276,6 +291,60 @@ impl RemoteLinkTracker {
         for waker in std::mem::take(&mut *self.wakers.borrow_mut()) {
             waker.wake();
         }
+    }
+
+    pub(super) fn has_witnesses(&self) -> bool {
+        !self.witnessed.borrow().is_empty()
+    }
+
+    pub(super) fn register_witness(&self, state: &Rc<RefCell<SubscriptionState>>) {
+        self.witnessed.borrow_mut().push(Rc::downgrade(state));
+    }
+
+    /// Resolve the authority witnesses at the end of an owner turn, after
+    /// every stream has folded that turn's inputs.
+    ///
+    /// A witness whose coverage has its settled authority answer marks its
+    /// gate answered; a still-withheld (hence empty) opening is then released.
+    /// Once a gate has released for any reason, the witness coverage is
+    /// returned for retirement: afterwards the stream is an ordinary
+    /// local-first stream on its own (owner-local) coverage.
+    pub(super) fn resolve_witnesses(
+        &self,
+        answered: impl Fn(&[UpstreamCoverageHandle]) -> bool,
+    ) -> Vec<UpstreamCoverageHandle> {
+        let witnessed = std::mem::take(&mut *self.witnessed.borrow_mut());
+        let mut retained = Vec::with_capacity(witnessed.len());
+        let mut retired = Vec::new();
+        for weak in witnessed {
+            let Some(state) = weak.upgrade() else {
+                continue;
+            };
+            let Ok(mut state_ref) = state.try_borrow_mut() else {
+                retained.push(weak);
+                continue;
+            };
+            if state_ref.closed.get() {
+                // Stream finalization retires the witness with the stream.
+                continue;
+            }
+            if let Some(gate) = state_ref.sender.opening_gate()
+                && !gate.witness_answered
+                && answered(&state_ref.authority_witness)
+            {
+                state_ref.sender.answer_witness();
+                if gate.withheld {
+                    state_ref.release_opening_gate();
+                }
+            }
+            if state_ref.sender.opening_gate().is_some() {
+                retained.push(weak);
+            } else {
+                retired.append(&mut state_ref.authority_witness);
+            }
+        }
+        self.witnessed.borrow_mut().extend(retained);
+        retired
     }
 
     fn register_waker(&self, waker: &Waker) {
@@ -310,6 +379,17 @@ impl OpeningGate {
             epoch,
             route,
             withheld: false,
+            witnessed: false,
+            witness_answered: false,
+        }
+    }
+
+    /// Still waiting for the answer that may release an empty opening.
+    pub(super) fn awaits_answer(&self, settled: bool) -> bool {
+        if self.witnessed {
+            !self.witness_answered
+        } else {
+            !settled
         }
     }
 }
@@ -317,6 +397,12 @@ impl OpeningGate {
 impl SubscriptionSender {
     pub(super) fn opening_gate(&self) -> Option<OpeningGate> {
         self.publication.borrow().opening_gate
+    }
+
+    fn answer_witness(&self) {
+        if let Some(gate) = self.publication.borrow_mut().opening_gate.as_mut() {
+            gate.witness_answered = true;
+        }
     }
 }
 
@@ -330,9 +416,17 @@ impl SubscriptionState {
         let Some(gate) = publication.opening_gate.take() else {
             return;
         };
-        // Without a withheld opening, ordinary publication delivers the first
-        // materialized result when it exists.
-        if publication.opened || !gate.withheld || !publication.unresolved.is_empty() {
+        // Without a withheld opening, ordinary local-first publication
+        // delivers the first materialized result when it exists. A strict
+        // remote window would instead keep withholding its unsettled opening
+        // until the authority answers, so it opens now with its current
+        // (possibly empty) view even if no refresh withheld it yet.
+        let window_unopened =
+            gate.route == OpeningRoute::RemoteWindow && !self.pending_initial_local_snapshot;
+        if publication.opened
+            || !(gate.withheld || window_unopened)
+            || !publication.unresolved.is_empty()
+        {
             return;
         }
         let Ok(current) =
@@ -415,6 +509,9 @@ where
     }
 
     pub(super) fn register_opening_gate(&self, state: &Rc<RefCell<SubscriptionState>>) {
+        if !state.borrow().authority_witness.is_empty() {
+            self.node.remote_link.register_witness(state);
+        }
         self.node.remote_link.register(state);
     }
 
@@ -441,22 +538,24 @@ where
         L: Future<Output = Result<T, E>>,
         R: Future<Output = Result<T, E>>,
     {
+        // Each phase is boxed so this future holds one phase at a time on the
+        // heap rather than both inline (and in every poll frame).
         if windowed {
             if let Some(epoch) = self.node.remote_link.arm()
-                && let Some(Ok(result)) = self.race_remote_answer(epoch, remote()).await
+                && let Some(Ok(result)) = self.race_remote_answer(epoch, Box::pin(remote())).await
             {
                 return Ok(result);
             }
-            return local().await;
+            return Box::pin(local()).await;
         }
-        let local = local().await?;
+        let local = Box::pin(local()).await?;
         if !is_empty(&local) {
             return Ok(local);
         }
         let Some(epoch) = self.node.remote_link.arm() else {
             return Ok(local);
         };
-        match self.race_remote_answer(epoch, remote()).await {
+        match self.race_remote_answer(epoch, Box::pin(remote())).await {
             Some(Ok(remote)) => Ok(remote),
             Some(Err(_)) | None => Ok(local),
         }

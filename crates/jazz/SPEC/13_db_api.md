@@ -355,16 +355,35 @@ can produce an empty page or a wrong one. Under `LocalFirstUnlessEmpty`, a
 query with `offset > 0` therefore reads the strict remote view (`Global`,
 immediate local updates) for both one-shots and subscriptions, whenever a
 remote can answer when the read opens. A subscription's opening waits as
-above for its first authority page. Otherwise, with no server or a failed
-link, the query is an ordinary local-first read. Example: server rows a..j,
+above for its first authority page. If the link is lost or the attempt
+window expires first, the subscription opens with its current, unsettled
+remote view, which can be empty. It stays a strict remote view and settles
+when the authority answers. A one-shot then falls back to the local-first
+window. Otherwise, with no server or a failed link when the read opens, the
+query is an ordinary local-first read. Example: server rows a..j,
 query ordered by label with offset 4 and limit 2, on a fresh client: the
 subscription's first delivery and the one-shot both yield `[e, f]`.
 
 _Non-durable foregrounds._ A foreground marked `set_non_durable_client` (a
-browser tab over a worker, or an RN foreground over the relay) settles at the
-storage owner's local answer, so the stream's `settled` bit does not wait for
-the authority. There, the gate only covers the owner's local answer, not the
-server's.
+browser tab over a worker, or an RN foreground over the relay) registers
+`Local` coverage with its storage owner. That coverage settles at the owner's
+local answer, so its `settled` bit cannot show that the authority answered.
+While its gate is armed, such a subscription therefore also holds a `Global`
+_authority witness_ coverage for the same read, which requires an authority
+receipt that the owner relays. The owner-local coverage still evaluates and
+delivers exactly as `LocalFirst`: a warm owner cache opens the stream at once.
+An empty opening is held until the witness has the authority's settled answer
+(then released, empty if the authority found nothing), rows arrive, or the
+link state releases it. The foreground host reports the _owner's_ server link
+(`attempting` / `live` / `failed`), so an owner that cannot reach the server
+releases the opening at once, an attempt is bounded by the window, and `live`
+has no time bound, as on a durable client. When the gate releases for any
+reason, the witness coverage is retired at the end of that owner turn. Only
+the owner-local coverage remains, so the stream is then exactly a `LocalFirst`
+stream. The witness is not kept, because a retained `Global` registration
+would stop the owner's cache from reaching the stream while the owner cannot
+reach the server. One-shot reads need no witness, because their remote phase
+is already a `Global` read through the owner.
 
 Binding read-tier strings: `local-first-unless-empty` /
 `LocalFirstUnlessEmpty` select this gate. The legacy `remote-if-possible` /

@@ -4805,6 +4805,11 @@ struct SubscriptionState {
     /// A non-durable foreground has not yet received its local owner's answer.
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
+    /// Global coverage held only while a non-durable foreground's
+    /// local-first-unless-empty opening gate is armed: its settled authority
+    /// answer, relayed by the storage owner, is what may release an empty
+    /// opening. Retired as soon as the gate releases.
+    authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
 }
 
@@ -4966,9 +4971,16 @@ impl SubscriptionSender {
         }
         if publication.opening_gate.is_some() {
             // Local-first unless empty: withhold the opening while it is still
-            // empty and unsettled. The first settled or non-empty result
-            // releases the gate and opens with a canonical reset below.
-            if !publication.opened && !settled && snapshot.root_count == 0 {
+            // empty and unanswered (unsettled, or for a non-durable foreground
+            // its authority witness unanswered). The first answered or
+            // non-empty result releases the gate and opens with a canonical
+            // reset below.
+            if !publication.opened
+                && publication
+                    .opening_gate
+                    .is_some_and(|gate| gate.awaits_answer(settled))
+                && snapshot.root_count == 0
+            {
                 if let Some(gate) = publication.opening_gate.as_mut() {
                     gate.withheld = true;
                 }

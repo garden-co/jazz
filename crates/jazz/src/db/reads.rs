@@ -271,7 +271,9 @@ where
             ..opts.clone()
         };
         let remote_scope = request_scope.clone();
-        self.read_local_first_unless_empty(
+        // Boxed: the gated read nests two full one-shot reads, which would
+        // otherwise multiply this future's size and every host poll frame.
+        Box::pin(self.read_local_first_unless_empty(
             windowed,
             || {
                 self.all_serialized_query_once(
@@ -301,7 +303,7 @@ where
                 SerializedReadResult::Rows(rows) => rows.is_empty(),
                 SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
             },
-        )
+        ))
         .await
     }
 
