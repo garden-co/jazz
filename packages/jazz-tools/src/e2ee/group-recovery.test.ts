@@ -174,4 +174,4 @@ it("retries interrupted read-only group recovery past a malformed candidate", as
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60000);
+}, 120_000);

@@ -33,3 +33,7 @@ Tombstone-inclusive reads retain deletion state when binding session claims.
 After a read grant is restored, the same client can receive fresh readable
 content without discarding its local cache; revoked successor content remains
 withheld.
+
+Group recovery correctness checks use the 120-second multi-client test budget,
+including interrupted recovery and retry; fault injection and permission
+assertions are unchanged.
