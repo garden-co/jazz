@@ -551,6 +551,16 @@ pub enum ForegroundDbCommandRequest {
     WaitForPendingWrites {
         tier: String,
     },
+    StageStreamingMutation {
+        upload: u64,
+    },
+    AttachStagedStreamingMutation {
+        staged: u64,
+        transaction: u64,
+    },
+    AbortStagedStreamingMutation {
+        staged: u64,
+    },
 }
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
@@ -693,6 +703,13 @@ pub enum ForegroundDbCommandResponse {
     CodedOperationError {
         code: String,
         reason: String,
+    },
+    StreamingMutationStaged {
+        staged: u64,
+    },
+    StagedStreamingMutationAttached,
+    StagedStreamingMutationAborted {
+        aborted: bool,
     },
 }
 
@@ -3258,6 +3275,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         | ForegroundDbCommandRequest::PushStreamingMutation { .. }
         | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
         | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
+        | ForegroundDbCommandRequest::StageStreamingMutation { .. }
+        | ForegroundDbCommandRequest::AttachStagedStreamingMutation { .. }
+        | ForegroundDbCommandRequest::AbortStagedStreamingMutation { .. }
         | ForegroundDbCommandRequest::UpdateLargeValues { .. }
         | ForegroundDbCommandRequest::DirectMutation { .. }) => {
             let client = match host.foreground_client(foreground) {
@@ -5111,8 +5131,19 @@ struct ForegroundTransaction {
 impl ConnectedClient {
     fn poll_mutation_cleanup(&mut self, waker: &Waker) {
         let mut context = Context::from_waker(waker);
-        self.mutation_cleanups
-            .retain_mut(|future| future.as_mut().poll(&mut context).is_pending());
+        let mutations = &self.mutations;
+        self.mutation_cleanups.retain_mut(|future| {
+            match future.as_mut().poll(&mut context) {
+                Poll::Pending => true,
+                Poll::Ready(Ok(ForegroundOperationResult::StreamingMutationStaged(handle))) => {
+                    // No caller can receive a cancelled stage result. Reclaim
+                    // the unpublished capability rather than leaving an orphan.
+                    mutations.retire_staged(handle);
+                    false
+                }
+                Poll::Ready(_) => false,
+            }
+        });
     }
 
     fn check_admission(&self) -> Result<(), RelayError> {
@@ -5355,6 +5386,9 @@ enum ForegroundOperationResult {
     TransactionCommitted(TransactionId),
     StreamingMutationPushed,
     StreamingMutationAborted(bool),
+    StreamingMutationStaged(u64),
+    StagedStreamingMutationAttached,
+    StagedStreamingMutationAborted(bool),
 }
 
 enum ForegroundOperationPoll {
@@ -5386,6 +5420,15 @@ fn foreground_operation_error(
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
     match poll {
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::StreamingMutationStaged(
+            staged,
+        )) => ForegroundDbCommandResponse::StreamingMutationStaged { staged },
+        ForegroundOperationPoll::Ready(
+            ForegroundOperationResult::StagedStreamingMutationAttached,
+        ) => ForegroundDbCommandResponse::StagedStreamingMutationAttached,
+        ForegroundOperationPoll::Ready(
+            ForegroundOperationResult::StagedStreamingMutationAborted(aborted),
+        ) => ForegroundDbCommandResponse::StagedStreamingMutationAborted { aborted },
         ForegroundOperationPoll::Ready(ForegroundOperationResult::PermissionAdvice(advice)) => {
             ForegroundDbCommandResponse::PermissionAdvice { advice }
         }
@@ -7995,6 +8038,154 @@ mod tests {
             .create(&[Value::String(title.to_owned())])
             .expect("fixture title record is valid");
         encoded_cells(descriptor, raw)
+    }
+
+    /// Alice's foreground stage is invisible until exclusive commit; rollback
+    /// and abort cannot publish it, and a consumed handle cannot attach again.
+    #[test]
+    fn foreground_staged_upload_commit_and_rollback_are_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("staged.sqlite"),
+            Some("staged"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let settle = |mut response| {
+            for _ in 0..100 {
+                let ForegroundDbCommandResponse::Pending { operation } = response else {
+                    return response;
+                };
+                relay.pump().unwrap();
+                response = foreground_operation_response(
+                    client.poll_foreground_operation(operation).unwrap(),
+                );
+            }
+            panic!("foreground stage operation did not settle");
+        };
+        for (row_id, commit) in [([0x4b; 16], true), ([0x4c; 16], false)] {
+            let descriptor = RecordDescriptor::new(std::iter::empty::<(&str, ValueType)>());
+            let raw = descriptor.create(&[]).unwrap();
+            let response = client
+                .execute_mutation_command(ForegroundDbCommandRequest::BeginStreamingMutation {
+                    mutation: ForegroundMutationKind::Insert,
+                    table: "todos".into(),
+                    row_id,
+                    cells: encoded_cells(descriptor, raw),
+                    column: "title".into(),
+                    options_json: "{}".into(),
+                })
+                .unwrap();
+            let ForegroundDbCommandResponse::StreamingMutationOpened { upload } = response else {
+                panic!("upload handle")
+            };
+            assert!(matches!(
+                settle(
+                    client
+                        .execute_mutation_command(
+                            ForegroundDbCommandRequest::PushStreamingMutation {
+                                upload,
+                                chunk: b"staged body".to_vec()
+                            },
+                        )
+                        .unwrap()
+                ),
+                ForegroundDbCommandResponse::StreamingMutationPushed
+            ));
+            let staged = settle(
+                client
+                    .execute_mutation_command(ForegroundDbCommandRequest::StageStreamingMutation {
+                        upload,
+                    })
+                    .unwrap(),
+            );
+            let ForegroundDbCommandResponse::StreamingMutationStaged { staged } = staged else {
+                panic!("staged handle")
+            };
+            let transaction = client
+                .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
+                .unwrap();
+            assert!(matches!(
+                settle(
+                    client
+                        .execute_mutation_command(
+                            ForegroundDbCommandRequest::AttachStagedStreamingMutation {
+                                staged,
+                                transaction
+                            },
+                        )
+                        .unwrap()
+                ),
+                ForegroundDbCommandResponse::StagedStreamingMutationAttached
+            ));
+            assert!(
+                client
+                    .execute_mutation_command(
+                        ForegroundDbCommandRequest::AttachStagedStreamingMutation {
+                            staged,
+                            transaction
+                        },
+                    )
+                    .is_err()
+            );
+            let rows = client
+                .local_current_foreground_row("todos".into(), row_id)
+                .unwrap();
+            let batches: Vec<DecodedForegroundRowBatch> = postcard::from_bytes(&rows).unwrap();
+            assert!(batches.iter().all(|batch| batch.rows.is_empty()));
+            if commit {
+                let tx = client.commit_foreground_transaction(transaction).unwrap();
+                let wait = foreground_operation_response(
+                    client
+                        .wait_for_foreground_transaction(*tx.as_bytes(), CoreDurabilityTier::Local)
+                        .unwrap(),
+                );
+                assert!(matches!(
+                    settle(wait),
+                    ForegroundDbCommandResponse::TransactionSettled { .. }
+                ));
+                let rows = client
+                    .local_current_foreground_row("todos".into(), row_id)
+                    .unwrap();
+                let batches: Vec<DecodedForegroundRowBatch> = postcard::from_bytes(&rows).unwrap();
+                assert_eq!(batches.len(), 1);
+                let batch = &batches[0];
+                assert_eq!(batch.table, "todos");
+                assert_eq!(batch.rows.len(), 1);
+                let row = &batch.rows[0];
+                assert_eq!(row.row_id, RowUuid::from_bytes(row_id));
+                assert!(!row.deleted);
+                let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
+                assert_eq!(
+                    record.get("title").unwrap(),
+                    Value::Nullable(Some(Box::new(Value::String("staged body".into())))),
+                );
+            } else {
+                assert!(client.rollback_foreground_transaction(transaction).unwrap());
+                relay.pump().unwrap();
+                let rows = client
+                    .local_current_foreground_row("todos".into(), row_id)
+                    .unwrap();
+                let batches: Vec<DecodedForegroundRowBatch> = postcard::from_bytes(&rows).unwrap();
+                assert!(batches.iter().all(|batch| batch.rows.is_empty()));
+            }
+            assert!(matches!(
+                settle(
+                    client
+                        .execute_mutation_command(
+                            ForegroundDbCommandRequest::AbortStagedStreamingMutation { staged },
+                        )
+                        .unwrap()
+                ),
+                ForegroundDbCommandResponse::StagedStreamingMutationAborted { aborted: false }
+            ));
+        }
+        client.close().unwrap();
     }
 
     #[derive(serde::Deserialize)]
@@ -16905,6 +17096,53 @@ mod tests {
             ),
         ];
         for (response, bytes) in responses {
+            assert_eq!(postcard::to_allocvec(&response).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+                response
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_staged_upload_v1_byte_contract() {
+        for (request, bytes) in [
+            (
+                ForegroundDbCommandRequest::StageStreamingMutation { upload: 128 },
+                vec![34, 128, 1],
+            ),
+            (
+                ForegroundDbCommandRequest::AttachStagedStreamingMutation {
+                    staged: 128,
+                    transaction: 300,
+                },
+                vec![35, 128, 1, 172, 2],
+            ),
+            (
+                ForegroundDbCommandRequest::AbortStagedStreamingMutation { staged: 128 },
+                vec![36, 128, 1],
+            ),
+        ] {
+            assert_eq!(postcard::to_allocvec(&request).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandRequest>(&bytes).unwrap(),
+                request
+            );
+        }
+        for (response, bytes) in [
+            (
+                ForegroundDbCommandResponse::StreamingMutationStaged { staged: 128 },
+                vec![26, 128, 1],
+            ),
+            (
+                ForegroundDbCommandResponse::StagedStreamingMutationAttached,
+                vec![27],
+            ),
+            (
+                ForegroundDbCommandResponse::StagedStreamingMutationAborted { aborted: true },
+                vec![28, 1],
+            ),
+        ] {
             assert_eq!(postcard::to_allocvec(&response).unwrap(), bytes);
             assert_eq!(
                 postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),

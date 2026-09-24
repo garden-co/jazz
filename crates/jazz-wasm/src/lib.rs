@@ -446,6 +446,63 @@ fn streaming_mutation_closed() -> JsValue {
     JsValue::from_str("streaming mutation is closed")
 }
 
+#[wasm_bindgen(js_name = StagedStreamingMutation)]
+pub struct WasmStagedStreamingMutation {
+    db: WasmDbInner,
+    staged: RefCell<Option<jazz::db::StagedStreamingValue>>,
+}
+
+#[wasm_bindgen]
+impl WasmStagedStreamingMutation {
+    pub fn attach(&self, open_transaction_id: String) -> js_sys::Promise {
+        let Some(mut staged) = self.staged.borrow_mut().take() else {
+            return js_sys::Promise::reject(&streaming_mutation_closed());
+        };
+        let tx = match open_transaction_id.parse::<OpenTransactionId>() {
+            Ok(tx) => tx,
+            Err(error) => return js_sys::Promise::reject(&JsValue::from_str(&error)),
+        };
+        let db = self.db.clone();
+        future_to_promise(async move {
+            match db {
+                WasmDbInner::Memory(db) => db
+                    .attach_staged_streaming_value(tx, &mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .attach_staged_streaming_value(tx, &mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            }
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn abort(&self) -> js_sys::Promise {
+        let Some(mut staged) = self.staged.borrow_mut().take() else {
+            return js_sys::Promise::resolve(&JsValue::FALSE);
+        };
+        let db = self.db.clone();
+        future_to_promise(async move {
+            let aborted = match db {
+                WasmDbInner::Memory(db) => db
+                    .abort_staged_streaming_value(&mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .abort_staged_streaming_value(&mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            };
+            Ok(JsValue::from_bool(aborted))
+        })
+    }
+}
+
 #[wasm_bindgen]
 impl WasmStreamingMutation {
     pub fn push(&self, chunk: Vec<u8>) -> js_sys::Promise {
@@ -549,6 +606,60 @@ impl WasmStreamingMutation {
                 WasmDbInner::Closed => Err(streaming_mutation_closed()),
             }?;
             Ok(write.into())
+        })
+    }
+
+    pub fn stage(&self) -> js_sys::Promise {
+        let state = {
+            let mut lifecycle = self.state.borrow_mut();
+            let current =
+                std::mem::replace(&mut *lifecycle, WasmStreamingMutationLifecycle::Closed);
+            let WasmStreamingMutationLifecycle::Open(state) = current else {
+                *lifecycle = current;
+                return js_sys::Promise::reject(&streaming_mutation_closed());
+            };
+            *state
+        };
+        future_to_promise(async move {
+            let staged = match &state.db {
+                WasmDbInner::Memory(db) => db
+                    .stage_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .stage_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            };
+            Ok(WasmStagedStreamingMutation {
+                db: state.db,
+                staged: RefCell::new(Some(staged)),
+            }
+            .into())
         })
     }
 

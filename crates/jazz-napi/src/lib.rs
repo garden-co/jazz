@@ -1840,6 +1840,61 @@ pub struct StreamingMutation {
     base: Option<CoreBranchViewBase>,
 }
 
+#[napi(js_name = "StagedStreamingMutation")]
+pub struct StagedStreamingMutation {
+    db: NapiDbInner,
+    staged: Option<jazz::db::StagedStreamingValue>,
+}
+
+#[napi]
+impl StagedStreamingMutation {
+    #[napi]
+    pub fn attach(&mut self, open_transaction_id: String) -> js::Result<()> {
+        let mut staged = self
+            .staged
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("staged streaming mutation is closed"))?;
+        let tx = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
+            }
+        }
+        .map_err(napi_error)
+        .map_err(BindingError::from)
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> js::Result<bool> {
+        let Some(mut staged) = self.staged.take() else {
+            return Ok(false);
+        };
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.abort_staged_streaming_value(&mut staged))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.abort_staged_streaming_value(&mut staged))
+            }
+        }
+        .map_err(napi_error)
+        .map_err(BindingError::from)
+    }
+}
+
 #[napi]
 impl StreamingMutation {
     #[napi]
@@ -1933,6 +1988,59 @@ impl StreamingMutation {
             )
             .map_err(BindingError::from),
         }
+    }
+
+    #[napi]
+    pub fn stage(&mut self) -> js::Result<StagedStreamingMutation> {
+        self.lifecycle.ensure_stream_active(self.stream_id)?;
+        if self
+            .lifecycle
+            .streams
+            .borrow()
+            .get(&self.stream_id)
+            .is_some_and(|stream| stream.borrow().cleanup_only)
+        {
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
+        }
+        let cells = self
+            .cells
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let (storage, upload) = self
+            .lifecycle
+            .take_stream(self.stream_id)
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let staged = match storage {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.stage_streaming_value_upload(
+                upload,
+                self.mutation,
+                &self.table,
+                self.row_id,
+                cells,
+                &self.column,
+                self.identity,
+                self.updated_at_ms,
+                self.head.clone(),
+                self.base.clone(),
+            )),
+            NapiDbInnerStorage::Persistent(db) => core_block_on(db.stage_streaming_value_upload(
+                upload,
+                self.mutation,
+                &self.table,
+                self.row_id,
+                cells,
+                &self.column,
+                self.identity,
+                self.updated_at_ms,
+                self.head.clone(),
+                self.base.clone(),
+            )),
+        }
+        .map_err(napi_error)?;
+        Ok(StagedStreamingMutation {
+            db: Rc::clone(&self.db),
+            staged: Some(staged),
+        })
     }
 
     #[napi]
