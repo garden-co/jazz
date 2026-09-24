@@ -574,6 +574,14 @@ where
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            // Linear history: a complete transaction's versions are immutable
+            // once stored, and Core's sequence is authoritative. A known
+            // complete transaction only needs its fate advanced.
+            if !existing.view_scoped_cardinality {
+                return self
+                    .apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
+                    .await;
+            }
             // Normalize aliases before establishing the batch's resident base.
             for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
                 self.ensure_schema_version_alias(schema).await?;

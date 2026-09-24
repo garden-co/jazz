@@ -320,16 +320,16 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        let global = self
-            .visible_global_layer_tx_id_for_physical_table_now(
-                table_id,
-                row_uuid,
-                VersionLayer::Deletion,
-            )
-            .await;
         let tx_id = match tier {
             // Global current storage already represents the settled winner.
-            DurabilityTier::Global => global,
+            DurabilityTier::Global => {
+                self.visible_global_layer_tx_id_for_physical_table_now(
+                    table_id,
+                    row_uuid,
+                    VersionLayer::Deletion,
+                )
+                .await
+            }
             // Local reads select the greatest global/ahead register winner.
             DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
             // No-tier reads do not have a settled maintained source.
@@ -364,6 +364,11 @@ where
                 continue;
             };
             persisted_tx_ids.insert(*tx_id);
+            // Linear history: a stored complete transaction is immutable and
+            // Core-sequenced; only view-scoped fragments need assembly below.
+            if !stored.view_scoped_cardinality {
+                continue;
+            }
             let mut stored_identity = stored.tx.clone();
             stored_identity.n_total_writes = 0;
             stored_identity = transaction_without_permission_subject(&stored_identity);
