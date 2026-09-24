@@ -845,7 +845,10 @@ macro_rules! workload_benches {
                 bench(bencher, EngineKind::PullTouched, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            // Groove's snapshot rerun is O(table) per touched subscriber; the
+            // 10-subscriber case already shows that, and 100 subscribers would
+            // cost seconds per iteration on the hosted runner.
+            #[divan::bench(args = [SUBSCRIBER_COUNTS[0]])]
             fn snapshot_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SnapshotTouched, $workload, subs);
             }
