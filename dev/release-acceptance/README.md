@@ -56,7 +56,10 @@ repository:
   },
   "output": "/absolute/new/private/receipt-directory",
   "packages": {
-    "jazz-tools": { "tarball": "/absolute/jazz-tools.tgz", "sha256": "<sha256>" },
+    "jazz-tools": {
+      "tarball": "/absolute/jazz-tools.tgz",
+      "sha256": "<sha256>"
+    },
     "jazz-napi": { "tarball": "/absolute/jazz-napi.tgz", "sha256": "<sha256>" },
     "jazz-wasm": { "tarball": "/absolute/jazz-wasm.tgz", "sha256": "<sha256>" },
     "@garden-co/jazz-napi-linux-x64-gnu": {
@@ -180,3 +183,45 @@ locators, and SIGINT/SIGTERM cleanup including TERM-resistant descendants. They
 make no network requests and do not count as package or Cloud acceptance.
 The CLI provenance tests inject API fixture responses and generated tiny ZIPs
 to check source/workflow/run/digest/entry binding and executable/package equality.
+
+## Mixed-version wire acceptance
+
+`mixed-version.mjs` runs real `jazz-tools server` binaries and real Node
+clients from two installed versions against each other (the runbook's
+"current client vs candidate server, candidate client vs current server, and
+the candidate pair"). Prepare two external projects, one with the published
+release (`npm i jazz-tools@<current>`) and one with the candidate's packed
+`jazz-tools`, `jazz-napi` and `jazz-wasm` tarballs (use npm `overrides` so the
+candidate packages win over the registry). Pair each with its native CLI: the
+published one is `node_modules/jazz-tools/bin/native/jazz-tools-linux-x64`
+(chmod +x), the candidate is `cargo build --release -p jazz-cli --bin jazz-tools`.
+
+```json
+{
+  "output": "/absolute/new/output-dir",
+  "versions": {
+    "old": {
+      "project": "/abs/old-project",
+      "cli": "/abs/old/jazz-tools-linux-x64"
+    },
+    "new": {
+      "project": "/abs/new-project",
+      "cli": "/abs/jazz/target/release/jazz-tools"
+    }
+  }
+}
+```
+
+Run `node dev/release-acceptance/mixed-version.mjs /absolute/config.json`.
+Optional keys: `only` (cell names), `skipLarge` (skip the 800KB value checks),
+`largeSizes`. Each cell uses a fresh server store, deploys schema (mixed cells
+deploy with the other version's CLI), and drives two client processes through
+global-tier insert/update/delete, remote point reads, subscriptions in both
+directions, 800KB chunked values, the legacy `"edge"` tier from old clients,
+disconnect/offline write/reconnect, a server restart or in-place server
+upgrade on the same store with a write made while it was down, and fresh
+clients. The `large-values-*` cells probe fresh subscribers against tables
+holding large rows; the `edge` cells check that retired server edges fail
+explicitly. Results are written to `<output>/results.json`; set
+`JAZZ_MIXED_TRACE=1` for per-command client traces and `RUST_LOG` for server
+logs.
