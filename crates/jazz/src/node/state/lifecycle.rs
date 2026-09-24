@@ -445,6 +445,73 @@ where
         Ok((meta_database.into_storage(), schema))
     }
 
+    /// Choose the schema a server runtime reopens an existing store with.
+    ///
+    /// A server's administrative catalogue can record schemas that never
+    /// reached its runtime store: a schema published without a lens, or one
+    /// whose lens bridge failed, is not admitted here. Reopening with such a
+    /// schema fails the durable genesis check on every restart. Keep
+    /// `requested` when this store's catalogue already holds it, and on a
+    /// fresh store. Otherwise reopen with the store's own current schema: its
+    /// write pointer, else its genesis.
+    pub(crate) async fn select_durable_reopen_schema(
+        storage: S,
+        requested: JazzSchema,
+    ) -> Result<(BoxedStorage, JazzSchema), Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
+        let meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
+        let mut genesis = None;
+        let mut schemas = BTreeMap::new();
+        for raw in meta_database
+            .primary_key_scan_raw("jazz_catalogue", &[])
+            .await?
+        {
+            let record = raw.record();
+            match codec::CatalogueRecordKind::from_key(
+                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
+            )? {
+                codec::CatalogueRecordKind::Genesis => {
+                    genesis = Some(SchemaVersionId(
+                        record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?,
+                    ));
+                }
+                codec::CatalogueRecordKind::Schema => {
+                    let schema = codec::decode_catalogue_schema(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    schemas.insert(schema.id, schema.schema);
+                }
+                _ => {}
+            }
+        }
+        let pointer = meta_database
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])
+            .await?
+            .map(|raw| {
+                Ok::<_, Error>(SchemaVersionId(
+                    raw.record()
+                        .get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                ))
+            })
+            .transpose()?;
+        let storage = meta_database.into_storage();
+        if genesis.is_none() || schemas.contains_key(&requested.version_id()) {
+            return Ok((storage, requested));
+        }
+        // The full open validates the recovered catalogue; an unusable
+        // candidate here only falls through to that open's own error.
+        let own = [pointer, genesis]
+            .into_iter()
+            .flatten()
+            .find_map(|id| schemas.remove(&id));
+        Ok((storage, own.unwrap_or(requested)))
+    }
+
     /// Open or create a node that is known to hold complete settled history.
     ///
     /// This is the authority/local-complete constructor for historical reads.
