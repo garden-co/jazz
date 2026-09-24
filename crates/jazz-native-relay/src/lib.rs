@@ -8385,6 +8385,109 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = schema();
+        let edge = JazzServer::builder()
+            .with_schema(schema.public_schema().clone())
+            .with_jwks_url(issuer.endpoint())
+            .start()
+            .await
+            .expect("start test server");
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let bearer = TestJwtIssuer::jwt_for_user("native-tick-diagnostic");
+        let capability = fixture
+            .begin_account_session(
+                &edge.base_url(),
+                &edge.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
+        let foreground = fixture.open_foreground(&capability);
+
+        let mut diagnostic = u32::MAX;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                    fixture.lease,
+                    foreground,
+                    &mut diagnostic,
+                )
+            },
+            JazzNativeRelayStatus::Ok,
+        );
+        assert_eq!(diagnostic, 0, "successful ticks have no diagnostic");
+
+        let scope = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foregrounds
+                .get(&foreground)
+                .unwrap()
+                .scope
+                .clone()
+        };
+        let terminal_error = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .private_scope_workers
+                .get(&scope)
+                .unwrap()
+                .terminal_error
+                .clone()
+        };
+        let sentinel = "UPSTREAM_SECRET_SENTINEL_do_not_expose";
+        *terminal_error.lock().unwrap() = Some(sentinel.to_owned());
+
+        diagnostic = u32::MAX;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                    fixture.lease,
+                    foreground,
+                    &mut diagnostic,
+                )
+            },
+            JazzNativeRelayStatus::LifecycleFailure,
+        );
+        assert_eq!(
+            diagnostic, 1,
+            "a retained terminal error gets the fixed upstream-terminal code"
+        );
+        assert_eq!(
+            terminal_error.lock().unwrap().as_deref(),
+            Some(sentinel),
+            "diagnostic reporting does not consume the retained terminal cause"
+        );
+
+        diagnostic = u32::MAX;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                    fixture.lease,
+                    u64::MAX,
+                    &mut diagnostic,
+                )
+            },
+            JazzNativeRelayStatus::InvalidHandle,
+        );
+        assert_eq!(diagnostic, 0, "invalid handles have no diagnostic");
+
+        fixture.revoke_private_session(&capability);
+        assert_eq!(
+            edge.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
     /// A strict native read crosses the local relay and authenticated Core link and must retain
     /// its policy binding without exporting a hop-local relay capability.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
