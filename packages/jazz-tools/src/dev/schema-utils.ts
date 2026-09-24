@@ -29,9 +29,7 @@ export function shortSchemaHash(hash: string): string {
  * strings compares UTF-16 code units, which orders U+E000..U+FFFF after
  * astral characters and would diverge from Rust's schema hash.
  */
-export function canonicalCompositeIndexOrder(
-  indexes: readonly (readonly string[])[],
-): string[][] {
+export function canonicalCompositeIndexOrder(indexes: readonly (readonly string[])[]): string[][] {
   return indexes
     .map((columns) => [...columns])
     .sort((left, right) => {
