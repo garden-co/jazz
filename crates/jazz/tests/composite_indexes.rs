@@ -10,6 +10,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, UpdateOptions}
 use jazz::groove::records::Value;
 use jazz::groove::storage::{LayoutStorage, OrderedKvStorage, StorageLayout};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuilder};
@@ -266,5 +267,182 @@ fn physical_composite_index_entry_keys_are_pinned() {
         [
             "6a617a7a5f706879736963616c5f315f61686561645f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0300ff00ff00ff00ff00ff0400ff00ff0300ff00ff00ff00ff00ff00ff00ff010000"
         ]
+    );
+}
+
+/// Row ids of every composite-index entry, in storage key order.
+///
+/// Deliberately below the public API: no query path reads a composite index
+/// yet (the planner still chooses single-column probes), so a missing or
+/// stale index is invisible in query results. The entries' key order is the
+/// order the index would serve `(owner, rank)` pages in, and each key ends in
+/// the row's primary key, whose 16-byte row uuid is `[n; 16]` in these tests.
+fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec<u8> {
+    let families = schema.column_families();
+    let storage = RocksDbStorage::open(
+        path,
+        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
+    block_on(storage.prefix("indices".into(), Vec::new()))
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            key.windows(b"\0by_physical_composite_".len())
+                .any(|window| window == b"\0by_physical_composite_")
+        })
+        .map(|key| {
+            (1..=u8::MAX)
+                .find(|byte| key.windows(16).any(|window| window == [*byte; 16]))
+                .expect("composite index key names a test row uuid")
+        })
+        .collect()
+}
+
+/// Publish `composite` as the identity-lens descendant of `plain` and make it
+/// the write schema: the ordinary catalogue migration path for any schema
+/// change to an existing store.
+fn publish_composite_descendant(
+    db: &Db<RocksDbStorage>,
+    plain: &JazzSchema,
+    composite: &JazzSchema,
+) {
+    let target = SchemaVersion::new(composite.clone());
+    let lens = MigrationLens::new(
+        plain.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "tasks".into(),
+            target_table: "tasks".into(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    let publication = db
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    block_on(db.publish_schema_with_lens(1, publication)).unwrap();
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
+        revision: 1,
+        schema: target.id,
+    }))
+    .unwrap();
+}
+
+/// Adding a composite index to an existing app is a schema change, not a
+/// no-op. The composite schema is a new schema version, so reopening a plain
+/// store with it directly waits for catalogue admission like any other schema
+/// change; once published through the ordinary identity-lens migration, the
+/// index is backfilled for rows written before it existed and maintained for
+/// rows written after, across a reopen, in `(owner, rank)` order.
+///
+/// ```text
+/// open(plain) ──insert r1 alice/2, r2 bob/1──► close
+/// open(plain + composite) ──write──► rejected: awaiting catalogue admission
+/// open(plain) ──publish composite via identity lens──► insert r3 alice/1 ──► close
+/// open(plain + composite) ──insert r4 bob/0──► close
+///     index order = [r3 alice/1, r1 alice/2, r4 bob/0, r2 bob/1]
+/// ```
+///
+/// Before composite indexes were part of the schema version id, both schemas
+/// shared one id, the direct reopen silently kept the stored plain schema, and
+/// the index held no entries at all.
+#[test]
+fn adding_composite_index_to_existing_store_maintains_and_backfills_it() {
+    let plain = JazzSchema::new(&SchemaBuilder::new().table(tasks_table()).build())
+        .expect("plain schema compiles");
+    let composite = JazzSchema::new(&public_schema()).expect("composite schema compiles");
+    assert_ne!(
+        plain.version_id(),
+        composite.version_id(),
+        "declaring a composite index is a new schema version"
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let db = open_rocks_db(directory.path(), &plain);
+        insert_task(&db, row(1), "alice", 2, "plan");
+        insert_task(&db, row(2), "bob", 1, "review");
+    }
+    {
+        let db = open_rocks_db(directory.path(), &composite);
+        let error = block_on(db.insert(
+            "tasks",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::String("carol".to_owned())),
+                ("rank".to_owned(), Value::I32(1)),
+                ("title".to_owned(), Value::String("unadmitted".to_owned())),
+            ]),
+            InsertOptions::default(),
+        ))
+        .err()
+        .expect("an unpublished composite schema is not silently the plain one");
+        assert!(
+            error
+                .to_string()
+                .contains("awaiting published catalogue admission"),
+            "{error}"
+        );
+    }
+    {
+        let db = open_rocks_db(directory.path(), &plain);
+        publish_composite_descendant(&db, &plain, &composite);
+        insert_task(&db, row(3), "alice", 1, "draft");
+        assert_eq!(top_two_titles(&db, &composite, "alice"), ["plan", "draft"]);
+    }
+    {
+        let db = open_rocks_db(directory.path(), &composite);
+        insert_task(&db, row(4), "bob", 0, "triage");
+        assert_eq!(top_two_titles(&db, &composite, "bob"), ["review", "triage"]);
+    }
+    assert_eq!(
+        composite_index_row_order(directory.path(), &composite),
+        [3, 1, 4, 2]
+    );
+}
+
+/// Durable-encoding receipt for schema version ids. The id is a UUIDv5 over
+/// the schema's canonical bytes and addresses every catalogue record, so it
+/// must never drift for an existing schema: a schema without composite
+/// indexes keeps its frozen `jazz-schema-v1-large-value-kinds` id (this value
+/// predates composite indexes), and a schema that declares one is addressed
+/// under the distinct `jazz-schema-v2-composite-indexes` domain, with its
+/// indexes in canonical order so declaration order is not identity.
+#[test]
+fn schema_version_ids_are_pinned_for_plain_and_composite_schemas() {
+    let plain = JazzSchema::new(&SchemaBuilder::new().table(tasks_table()).build())
+        .expect("plain schema compiles");
+    assert_eq!(
+        plain.version_id().0.to_string(),
+        "ea0daf2b-1053-5c20-87ac-ac6cec6e0a05"
+    );
+    let composite = JazzSchema::new(&public_schema()).expect("composite schema compiles");
+    assert_eq!(
+        composite.version_id().0.to_string(),
+        "f68ae7b9-71bd-5411-9bd8-40f52d154e79"
+    );
+    let two = |first: [&str; 2], second: [&str; 2]| {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(tasks_table().composite_index(first).composite_index(second))
+                .build(),
+        )
+        .expect("composite schema compiles")
+        .version_id()
+    };
+    assert_eq!(
+        two(["owner", "rank"], ["rank", "owner"]).0.to_string(),
+        "e07667f6-7076-597e-ad37-f1829ff8bd96"
+    );
+    assert_eq!(
+        two(["owner", "rank"], ["rank", "owner"]),
+        two(["rank", "owner"], ["owner", "rank"])
     );
 }

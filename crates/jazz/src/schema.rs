@@ -1905,9 +1905,32 @@ pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
     .column_type
 }
 
+/// Domain tag of the frozen schema-id encoding. Every schema without a
+/// composite index is addressed by exactly these bytes, so its
+/// [`SchemaVersionId`] never changes.
+const SCHEMA_ID_DOMAIN_V1: &str = "jazz-schema-v1-large-value-kinds";
+/// Domain tag used exactly when some table declares a composite index. The
+/// body is the v1 body with, after each table's `branch_by`, that table's
+/// composite indexes: a `u64` count, then per index (in canonical order,
+/// lexicographic over UTF-8 column-name bytes) a `u64` column count and each
+/// length-prefixed column name. A distinct domain tag rather than an optional
+/// trailing section keeps the encoding injective.
+const SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES: &str = "jazz-schema-v2-composite-indexes";
+
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
+    let with_composite_indexes = schema
+        .tables
+        .iter()
+        .any(|table| !table.composite_indexes.is_empty());
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v1-large-value-kinds");
+    put_str(
+        &mut bytes,
+        if with_composite_indexes {
+            SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES
+        } else {
+            SCHEMA_ID_DOMAIN_V1
+        },
+    );
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1935,6 +1958,16 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         put_u64(&mut bytes, branch_by.len() as u64);
         for column in branch_by {
             put_str(&mut bytes, column);
+        }
+        if with_composite_indexes {
+            // `BTreeSet<Vec<String>>` iterates in canonical order.
+            put_u64(&mut bytes, table.composite_indexes.len() as u64);
+            for columns in &table.composite_indexes {
+                put_u64(&mut bytes, columns.len() as u64);
+                for column in columns {
+                    put_str(&mut bytes, column);
+                }
+            }
         }
     }
     bytes
