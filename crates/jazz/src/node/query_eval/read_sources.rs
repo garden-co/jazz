@@ -4286,18 +4286,15 @@ where
                         }
                         _ => literal_equalities_for_filters(&join.filters, binding)?,
                     };
-                    if let Some(path @ CurrentAccessPath::Index { .. }) =
-                        select_current_access_path(&join_table, &equalities)
+                    // Key the path by the occurrence normalization actually
+                    // emitted rather than re-spelling its alias scheme here: a
+                    // stale spelling would silently drop the probe, or narrow
+                    // a different occurrence of the same table.
+                    if let Some(join_source) = single_root_join_source(request, &join.table)
+                        && let Some(path @ CurrentAccessPath::Index { .. }) =
+                            select_current_access_path(&join_table, &equalities)
                     {
-                        paths.insert(
-                            SourceId {
-                                table: join.table.clone(),
-                                path: SourcePath {
-                                    components: vec![SourceRole::Alias("join_via:0".to_owned())],
-                                },
-                            },
-                            path,
-                        );
+                        paths.insert(join_source.clone(), path);
                     }
                 }
             }
@@ -5495,4 +5492,24 @@ fn append_author_projection_values(
         values.push(value);
     }
     Ok(())
+}
+
+/// The normalized source occurrence of a query's only root-level `join_via`.
+///
+/// Returns `None` unless normalization recorded exactly one root join
+/// contribution and it reads `join_table`, so a caller never guesses which
+/// occurrence an access path applies to.
+fn single_root_join_source<'a>(
+    request: &'a QueryProgramRequest,
+    join_table: &str,
+) -> Option<&'a SourceId> {
+    let mut root_joins = request
+        .input
+        .shape
+        .join_contributions
+        .iter()
+        .filter(|contribution| contribution.parent.is_none());
+    let contribution = root_joins.next()?;
+    (root_joins.next().is_none() && contribution.source.table == join_table)
+        .then_some(&contribution.source)
 }
