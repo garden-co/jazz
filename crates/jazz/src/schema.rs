@@ -471,16 +471,14 @@ impl RuntimeSchema {
 
     /// Return all storage tables used by Jazz.
     pub fn storage_tables(&self) -> Vec<GrooveTableSchema> {
-        let mut tables = vec![
+        vec![
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
             transactions_table(),
             rejected_transactions_table(),
-        ];
-        tables.push(global_changes_table());
-        tables
+        ]
     }
 
     /// Return the version-independent metadata tables used by staged catalogue open.
@@ -1097,7 +1095,13 @@ impl TableSchema {
                 ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
-        content_table
+        // `by_seq`: rows ordered by the seq of their latest accepted change.
+        // "Rows changed since W" is a range read here; there is no separate
+        // change log.
+        content_table.with_index(GrooveIndexSchema::new(
+            GLOBAL_CURRENT_BY_SEQ_INDEX,
+            ["branch_key", "global_time", "row_uuid"],
+        ))
     }
 
     /// Return the ahead-of-global candidate table (local pending rows).
@@ -1234,34 +1238,6 @@ fn catalogue_pointer_table() -> GrooveTableSchema {
     .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
 }
 
-fn global_changes_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_global_changes",
-        [
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("global_time", GrooveColumnType::U64),
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::bytes("branch_key"),
-        PrimaryKeyColumn::uuid("row_uuid"),
-        PrimaryKeyColumn::integer("global_time", IntegerKeyType::U64),
-    ]))
-    .with_index(GrooveIndexSchema::new(
-        "by_global_time",
-        ["global_time", "physical_table_id", "branch_key", "row_uuid"],
-    ))
-    .with_index(GrooveIndexSchema::new(
-        "by_table_global_time",
-        ["physical_table_id", "branch_key", "global_time", "row_uuid"],
-    ))
-}
-
 /// Policy-shape constructors.
 #[cfg(test)]
 pub(crate) struct Policy;
@@ -1329,6 +1305,9 @@ pub(crate) const APP_COLUMN_PREFIX: &str = "_app_";
 pub(crate) fn app_storage_column_name(column: &str) -> String {
     format!("{APP_COLUMN_PREFIX}{column}")
 }
+
+/// Index on global current ordered by each row's latest accepted seq.
+pub(crate) const GLOBAL_CURRENT_BY_SEQ_INDEX: &str = "by_seq";
 
 pub(crate) fn global_current_index_name(column: &str) -> String {
     format!("by_app_{column}")
@@ -1886,40 +1865,6 @@ mod tests {
             [ColumnSchema::new("owner", ColumnType::Uuid)],
         )
         .with_read_policy(Policy::owner_only("todos", "missing"))]);
-    }
-
-    #[test]
-    fn global_changes_table_key_and_index_match_sync_contract() {
-        let table = global_changes_table();
-        let primary_key = table.primary_key.as_ref().unwrap();
-        assert_eq!(table.name, "jazz_global_changes");
-        assert_eq!(
-            primary_key
-                .columns
-                .iter()
-                .map(|column| column.column.as_str())
-                .collect::<Vec<_>>(),
-            vec!["physical_table_id", "branch_key", "row_uuid", "global_time"]
-        );
-
-        let index = table
-            .indices
-            .iter()
-            .find(|index| index.name == "by_global_time")
-            .unwrap();
-        assert_eq!(
-            index.columns,
-            vec!["global_time", "physical_table_id", "branch_key", "row_uuid",]
-        );
-        let table_index = table
-            .indices
-            .iter()
-            .find(|index| index.name == "by_table_global_time")
-            .unwrap();
-        assert_eq!(
-            table_index.columns,
-            vec!["physical_table_id", "branch_key", "global_time", "row_uuid",]
-        );
     }
 
     #[test]

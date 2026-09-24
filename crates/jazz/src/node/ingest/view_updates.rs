@@ -264,8 +264,6 @@ where
             }
             self.assert_global_current_row_matches_version_for_test(version, *global_time)
                 .await?;
-            self.assert_global_change_row_matches_version_for_test(version, *global_time)
-                .await?;
         }
         Ok(())
     }
@@ -315,58 +313,6 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
-    async fn assert_global_change_row_matches_version_for_test(
-        &mut self,
-        version: &VersionRow,
-        global_time: GlobalTime,
-    ) -> Result<(), Error> {
-        let schema_version = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
-        let rows = self.database.primary_key_scan_raw(
-            "jazz_global_changes",
-            &[
-                Value::U64(table_id.0),
-                Value::Bytes(version.branch_key().canonical_bytes()),
-                Value::Uuid(version.row_uuid().0),
-                Value::U64(global_time.0),
-            ],
-        )
-        .await?;
-        let Some(row) = rows.first() else {
-            panic!(
-                "missing global-change row for {}/{:?} at {:?}",
-                version.table(),
-                version.row_uuid(),
-                global_time
-            );
-        };
-        let record = row.record();
-        let actual_tx = TxId::new(
-            TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
-            self.node_for_alias(NodeAlias(
-                record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?,
-            ))
-            .ok_or(Error::InvalidStoredValue(
-                "global-change tx node alias must exist",
-            ))?,
-        );
-        let expected_tx = self.version_tx_id(version)?;
-        if actual_tx != expected_tx {
-            panic!(
-                "global-change row diverged for {}/{:?} at {:?}: expected tx {:?}, actual tx {:?}",
-                version.table(),
-                version.row_uuid(),
-                global_time,
-                expected_tx,
-                actual_tx,
-            );
-        }
-        Ok(())
-    }
-
     pub(super) fn write_history_post_image(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -403,14 +349,6 @@ where
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
-        );
-        batch.update(
-            "jazz_global_changes",
-            global_change_values(
-                self.physical_table_id_for_schema(schema_version, version.table())?,
-                version,
-                global_time,
-            ),
         );
         Ok(())
     }

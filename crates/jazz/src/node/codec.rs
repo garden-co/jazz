@@ -48,17 +48,6 @@ groove::define_record! {
     }
 }
 
-groove::define_record! {
-    pub(super) struct GlobalChangeRowRecord {
-        0 => physical_table_id: u64,
-        1 => branch_key: Vec<u8>,
-        2 => row_uuid: RowUuid,
-        3 => global_time: GlobalTime,
-        4 => tx_time: TxTime,
-        5 => tx_node_id: NodeAlias,
-    }
-}
-
 groove::impl_record_field_u64!(TxTime);
 groove::impl_record_field_u64!(GlobalTime);
 groove::impl_record_field_u64!(NodeAlias);
@@ -1980,12 +1969,6 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         RejectedTransactionRowRecord::assert_layout(&rejected_tx_descriptor);
 
-        let global_change_descriptor = groove_schema
-            .table("jazz_global_changes")
-            .expect("global changes table")
-            .record_schema();
-        GlobalChangeRowRecord::assert_layout(&global_change_descriptor);
-
         for table in &schema.tables {
             let rejected_version_descriptor =
                 table.rejected_versions_storage_table().record_schema();
@@ -3714,37 +3697,6 @@ pub(super) fn global_current_values(
         version.authored_column_ids()?.as_ref(),
     ));
     Ok(values)
-}
-
-pub(super) fn global_change_values(
-    table_id: PhysicalTableId,
-    version: &VersionRow,
-    global_time: GlobalTime,
-) -> Vec<Value> {
-    vec![
-        Value::U64(table_id.0),
-        Value::Bytes(version.branch_key().canonical_bytes()),
-        Value::Uuid(version.row_uuid().0),
-        Value::U64(global_time.0),
-        Value::U64(version.tx_time().0),
-        Value::U64(version.tx_node_alias().0),
-    ]
-}
-
-#[allow(dead_code)]
-pub(super) fn global_change_primary_key_from_record(
-    record: &BorrowedRecord<'_>,
-) -> Result<PrimaryKeyValue, Error> {
-    Ok(PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
-        PrimaryKeyValue::Bytes(
-            record
-                .get_bytes(GlobalChangeRowRecord::FIELD_BRANCH_KEY_IDX)?
-                .to_vec(),
-        ),
-        PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
-        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)?),
-    ]))
 }
 
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {

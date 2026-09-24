@@ -2032,74 +2032,61 @@ where
         self.bounded_historical_current_rows(table, position).await
     }
 
-    async fn bounded_global_change_records_at(
-        &mut self,
-        table: &str,
-        position: GlobalTime,
-    ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        if position.0 == u64::MAX {
-            Ok(self
-                .database
-                .index_scan_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                    ],
-                )
-                .await?)
-        } else {
-            Ok(self
-                .database
-                .index_scan_range_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(0),
-                    ],
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(position.0 + 1),
-                    ],
-                )
-                .await?)
-        }
-    }
-
+    /// Global rows of `table` as of seq `position`: a row whose latest
+    /// accepted seq is at or below the cut reads current; a newer row seeks
+    /// its history for the newest accepted image at or below the cut.
     async fn bounded_historical_current_rows(
         &mut self,
         table: &str,
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
-        let mut rows_by_uuid = BTreeMap::<RowUuid, (TxTime, NodeAlias)>::new();
-        for raw in self
-            .bounded_global_change_records_at(table, position)
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let current_table = physical_global_current_table_name(table_id);
+        let branch = BranchKey::default();
+        let records = self
+            .database
+            .primary_key_scan_raw(&current_table, &[Value::Bytes(branch.canonical_bytes())])
             .await?
-        {
-            let record = raw.record();
-            let row_uuid = RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?);
-            let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-            let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            let entry = rows_by_uuid.entry(row_uuid).or_insert((tx_time, tx_node));
-            if (tx_time, tx_node) > *entry {
-                *entry = (tx_time, tx_node);
-            }
-        }
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
         let mut rows = Vec::new();
-        for (row_uuid, (tx_time, tx_node_alias)) in rows_by_uuid {
-            let version = self
-                .query_version_by_alias(table, row_uuid, tx_time, tx_node_alias)
-                .await?
-                .ok_or(Error::InvalidStoredValue(
-                    "historical row winner is missing",
-                ))?;
+        for record in records {
+            let record = record.borrowed();
+            let row_uuid = RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
+            let seq = record
+                .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .unwrap_or(0);
+            let version = if seq <= position.0 {
+                let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+                let tx_node =
+                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                self.query_version_by_alias(table, row_uuid, tx_time, tx_node)
+                    .await?
+                    .ok_or(Error::InvalidStoredValue(
+                        "historical row winner is missing",
+                    ))?
+            } else {
+                let mut best: Option<(GlobalTime, VersionRow)> = None;
+                for version in self
+                    .query_row_versions_in_branch(table, &branch, row_uuid)
+                    .await?
+                {
+                    let tx_id = self.version_tx_id(&version)?;
+                    let Some((_, Some(seq), _)) = self.query_transaction_state(tx_id).await? else {
+                        continue;
+                    };
+                    if seq <= position && best.as_ref().is_none_or(|(best, _)| *best < seq) {
+                        best = Some((seq, version));
+                    }
+                }
+                let Some((_, version)) = best else {
+                    continue;
+                };
+                version
+            };
             if version.is_deleted() {
                 continue;
             }

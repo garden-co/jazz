@@ -354,11 +354,7 @@ where
             }
         } else { legacy_pointer };
         let mut has_non_catalogue_residue = false;
-        for table in [
-            "jazz_transactions",
-            "jazz_rejected_transactions",
-            "jazz_global_changes",
-        ] {
+        for table in ["jazz_transactions", "jazz_rejected_transactions"] {
             if !meta_database
                 .primary_key_scan_raw(table, &[])
                 .await?

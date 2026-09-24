@@ -4913,67 +4913,6 @@ fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
     ))
 }
 
-#[cfg(test)]
-pub(super) fn historical_current_graph_full_scan(
-    table: &TableSchema,
-    table_id: PhysicalTableId,
-    position: GlobalTime,
-    history_rows: GraphBuilder,
-) -> GraphBuilder {
-    let cut_predicate = PredicateExpr::And(vec![
-        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
-        PredicateExpr::LtEq {
-            field: "global_time".to_owned(),
-            value: Value::U64(position.0).into(),
-        },
-    ])
-    .canonicalize();
-    // Deletion is a cell of the row image: the latest settled change per row
-    // names the winning image, which is visible unless it is deleted.
-    let winners = GraphBuilder::arg_max_by(
-        GraphBuilder::table("jazz_global_changes")
-            .filter(cut_predicate)
-            .project(["row_uuid", "tx_time", "tx_node_id"]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    );
-    let mut history_fields = maintained_view_history_storage_field_names(table);
-    history_fields.push("_deletion".to_owned());
-    let history_rows = history_rows.project(history_fields);
-    GraphBuilder::join(
-        history_rows,
-        winners,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .filter(PredicateExpr::Or(vec![
-        PredicateExpr::is_null("left._deletion"),
-        PredicateExpr::Neq {
-            field: "left._deletion".to_owned(),
-            value: Value::EnumTag(0).into(),
-        },
-    ]))
-    .project_fields(
-        ["row_uuid".to_owned()]
-            .into_iter()
-            .chain(
-                table
-                    .columns
-                    .iter()
-                    .map(|column| user_column_field(&column.name)),
-            )
-            .map(|field| ProjectField::renamed(left_field(&field), field))
-            .chain([
-                ProjectField::renamed("left.created_by", "$createdBy"),
-                ProjectField::renamed("left.created_at", "$createdAt"),
-                ProjectField::renamed("left.updated_by", "$updatedBy"),
-                ProjectField::renamed("left.updated_at", "$updatedAt"),
-                ProjectField::renamed("left.tx_time", "tx_time"),
-                ProjectField::renamed("left.tx_node_id", "tx_node_id"),
-            ]),
-    )
-}
-
 fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))

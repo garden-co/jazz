@@ -6,6 +6,7 @@
 //! authority-settled groove state.
 
 use super::*;
+use crate::schema::GLOBAL_CURRENT_BY_SEQ_INDEX;
 
 impl<S> NodeState<S>
 where
@@ -46,39 +47,75 @@ where
         Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
     }
 
-    /// Rows of `table` whose global current changed after `position`, read
-    /// from the seq-ordered change index.
+    /// Global-current records of `table` whose latest accepted seq is after
+    /// `position`, in seq order, read from the current table's `by_seq` index.
+    async fn global_current_records_after(
+        &mut self,
+        table: &str,
+        position: GlobalTime,
+    ) -> Result<Vec<groove::records::OwnedRecord>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let current_table = physical_global_current_table_name(table_id);
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        Ok(self
+            .database
+            .index_scan_range_raw(
+                &current_table,
+                GLOBAL_CURRENT_BY_SEQ_INDEX,
+                &[
+                    branch.clone(),
+                    Value::Nullable(Some(Box::new(Value::U64(position.0.saturating_add(1))))),
+                ],
+                &[
+                    branch,
+                    Value::Nullable(Some(Box::new(Value::U64(u64::MAX)))),
+                ],
+            )
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect())
+    }
+
+    /// Rows of `table` whose global current changed after `position`.
     pub(super) async fn global_rows_changed_after(
         &mut self,
         table: &str,
         position: GlobalTime,
     ) -> Result<BTreeSet<RowUuid>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
-        let records = self
-            .database
-            .index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    branch.clone(),
-                    Value::U64(position.0.saturating_add(1)),
-                ],
-                &[Value::U64(table_id.0), branch, Value::U64(u64::MAX)],
-            )
-            .await?;
         let mut rows = BTreeSet::new();
-        for raw in records {
-            let record = raw.record();
-            rows.insert(RowUuid::from_bytes(
-                *record
-                    .get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?
-                    .as_bytes(),
+        for record in self.global_current_records_after(table, position).await? {
+            rows.insert(RowUuid(
+                record
+                    .borrowed()
+                    .get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
             ));
         }
         Ok(rows)
+    }
+
+    /// The largest seq of any accepted change to `table`.
+    pub(super) async fn global_table_seq(&mut self, table: &str) -> Result<GlobalTime, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let current_table = physical_global_current_table_name(table_id);
+        let Some(raw) = self
+            .database
+            .index_last_raw(
+                &current_table,
+                GLOBAL_CURRENT_BY_SEQ_INDEX,
+                &[Value::Bytes(BranchKey::default().canonical_bytes())],
+            )
+            .await?
+        else {
+            return Ok(GlobalTime(0));
+        };
+        Ok(GlobalTime(
+            raw.record()
+                .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .unwrap_or(0),
+        ))
     }
 
     pub(super) async fn global_currency_changed_after(
@@ -86,24 +123,7 @@ where
         table: &str,
         global_base: GlobalTime,
     ) -> Result<bool, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        let Some(raw) = self
-            .database
-            .index_last_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                ],
-            )
-            .await?
-        else {
-            return Ok(false);
-        };
-        let record = raw.record();
-        Ok(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)? > global_base.0)
+        Ok(self.global_table_seq(table).await? > global_base)
     }
 
     pub(super) async fn global_currency_changed_outside_snapshot(
@@ -116,32 +136,17 @@ where
                 .global_currency_changed_after(table, snapshot.global_base)
                 .await;
         }
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        let records = self
-            .database
-            .index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[Value::U64(table_id.0)],
-            )
+        for record in self
+            .global_current_records_after(table, snapshot.global_base)
             .await?
-            .into_iter()
-            .map(|raw| raw.owned_record())
-            .collect::<Vec<_>>();
-        for record in records {
+        {
             let record = record.borrowed();
-            if record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                <= snapshot.global_base.0
-            {
-                continue;
-            }
-            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-                "global change node alias must exist",
+                "global current node alias must exist",
             ))?;
             let tx_id = TxId::new(
-                TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
+                TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
                 node,
             );
             if !self.snapshot_covers(tx_id, snapshot).await {

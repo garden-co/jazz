@@ -848,6 +848,10 @@ pub(super) fn physical_version_storage_tables(
             current_columns(),
         );
         physical_global.primary_key = logical_global.primary_key.clone();
+        physical_global = physical_global.with_index(GrooveIndexSchema::new(
+            crate::schema::GLOBAL_CURRENT_BY_SEQ_INDEX,
+            ["branch_key", "global_time", "row_uuid"],
+        ));
         let indexed_columns = variants
             .iter()
             .flat_map(|(_, logical_table, mapping, _)| {
