@@ -206,8 +206,9 @@ export abstract class ConnectionManager {
    */
   private bindRemoteLinkHint(client: JazzClient): void {
     this.remoteLinkHintBinding?.abort();
-    const runtime = client.getRuntime();
-    if (!runtime.setRemoteLinkHint) return;
+    // Test doubles and runtimes without a core read gate expose no setter.
+    const runtime = client.getRuntime?.();
+    if (!runtime?.setRemoteLinkHint) return;
     const binding = new AbortController();
     this.remoteLinkHintBinding = binding;
     const report = (state: RemoteLinkState) => {
