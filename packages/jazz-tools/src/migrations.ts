@@ -692,12 +692,19 @@ function buildRemovedTableSet(
   return set;
 }
 
-function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
+function columnShapeSignature(
+  builder: AnyTypedColumnBuilder,
+  omitReference = false,
+  tableRenames?: ReadonlyMap<string, string>,
+): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
     sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
     nullable: column.nullable,
-    references: omitReference ? null : (column.references ?? null),
+    references:
+      omitReference || !column.references
+        ? null
+        : (tableRenames?.get(column.references) ?? column.references),
   });
 }
 
@@ -744,6 +751,7 @@ function tableMatchesAfterApplyingColumnOperations(
   sourceTable: Record<string, AnyTypedColumnBuilder>,
   targetTable: Record<string, AnyTypedColumnBuilder>,
   tableOps: Record<string, AddOp | DropOp | RenameOp>,
+  tableRenames: ReadonlyMap<string, string>,
   allowReferenceAdditions = false,
 ): boolean {
   const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
@@ -792,8 +800,12 @@ function tableMatchesAfterApplyingColumnOperations(
     if (allowReferenceAdditions && !columnMetadataEqual(sourceBuilder, targetBuilder)) return false;
     const omitReference = allowReferenceAdditions && !sourceBuilder._build(columnName).references;
     if (
-      columnShapeSignature(sourceBuilder, omitReference) !==
-      columnShapeSignature(targetBuilder, omitReference)
+      columnShapeSignature(
+        sourceBuilder,
+        omitReference,
+        // Added columns already use the destination witness's reference names.
+        tableOps[columnName]?._type === "add" ? tableRenames : undefined,
+      ) !== columnShapeSignature(targetBuilder, omitReference, tableRenames)
     ) {
       return false;
     }
@@ -909,7 +921,10 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
-      if (source.references === target.references) continue;
+      const targetReference = target.references
+        ? (renameTableMap.get(target.references) ?? target.references)
+        : target.references;
+      if (source.references === targetReference) continue;
       if (
         !source.references &&
         target.references &&
@@ -1060,6 +1075,7 @@ function buildForwardLenses<
         sourceTables[sourceTableName]!,
         targetTables[tableName]!,
         tableOps,
+        renameTableMap,
         true,
       )
     ) {
@@ -1078,7 +1094,14 @@ function buildForwardLenses<
         );
       }
 
-      if (!tableMatchesAfterApplyingColumnOperations(sourceTable, targetTable, tableOps)) {
+      if (
+        !tableMatchesAfterApplyingColumnOperations(
+          sourceTable,
+          targetTable,
+          tableOps,
+          renameTableMap,
+        )
+      ) {
         throw new Error(
           `Table rename ${sourceTableName} -> ${tableName} does not match the target table after applying its column migrations.`,
         );
