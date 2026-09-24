@@ -522,6 +522,17 @@ requested order and filters can be satisfied by storage. The fallback remains
 correct materialize/sort/limit behavior, but the optimized path must preserve
 policy filtering, pagination, and live subscription maintenance.
 
+A table's declared `composite_indexes` lower to one physical index per
+distinct column list on both the ahead-current and global-current tables of
+its lineage. The index is named `by_physical_composite_v1_<id>_<id>...`,
+listing the columns' decimal `PhysicalColumnId`s in declared order, and its
+key columns are `branch_key` followed by each `_app_<id>` field in that order;
+entries use groove's ordinary persisted-index key encoding. The `v1` spelling
+is part of the durable key namespace: changing the name or column order is a
+new index version, not a respelling. `crates/jazz/tests/composite_indexes.rs`
+pins the exact entry key bytes. Every read of such an index is admitted
+through the same current-access-path guard as single-column indexes.
+
 ### Established policy-lowering boundary
 
 `INV-LOWER-20` is settled: both read policy and write admission lower through

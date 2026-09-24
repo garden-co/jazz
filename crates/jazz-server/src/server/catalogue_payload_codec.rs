@@ -3571,7 +3571,10 @@ mod tests {
             )
             .build();
         let schema_bytes = encode_schema(&schema);
-        assert_eq!(hex(&schema_bytes), "TODO");
+        assert_eq!(
+            hex(&schema_bytes),
+            "020100000004000000646f637302000000050000006f776e6572060000000007000000757064617465640500000000ffffffff000000000200000002000000050000006f776e65720700000075706461746564020000000700000075706461746564050000006f776e6572"
+        );
         assert_eq!(decode_schema(&schema_bytes).unwrap(), schema);
         let redeclared = SchemaBuilder::new()
             .table(
@@ -3604,8 +3607,14 @@ mod tests {
             false,
         );
         let lens_bytes = encode_lens_transform(&lens);
-        assert_eq!(hex(&lens_bytes), "TODO");
-        assert_eq!(encode_lens_transform(&decode_lens_transform(&lens_bytes).unwrap()), lens_bytes);
+        assert_eq!(
+            hex(&lens_bytes),
+            "02010000000404000000646f637302000000050000006f776e6572060000000007000000757064617465640500000000000000000100000002000000050000006f776e6572070000007570646174656400000000"
+        );
+        assert_eq!(
+            encode_lens_transform(&decode_lens_transform(&lens_bytes).unwrap()),
+            lens_bytes
+        );
         let mut lens_as_v1 = lens_bytes.clone();
         lens_as_v1[0] = LENS_VERSION;
         assert!(decode_lens_transform(&lens_as_v1).is_err());

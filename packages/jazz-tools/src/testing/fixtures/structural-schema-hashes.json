@@ -543,25 +543,25 @@
       "name": "composite-column-order-is-identity",
       "columns": ["owner", "updated"],
       "compositeIndexes": [["updated", "owner"]],
-      "hash": "TODO"
+      "hash": "612d03779b68da33f63644a6de8fb6bde90b0432fb242f4dfcf163e5b7772680"
     },
     {
       "name": "composite-two-declared-sorted",
       "columns": ["owner", "updated"],
       "compositeIndexes": [["owner", "updated"], ["updated", "owner"]],
-      "hash": "TODO"
+      "hash": "b9068bd48979c32723dc502b29109f9658f1671913a5560413e3b2169b6a2098"
     },
     {
       "name": "composite-two-declared-reversed",
       "columns": ["owner", "updated"],
       "compositeIndexes": [["updated", "owner"], ["owner", "updated"]],
-      "hash": "TODO"
+      "hash": "b9068bd48979c32723dc502b29109f9658f1671913a5560413e3b2169b6a2098"
     },
     {
       "name": "composite-utf8-not-utf16-order",
       "columns": ["\ue000", "\ud800\udc00", "a"],
       "compositeIndexes": [["\ud800\udc00", "a"], ["\ue000", "a"]],
-      "hash": "TODO"
+      "hash": "9206d3bb7999f301f3143b827b0ad1fbe8cccdd3f996126a6d6de5b9dc8e461b"
     }
   ]
 }

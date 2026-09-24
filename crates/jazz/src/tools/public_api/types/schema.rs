@@ -445,13 +445,15 @@ pub struct TableSchema {
     /// equality while the following column supplies the query's sort order.
     ///
     /// Column order inside one index is significant. The set of indexes is
-    /// not: it serializes in canonical order (lexicographic over the columns'
-    /// UTF-8 bytes), the order [`SchemaHash`] hashes, so a schema's
-    /// content-addressed catalogue bytes never depend on declaration order.
+    /// not: the builder and deserializer keep it, and serialization always
+    /// writes it, in canonical order (lexicographic over the columns' UTF-8
+    /// bytes), the order [`SchemaHash`] hashes, so neither schema equality nor
+    /// a schema's content-addressed catalogue bytes depend on declaration order.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_composite_indexes_canonically"
+        serialize_with = "serialize_composite_indexes_canonically",
+        deserialize_with = "deserialize_composite_indexes_canonically"
     )]
     pub composite_indexes: Vec<Vec<ColumnName>>,
     /// Access control policies.
@@ -468,10 +470,35 @@ pub struct TableSchema {
 pub(crate) fn canonical_composite_index_order(indexes: &[Vec<ColumnName>]) -> Vec<Vec<&str>> {
     let mut sorted = indexes
         .iter()
-        .map(|columns| columns.iter().map(|column| column.as_str()).collect::<Vec<_>>())
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|column| column.as_str())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     sorted.sort_unstable();
     sorted
+}
+
+/// Sort a table's composite indexes into [`canonical_composite_index_order`],
+/// so structural equality of two schemas agrees with their [`SchemaHash`].
+fn canonicalize_composite_indexes(mut indexes: Vec<Vec<ColumnName>>) -> Vec<Vec<ColumnName>> {
+    indexes.sort_unstable_by(|left, right| {
+        left.iter()
+            .map(ColumnName::as_str)
+            .cmp(right.iter().map(ColumnName::as_str))
+    });
+    indexes
+}
+
+fn deserialize_composite_indexes_canonically<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Vec<ColumnName>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<Vec<ColumnName>>::deserialize(deserializer).map(canonicalize_composite_indexes)
 }
 
 fn serialize_composite_indexes_canonically<S>(
@@ -673,7 +700,7 @@ impl TableSchemaBuilder {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
-            composite_indexes: self.composite_indexes,
+            composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
         }
@@ -685,7 +712,7 @@ impl TableSchemaBuilder {
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
-            composite_indexes: self.composite_indexes,
+            composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
         };
