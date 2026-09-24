@@ -3554,6 +3554,63 @@ mod tests {
         );
     }
 
+    // Internal for the same reason as the v1 goldens: this pins the exact
+    // restart-authoritative v2 bytes below the public catalogue API.
+    #[test]
+    fn composite_catalogue_payload_v2_goldens_are_exact() {
+        let table = || {
+            TableSchema::builder("docs")
+                .column("owner", ColumnType::Uuid)
+                .column("updated", ColumnType::Timestamp)
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                table()
+                    .composite_index(["updated", "owner"])
+                    .composite_index(["owner", "updated"]),
+            )
+            .build();
+        let schema_bytes = encode_schema(&schema);
+        assert_eq!(hex(&schema_bytes), "TODO");
+        assert_eq!(decode_schema(&schema_bytes).unwrap(), schema);
+        let redeclared = SchemaBuilder::new()
+            .table(
+                table()
+                    .composite_index(["owner", "updated"])
+                    .composite_index(["updated", "owner"]),
+            )
+            .build();
+        assert_eq!(
+            encode_schema(&redeclared),
+            schema_bytes,
+            "composite indexes encode in canonical order"
+        );
+
+        // Neither label is an alias for the other.
+        let mut as_v1 = schema_bytes.clone();
+        as_v1[0] = SCHEMA_VERSION;
+        assert!(decode_schema(&as_v1).is_err());
+        let mut plain_as_v2 = encode_schema(&SchemaBuilder::new().table(table()).build());
+        assert_eq!(plain_as_v2[0], SCHEMA_VERSION);
+        plain_as_v2[0] = SCHEMA_COMPOSITE_VERSION;
+        assert!(decode_schema(&plain_as_v2).is_err());
+
+        let mut lens = LensTransform::new();
+        lens.push(
+            LensOp::AddTable {
+                table: "docs".to_owned(),
+                schema: table().composite_index(["owner", "updated"]).build(),
+            },
+            false,
+        );
+        let lens_bytes = encode_lens_transform(&lens);
+        assert_eq!(hex(&lens_bytes), "TODO");
+        assert_eq!(encode_lens_transform(&decode_lens_transform(&lens_bytes).unwrap()), lens_bytes);
+        let mut lens_as_v1 = lens_bytes.clone();
+        lens_as_v1[0] = LENS_VERSION;
+        assert!(decode_lens_transform(&lens_as_v1).is_err());
+    }
+
     #[test]
     fn schema_roundtrip_with_column_defaults() {
         let schema = SchemaBuilder::new()

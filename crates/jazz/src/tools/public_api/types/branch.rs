@@ -105,12 +105,8 @@ impl SchemaHash {
 
             if !table_schema.composite_indexes.is_empty() {
                 hasher.update(b"composite_indexes\0");
-                let mut indexes = table_schema
-                    .composite_indexes
-                    .iter()
-                    .map(|columns| columns.iter().map(|c| c.as_str()).collect::<Vec<_>>())
-                    .collect::<Vec<_>>();
-                indexes.sort_unstable();
+                let indexes =
+                    super::schema::canonical_composite_index_order(&table_schema.composite_indexes);
                 hasher.update(
                     &serde_json::to_vec(&indexes).expect("composite index names serialize"),
                 );

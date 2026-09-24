@@ -531,5 +531,37 @@
       "name": "default-and-merge",
       "nullable": false
     }
+  ],
+  "compositeIndexCases": [
+    {
+      "name": "composite-one",
+      "columns": ["owner", "updated"],
+      "compositeIndexes": [["owner", "updated"]],
+      "hash": "ca6530e8ae7ce9572235d007b4ac57a56d4ac2263f41415d8d5863455f0c7d31"
+    },
+    {
+      "name": "composite-column-order-is-identity",
+      "columns": ["owner", "updated"],
+      "compositeIndexes": [["updated", "owner"]],
+      "hash": "TODO"
+    },
+    {
+      "name": "composite-two-declared-sorted",
+      "columns": ["owner", "updated"],
+      "compositeIndexes": [["owner", "updated"], ["updated", "owner"]],
+      "hash": "TODO"
+    },
+    {
+      "name": "composite-two-declared-reversed",
+      "columns": ["owner", "updated"],
+      "compositeIndexes": [["updated", "owner"], ["owner", "updated"]],
+      "hash": "TODO"
+    },
+    {
+      "name": "composite-utf8-not-utf16-order",
+      "columns": ["\ue000", "\ud800\udc00", "a"],
+      "compositeIndexes": [["\ud800\udc00", "a"], ["\ue000", "a"]],
+      "hash": "TODO"
+    }
   ]
 }

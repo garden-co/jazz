@@ -639,12 +639,20 @@ fn convert_table(
                 ));
             }
         }
-        converted.composite_indexes.insert(
+        // Duplicate declarations would hash and serialize twice while the
+        // runtime keeps one index; reject them rather than alias two
+        // schema identities to one physical layout.
+        if !converted.composite_indexes.insert(
             group
                 .iter()
                 .map(|column| column.as_str().to_owned())
                 .collect(),
-        );
+        ) {
+            return Err(err(
+                format!("$.{}.composite_indexes.{index}", name.as_str()),
+                "duplicate composite index",
+            ));
+        }
     }
     converted.merge_strategies = merge_strategies;
     converted.read_policy = convert_optional_policy(

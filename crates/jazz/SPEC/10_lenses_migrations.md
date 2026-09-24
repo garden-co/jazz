@@ -84,9 +84,17 @@ versioned binary layouts; they are not authoritative JSON. In this epoch,
 public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
 pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
 and the pending write-pointer and active-lineage receipts are likewise fixed
-`v1` UUID/integer tuples. A decoder accepts exactly one known version and
-must consume the entire payload before it returns a value to catalogue
-recovery; it does not fall back to the former JSON bytes. The public-schema
+`v1` UUID/integer tuples. The `schema` envelope has one further version:
+`v2` has the identical layout and is used exactly when some table's public
+schema declares `composite_indexes`; every other schema keeps its frozen `v1`
+bytes. A reader that predates composite indexes therefore rejects such a
+schema by version instead of silently dropping the unknown JSON field, and a
+decoder rejects a `v1` label on a composite schema and a `v2` label on a
+schema without one. Composite indexes serialize in canonical order
+(lexicographic over UTF-8 column-name bytes), the order the schema hash uses,
+so declaration order never changes the payload. A decoder accepts exactly the
+known versions and must consume the entire payload before it returns a value
+to catalogue recovery; it does not fall back to the former JSON bytes. The public-schema
 body is decoded and re-encoded with the canonical public-schema serializer,
 and those bytes must match exactly, so insignificant whitespace, field
 reordering, or alternate JSON spellings are corruption rather than aliases.

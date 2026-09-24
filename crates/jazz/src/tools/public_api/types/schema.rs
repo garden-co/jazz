@@ -443,7 +443,16 @@ pub struct TableSchema {
     pub indexed_columns: Option<Vec<ColumnName>>,
     /// Ordered multi-column indexes. The first column can be constrained by an
     /// equality while the following column supplies the query's sort order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Column order inside one index is significant. The set of indexes is
+    /// not: it serializes in canonical order (lexicographic over the columns'
+    /// UTF-8 bytes), the order [`SchemaHash`] hashes, so a schema's
+    /// content-addressed catalogue bytes never depend on declaration order.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_composite_indexes_canonically"
+    )]
     pub composite_indexes: Vec<Vec<ColumnName>>,
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
@@ -451,6 +460,28 @@ pub struct TableSchema {
     /// Ordinary immutable columns that form this table's branch key.
     #[serde(default, rename = "branchBy", skip_serializing_if = "Vec::is_empty")]
     pub branch_by: Vec<ColumnName>,
+}
+
+/// Canonical order of a table's composite indexes: lexicographic over each
+/// index's column names compared as UTF-8 bytes (equivalently, Unicode code
+/// points). TypeScript's `structuralSchemaHash` must use the same comparator.
+pub(crate) fn canonical_composite_index_order(indexes: &[Vec<ColumnName>]) -> Vec<Vec<&str>> {
+    let mut sorted = indexes
+        .iter()
+        .map(|columns| columns.iter().map(|column| column.as_str()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    sorted.sort_unstable();
+    sorted
+}
+
+fn serialize_composite_indexes_canonically<S>(
+    indexes: &[Vec<ColumnName>],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    canonical_composite_index_order(indexes).serialize(serializer)
 }
 
 fn table_policies_are_default(policies: &TablePolicies) -> bool {

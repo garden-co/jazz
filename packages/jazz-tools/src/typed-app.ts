@@ -82,6 +82,10 @@ export class DefinedTable<
     ) {
       throw new Error("table.compositeIndex(...) requires distinct declared columns.");
     }
+    const key = JSON.stringify(columns);
+    if ((this.compositeIndexes ?? []).some((existing) => JSON.stringify(existing) === key)) {
+      throw new Error("table.compositeIndex(...) declares the same index twice.");
+    }
     return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, [
       ...(this.compositeIndexes ?? []),
       [...columns],

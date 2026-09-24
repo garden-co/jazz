@@ -23,6 +23,39 @@ export function shortSchemaHash(hash: string): string {
   return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
 }
 
+/**
+ * Rust's canonical composite-index order: lexicographic over column names
+ * compared as UTF-8 bytes, i.e. by Unicode code point. JavaScript's `<` on
+ * strings compares UTF-16 code units, which orders U+E000..U+FFFF after
+ * astral characters and would diverge from Rust's schema hash.
+ */
+export function canonicalCompositeIndexOrder(
+  indexes: readonly (readonly string[])[],
+): string[][] {
+  return indexes
+    .map((columns) => [...columns])
+    .sort((left, right) => {
+      for (let index = 0; index < Math.min(left.length, right.length); index++) {
+        const order = compareCodePoints(left[index]!, right[index]!);
+        if (order !== 0) {
+          return order;
+        }
+      }
+      return left.length - right.length;
+    });
+}
+
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (char) => char.codePointAt(0)!);
+  const rightPoints = Array.from(right, (char) => char.codePointAt(0)!);
+  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index++) {
+    if (leftPoints[index] !== rightPoints[index]) {
+      return leftPoints[index]! - rightPoints[index]!;
+    }
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
 export function structuralSchemaHash(schema: WasmSchema): string {
   const writer = new StructuralHashWriter();
 
@@ -42,16 +75,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     }
     if (table.composite_indexes?.length) {
       writer.stringBytes("composite_indexes\0");
-      const indexes = table.composite_indexes.map((columns) => [...columns]);
-      indexes.sort((left, right) => {
-        for (let index = 0; index < Math.min(left.length, right.length); index++) {
-          if (left[index] !== right[index]) {
-            return left[index]! < right[index]! ? -1 : 1;
-          }
-        }
-        return left.length - right.length;
-      });
-      writer.stringBytes(JSON.stringify(indexes));
+      writer.stringBytes(JSON.stringify(canonicalCompositeIndexOrder(table.composite_indexes)));
     }
     if (table.branchBy?.length) {
       writer.stringBytes("branch_by\0");
