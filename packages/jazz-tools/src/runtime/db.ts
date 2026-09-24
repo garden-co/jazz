@@ -1016,7 +1016,10 @@ type DbTransactionHandleBinding = {
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
 const initialisingTransactions = new WeakSet<Transaction>();
-const standaloneWriteRetries = new WeakMap<Transaction, ((tx: Transaction) => void) | null>();
+const standaloneWriteRetries = new WeakMap<
+  Transaction,
+  { prepare: (tx: Transaction) => void; branch: boolean } | null
+>();
 
 function getDbTxHandleBinding(handle: Transaction, operation: string): DbTransactionHandleBinding {
   const binding = dbTxHandleBindings.get(handle);
@@ -1538,10 +1541,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const normalized = normalizeInsertOptions(table._schema, table._table, optionsSnapshot);
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
     if (operation === "insert" && standaloneWriteRetries.has(this)) {
-      const retryOptions = { ...options, id: preview.id };
-      standaloneWriteRetries.set(this, (tx) => {
-        tx.bindTable(table);
-        tx.prepareEncryptedRow(table, data, retryOptions, "insert", values);
+      const retryOptions = { ...optionsSnapshot, id: preview.id };
+      standaloneWriteRetries.set(this, {
+        branch: optionsSnapshot?.branch !== undefined,
+        prepare: (tx) => {
+          tx.bindTable(table);
+          tx.prepareEncryptedRow(table, data, retryOptions, "insert", values);
+        },
       });
     }
     if (operation === "insert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
@@ -1914,18 +1920,21 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparedUpdates ?? toWriteRecord(data, metadata.logical, table._table),
     );
     const optionsSnapshot = options ? structuredClone(options) : undefined;
-    if (operation === "upsert" && standaloneWriteRetries.has(this)) {
-      const retryValues = structuredClone(updates);
-      const retryOptions = options && { ...options };
-      standaloneWriteRetries.set(this, (tx) => {
-        tx.bindTable(table);
-        tx.updateEncrypted(table, id, data, retryOptions, "upsert", retryValues);
-      });
-    }
     if (operation === "upsert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
     const normalized = normalizeUpdateOptions(table._schema, table._table, optionsSnapshot);
+    if (operation === "upsert" && standaloneWriteRetries.has(this)) {
+      const retryValues = structuredClone(updates);
+      const retryOptions = optionsSnapshot;
+      standaloneWriteRetries.set(this, {
+        branch: optionsSnapshot?.branch !== undefined,
+        prepare: (tx) => {
+          tx.bindTable(table);
+          tx.updateEncrypted(table, id, data, retryOptions, "upsert", retryValues);
+        },
+      });
+    }
     const query = new TypedTableQueryBuilder<
       AnyTableMeta & { row: { id: string } & Record<string, unknown> }
     >(table._table, table._schema)
@@ -2939,9 +2948,13 @@ export class Db {
           .catch(async (error) => {
             const retry = standaloneWriteRetries.get(tx);
             if (!(error instanceof SpaceInitialisationRequired) || !retry) throw error;
+            if (retry.branch)
+              throw new Error(
+                "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
+              );
             const begin = () => this.createTransaction("exclusive");
             const exclusive = context ? this.withRuntimeOperationContext(context, begin) : begin();
-            return (await runInTransaction(exclusive, () => retry(exclusive), client)).txId;
+            return (await runInTransaction(exclusive, () => retry.prepare(exclusive), client)).txId;
           }),
         client,
       ),

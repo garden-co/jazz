@@ -14,6 +14,12 @@ schemas, not partial migration witnesses. Adding another encrypted table
 preserves existing managed identities and historical ciphertext. Explicit
 attempts to recreate an existing table fail before catalogue publication.
 
+Branch-target first writes to an uninitialised space remain unsupported. Their
+wait handles now reject before preparing provisional keys, grants or ciphertext,
+and caller mutations cannot change a captured branch target. Existing-space
+branch writes are unchanged. Public exclusive transactions still capture their
+snapshot at `begin`; only internal admission helpers may defer opening.
+
 For local qualification, preserve canonical temporary-directory environment
 variables through Turbo's strict test boundary. Keep invalid-authority and
 signed-token checks portable across supported Node versions and host loopback
