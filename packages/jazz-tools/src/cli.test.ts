@@ -3130,41 +3130,6 @@ export default s.defineMigration({
       bundleObjectId: "22222222-2222-2222-2222-222222222222",
     };
 
-    await writeFile(
-      join(migrationsDir, `20260318-rename-${previousShortHash}-${nextShortHash}.ts`),
-      `
-import { schema as s } from ${JSON.stringify(indexPath)};
-
-export default s.defineMigration({
-  migrate: {
-    todos: {
-      ownerId: s.renameFrom("owner_id"),
-    },
-  },
-  fromHash: ${JSON.stringify(previousShortHash)},
-  toHash: ${JSON.stringify(nextShortHash)},
-  from: {
-    projects: s.table({
-      name: s.string(),
-    }, {  }),
-    todos: s.table({
-      title: s.string(),
-      owner_id: s.string(),
-    }, {  }),
-  },
-  to: {
-    projects: s.table({
-      name: s.string(),
-    }, {  }),
-    todos: s.table({
-      title: s.string(),
-      ownerId: s.string(),
-    }, {  }),
-  },
-});
-`,
-    );
-
     const migrationPosts: string[] = [];
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
