@@ -1193,21 +1193,35 @@ where
         // Rows that left the result or its covered sources. A deleted row
         // simply leaves; its deleted image is shipped so the reader's store
         // learns the deletion.
-        let removed_row_candidates = row_result_removes
+        let mut removed_row_candidates = row_result_removes
             .iter()
-            .map(|(table, row, tx)| (table.to_string(), *row, *tx, true))
+            .map(|(table, row, tx)| (table.to_string(), *row, Some(*tx), true))
             .chain(supporting_update.removed_rows().iter().filter_map(|row| {
                 let table = *logical_tables.get(&row.physical_table)?;
-                Some((table.to_owned(), row.row, row.version.tx, false))
+                Some((table.to_owned(), row.row, Some(row.version.tx), false))
             }))
             .fold(
-                BTreeMap::<(String, RowUuid), (TxId, bool)>::new(),
+                BTreeMap::<(String, RowUuid), (Option<TxId>, bool)>::new(),
                 |mut acc, (table, row, tx, is_member)| {
                     let entry = acc.entry((table, row)).or_insert((tx, is_member));
                     entry.1 |= is_member;
                     acc
                 },
             );
+        // A reset from a known cursor cannot name the rows the reader holds,
+        // so every source row that changed after the cursor is a candidate.
+        if let (crate::protocol::SupportingRowsUpdate::Snapshot { .. }, Some(position)) =
+            (&supporting_update, known_state_position)
+        {
+            let tables = logical_tables.values().copied().collect::<BTreeSet<_>>();
+            for table in tables {
+                for row_uuid in self.global_rows_changed_after(table, position).await? {
+                    removed_row_candidates
+                        .entry((table.to_owned(), row_uuid))
+                        .or_insert((None, false));
+                }
+            }
+        }
         for ((entry_table, row_uuid), (old_tx_id, is_member)) in &removed_row_candidates {
             let entry_table = entry_table.as_str();
             let (content_winner, retained_deletion_winner) =
@@ -1247,7 +1261,7 @@ where
                     continue;
                 };
                 let tx_id = self.version_tx_id(version)?;
-                if tx_id == *old_tx_id || emitted_versions.contains(&tx_id) {
+                if Some(tx_id) == *old_tx_id || emitted_versions.contains(&tx_id) {
                     continue;
                 }
                 replacement_winners_by_tx.entry(tx_id).or_default().push((

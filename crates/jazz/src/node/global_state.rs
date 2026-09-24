@@ -46,6 +46,41 @@ where
         Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
     }
 
+    /// Rows of `table` whose global current changed after `position`, read
+    /// from the seq-ordered change index.
+    pub(super) async fn global_rows_changed_after(
+        &mut self,
+        table: &str,
+        position: GlobalTime,
+    ) -> Result<BTreeSet<RowUuid>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let records = self
+            .database
+            .index_scan_range_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    branch.clone(),
+                    Value::U64(position.0.saturating_add(1)),
+                ],
+                &[Value::U64(table_id.0), branch, Value::U64(u64::MAX)],
+            )
+            .await?;
+        let mut rows = BTreeSet::new();
+        for raw in records {
+            let record = raw.record();
+            rows.insert(RowUuid::from_bytes(
+                *record
+                    .get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?
+                    .as_bytes(),
+            ));
+        }
+        Ok(rows)
+    }
+
     pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
