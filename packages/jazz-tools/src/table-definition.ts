@@ -2,7 +2,7 @@ import { assertRelationshipDeclaration } from "./relationships.js";
 import type { Relationships, ForwardRelationship } from "./relationships.js";
 import type { AnyTypedColumnBuilder, ColumnBuilderSqlType } from "./dsl.js";
 import { type NoExplicitIdColumn, assertUserTableColumnNameAllowed } from "./magic-columns.js";
-import type { EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
+import { equalityIndexColumn, type EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
 export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
@@ -17,6 +17,7 @@ export class DefinedTable<
   encrypted(options: {
     space: Extract<keyof TColumns, string>;
     columns?: readonly Extract<keyof TColumns, string>[];
+    indexes?: Partial<Record<Extract<keyof TColumns, string>, "equality">>;
   }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
     const referenceColumns = new Set<string>();
     for (const relation of Object.values(this.relations)) {
@@ -41,8 +42,22 @@ export class DefinedTable<
         throw new Error(`Encrypted column "${name}" cannot be an ordinary index or branch key`);
     }
     const space = this.columns[options.space]?._build(options.space);
-    if (Object.hasOwn(options, "indexes"))
-      throw new Error("Encrypted equality indexes are not supported yet");
+    if (
+      options.indexes !== undefined &&
+      (options.indexes === null ||
+        typeof options.indexes !== "object" ||
+        Array.isArray(options.indexes))
+    )
+      throw new Error("Encrypted indexes must map column names to equality");
+    const indexes: Record<string, "equality"> = Object.create(null);
+    for (const [name, mode] of Object.entries(options.indexes ?? {})) {
+      if (!selected.some((column) => column === name))
+        throw new Error(`Index column "${name}" must be encrypted`);
+      if (mode !== "equality") throw new Error(`Encrypted index "${name}" only supports equality`);
+      indexes[name] = mode;
+      if (Object.hasOwn(this.columns, equalityIndexColumn(name)))
+        throw new Error(`Column "${equalityIndexColumn(name)}" conflicts with an encrypted index`);
+    }
     if (
       !referenceColumns.has(options.space) ||
       !space ||
@@ -53,6 +68,7 @@ export class DefinedTable<
     return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, {
       space: options.space,
       columns: [...new Set(selected)],
+      indexes,
     });
   }
 

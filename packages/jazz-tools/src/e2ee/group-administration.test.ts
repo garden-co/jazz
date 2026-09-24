@@ -130,8 +130,15 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
               signature: new Uint8Array(64),
             })
             .wait({ tier: "global" });
-        if (scenario === "forged-malformed-id") expect(proposal).toThrow("invalid UUID value");
-        else await proposal();
+        if (scenario === "forged-malformed-id") {
+          await expect(async () => proposal()).rejects.toBeInstanceOf(Error);
+          expect(
+            await administrator.all(
+              app.__e2ee_group_membership.where({ groupId: id, authorDeviceId: request.id }),
+              { tier: "global" },
+            ),
+          ).toEqual([]);
+        } else await proposal();
       }
       expect(await administrator.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
       await administrator.e2ee.groups.add(id, bob.account.id).wait();

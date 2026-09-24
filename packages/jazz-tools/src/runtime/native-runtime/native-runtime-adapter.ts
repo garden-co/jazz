@@ -1,5 +1,6 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
+import { formatUuid, parseUuid } from "../uuid.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import type {
@@ -581,7 +582,6 @@ type NativeRowFieldPlan = {
 };
 
 const textDecoder = new Utf8Decoder({ fatal: true });
-const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
@@ -6416,41 +6416,6 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false;
   return left.every((byte, index) => byte === right[index]);
-}
-
-export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return (
-    byteHex[bytes[0]!] +
-    byteHex[bytes[1]!] +
-    byteHex[bytes[2]!] +
-    byteHex[bytes[3]!] +
-    "-" +
-    byteHex[bytes[4]!] +
-    byteHex[bytes[5]!] +
-    "-" +
-    byteHex[bytes[6]!] +
-    byteHex[bytes[7]!] +
-    "-" +
-    byteHex[bytes[8]!] +
-    byteHex[bytes[9]!] +
-    "-" +
-    byteHex[bytes[10]!] +
-    byteHex[bytes[11]!] +
-    byteHex[bytes[12]!] +
-    byteHex[bytes[13]!] +
-    byteHex[bytes[14]!] +
-    byteHex[bytes[15]!]
-  );
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {
