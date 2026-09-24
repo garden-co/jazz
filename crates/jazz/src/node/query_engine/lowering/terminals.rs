@@ -1901,11 +1901,17 @@ fn retain_collect_slot_value(
     } else {
         ValueType::Nullable(Box::new(source_value_type.clone()))
     };
+    // Derive the unwrapped type exactly as selected slot fields do. The anchor
+    // and association arms both key their outer wrapper off
+    // `value_type != output_value_type`; keeping the current-row presence
+    // wrapper here made the association arm wrap an already wrapped cell.
+    let output_value_type =
+        collect_unwrapped_output_type(source, &source_field, &source_value_type);
     slot.fields.push(CollectFlatField {
         input: format!("{prefix}_{source_field}"),
         output: source_field.clone(),
         value_type,
-        output_value_type: source_value_type,
+        output_value_type,
         source_public_name: resolved_source_public_name(source, &source_field),
         source_field: Some(source_field),
         origin: CollectFieldOrigin::SourceRow,

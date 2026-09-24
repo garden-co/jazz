@@ -422,3 +422,112 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
     block_on(db.subscribe(&prepared, ReadOpts::default()))
         .expect("large reset remains one atomic logical result");
 }
+
+/// Ordering or slicing a nested collector by a column the include does not
+/// select keeps that column as a hidden carrier. Both union arms of the
+/// collector must agree on its descriptor (#2739), for one-shot reads and for
+/// maintained subscriptions.
+#[test]
+fn nested_order_by_unselected_column_reads_and_subscribes() {
+    let db = open_db();
+    let parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+        Default::default(),
+    ))
+    .expect("insert parent")
+    .row_uuid();
+    let mut child_ids = Vec::new();
+    for (rank, label) in [(2, "last"), (0, "first"), (1, "middle")] {
+        let child = block_on(db.insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                ("label".to_owned(), Value::String(label.to_owned())),
+                ("rank".to_owned(), Value::I32(rank)),
+            ]),
+            Default::default(),
+        ))
+        .expect("insert child")
+        .row_uuid();
+        block_on(db.insert(
+            "grandchildren",
+            BTreeMap::from([
+                ("child_id".to_owned(), Value::Uuid(child.0)),
+                (
+                    "label".to_owned(),
+                    Value::String(format!("{label} grandchild")),
+                ),
+                ("rank".to_owned(), Value::I32(0)),
+            ]),
+            Default::default(),
+        ))
+        .expect("insert grandchild");
+        child_ids.push(child);
+    }
+
+    for (direction, offset, limit, expected) in [
+        (
+            OrderDirection::Asc,
+            0,
+            None,
+            vec![child_ids[1], child_ids[2], child_ids[0]],
+        ),
+        (
+            OrderDirection::Desc,
+            0,
+            None,
+            vec![child_ids[0], child_ids[2], child_ids[1]],
+        ),
+        (OrderDirection::Asc, 1, Some(1), vec![child_ids[2]]),
+    ] {
+        let mut include = ArraySubquery::new("children", "children", "parent_id", "id")
+            .select(["label"])
+            .order_by("rank", direction)
+            .offset(offset)
+            .nested(
+                ArraySubquery::new("grandchildren", "grandchildren", "child_id", "id")
+                    .select(["label"]),
+            );
+        if let Some(limit) = limit {
+            include = include.limit(limit);
+        }
+        let prepared = db
+            .prepare_query(&child_query(include))
+            .expect("prepare include ordered by an unselected column");
+        let tree = block_on(db.all_result_tree(&prepared, ReadOpts::default()))
+            .expect("read include ordered by an unselected column");
+        assert_eq!(tree.roots.len(), 1);
+        let included = children(&tree.roots[0], "children");
+        assert_eq!(
+            included
+                .iter()
+                .map(|child| child.row.row_uuid())
+                .collect::<Vec<_>>(),
+            expected,
+            "{direction:?} offset {offset} limit {limit:?}"
+        );
+        for child in included {
+            assert!(
+                child.row.encoded_record().0.field_index("rank").is_none(),
+                "the unselected sort column is not exposed"
+            );
+            assert!(matches!(child.row.cell_at(0), Some(Value::String(_))));
+            assert_eq!(children(child, "grandchildren").len(), 1);
+        }
+
+        let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+            .expect("open maintained subscription ordered by an unselected column");
+        let SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } = block_on(subscription.next_event()).expect("maintained reset")
+        else {
+            panic!("expected maintained reset");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].row_uuid(), parent);
+    }
+}
