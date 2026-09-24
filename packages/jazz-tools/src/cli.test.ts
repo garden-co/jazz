@@ -3112,6 +3112,139 @@ export default s.defineMigration({
     expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
   });
 
+  it("reports an already-connected migration without publishing it", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = await computeTestSchemaHash(storedRootSchemaBeforeOwnerRename());
+    const nextSchemaHash = await computeTestSchemaHash(storedRootSchema());
+    const previousShortHash = previousSchemaHash.slice(0, 12);
+    const nextShortHash = nextSchemaHash.slice(0, 12);
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    await writeFile(
+      join(migrationsDir, `20260318-rename-${previousShortHash}-${nextShortHash}.ts`),
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    todos: {
+      ownerId: s.renameFrom("owner_id"),
+    },
+  },
+  fromHash: ${JSON.stringify(previousShortHash)},
+  toHash: ${JSON.stringify(nextShortHash)},
+  from: {
+    projects: s.table({
+      name: s.string(),
+    }, {  }),
+    todos: s.table({
+      title: s.string(),
+      owner_id: s.string(),
+    }, {  }),
+  },
+  to: {
+    projects: s.table({
+      name: s.string(),
+    }, {  }),
+    todos: s.table({
+      title: s.string(),
+      ownerId: s.string(),
+    }, {  }),
+  },
+});
+`,
+    );
+
+    const migrationPosts: string[] = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchemaBeforeOwnerRename());
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+        return new Response(JSON.stringify({ connected: true }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+        migrationPosts.push(`${init?.method ?? "GET"} ${input}`);
+        return new Response(
+          JSON.stringify({
+            objectId: "55555555-5555-5555-5555-555555555555",
+            fromHash: previousSchemaHash,
+            toHash: nextSchemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "44444444-4444-4444-4444-444444444444",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+
+    expect(
+      logs.some(
+        (line) =>
+          /already.connected/i.test(line) &&
+          /skip/i.test(line) &&
+          line.includes(previousShortHash) &&
+          line.includes(nextShortHash),
+      ),
+    ).toBe(true);
+    expect(logs.some((line) => /published migration/i.test(line))).toBe(false);
+    expect(logs.some((line) => /skip(ping)? (the )?(whole|entire|all) deploy/i.test(line))).toBe(
+      false,
+    );
+    expect(migrationPosts).toEqual([]);
+  });
+
   it("replays a chain of local migrations when no direct file connects the head to the release schema", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
