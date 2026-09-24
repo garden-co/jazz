@@ -723,16 +723,6 @@ pub(super) fn global_subscribe_opts() -> ReadOpts {
     }
 }
 
-pub(super) fn edge_subscribe_opts() -> ReadOpts {
-    ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
-        include_deleted: false,
-        ..ReadOpts::default()
-    }
-}
-
 pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(

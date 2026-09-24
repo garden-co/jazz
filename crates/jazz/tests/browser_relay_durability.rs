@@ -4043,7 +4043,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         "Local counts over cached positions 7..24: the newly received position 7 shifts its local offset, while cached position 23 remains known",
     );
 
-    // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
+    // Mirror a browser `db.all({ tier: "remote" })`: it releases the broad
     // coverage after its result is materialized, but its rows remain in the
     // main-thread overlay for later Local reads.
     drop(subscription);

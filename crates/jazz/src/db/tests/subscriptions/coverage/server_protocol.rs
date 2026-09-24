@@ -890,7 +890,7 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();

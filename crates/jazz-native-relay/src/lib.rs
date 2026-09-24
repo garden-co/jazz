@@ -15599,6 +15599,117 @@ mod tests {
     }
 
     #[test]
+    fn foreground_reads_reject_the_removed_edge_tier() {
+        // Internal C-ABI receipt, like the transaction-command test above:
+        // React Native reaches read options only through this byte command
+        // family, so the retired `edge` tier must fail here with the same
+        // Core-only guidance the TypeScript client gives, rather than being
+        // silently treated as some other tier.
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "foreground-removed-edge-tier".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0xb3; 16]),
+                        author: AuthorSubject::for_test_bytes([0xb4; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+        let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
+        let mut foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    lease,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        let response = |command| {
+            let request = postcard::to_allocvec(&command).unwrap();
+            let mut response = JazzNativeRelayBytes::EMPTY;
+            let status = unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    lease,
+                    foreground,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut response,
+                )
+            };
+            assert_eq!(status, JazzNativeRelayStatus::Ok);
+            let bytes = unsafe { std::slice::from_raw_parts(response.data, response.len) }.to_vec();
+            unsafe { jazz_native_relay_bytes_free(&mut response) };
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap()
+        };
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let removed = "foreground NativeDb command failed: invalid read options: the edge tier was removed; use remote or global for Core confirmation";
+
+        for tier in ["edge", "Edge"] {
+            let options_json = format!(r#"{{"tier":"{tier}"}}"#);
+            assert_eq!(
+                response(ForegroundDbCommandRequest::All {
+                    query: query.clone(),
+                    options_json: options_json.clone(),
+                    transaction: None,
+                }),
+                ForegroundDbCommandResponse::OperationError {
+                    reason: removed.to_owned()
+                },
+                "one-shot read with tier {tier}"
+            );
+            assert_eq!(
+                response(ForegroundDbCommandRequest::Subscribe {
+                    query: query.clone(),
+                    options_json,
+                }),
+                ForegroundDbCommandResponse::OperationError {
+                    reason: removed.to_owned()
+                },
+                "subscription with tier {tier}"
+            );
+        }
+        // The same command with a supported tier is admitted: it reads or
+        // starts a pending read instead of failing its options.
+        let local = response(ForegroundDbCommandRequest::All {
+            query,
+            options_json: r#"{"tier":"local"}"#.to_owned(),
+            transaction: None,
+        });
+        assert!(
+            matches!(
+                local,
+                ForegroundDbCommandResponse::Rows { .. }
+                    | ForegroundDbCommandResponse::Pending { .. }
+            ),
+            "{local:?}"
+        );
+
+        unsafe { jazz_native_relay_host_lease_free(lease) };
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
     fn foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec() {
         assert_eq!(
             postcard::to_allocvec(&ForegroundDbCommandRequest::BeginTransaction {

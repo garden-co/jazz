@@ -824,7 +824,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
     let first_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -834,7 +834,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 
     seed(&server, "todos", cells("second", false, owner));
     let second_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
@@ -875,11 +875,11 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 
     let backend_query = prepared(&backend, &Query::from("todos"));
     let backend_attachment = backend
-        .attach_query_with_opts(&backend_query, edge_subscribe_opts())
+        .attach_query_with_opts(&backend_query, global_subscribe_opts())
         .unwrap();
     let session_query = prepared(&session, &Query::from("todos"));
     let session_attachment = session
-        .attach_query_with_opts(&session_query, edge_subscribe_opts())
+        .attach_query_with_opts(&session_query, global_subscribe_opts())
         .unwrap();
 
     backend.tick().unwrap();
@@ -942,14 +942,14 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
     let query = Query::from("chats");
     let prepared = prepared(&client, &query);
     let first_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert_eq!(
-        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![first]
     );
 
@@ -965,7 +965,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         ]),
     );
     let second_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
@@ -975,7 +975,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
     assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(
-        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![first, second]
     );
     client.detach_query(first_attachment);
@@ -1019,7 +1019,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
     let query = Query::from("chats");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();

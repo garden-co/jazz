@@ -658,7 +658,7 @@ fn runtime_reset_rebuilds_occurrence_sidecar_after_order_change() {
 }
 
 #[test]
-fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_edge() {
+fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
     // The client holds an extra raw row locally while the serving host has
     // only the published row. This guards against an Edge facade widening
     // server scope by re-scanning a broad local transport cache.
@@ -747,7 +747,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("attach Edge coverage");
     db.tick().unwrap();
     server.tick().unwrap();
@@ -759,11 +759,11 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     // response rather than treating the older attachment's empty/non-empty
     // state as fresh coverage.
     let fresh_attachment = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("attach a second Edge coverage request");
     db.tick().unwrap();
     let concurrent_attachment = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("attach concurrent Edge coverage");
     db.tick().unwrap();
     assert!(
@@ -783,7 +783,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     db.detach_query(concurrent_attachment);
 
     assert_eq!(
-        ids(block_on(db.all(&prepared, edge_subscribe_opts())).unwrap()),
+        ids(block_on(db.all(&prepared, global_subscribe_opts())).unwrap()),
         BTreeSet::from([published]),
         "Edge reads consume the canonical Global settled member set"
     );
@@ -794,7 +794,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     );
     db.detach_query(attachment);
     let reattached = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("re-attach Edge coverage after unsubscribe");
     db.tick().unwrap();
     assert!(
@@ -806,7 +806,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     assert!(db.query_attachment_is_covered(&reattached));
     db.detach_query(reattached);
     let mut edge_subscription =
-        block_on(db.subscribe(&prepared, edge_subscribe_opts())).expect("open edge subscription");
+        block_on(db.subscribe(&prepared, global_subscribe_opts())).expect("open edge subscription");
     assert!(edge_subscription.try_next_event().is_none());
     db.tick().unwrap();
     server.tick().unwrap();
@@ -817,7 +817,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
         "Edge maintained facades consume Global result members instead of raw local rows"
     );
     let refresh_attachment = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("refresh a deduplicated Edge attachment");
     db.tick().unwrap();
     assert!(
@@ -829,9 +829,11 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     assert!(db.query_attachment_is_covered(&refresh_attachment));
     db.detach_query(refresh_attachment);
     assert_eq!(
-        ids(block_on(
-            db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorSubject::SYSTEM,)
-        )
+        ids(block_on(db.all_for_identity(
+            &prepared,
+            global_subscribe_opts(),
+            AuthorSubject::SYSTEM,
+        ))
         .unwrap()),
         BTreeSet::from([published, server_overemitted]),
         "serving hosts remain TrustedServing and do not consume a client result cache"
@@ -879,13 +881,13 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
     let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("attach file coverage");
     db.tick().unwrap();
     server.tick().unwrap();
     db.tick().unwrap();
     assert!(db.query_attachment_is_covered(&attachment));
-    let rows = block_on(db.all(&prepared, edge_subscribe_opts())).unwrap();
+    let rows = block_on(db.all(&prepared, global_subscribe_opts())).unwrap();
     assert_eq!(
         rows.len(),
         1,

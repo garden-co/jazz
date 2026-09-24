@@ -383,9 +383,9 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
         bob.query(todo_query(), jazz::tools::ReadTier::Remote)
             .await
             .map(jazz::tools::test_support::ordinary_rows)
-            .expect("bob edge query before commit")
+            .expect("bob remote query before commit")
             .is_empty(),
-        "peer edge reads should not see an uncommitted transaction"
+        "a peer's remote reads should not see an uncommitted transaction"
     );
 
     let committed_tx_id = tx.commit().expect("commit transaction");

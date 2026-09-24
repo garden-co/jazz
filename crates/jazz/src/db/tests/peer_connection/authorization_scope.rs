@@ -2743,7 +2743,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let attachment = client
-        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .attach_query_with_opts(&query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -2751,7 +2751,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
 
     assert!(client.query_attachment_is_covered(&attachment));
     assert!(
-        block_on(client.all(&query, edge_subscribe_opts()))
+        block_on(client.all(&query, global_subscribe_opts()))
             .unwrap()
             .is_empty(),
         "a resumed empty-claim session must not inherit its sibling's invite claim",
@@ -2831,7 +2831,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let attachment = client
-        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .attach_query_with_opts(&query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -2839,7 +2839,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
 
     assert!(client.query_attachment_is_covered(&attachment));
     assert!(
-        block_on(client.all(&query, edge_subscribe_opts()))
+        block_on(client.all(&query, global_subscribe_opts()))
             .unwrap()
             .is_empty(),
         "a subscriber cannot grant itself an invite claim after host admission",

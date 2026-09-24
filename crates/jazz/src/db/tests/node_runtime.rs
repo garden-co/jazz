@@ -943,16 +943,16 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
     );
 }
 
-/// A Core schedules a fresh owner turn for a peer-edge subscriber that was
+/// A Core schedules a fresh owner turn for a relay subscriber that was
 /// visited before a later client upload, so Bob receives Alice's later
 /// canonical row without an unrelated next websocket frame.
 ///
 /// ```text
-/// bob --empty Global subscribe--> peer edge --> Core
+/// bob --empty Global subscribe--> relay ------> Core
 /// alice --later CommitUnit----------------------> Core
 ///                                                |
 ///                 Core ViewUpdate <--------------+
-/// bob <--- peer-edge local IVM refresh <---------+
+/// bob <--- relay local IVM refresh <-------------+
 /// ```
 ///
 /// The peer connection is deliberately accepted before Alice's connection.
@@ -969,13 +969,13 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     let core = open_core(0xd1, AuthorSubject::SYSTEM, &schema);
     let core_scheduler = Rc::new(RecordingScheduler::default());
     core.server.set_scheduler(Some(core_scheduler.clone()));
-    let peer_edge = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
     let bob = open_db(0xd3, bob_author, &schema);
 
     // Keep the Core-to-peer queue observable, and accept this peer before
     // Alice so the ordering under test is fixed.
     let (peer_transport, core_transport, core_to_peer) = duplex_with_server_outbound_tap();
-    let _peer_upstream = crate::db::block_on(peer_edge.connect_upstream(peer_transport));
+    let _peer_upstream = crate::db::block_on(relay.connect_upstream(peer_transport));
     let _core_peer = core.accept_subscriber_with_trust(
         core_transport,
         AuthorSubject::SYSTEM,
@@ -983,16 +983,16 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
     let (bob_transport, peer_client_transport) = duplex();
     let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
-    let _peer_client = peer_edge.accept_subscriber(peer_client_transport, bob_author);
+    let _peer_client = relay.accept_subscriber(peer_client_transport, bob_author);
 
     let query = bob.table("todos");
     let mut subscription = prepared_subscribe(&bob, &query, global_subscribe_opts()).unwrap();
     let opening = (0..32)
         .find_map(|_| {
             bob.tick().unwrap();
-            peer_edge.tick().unwrap();
+            relay.tick().unwrap();
             core.tick().unwrap();
-            peer_edge.tick().unwrap();
+            relay.tick().unwrap();
             bob.tick().unwrap();
             subscription.try_next_event()
         })
@@ -1005,11 +1005,11 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
     core_scheduler.take();
 
-    let alice_edge = open_db(0xd4, alice, &schema);
+    let alice_client = open_db(0xd4, alice, &schema);
     let (alice_transport, core_alice_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_edge.connect_upstream(alice_transport));
+    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
     let _core_alice = core.accept_subscriber(core_alice_transport, alice);
-    let write = alice_edge
+    let write = alice_client
         .insert(
             "todos",
             cells("later row", false, alice),
@@ -1020,9 +1020,9 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
         )
         .unwrap();
 
-    // One edge tick uploads Alice's local commit; one Core tick finalizes it
+    // One client tick uploads Alice's local commit; one Core tick finalizes it
     // and asks the host for a fresh turn to serve the earlier peer connection.
-    alice_edge.tick().unwrap();
+    alice_client.tick().unwrap();
     core.tick().unwrap();
     let wakes = core_scheduler.take();
     assert!(
@@ -1062,8 +1062,8 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
 
     // Applying that upstream ViewUpdate must dirty and refresh the existing
-    // Bob connection in the same peer-edge service pass.
-    peer_edge.tick().unwrap();
+    // Bob connection in the same relay service pass.
+    relay.tick().unwrap();
     bob.tick().unwrap();
     let delivered = subscription
         .try_next_event()
@@ -1082,25 +1082,25 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
 }
 
-/// An Edge immediately flushes an upload queued by a later client connection
+/// A relay immediately flushes an upload queued by a later client connection
 /// through the upstream connection that was already visited in the same pass.
 ///
 /// The upstream connection is deliberately installed first. One client tick
-/// places the commit on the Edge subscriber transport; one Edge tick must both
+/// places the commit on the relay subscriber transport; one relay tick must both
 /// ingest it and emit the corresponding Core-bound `CommitUnit`.
 #[test]
-fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
+fn relay_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xd2, alice, &schema);
 
-    let (edge_transport, _core_transport, edge_to_core) = duplex_with_client_outbound_tap();
-    let _edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let (relay_transport, _core_transport, relay_to_core) = duplex_with_client_outbound_tap();
+    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
 
-    let (client_transport, edge_client_transport) = duplex();
+    let (client_transport, relay_client_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge.accept_subscriber(edge_client_transport, alice);
+    let _relay_client = relay.accept_subscriber(relay_client_transport, alice);
 
     let write = client
         .insert(
@@ -1113,9 +1113,9 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
         )
         .unwrap();
     client.tick().unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
 
-    let uploads = edge_to_core
+    let uploads = relay_to_core
         .borrow()
         .iter()
         .filter(|message| {
@@ -1127,12 +1127,12 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
         .count();
     assert_eq!(
         uploads, 1,
-        "one Edge service pass flushes the later client upload through the earlier upstream link"
+        "one relay service pass flushes the later client upload through the earlier upstream link"
     );
 
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert_eq!(
-        edge_to_core
+        relay_to_core
             .borrow()
             .iter()
             .filter(|message| {
@@ -1697,13 +1697,13 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
         )]),
     );
     let query = Query::from("messages");
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     reader.tick().unwrap();
     server.tick().unwrap();
     reader.tick().unwrap();
     assert!(opened_rows(next_settled_opening(&mut subscription)).is_empty());
-    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    assert!(prepared_all(&reader, &query, global_subscribe_opts()).is_empty());
 }
 
 /// A real client commonly reads its self-membership grant before querying the
@@ -1821,12 +1821,12 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     let grant_query =
         Query::from("members").filter(eq(col("id"), lit(Value::Uuid(grant.row_uuid().0))));
     let mut grant_subscription =
-        prepared_subscribe(&client, &grant_query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&client, &grant_query, global_subscribe_opts()).unwrap();
     for _ in 0..16 {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
-        if !prepared_all(&client, &grant_query, edge_subscribe_opts()).is_empty() {
+        if !prepared_all(&client, &grant_query, global_subscribe_opts()).is_empty() {
             break;
         }
     }
@@ -1842,7 +1842,7 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
         );
     }
     assert_eq!(
-        prepared_all(&client, &grant_query, edge_subscribe_opts()).len(),
+        prepared_all(&client, &grant_query, global_subscribe_opts()).len(),
         1
     );
     while grant_subscription.try_next_event().is_some() {}
@@ -1850,17 +1850,17 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     let workspace_query =
         Query::from("workspaces").filter(eq(col("id"), lit(Value::Uuid(workspace.row_uuid().0))));
     let mut workspace_subscription =
-        prepared_subscribe(&client, &workspace_query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&client, &workspace_query, global_subscribe_opts()).unwrap();
     for _ in 0..16 {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
-        if !prepared_all(&client, &workspace_query, edge_subscribe_opts()).is_empty() {
+        if !prepared_all(&client, &workspace_query, global_subscribe_opts()).is_empty() {
             break;
         }
     }
     assert_eq!(
-        prepared_all(&client, &workspace_query, edge_subscribe_opts())
+        prepared_all(&client, &workspace_query, global_subscribe_opts())
             .iter()
             .map(CurrentRow::row_uuid)
             .collect::<Vec<_>>(),
@@ -2017,7 +2017,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     );
     let query = Query::from("messages");
     let mut alice_subscription =
-        prepared_subscribe(&alice_reader, &query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&alice_reader, &query, global_subscribe_opts()).unwrap();
     assert!(alice_subscription.try_next_event().is_none());
     alice_reader.tick().unwrap();
     server.tick().unwrap();
@@ -2031,7 +2031,11 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(
-        row_ids(&prepared_all(&alice_reader, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(
+            &alice_reader,
+            &query,
+            global_subscribe_opts()
+        )),
         vec![added[0].row_uuid()],
     );
 
@@ -2045,14 +2049,14 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
             Value::String(bob.test_uuid().to_string()),
         )]),
     );
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
 
     reader.tick().unwrap();
     server.tick().unwrap();
     reader.tick().unwrap();
     assert!(opened_rows(next_settled_opening(&mut subscription)).is_empty());
-    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    assert!(prepared_all(&reader, &query, global_subscribe_opts()).is_empty());
 }
 
 #[test]

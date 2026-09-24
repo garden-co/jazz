@@ -244,7 +244,7 @@ export interface SubscriptionDeltaEvent {
   delta: Uint8Array
   terminalOperations: Array<SubscriptionTerminalOperation>
   settled: boolean
-  tier: 'None' | 'Local' | 'Edge' | 'Global'
+  tier: 'None' | 'Local' | 'Global'
 }
 
 export type SubscriptionEvent =
