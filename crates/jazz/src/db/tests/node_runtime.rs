@@ -4722,3 +4722,171 @@ fn legacy_edge_receipt_replay_preserves_existing_core_acceptance() {
 fn legacy_edge_receipt_replay_obeys_current_core_permissions() {
     assert_legacy_edge_receipt_replays_to_core(false, true);
 }
+
+/// What the application sees when Core rejects a replayed legacy edge receipt:
+/// the unhandled-rejection callback fires with Core's reason, exactly as for
+/// an ordinary rejected write, and the optimistic row leaves local reads and
+/// live subscriptions. As above, only the retired receipt is planted
+/// internally, because no current API can author it.
+#[test]
+fn rejected_legacy_edge_receipt_replay_reaches_the_application_like_an_ordinary_rejection() {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc7; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = || {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            identity,
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd7, AuthorSubject::SYSTEM, &schema);
+    let client = open();
+    let legacy_tx = client
+        .insert(
+            "todos",
+            cells("legacy edge-accepted payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe7)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(legacy_tx),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    let client = open();
+    let events = Rc::new(RefCell::new(Vec::<MutationErrorEvent>::new()));
+    let observed = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        observed.borrow_mut().push(event.clone())
+    }));
+    let todos = client.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(client.subscribe(&todos, ReadOpts::default())).unwrap();
+    let mut visible = BTreeSet::new();
+    let mut drain = |subscription: &mut SubscriptionStream, visible: &mut BTreeSet<RowUuid>| {
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    visible.clear();
+                }
+                visible.extend(added.iter().chain(&updated).map(|row| row.row.row_uuid()));
+                for gone in &removed {
+                    visible.remove(&gone.row_uuid);
+                }
+            }
+        }
+    };
+    for _ in 0..16 {
+        client.tick().unwrap();
+        client.refresh_subscriptions().unwrap();
+        drain(&mut subscription, &mut visible);
+    }
+    // Reopened as Pending/Local, the legacy write is still an optimistic row.
+    assert_eq!(row_ids(&client.read(&todos).unwrap()), vec![row(0xe7)]);
+    assert_eq!(visible, BTreeSet::from([row(0xe7)]));
+    assert!(events.borrow().is_empty());
+
+    // Permission loss since the old receipt: Core now rejects this author.
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    let _subscriber =
+        core.accept_subscriber_with_claims(down, author, test_provider_claims(other_author));
+    let pump_until = |count: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while events.borrow().len() < count && std::time::Instant::now() < deadline {
+            client.tick().unwrap();
+            core.tick().unwrap();
+            client.tick().unwrap();
+            std::thread::yield_now();
+        }
+    };
+    pump_until(1);
+    let legacy = events.borrow().first().cloned().expect(
+        "a rejected replay without an active waiter must reach the mutation-error callback",
+    );
+    assert_eq!(
+        legacy.transaction.transaction_id,
+        TransactionId::from_committed_tx(legacy_tx)
+    );
+    assert!(!legacy.reason.is_empty());
+    assert_eq!(
+        legacy.transaction.latest_settlement,
+        TransactionFate::Rejected {
+            transaction_id: TransactionId::from_committed_tx(legacy_tx),
+            code: legacy.code.clone(),
+            reason: legacy.reason.clone(),
+        }
+    );
+    client.refresh_subscriptions().unwrap();
+    drain(&mut subscription, &mut visible);
+    assert!(client.read(&todos).unwrap().is_empty());
+    assert!(
+        visible.is_empty(),
+        "the rejected optimistic row leaves the subscription"
+    );
+    assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+
+    // An ordinary write rejected on the same link reports the same surface.
+    let ordinary_tx = client
+        .insert(
+            "todos",
+            cells("ordinary payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe8)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    pump_until(2);
+    let events = events.borrow();
+    assert_eq!(events.len(), 2, "each rejection is reported exactly once");
+    let ordinary = &events[1];
+    assert_eq!(
+        ordinary.transaction.transaction_id,
+        TransactionId::from_committed_tx(ordinary_tx)
+    );
+    assert_eq!(
+        (
+            &legacy.code,
+            &legacy.reason,
+            legacy.transaction.kind,
+            legacy.transaction.sealed
+        ),
+        (
+            &ordinary.code,
+            &ordinary.reason,
+            ordinary.transaction.kind,
+            ordinary.transaction.sealed
+        )
+    );
+    drop(events);
+    client.refresh_subscriptions().unwrap();
+    drain(&mut subscription, &mut visible);
+    assert!(client.read(&todos).unwrap().is_empty());
+    assert!(visible.is_empty());
+}
