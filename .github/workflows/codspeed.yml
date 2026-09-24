@@ -163,7 +163,7 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: Groove IVM experiment wall time
     runs-on: codspeed-macro
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
