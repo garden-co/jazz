@@ -630,10 +630,10 @@ fn peel_relation_output_steps(
         }
     }
 
-    let (offset, limit) = output_steps.into_iter().rev().fold(
-        (0, None),
-        fold_relation_output_step,
-    );
+    let (offset, limit) = output_steps
+        .into_iter()
+        .rev()
+        .fold((0, None), fold_relation_output_step);
     Ok((current, filters, order_by, offset, limit))
 }
 
@@ -915,6 +915,7 @@ fn build_relation_path_join(
         .cloned()
         .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
     let mut join = JoinVia {
+        source_mode: CandidateSourceMode::AcceptedOnly,
         table: join_table,
         on_column: right_column,
         target: JoinTarget::Column,

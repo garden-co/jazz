@@ -428,8 +428,9 @@ function normalizePolicyExprForWasm(expr: PolicyExpr): WasmPolicyExpr {
         values: expr.values.map((value) => normalizePolicyLiteralValueForWasm(value)),
       };
     case "Exists":
+    case "ExistsIncludingCreated":
       return {
-        type: "Exists",
+        type: expr.type,
         table: expr.table,
         condition: normalizePolicyExprForWasm(expr.condition),
       };

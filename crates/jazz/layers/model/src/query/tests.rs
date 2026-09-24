@@ -1,32 +1,30 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::records::{
-        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
-    };
-    use groove::schema::{ColumnSchema, ColumnType};
     use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
         EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
     };
+    use groove::records::{
+        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
+    };
+    use groove::schema::{ColumnSchema, ColumnType};
 
     fn payload_enum_schema() -> JazzSchema {
         let source = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("events").column(
-                    "event",
-                    PublicColumnType::EnumPayload {
-                        cases: vec![EnumCaseDescriptor {
-                            name: "message".to_owned(),
-                            fields: vec![PublicColumnDescriptor::new(
-                                "level",
-                                PublicColumnType::Integer,
-                            )],
-                        }],
-                    },
-                ),
-            )
+            .table(PublicTableSchemaBuilder::new("events").column(
+                "event",
+                PublicColumnType::EnumPayload {
+                    cases: vec![EnumCaseDescriptor {
+                        name: "message".to_owned(),
+                        fields: vec![PublicColumnDescriptor::new(
+                            "level",
+                            PublicColumnType::Integer,
+                        )],
+                    }],
+                },
+            ))
             .build();
         JazzSchema::new(&source).expect("payload enum public schema compiles")
     }
@@ -231,7 +229,10 @@ mod tests {
             .validate(&payload_enum_schema())
             .expect("payload enum column parameter shape is valid");
         let error = validated
-            .bind(BTreeMap::from([("event".to_owned(), payload_enum_literal())]))
+            .bind(BTreeMap::from([(
+                "event".to_owned(),
+                payload_enum_literal(),
+            )]))
             .unwrap_err();
 
         assert!(matches!(
@@ -258,20 +259,14 @@ mod tests {
             .filter(gt(col("wide"), lit(9_i64)))
             .validate_runtime(&schema)
             .unwrap();
-        assert_eq!(
-            widened.query().filters,
-            vec![gt(col("wide"), lit(9_i64))]
-        );
+        assert_eq!(widened.query().filters, vec![gt(col("wide"), lit(9_i64))]);
         assert_eq!(widened.shape_id(), explicitly_wide.shape_id());
 
         let narrowed = Query::from("metrics")
             .filter(eq(col("narrow"), lit(9_i64)))
             .validate_runtime(&schema)
             .expect("in-range i64 literal narrows for an i32 column");
-        assert_eq!(
-            narrowed.query().filters,
-            vec![eq(col("narrow"), lit(9))]
-        );
+        assert_eq!(narrowed.query().filters, vec![eq(col("narrow"), lit(9))]);
 
         let inferred_in = Query::from("metrics")
             .filter(in_list(col("wide"), [lit(9), lit(10_i64)]))
@@ -284,10 +279,7 @@ mod tests {
         assert_eq!(inferred_in.shape_id(), explicit_in.shape_id());
 
         let out_of_range = Query::from("metrics")
-            .filter(eq(
-                col("narrow"),
-                lit(i64::from(i32::MAX) + 1),
-            ))
+            .filter(eq(col("narrow"), lit(i64::from(i32::MAX) + 1)))
             .validate_runtime(&schema)
             .unwrap_err();
         assert_eq!(out_of_range, QueryError::OperandTypeMismatch);
@@ -682,17 +674,11 @@ mod tests {
         let schema = RuntimeSchema::new([
             TableSchema::new(
                 "parents",
-                [ColumnSchema::new(
-                    "child_id",
-                    ColumnType::Uuid.nullable(),
-                )],
+                [ColumnSchema::new("child_id", ColumnType::Uuid.nullable())],
             ),
             TableSchema::new(
                 "children",
-                [ColumnSchema::new(
-                    "parent_id",
-                    ColumnType::Uuid.nullable(),
-                )],
+                [ColumnSchema::new("parent_id", ColumnType::Uuid.nullable())],
             ),
         ]);
 
@@ -721,17 +707,11 @@ mod tests {
         let schema = RuntimeSchema::new([
             TableSchema::new(
                 "parents",
-                [ColumnSchema::new(
-                    "child_ids",
-                    ColumnType::Uuid.array_of(),
-                )],
+                [ColumnSchema::new("child_ids", ColumnType::Uuid.array_of())],
             ),
             TableSchema::new(
                 "children",
-                [ColumnSchema::new(
-                    "parent_ids",
-                    ColumnType::Uuid.array_of(),
-                )],
+                [ColumnSchema::new("parent_ids", ColumnType::Uuid.array_of())],
             ),
         ]);
 
@@ -823,7 +803,10 @@ mod tests {
         );
         let zero = zero.validate_runtime(&schema).unwrap();
         assert_eq!(zero.query().array_subqueries[0].offset, 2);
-        assert_ne!(zero.shape_id(), one.validate_runtime(&schema).unwrap().shape_id());
+        assert_ne!(
+            zero.shape_id(),
+            one.validate_runtime(&schema).unwrap().shape_id()
+        );
 
         Query::from("issues")
             .array_subquery(ArraySubquery::new("tags", "issue_tags", "issue", "id").offset(2))
@@ -874,8 +857,7 @@ mod tests {
     fn aggregate_count_and_sum_reject_duplicate_output_alias() {
         let source = PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("metrics")
-                    .column("score", PublicColumnType::Integer),
+                PublicTableSchemaBuilder::new("metrics").column("score", PublicColumnType::Integer),
             )
             .build();
         let schema = JazzSchema::new(&source).expect("aggregate public schema compiles");
@@ -887,8 +869,8 @@ mod tests {
             ])
             .validate(&schema);
 
-        let error = result
-            .expect_err("count and sum must not publish the same aggregate output name");
+        let error =
+            result.expect_err("count and sum must not publish the same aggregate output name");
         assert_eq!(
             error,
             QueryError::AggregateOutputNameCollision("metric".to_owned())
@@ -898,10 +880,7 @@ mod tests {
     #[test]
     fn aggregate_alias_rejects_group_output_name() {
         let source = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("metrics")
-                    .column("count", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("metrics").column("count", PublicColumnType::Text))
             .build();
         let schema = JazzSchema::new(&source).unwrap();
 
@@ -989,17 +968,14 @@ mod tests {
                     column: "missing".to_owned(),
                 },
             ),
-            (
-                Aggregate::sum("label"),
-                QueryError::OperandTypeMismatch,
-            ),
+            (Aggregate::sum("label"), QueryError::OperandTypeMismatch),
             (
                 Aggregate::count().alias("__jazz_aggregate_reserved"),
                 QueryError::ReservedAggregateAlias("__jazz_aggregate_reserved".to_owned()),
             ),
         ] {
-            let query = Query::from("metrics")
-                .aggregate(colliding.clone().into_iter().chain([invalid]));
+            let query =
+                Query::from("metrics").aggregate(colliding.clone().into_iter().chain([invalid]));
             assert_eq!(query.validate(&schema).unwrap_err(), expected);
         }
     }
@@ -1229,6 +1205,107 @@ mod tests {
             canonical_binding_bytes_for_values(&BTreeMap::from([("r".to_owned(), record)]))
                 .unwrap();
         assert!(binding_values_from_canonical_bytes(&record_bytes).is_err());
+    }
+
+    #[test]
+    fn authorized_created_join_v1_wire_corpus_preserves_legacy_and_fails_closed() {
+        // Internal codec corpus: old peers must reject a new source capability,
+        // not deserialize it as accepted-only and silently change its meaning.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct LegacyJoin {
+            table: String,
+            on_column: String,
+            target: JoinTarget,
+            source_column: Option<String>,
+            source_lookup: Option<JoinSourceLookup>,
+            correlated_filters: Vec<JoinCorrelation>,
+            filters: Vec<Predicate>,
+            nested_joins: Vec<LegacyJoin>,
+        }
+
+        let cases: &[(JoinTarget, CandidateSourceMode, &[u8], &str)] = &[
+            (
+                JoinTarget::Column,
+                CandidateSourceMode::AcceptedOnly,
+                &[1, b'p', 1, b'r', 0, 0, 0, 0, 0, 0],
+                r#"{"table":"p","on_column":"r","target":"Column","source_column":null,"source_lookup":null,"correlated_filters":[],"filters":[],"nested_joins":[]}"#,
+            ),
+            (
+                JoinTarget::RowId,
+                CandidateSourceMode::AcceptedOnly,
+                &[1, b'p', 1, b'r', 1, 0, 0, 0, 0, 0],
+                r#"{"table":"p","on_column":"r","target":"RowId","source_column":null,"source_lookup":null,"correlated_filters":[],"filters":[],"nested_joins":[]}"#,
+            ),
+            (
+                JoinTarget::Uncorrelated,
+                CandidateSourceMode::AcceptedOnly,
+                &[1, b'p', 1, b'r', 2, 0, 0, 0, 0, 0],
+                r#"{"table":"p","on_column":"r","target":"Uncorrelated","source_column":null,"source_lookup":null,"correlated_filters":[],"filters":[],"nested_joins":[]}"#,
+            ),
+            (
+                JoinTarget::Column,
+                CandidateSourceMode::IncludeAuthorizedCreatedV1,
+                &[1, b'p', 1, b'r', 3, 0, 0, 0, 0, 0],
+                r#"{"table":"p","on_column":"r","target":"AuthorizedCreatedColumnV1","source_column":null,"source_lookup":null,"correlated_filters":[],"filters":[],"nested_joins":[]}"#,
+            ),
+            (
+                JoinTarget::RowId,
+                CandidateSourceMode::IncludeAuthorizedCreatedV1,
+                &[1, b'p', 1, b'r', 4, 0, 0, 0, 0, 0],
+                r#"{"table":"p","on_column":"r","target":"AuthorizedCreatedRowIdV1","source_column":null,"source_lookup":null,"correlated_filters":[],"filters":[],"nested_joins":[]}"#,
+            ),
+        ];
+        for &(target, source_mode, bytes, json) in cases {
+            let mut join = Query::from("t").join_via("p", "r", []).joins.remove(0);
+            join.target = target;
+            join.source_mode = source_mode;
+            assert_eq!(postcard::to_allocvec(&join).unwrap(), bytes);
+            assert_eq!(serde_json::to_string(&join).unwrap(), json);
+            assert_eq!(postcard::from_bytes::<JoinVia>(bytes).unwrap(), join);
+            assert_eq!(serde_json::from_str::<JoinVia>(json).unwrap(), join);
+            if source_mode == CandidateSourceMode::AcceptedOnly {
+                let old = postcard::from_bytes::<LegacyJoin>(bytes).unwrap();
+                assert_eq!(postcard::to_allocvec(&old).unwrap(), bytes);
+                assert_eq!(serde_json::to_string(&old).unwrap(), json);
+            } else {
+                assert!(postcard::from_bytes::<LegacyJoin>(bytes).is_err());
+                assert!(serde_json::from_str::<LegacyJoin>(json).is_err());
+                for length in 0..bytes.len() {
+                    assert!(postcard::from_bytes::<JoinVia>(&bytes[..length]).is_err());
+                }
+            }
+        }
+        assert!(postcard::from_bytes::<JoinVia>(&[1, b'p', 1, b'r', 5, 0, 0, 0, 0, 0]).is_err());
+        let mut unsupported = Query::from("t").join_via("p", "r", []).joins.remove(0);
+        unsupported.source_mode = CandidateSourceMode::IncludeAuthorizedCreatedV1;
+        unsupported.target = JoinTarget::Uncorrelated;
+        assert!(postcard::to_allocvec(&unsupported).is_err());
+        assert!(serde_json::to_string(&unsupported).is_err());
+    }
+
+    #[test]
+    fn authorized_created_join_v1_canonical_marker_precedes_filter_bytes() {
+        // Canonical identity is a codec contract; pin the marker's framing,
+        // not just inequality between two hashes generated by this encoder.
+        let mut join = Query::from("t")
+            .join_via("p", "r", [Predicate::All(Vec::new())])
+            .joins
+            .remove(0);
+        assert_eq!(
+            canonical_join_key(&join),
+            [
+                0, 0, 0, 0, 0, 0, 0, 1, b'p', 0, 0, 0, 0, 0, 0, 0, 1, b'r', 0, 0, 0, 0, 0, 0, 0, 9,
+                b'A', 0, 0, 0, 0, 0, 0, 0, 0,
+            ]
+        );
+        join.source_mode = CandidateSourceMode::IncludeAuthorizedCreatedV1;
+        assert_eq!(
+            canonical_join_key(&join),
+            [
+                0, 0, 0, 0, 0, 0, 0, 1, b'p', 0, 0, 0, 0, 0, 0, 0, 1, b'r', b'a', 1, 0, 0, 0, 0, 0,
+                0, 0, 9, b'A', 0, 0, 0, 0, 0, 0, 0, 0,
+            ]
+        );
     }
 
     #[test]

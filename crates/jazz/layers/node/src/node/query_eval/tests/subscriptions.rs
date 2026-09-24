@@ -5,6 +5,46 @@ use crate::node::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey, ReadViewSourceSpec, SnapshotRef};
 
+/// Mallory forges an INSERT-only candidate source into a wire query shape.
+/// Registration must reject it even though the query is structurally valid
+/// for trusted policy compilation. This protocol seam is needed because the
+/// public query builder already rejects this capability before transmission.
+///
+/// mallory -- forged RegisterShape --> authority -- unsupported capability
+#[test]
+fn forged_query_shape_cannot_register_authorized_created_sources() {
+    let mut marked = Query::from("issues").join_via_row_id("users", "assignee", []);
+    marked.joins[0].source_mode = crate::query::CandidateSourceMode::IncludeAuthorizedCreatedV1;
+    let mut branch = Query::from("issues");
+    branch
+        .policy_branches
+        .push(crate::query::PolicyBranch::single_alternative_from_query(
+            marked.clone(),
+        ));
+    let mut nested = Query::from("issue_members").join_via_row_id("issues", "issue", []);
+    nested.joins[0].nested_joins = marked.joins.clone();
+
+    for (location, query) in [("root", marked), ("branch", branch), ("nested", nested)] {
+        let (_dir, mut node) = open_node();
+        // The forged sender can use the same structural compiler as INSERT
+        // policies, bypassing the ordinary public Query::validate guard.
+        let shape = query
+            .validate_runtime(&schema())
+            .expect("candidate source has a valid declared-reference correlation");
+        let error = node
+            .apply_sync_message_settled(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .expect_err("wire query registration must reject the INSERT-only capability");
+        assert!(
+            matches!(error, Error::UnsupportedSyncMessage(_)),
+            "{location} candidate source must be rejected at ingress: {error:?}",
+        );
+    }
+}
+
 /// Internal compiler boundary: public rows cannot reveal whether two logical
 /// witness roles have one executable payload producer. Alice's maintained
 /// program must retain both contracts while sharing their proven execution.

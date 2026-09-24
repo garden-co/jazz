@@ -353,6 +353,9 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
             put_bytes(&mut bytes, &canonical_join_key(nested));
         }
     }
+    if join.source_mode == CandidateSourceMode::IncludeAuthorizedCreatedV1 {
+        bytes.extend_from_slice(&[b'a', 1]);
+    }
     for filter in &join.filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
     }
@@ -645,9 +648,7 @@ fn canonical_relation_query_key(
     Ok(bytes)
 }
 
-fn canonical_binding_bytes(
-    values: &BTreeMap<String, Value>,
-) -> Result<Vec<u8>, QueryError> {
+fn canonical_binding_bytes(values: &BTreeMap<String, Value>) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"jazz-binding-v0");
     put_len(&mut bytes, values.len());
@@ -744,10 +745,7 @@ fn put_binding_value(bytes: &mut Vec<u8>, value: &Value) -> Result<(), QueryErro
     Ok(())
 }
 
-fn put_binding_column_type(
-    bytes: &mut Vec<u8>,
-    ty: &ColumnType,
-) -> Result<(), QueryError> {
+fn put_binding_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) -> Result<(), QueryError> {
     match ty {
         ColumnType::U8 => bytes.push(0),
         ColumnType::U16 => bytes.push(1),
@@ -1133,10 +1131,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             put_len(bytes, schema.cases.len());
             for case in &schema.cases {
                 put_str(bytes, &case.name);
-                put_column_type(
-                    bytes,
-                    &ColumnType::Record(Box::new(case.payload.clone())),
-                );
+                put_column_type(bytes, &ColumnType::Record(Box::new(case.payload.clone())));
             }
         }
         // Internal physical types cannot be supplied through the public query
