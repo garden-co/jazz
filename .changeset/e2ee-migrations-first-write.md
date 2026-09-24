@@ -13,6 +13,10 @@ Resolve managed administration table additions against the full published
 schemas, not partial migration witnesses. Adding another encrypted table
 preserves existing managed identities and historical ciphertext. Explicit
 attempts to recreate an existing table fail before catalogue publication.
+Compatible scope and referencing-table renames preserve reference identity in
+both migration validation paths, so existing ciphertext remains readable and
+searchable. Retargeting encrypted rows to an unrelated scope still requires
+authorised client conversion.
 
 Branch-target first writes to an uninitialised space remain unsupported. Their
 wait handles now reject before preparing provisional keys, grants or ciphertext,
