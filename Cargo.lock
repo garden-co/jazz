@@ -2255,6 +2255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-linear-history-spike"
+version = "0.0.0"
+dependencies = [
+ "groove",
+ "jazz-storage-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [

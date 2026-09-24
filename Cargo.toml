@@ -39,6 +39,7 @@ members = [
   "examples/benchmarks/smoke",
   "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
+  "dev/spikes/linear-history",
 ]
 exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
 
