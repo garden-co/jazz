@@ -341,14 +341,12 @@ fn version_record<V: Into<Value> + Clone>(
         &schema.tables[0],
         schema.version_id(),
         row_uuid,
-        parents,
         AuthorSubject::system_at(node(1)),
         1,
         AuthorSubject::system_at(node(1)),
         1,
         &cells,
-        deletion,
-    )
+        deletion,)
     .unwrap()
 }
 fn version_record_cells(record: &VersionRecord, table: &TableSchema) -> BTreeMap<String, Value> {
@@ -1154,7 +1152,7 @@ fn add_core_versions_to_oracle(
         if tx_id.node == node(9) && known_txs.insert(tx_id) {
             let table_schema = core.table(&version.table).unwrap().clone();
             let cells = version.cells(&table_schema).unwrap();
-            let parents = version.parents();
+            let parents = Vec::<TxId>::new();
             assert_eq!(
                 cells,
                 oracle.merged_cells_for_parents(version.row_uuid(), &parents),
@@ -1202,7 +1200,7 @@ fn add_commit_unit_versions_to_oracle(
 ) {
     for version in versions {
         let mut model = ModelRowVersion::new(version.row_uuid(), tx.tx_id, tx.tx_id.time);
-        model.parents = version.parents();
+        model.parents = Vec::new();
         model.cells = version_record_cells(version, table_schema);
         model.deletion = version.deletion();
         oracle.add_version(model);

@@ -236,7 +236,6 @@ fn run_commit_unit(config: &Config) {
                         &table,
                         schema_version,
                         row(20_000 + iter * rows_per_unit + idx),
-                        Vec::new(),
                         AuthorSubject::system_at(node((rows_per_unit % 200) as u8 + 1)),
                         iter as u64,
                         AuthorSubject::system_at(node((rows_per_unit % 200) as u8 + 1)),

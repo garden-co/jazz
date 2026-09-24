@@ -706,7 +706,6 @@ fn mixed_version_carriers(
                         table,
                         schema_version,
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
-                        Vec::new(),
                         author,
                         100 + index,
                         author,

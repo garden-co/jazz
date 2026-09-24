@@ -22,11 +22,10 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: TxTime,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: TxTime,
+        5 => created_by: RowAuthor,
+        6 => created_at: TxTime,
+        7 => updated_by: RowAuthor,
+        8 => updated_at: TxTime,
         .. user_cells,
     }
 }
@@ -38,12 +37,11 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: TxTime,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: TxTime,
-        10 => _deletion: DeletionEvent,
+        5 => created_by: RowAuthor,
+        6 => created_at: TxTime,
+        7 => updated_by: RowAuthor,
+        8 => updated_at: TxTime,
+        9 => _deletion: DeletionEvent,
     }
 }
 
@@ -58,12 +56,11 @@ groove::define_record! {
         3 => tx_time: TxTime,
         4 => tx_node_id: NodeAlias,
         5 => schema_version: SchemaVersionAlias,
-        6 => parents: ParentRefs,
-        7 => created_by: RowAuthor,
-        8 => created_at: TxTime,
-        9 => updated_by: RowAuthor,
-        10 => updated_at: TxTime,
-        11 => _deletion: DeletionEvent,
+        6 => created_by: RowAuthor,
+        7 => created_at: TxTime,
+        8 => updated_by: RowAuthor,
+        9 => updated_at: TxTime,
+        10 => _deletion: DeletionEvent,
     }
 }
 
@@ -74,12 +71,11 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: u64,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: u64,
-        10 => global_time: Option<GlobalTime>,
+        5 => created_by: RowAuthor,
+        6 => created_at: u64,
+        7 => updated_by: RowAuthor,
+        8 => updated_at: u64,
+        9 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
 }
@@ -91,13 +87,12 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: u64,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: u64,
-        10 => global_time: Option<GlobalTime>,
-        11 => _deletion: DeletionEvent,
+        5 => created_by: RowAuthor,
+        6 => created_at: u64,
+        7 => updated_by: RowAuthor,
+        8 => updated_at: u64,
+        9 => global_time: Option<GlobalTime>,
+        10 => _deletion: DeletionEvent,
     }
 }
 
@@ -277,28 +272,6 @@ impl records::RecordField for RowAuthor {
     const COLUMN_KIND: records::FieldKind = records::FieldKind::Record;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ParentRefs(Vec<TxId>);
-
-impl records::RecordField for ParentRefs {
-    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        tx_ids_from_value(record.get_idx(idx)?)
-            .map(Self)
-            .map_err(|_| records::Error::TypeMismatch {
-                expected: records::ValueType::Array(Box::new(records::ValueType::Tuple(vec![
-                    records::ValueType::U64,
-                    records::ValueType::Uuid,
-                ]))),
-            })
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Array(self.0.iter().map(|parent| tx_id_value(*parent)).collect())
-    }
-
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::Array;
-}
-
 groove::define_record! {
     pub(super) struct CurrentRowRecord {
         0 => row_uuid: RowUuid,
@@ -309,12 +282,11 @@ groove::define_record! {
 groove::define_record! {
     pub(super) struct WireRowRecord {
         0 => row_uuid: RowUuid,
-        1 => parents: ParentRefs,
-        2 => created_by: RowAuthor,
-        3 => created_at: u64,
-        4 => updated_by: RowAuthor,
-        5 => updated_at: u64,
-        6 => _deletion: Option<Value>,
+        1 => created_by: RowAuthor,
+        2 => created_at: u64,
+        3 => updated_by: RowAuthor,
+        4 => updated_at: u64,
+        5 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
@@ -1923,8 +1895,7 @@ groove::define_record! {
         1 => tx_node_id: NodeAlias,
         2 => row_uuid: RowUuid,
         3 => layer: Vec<u8>,
-        4 => parents: ParentRefs,
-        5 => _deletion: Option<Value>,
+        4 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
@@ -1945,7 +1916,6 @@ impl VersionRecord {
             table,
             schema_version,
             commit.row_uuid,
-            Vec::new(),
             commit.made_by,
             commit.now_ms,
             commit.made_by,
@@ -1973,9 +1943,8 @@ impl VersionRecord {
                 // are packed HLC values in storage and milliseconds on wire.
                 let source = match index {
                     0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
-                    1 => Some(HistoryRowRecord::FIELD_PARENTS_IDX),
-                    2 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
-                    4 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
+                    1 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
+                    3 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
                     i if i >= WireRowRecord::USER_CELLS && !register => {
                         Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
                     }
@@ -1987,9 +1956,9 @@ impl VersionRecord {
                     return Ok(());
                 }
                 let value = match index {
-                    3 => Value::U64(stored.created_at().physical_ms()),
-                    5 => Value::U64(stored.updated_at().physical_ms()),
-                    6 => Value::Nullable(stored.deletion().map(|deletion| {
+                    2 => Value::U64(stored.created_at().physical_ms()),
+                    4 => Value::U64(stored.updated_at().physical_ms()),
+                    5 => Value::Nullable(stored.deletion().map(|deletion| {
                         Box::new(Value::EnumTag(match deletion {
                             DeletionEvent::Deleted => 0,
                             DeletionEvent::Restored => 1,
@@ -2014,7 +1983,6 @@ impl VersionRecord {
                 table,
                 schema_version,
                 stored.row_uuid(),
-                stored.parents(),
                 stored.created_by(),
                 stored.created_at().physical_ms(),
                 stored.updated_by(),
@@ -2178,7 +2146,6 @@ pub(super) struct VersionRowParts {
     pub(super) tx_node_alias: NodeAlias,
     pub(super) schema_version_alias: SchemaVersionAlias,
     pub(super) tx_time: TxTime,
-    pub(super) parents: Vec<TxId>,
     pub(super) created_by: AuthorSubject,
     pub(super) created_at: TxTime,
     pub(super) updated_by: AuthorSubject,
@@ -2325,11 +2292,6 @@ impl VersionRow {
                 "row version branch key is not canonical",
             ));
         }
-        if version.parents().windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::InvalidMergeableCommit(
-                "row version parents must be sorted and unique",
-            ));
-        }
         let deletion = version.deletion();
         let descriptor = if deletion.is_some() {
             register_record_descriptor(table)
@@ -2356,10 +2318,9 @@ impl VersionRow {
                 let source_index = match index {
                     1 => Some(0),
                     5 => Some(1),
-                    6 => Some(2),
-                    8 => Some(4),
-                    i if deletion.is_none() && i >= 10 && i < 10 + table.columns.len() => {
-                        Some(i - 10 + 7)
+                    7 => Some(3),
+                    i if deletion.is_none() && i >= 9 && i < 9 + table.columns.len() => {
+                        Some(i - 9 + 6)
                     }
                     _ => None,
                 };
@@ -2382,22 +2343,15 @@ impl VersionRow {
                     2 => Value::U64(tx_time.0),
                     3 => Value::U64(tx_node_alias.0),
                     4 => Value::U64(schema_version_alias.0),
-                    5 => Value::Array(
-                        version
-                            .parents()
-                            .iter()
-                            .map(|parent| tx_id_value(*parent))
-                            .collect(),
-                    ),
-                    6 => row_author_value(version.created_by())?,
-                    7 => Value::U64(created_at),
-                    8 => row_author_value(version.updated_by())?,
-                    9 => Value::U64(updated_at),
+                    5 => row_author_value(version.created_by())?,
+                    6 => Value::U64(created_at),
+                    7 => row_author_value(version.updated_by())?,
+                    8 => Value::U64(updated_at),
                     _ if deletion.is_some() => deletion_event_value(deletion.unwrap()),
-                    i if i < 10 + table.columns.len() => {
-                        let value = version.optional_cell_at(i - 10);
+                    i if i < 9 + table.columns.len() => {
+                        let value = version.optional_cell_at(i - 9);
                         if let Some(value) = value.as_ref() {
-                            validate_cell_value(&table.columns[i - 10], value)?;
+                            validate_cell_value(&table.columns[i - 9], value)?;
                         }
                         Value::Nullable(value.map(Box::new))
                     }
@@ -2487,22 +2441,8 @@ impl VersionRow {
         TxTime(self.record.borrowed().get_u64(idx).expect("valid tx_time"))
     }
 
-    pub(super) fn parents(&self) -> Vec<TxId> {
-        self.checked_parents()
-            .expect("valid canonical parent tx ids")
-    }
-
     pub(super) fn validate_canonical(&self) -> Result<(), Error> {
-        validate_canonical_version_parts(&self.branch_key, &self.checked_parents()?)
-    }
-
-    fn checked_parents(&self) -> Result<Vec<TxId>, Error> {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_PARENTS_IDX
-        } else {
-            HistoryRowRecord::FIELD_PARENTS_IDX
-        };
-        tx_ids_from_value(self.record.borrowed().get_idx(idx)?)
+        validate_canonical_version_parts(&self.branch_key)
     }
 
     pub(super) fn created_by(&self) -> AuthorSubject {
@@ -2727,86 +2667,29 @@ pub(super) fn current_version_index(
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
 ) -> Option<usize> {
     match layer {
-        VersionLayer::Content => {
-            let heads = content_head_indices(versions, candidate_indices, node_aliases);
-            heads.into_iter().max_by_key(|idx| {
+        VersionLayer::Content | VersionLayer::Deletion => {
+            candidate_indices.iter().copied().max_by_key(|idx| {
                 let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
                     .expect("valid version tx id");
                 versions[*idx].tx_time().sort_key(tx_id.node)
             })
         }
-        VersionLayer::Deletion => candidate_indices.iter().copied().max_by_key(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            versions[*idx].tx_time().sort_key(tx_id.node)
-        }),
     }
 }
 
 pub(super) fn version_wins_over_open_winner(
-    incoming: &VersionRow,
+    _incoming: &VersionRow,
     incoming_tx_id: TxId,
     incoming_made_at: TxTime,
     open_winner: Option<(&VersionRow, TxId, TxTime)>,
 ) -> bool {
     match open_winner {
         None => true,
-        Some((_, winner_tx_id, _)) if incoming.parents().contains(&winner_tx_id) => true,
         Some((_, winner_tx_id, winner_made_at)) => {
             incoming_made_at.sort_key(incoming_tx_id.node)
                 > winner_made_at.sort_key(winner_tx_id.node)
         }
     }
-}
-
-pub(super) fn content_head_indices(
-    versions: &[VersionRow],
-    candidate_indices: &[usize],
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-) -> Vec<usize> {
-    let txs = candidate_indices
-        .iter()
-        .map(|idx| {
-            version_tx_id_from_aliases(&versions[*idx], node_aliases).expect("valid version tx id")
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let parents_by_tx = candidate_indices
-        .iter()
-        .map(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            (tx_id, versions[*idx].parents())
-        })
-        .collect::<BTreeMap<_, _>>();
-    let dominated = candidate_indices
-        .iter()
-        .flat_map(|idx| {
-            let mut dominated = Vec::new();
-            let mut stack = versions[*idx].parents();
-            let mut seen = std::collections::BTreeSet::new();
-            while let Some(parent) = stack.pop() {
-                if !seen.insert(parent) {
-                    continue;
-                }
-                if txs.contains(&parent) {
-                    dominated.push(parent);
-                }
-                if let Some(parents) = parents_by_tx.get(&parent) {
-                    stack.extend(parents.iter().copied());
-                }
-            }
-            dominated
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    candidate_indices
-        .iter()
-        .copied()
-        .filter(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            !dominated.contains(&tx_id)
-        })
-        .collect()
 }
 
 pub(super) fn version_tx_id_from_aliases(
@@ -3712,13 +3595,6 @@ pub(super) fn rejected_version_values(
         Value::U64(version.tx_node_alias().0),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         Value::Nullable(version.deletion().map(|deletion| {
             Box::new(Value::EnumTag(match deletion {
                 DeletionEvent::Deleted => 0,
@@ -3928,13 +3804,6 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
-        Value::Array(
-            version
-                .parents
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
         row_author_value(version.updated_by)?,
@@ -3964,13 +3833,6 @@ fn history_values_from_wire(
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
     values.push(Value::U64(schema_version_alias.0));
-    values.push(Value::Array(
-        version
-            .parents()
-            .iter()
-            .map(|parent| tx_id_value(*parent))
-            .collect(),
-    ));
     values.push(row_author_value(version.created_by())?);
     // Wire provenance carries public Unix milliseconds. Reconstruct the
     // internal HLC with logical counter zero at this ingestion boundary.
@@ -4006,13 +3868,6 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
-        Value::Array(
-            version
-                .parents
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
         row_author_value(version.updated_by)?,
@@ -4035,13 +3890,6 @@ fn register_values_from_wire(
         Value::U64(tx_time.0),
         Value::U64(tx_node_alias.0),
         Value::U64(schema_version_alias.0),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by())?,
         Value::U64(
             TxTime::from_physical_ms(version.created_at_ms())
@@ -4095,13 +3943,6 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
         Value::U64(version.schema_version_alias().0),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by())?,
         Value::U64(version.created_at().0),
         row_author_value(version.updated_by())?,
@@ -4690,37 +4531,11 @@ pub(super) fn expect_uuid(value: Value, field: &'static str) -> Result<uuid::Uui
     }
 }
 
-pub(super) fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, Error> {
-    match value {
-        Value::Array(values) => {
-            let parents = values
-                .into_iter()
-                .map(tx_id_from_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            validate_parent_tx_ids(&parents)?;
-            Ok(parents)
-        }
-        _ => Err(Error::InvalidStoredValue("parents must be array")),
-    }
-}
-
-pub(super) fn validate_parent_tx_ids(parents: &[TxId]) -> Result<(), Error> {
-    if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(Error::InvalidMergeableCommit(
-            "row version parents must be sorted and unique",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_canonical_version_parts(
-    branch_key: &BranchKey,
-    parents: &[TxId],
-) -> Result<(), Error> {
+pub(super) fn validate_canonical_version_parts(branch_key: &BranchKey) -> Result<(), Error> {
     branch_key
         .try_canonical_bytes()
         .map_err(|_| Error::InvalidMergeableCommit("row version branch key is not canonical"))?;
-    validate_parent_tx_ids(parents)
+    Ok(())
 }
 
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {

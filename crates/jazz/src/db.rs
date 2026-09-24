@@ -2288,12 +2288,8 @@ where
                         (
                             tx.n_total_writes,
                             versions.len(),
-                            versions
-                                .iter()
-                                .flat_map(crate::protocol::VersionRecord::parents)
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .collect::<Vec<_>>(),
+                            // Linear history: replay order is transaction order.
+                            Vec::<TxId>::new(),
                         )
                     };
                     units.insert(tx_id, unit);

@@ -688,15 +688,6 @@ where
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
     }
 
-    pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
-        let write_schema = self.catalogue.active_schema.schema;
-        if self.table_in_schema(table, write_schema).is_ok() {
-            write_schema
-        } else {
-            self.catalogue.local_schema_version_id
-        }
-    }
-
     pub(super) fn read_policy_schema_for_table_name(
         &self,
         table: &str,
@@ -835,48 +826,6 @@ where
         } else {
             &table.name
         };
-        for parent in version.parents() {
-            for parent_version in self.query_versions_for_tx(parent).await? {
-                if parent_version.row_uuid() != version.row_uuid()
-                    || parent_version.layer() != VersionLayer::Content
-                {
-                    continue;
-                }
-                let (_policy_schema_version, projected_table, cells) =
-                    match self.policy_projection_for_version_row(&parent_version) {
-                        Ok(projected) => projected,
-                        Err(Error::InvalidCatalogueUpdate("lens chain is unknown")) => {
-                            let source_schema = self
-                                .schema_version_for_alias(parent_version.schema_version_alias())
-                                .ok_or(Error::InvalidStoredValue(
-                                    "history schema version alias must exist",
-                                ))?;
-                            let source_table =
-                                self.table_in_schema(parent_version.table(), source_schema)?;
-                            if !policy_tables_are_directly_compatible(&source_table, table) {
-                                return Err(Error::InvalidCatalogueUpdate("lens chain is unknown"));
-                            }
-                            (
-                                self.policy_schema_for_table_name(&table.name),
-                                table.clone(),
-                                parent_version.cells(&source_table)?,
-                            )
-                        }
-                        Err(error) => return Err(error),
-                    };
-                if projected_table.name != table.name {
-                    continue;
-                }
-                return reconstructed_policy_subject_row(
-                    table,
-                    version.row_uuid(),
-                    &cells,
-                    &parent_version,
-                )
-                .map(Some);
-            }
-        }
-
         let local_previous = match candidate_tx_id {
             Some(candidate_tx_id) => {
                 self.query_local_layer_winner_in_branch_excluding_tx(

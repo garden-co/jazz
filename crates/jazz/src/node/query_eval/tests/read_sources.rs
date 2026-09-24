@@ -64,13 +64,7 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
             && tx_time_field == "tx_time"
             && tx_node_field == "tx_node_id"
     ));
-    for field in [
-        "table",
-        "layer",
-        "schema_version",
-        "parents",
-        "authored_columns",
-    ] {
+    for field in ["table", "layer", "schema_version", "authored_columns"] {
         assert!(
             descriptor.field_index(field).is_some(),
             "synthesized witness descriptor must carry {field}"

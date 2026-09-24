@@ -308,14 +308,12 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
                 &base.tables[0],
                 evolved_id,
                 version.row_uuid(),
-                version.parents(),
                 version.created_by(),
                 version.created_at_ms(),
                 version.updated_by(),
                 version.updated_at_ms(),
                 &version_record_cells(&version, &base.tables[0]),
-                version.deletion(),
-            )
+                version.deletion(),)
             .unwrap()
         })
         .collect();
@@ -389,14 +387,12 @@ fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
                 &base.tables[0],
                 evolved_id,
                 version.row_uuid(),
-                version.parents(),
                 version.created_by(),
                 version.created_at_ms(),
                 version.updated_by(),
                 version.updated_at_ms(),
                 &version_record_cells(&version, &base.tables[0]),
-                version.deletion(),
-            )
+                version.deletion(),)
             .unwrap()
         })
         .collect();
@@ -440,14 +436,12 @@ fn zero_column_version_claiming_schema(
         &TableSchema::new("todos", Vec::<ColumnSchema>::new()),
         schema.version_id(),
         version.row_uuid(),
-        version.parents(),
         version.created_by(),
         version.created_at_ms(),
         version.updated_by(),
         version.updated_at_ms(),
         &BTreeMap::<String, Value>::new(),
-        version.deletion(),
-    )
+        version.deletion(),)
     .unwrap()
 }
 

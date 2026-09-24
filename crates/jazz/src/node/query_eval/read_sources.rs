@@ -3146,7 +3146,6 @@ fn selected_visible_current_primary_key_graph(
     let mut content_fields = vec![
         "row_uuid".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "authored_columns".to_owned(),
     ];
     content_fields.extend(user_fields.iter().cloned());
@@ -3238,7 +3237,6 @@ pub(super) fn register_storage_field_names() -> Vec<String> {
         "tx_time",
         "tx_node_id",
         "schema_version",
-        "parents",
         "created_by",
         "created_at",
         "updated_by",
@@ -3516,7 +3514,6 @@ where
             ProjectField::literal("table", Value::String(table.name.clone())),
             ProjectField::literal("layer", Value::String("content".to_owned())),
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
             ProjectField::renamed("$createdBy", "created_by"),
             ProjectField::renamed("$createdAt", "created_at"),
@@ -3731,7 +3728,6 @@ fn canonical_current_source_fields(
     if include_version {
         fields.extend([
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
         ]);
     }
@@ -3771,7 +3767,6 @@ fn storage_to_canonical_current_source_fields(
     if include_version {
         fields.extend([
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
         ]);
     }
@@ -3790,7 +3785,6 @@ fn branch_view_storage_source_fields(
         ProjectField::renamed("branch_key", "supplying_branch_key"),
         ProjectField::named("row_uuid"),
         ProjectField::named("schema_version"),
-        ProjectField::named("parents"),
         ProjectField::named("authored_columns"),
     ];
     for column in &table.columns {
@@ -3960,13 +3954,6 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             records::DescriptorField::new("table", ValueType::String),
             records::DescriptorField::new("layer", ValueType::String),
             records::DescriptorField::new("schema_version", ValueType::U64),
-            records::DescriptorField::new(
-                "parents",
-                ValueType::Array(Box::new(ValueType::Tuple(vec![
-                    ValueType::U64,
-                    ValueType::Uuid,
-                ]))),
-            ),
             records::DescriptorField::new(
                 "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
@@ -4612,11 +4599,7 @@ pub(super) fn global_current_storage_fields(
 ) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     if include_version {
-        fields.extend([
-            "schema_version".to_owned(),
-            "parents".to_owned(),
-            "authored_columns".to_owned(),
-        ]);
+        fields.extend(["schema_version".to_owned(), "authored_columns".to_owned()]);
     }
     fields.extend(
         table
@@ -4952,7 +4935,6 @@ fn inline_current_record_with_source_metadata_and_deletion(
             Value::String(table.name.clone()),
             Value::String("content".to_owned()),
             Value::U64(schema_version_alias.0),
-            Value::Array(Vec::new()),
             Value::Nullable(None),
             row_author_value(provenance.created_by)?,
             Value::U64(provenance.created_at),
@@ -5205,7 +5187,6 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     let mut content_storage_fields = vec![
         "row_uuid".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "authored_columns".to_owned(),
     ];
     content_storage_fields.extend(user_fields.iter().cloned());
@@ -5330,7 +5311,6 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
         "tx_time".to_owned(),
         "tx_node_id".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "created_by".to_owned(),
         "created_at".to_owned(),
         "updated_by".to_owned(),

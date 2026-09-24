@@ -447,7 +447,6 @@ where
                     tx_node_alias,
                     schema_version_alias,
                     tx_time: made_at,
-                    parents: Vec::new(),
                     created_by,
                     created_at,
                     updated_by: commit.made_by,

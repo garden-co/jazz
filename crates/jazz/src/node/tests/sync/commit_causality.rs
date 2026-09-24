@@ -272,14 +272,12 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
             &schema.tables[0],
             original.schema_version(),
             original.row_uuid(),
-            original.parents(),
             original.created_by(),
             HLC_MAX_PHYSICAL_MS,
             original.updated_by(),
             HLC_MAX_PHYSICAL_MS,
             &[original.cell_at(0)],
-            original.deletion(),
-        )
+            original.deletion(),)
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let accepted = core
@@ -312,14 +310,12 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
             &schema.tables[0],
             original.schema_version(),
             original.row_uuid(),
-            original.parents(),
             original.created_by(),
             HLC_MAX_PHYSICAL_MS + 1,
             original.updated_by(),
             HLC_MAX_PHYSICAL_MS + 1,
             &[original.cell_at(0)],
-            original.deletion(),
-        )
+            original.deletion(),)
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let rejected = core

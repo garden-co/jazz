@@ -160,7 +160,6 @@ mod tests {
             &schema.tables()[0],
             schema.version_id(),
             RowUuid(uuid::Uuid::nil()),
-            Vec::new(),
             AuthorSubject::for_test_bytes([0; 16]),
             tx_id.time.physical_ms(),
             AuthorSubject::for_test_bytes([0; 16]),

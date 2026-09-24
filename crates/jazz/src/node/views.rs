@@ -1509,9 +1509,6 @@ where
             for version in &bundle.versions {
                 self.ensure_schema_version_alias(version.schema_version())
                     .await?;
-                for parent in version.parents() {
-                    self.ensure_node_alias(parent.node).await?;
-                }
             }
         }
         let mut receiver_batch = self.database.open_batch();

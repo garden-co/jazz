@@ -419,7 +419,7 @@ where
                 }
             }
             if let Err(Error::InvalidMergeableCommit(reason)) =
-                validate_canonical_version_parts(version.branch_key(), &version.parents())
+                validate_canonical_version_parts(version.branch_key())
             {
                 return Some(reason.to_owned());
             }

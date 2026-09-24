@@ -642,22 +642,6 @@ impl HistoryEntry {
         self.transaction.durability
     }
 
-    /// Direct parent transaction ids for this version.
-    pub fn parents(&self) -> Vec<TxId> {
-        let field = self
-            .version
-            .descriptor()
-            .field_index("parents")
-            .expect("history record has parents");
-        tx_ids_from_value(
-            self.version
-                .borrowed()
-                .get_idx(field)
-                .expect("valid history parents"),
-        )
-        .expect("valid history parent refs")
-    }
-
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
         if self.is_register_record() {
@@ -838,17 +822,6 @@ impl RejectedVersion {
         )
     }
 
-    /// Direct parent transaction ids.
-    pub fn parents(&self) -> Vec<TxId> {
-        tx_ids_from_value(
-            self.record
-                .borrowed()
-                .get_idx(RejectedVersionRowRecord::FIELD_PARENTS_IDX)
-                .expect("valid rejected parents"),
-        )
-        .expect("valid rejected parents")
-    }
-
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
         self.record
@@ -977,11 +950,10 @@ groove::define_record! {
         1 => tx_time: u64,
         2 => tx_node_id: u64,
         3 => schema_version: u64,
-        4 => parents: ParentRefs,
-        5 => created_by: RowAuthor,
-        6 => created_at: u64,
-        7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
+        4 => created_by: RowAuthor,
+        5 => created_at: u64,
+        6 => updated_by: RowAuthor,
+        7 => updated_at: u64,
         .. user_cells,
     }
 }
@@ -992,12 +964,11 @@ groove::define_record! {
         1 => tx_time: u64,
         2 => tx_node_id: u64,
         3 => schema_version: u64,
-        4 => parents: ParentRefs,
-        5 => created_by: RowAuthor,
-        6 => created_at: u64,
-        7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
-        9 => _deletion: Value,
+        4 => created_by: RowAuthor,
+        5 => created_at: u64,
+        6 => updated_by: RowAuthor,
+        7 => updated_at: u64,
+        8 => _deletion: Value,
     }
 }
 
@@ -1020,37 +991,9 @@ groove::define_record! {
         1 => tx_node_id: u64,
         2 => row_uuid: RowUuid,
         3 => layer: Vec<u8>,
-        4 => parents: ParentRefs,
-        5 => _deletion: Option<Value>,
+        4 => _deletion: Option<Value>,
         .. user_cells,
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParentRefs(Vec<TxId>);
-
-impl groove::records::RecordField for ParentRefs {
-    fn read(
-        record: &groove::records::BorrowedRecord<'_>,
-        idx: usize,
-    ) -> Result<Self, groove::records::Error> {
-        tx_ids_from_value(record.get_idx(idx)?)
-            .map(Self)
-            .map_err(|_| groove::records::Error::TypeMismatch {
-                expected: groove::records::ValueType::Array(Box::new(
-                    groove::records::ValueType::Tuple(vec![
-                        groove::records::ValueType::U64,
-                        groove::records::ValueType::Uuid,
-                    ]),
-                )),
-            })
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Array(self.0.iter().map(|parent| tx_id_value(*parent)).collect())
-    }
-
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Array;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1080,13 +1023,6 @@ fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, &'static str> {
     }
 }
 
-fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, &'static str> {
-    match value {
-        Value::Array(values) => values.into_iter().map(tx_id_from_value).collect(),
-        _ => Err("parents"),
-    }
-}
-
 fn tx_id_from_value(value: Value) -> Result<TxId, &'static str> {
     match value {
         Value::Tuple(values) if values.len() == 2 => {
@@ -1101,10 +1037,6 @@ fn tx_id_from_value(value: Value) -> Result<TxId, &'static str> {
         }
         _ => Err("tx id tuple"),
     }
-}
-
-fn tx_id_value(tx_id: TxId) -> Value {
-    Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
 }
 
 fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static str> {

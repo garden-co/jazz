@@ -979,7 +979,7 @@ impl SyncCapture {
                     .collect::<BTreeMap<_, _>>();
                 json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
                     "schema": version.schema_version(), "branch": version.branch_key(),
-                    "parents": version.parents(), "cells": cells,
+                    "cells": cells,
                     "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
             }).collect::<Vec<_>>();
             json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),

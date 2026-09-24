@@ -13,8 +13,7 @@ use groove::records::{
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
-    register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
-    version_tx_id_from_aliases,
+    register_values_from_parts, runtime_result_identity_bytes, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -48,7 +47,6 @@ struct VersionDecodePlan {
     tx_time_idx: usize,
     tx_node_idx: usize,
     schema_version_idx: usize,
-    parents_idx: usize,
     created_by_idx: usize,
     created_at_idx: usize,
     updated_by_idx: usize,
@@ -3037,7 +3035,6 @@ fn decode_typed_version_witness(
             plan.schema_version_idx,
         )?),
         tx_time,
-        parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
         created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
@@ -3075,8 +3072,12 @@ fn decode_typed_version_witness(
     let raw = plan.descriptor.create_with_encoded_fields::<super::Error>(
         record.raw().len(),
         |index, output| {
-            if layer == VersionLayer::Content && index >= 10 && index < 10 + table.columns.len() {
-                let source_index = plan.user_indices[&table.columns[index - 10].name];
+            let user_cells = super::codec::HistoryRowRecord::USER_CELLS;
+            if layer == VersionLayer::Content
+                && index >= user_cells
+                && index < user_cells + table.columns.len()
+            {
+                let source_index = plan.user_indices[&table.columns[index - user_cells].name];
                 if record.descriptor().fields()[source_index].value_type
                     == plan.descriptor.fields()[index].value_type
                 {
@@ -3167,7 +3168,6 @@ fn build_version_decode_plan(
             terminal_descriptor,
             &schema.identity.schema_field,
         )?,
-        parents_idx: field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
         created_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
         created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
         updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
@@ -4364,7 +4364,6 @@ mod tests {
             created_at_field: "created_at".to_owned(),
             updated_by_field: "updated_by".to_owned(),
             updated_at_field: "updated_at".to_owned(),
-            parents_field: "parents".to_owned(),
             authored_columns_field: "authored_columns".to_owned(),
             deletion_field: "_deletion".to_owned(),
             user_fields: BTreeMap::new(),
@@ -4401,7 +4400,6 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                parents: Vec::new(),
                 created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
                 updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
@@ -4426,7 +4424,6 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                parents: Vec::new(),
                 created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
                 updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),

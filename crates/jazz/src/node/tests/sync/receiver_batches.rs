@@ -1119,7 +1119,6 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         &projection_schema.tables[0],
         full.schema_version(),
         full.row_uuid(),
-        full.parents(),
         full.created_by(),
         full.created_at_ms(),
         full.updated_by(),
@@ -1128,8 +1127,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             Some(Value::String("conflicting title".to_owned())),
             full.cell_at(1),
         ],
-        full.deletion(),
-    )
+        full.deletion(),)
     .unwrap()
     .with_authored_columns(full.authored_columns().cloned());
     let subscription = reader.whole_table_subscription_key("todos").unwrap();

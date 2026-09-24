@@ -20,7 +20,6 @@ struct CanonicalVersionRecord {
     table: String,
     schema_version: SchemaVersionId,
     row_uuid: RowUuid,
-    parents: Vec<TxId>,
     created_by: AuthorSubject,
     created_at: u64,
     updated_by: AuthorSubject,
@@ -46,8 +45,6 @@ fn canonical_version_bundle(bundle: VersionBundle) -> CanonicalVersionBundle {
 }
 
 fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
-    let mut parents = record.parents();
-    parents.sort();
     let cells = (0..record.record().descriptor().fields().len())
         .filter_map(|idx| record.optional_cell_at(idx))
         .map(|value| format!("{value:?}"))
@@ -56,7 +53,6 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
         table: record.table().to_owned(),
         schema_version: record.schema_version(),
         row_uuid: record.row_uuid(),
-        parents,
         created_by: record.created_by(),
         created_at: record.created_at_ms(),
         updated_by: record.updated_by(),

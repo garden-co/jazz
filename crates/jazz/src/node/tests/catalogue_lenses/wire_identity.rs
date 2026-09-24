@@ -85,9 +85,6 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     };
     assert_eq!(tx.tx_id.node, node(0x4a));
     assert_eq!(versions[0].schema_version(), schema.version_id());
-    // Linear history: versions carry no parents; the wire identity is the
-    // transaction's node UUID, checked above.
-    assert!(versions[0].parents().is_empty());
     let _ = parent;
 
     core.apply_sync_message_settled(unit).unwrap();

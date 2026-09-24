@@ -898,7 +898,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             profile_version
                 .record()
                 .borrowed()
-                .get_idx(7)
+                .get_idx(6)
                 .expect("decode sender wire userId"),
             Value::Nullable(Some(Box::new(Value::String(
                 identity.test_uuid().to_string()

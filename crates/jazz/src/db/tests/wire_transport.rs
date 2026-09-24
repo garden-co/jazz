@@ -1776,7 +1776,6 @@ fn transport_version_bundles(count: usize) -> Vec<crate::protocol::VersionBundle
                         &table,
                         schema_version,
                         RowUuid::from_bytes([index as u8; 16]),
-                        Vec::new(),
                         author,
                         1_000 + index as u64,
                         author,

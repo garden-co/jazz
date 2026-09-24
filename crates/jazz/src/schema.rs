@@ -1025,7 +1025,6 @@ impl TableSchema {
             column("tx_node_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
-            column("parents", tx_id_column().array_of()),
             column("_deletion", deletion_column().nullable()),
         ];
         columns.extend(self.columns.iter().map(|user_column| {
@@ -1061,7 +1060,6 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("parents", tx_id_column().array_of()),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1108,7 +1106,6 @@ impl TableSchema {
                 column("tx_time", GrooveColumnType::U64),
                 column("tx_node_id", GrooveColumnType::U64),
                 column("schema_version", GrooveColumnType::U64),
-                column("parents", tx_id_column().array_of()),
                 column("created_by", crate::ids::RowAuthor::value_type()),
                 column("created_at", GrooveColumnType::U64),
                 column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1137,7 +1134,6 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("parents", tx_id_column().array_of()),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1183,7 +1179,6 @@ impl TableSchema {
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
                     column("schema_version", GrooveColumnType::U64),
-                    column("parents", tx_id_column().array_of()),
                     column("created_by", crate::ids::RowAuthor::value_type()),
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1207,7 +1202,6 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("parents", tx_id_column().array_of()),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1244,7 +1238,6 @@ impl TableSchema {
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
                     column("schema_version", GrooveColumnType::U64),
-                    column("parents", tx_id_column().array_of()),
                     column("created_by", crate::ids::RowAuthor::value_type()),
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -1278,7 +1271,7 @@ impl TableSchema {
     /// Return the wire descriptor for replicated immutable row payloads.
     ///
     /// Wire records contain row payload data and immutable row provenance:
-    /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
+    /// `row_uuid`, provenance, `_deletion`, and nullable user cells.
     /// Receiver-local currentness and authority-state columns are deliberately
     /// excluded. Schema changes change this descriptor; v1 requires identical
     /// descriptors at sender and receiver. JSON cells retain their schema-derived
@@ -1287,10 +1280,6 @@ impl TableSchema {
         RecordDescriptor::new(
             [
                 ("row_uuid".to_owned(), ValueType::Uuid),
-                (
-                    "parents".to_owned(),
-                    ValueType::Array(Box::new(tx_id_column().clone())),
-                ),
                 ("created_by".to_owned(), crate::ids::RowAuthor::value_type()),
                 ("created_at".to_owned(), ValueType::U64),
                 ("updated_by".to_owned(), crate::ids::RowAuthor::value_type()),
@@ -1425,7 +1414,6 @@ pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("parents", tx_id_column().array_of()),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", crate::ids::RowAuthor::value_type()),
@@ -2306,12 +2294,6 @@ mod tests {
                 .columns
                 .iter()
                 .any(|column| column.name == "durability")
-        );
-        assert!(
-            history
-                .columns
-                .iter()
-                .any(|column| column.name == "parents")
         );
         assert!(
             register

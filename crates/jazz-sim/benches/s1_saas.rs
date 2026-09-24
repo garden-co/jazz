@@ -1621,7 +1621,6 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
                 table,
                 schema.version_id(),
                 commit.row_uuid,
-                Vec::new(),
                 AuthorSubject::SYSTEM,
                 0,
                 AuthorSubject::SYSTEM,

@@ -566,14 +566,12 @@ fn operation_version(schema: &JazzSchema, column: &str, value: Value) -> Version
         &schema.tables[0],
         schema.version_id(),
         row(0x60),
-        Vec::new(),
         AuthorSubject::system_at(node(1)),
         1,
         AuthorSubject::system_at(node(1)),
         1,
         &BTreeMap::from([(column.to_owned(), value)]),
-        None,
-    )
+        None,)
     .unwrap()
 }
 

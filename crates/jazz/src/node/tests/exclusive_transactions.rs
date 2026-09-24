@@ -307,7 +307,6 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         )
     );
     assert_eq!(versions.len(), 1);
-    assert!(versions[0].parents().is_empty());
 }
 
 #[test]
@@ -773,7 +772,6 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
         panic!("expected exclusive commit unit");
     };
     assert_eq!(versions.len(), 1);
-    assert!(versions[0].parents().is_empty());
 
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -841,8 +839,6 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
     // Linear history: exclusive writes carry no ancestry; authority CAS checks
     // each written register against the transaction's base snapshot.
     let _ = (content_parent, deletion_parent);
-    assert!(content.parents().is_empty());
-    assert!(restore.parents().is_empty());
 
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1872,7 +1868,6 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         stored.versions()[0].test_cells(&schema().tables[0]),
         title_cells("retry me")
     );
-    assert!(stored.versions()[0].parents().is_empty());
     assert!(
         writer_b
             .row_history("todos", row)

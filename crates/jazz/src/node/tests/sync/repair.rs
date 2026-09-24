@@ -76,14 +76,12 @@ fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
         &schema.tables[0],
         original.schema_version(),
         original.row_uuid(),
-        original.parents(),
         original.created_by(),
         HLC_MAX_PHYSICAL_MS + 1,
         original.updated_by(),
         HLC_MAX_PHYSICAL_MS + 1,
         &[original.cell_at(0)],
-        original.deletion(),
-    )
+        original.deletion(),)
     .unwrap()
     .with_authored_columns(original.authored_columns().cloned());
 
@@ -1065,14 +1063,12 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
             notes,
             renamed.id,
             row_uuid,
-            Vec::new(),
             AuthorSubject::system_at(node(1)),
             tx_id.time.physical_ms(),
             AuthorSubject::system_at(node(1)),
             tx_id.time.physical_ms(),
             &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
-            None,
-        )
+            None,)
         .unwrap(),
     ];
     let (_negative_dir, mut negative) = open_node_with_schema(node(0x94), schema());
@@ -1213,14 +1209,12 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         &original.tables[0],
         original.version_id(),
         task_row,
-        Vec::new(),
         AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         &BTreeMap::from([("name".to_owned(), v("old physical task"))]),
-        None,
-    )
+        None,)
     .unwrap();
     let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: crate::protocol::SubscriptionKey {

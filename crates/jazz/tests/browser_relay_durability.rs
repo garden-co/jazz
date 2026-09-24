@@ -532,7 +532,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         table,
         schema.version_id(),
         row,
-        Vec::new(),
         alice,
         tx_id.time.physical_ms(),
         alice,

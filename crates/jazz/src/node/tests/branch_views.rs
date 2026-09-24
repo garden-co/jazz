@@ -282,7 +282,6 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             table,
             schema.version_id(),
             source_row,
-            Vec::new(),
             subject,
             tx_id.time.physical_ms(),
             subject,
@@ -292,8 +291,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 ("title".to_owned(), v("head patch")),
                 ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
             ]),
-            None,
-        )
+            None,)
         .unwrap()
         .with_branch_key(target_key.clone());
         let evidence = crate::tx::BranchViewCopyEvidence {
@@ -374,7 +372,6 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             table,
             schema.version_id(),
             batch_insert_row,
-            Vec::new(),
             allowed,
             batch_tx.tx_id.time.physical_ms(),
             allowed,
@@ -384,8 +381,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 ("title".to_owned(), v("exact head insert")),
                 ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
             ]),
-            None,
-        )
+            None,)
         .unwrap()
         .with_branch_key(batch_head_key.clone()),
     );
@@ -470,7 +466,6 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             table,
             schema.version_id(),
             rejected_insert_row,
-            Vec::new(),
             allowed,
             rejected_tx.tx_id.time.physical_ms(),
             allowed,
@@ -480,8 +475,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 ("title".to_owned(), v("must reject atomically")),
                 ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
             ]),
-            None,
-        )
+            None,)
         .unwrap()
         .with_branch_key(rejected_head_key.clone()),
     );
@@ -719,7 +713,6 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             table,
             schema.version_id(),
             source_row,
-            vec![missing_parent],
             allowed,
             malformed_tx.tx_id.time.physical_ms(),
             allowed,
@@ -729,8 +722,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 ("title".to_owned(), v("head patch")),
                 ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
             ]),
-            None,
-        )
+            None,)
         .unwrap()
         .with_branch_key(
             schema
@@ -1503,28 +1495,24 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
         table,
         schema.version_id(),
         row(0x63),
-        Vec::new(),
         AuthorSubject::system_at(node(1)),
         10,
         AuthorSubject::system_at(node(1)),
         10,
         &content_cells,
-        None,
-    )
+        None,)
     .unwrap()
     .with_branch_key(valid_key.clone());
     let deletion = VersionRecord::from_cells(
         table,
         schema.version_id(),
         row(0x64),
-        Vec::new(),
         AuthorSubject::system_at(node(1)),
         10,
         AuthorSubject::system_at(node(1)),
         10,
         &BTreeMap::<String, Value>::new(),
-        Some(DeletionEvent::Deleted),
-    )
+        Some(DeletionEvent::Deleted),)
     .unwrap()
     .with_branch_key(valid_key.clone());
 

@@ -1372,10 +1372,6 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             tx_node_alias: NodeAlias(u64::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
             tx_time: TxTime::from(u64::from(seed) + 30),
-            parents: vec![TxId::new(
-                TxTime::from(u64::from(seed) + 1),
-                node(seed.wrapping_add(1)),
-            )],
             created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
             created_at: TxTime::from(u64::from(seed) + 40),
             updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
@@ -1614,7 +1610,6 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                     tx_node_alias: version.tx_node_alias(),
                     schema_version_alias: version.schema_version_alias(),
                     tx_time: version.tx_time(),
-                    parents: version.parents(),
                     created_by: version.created_by(),
                     created_at: version.created_at(),
                     updated_by: version.updated_by(),
@@ -1813,70 +1808,6 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
             .unwrap(),
         vec![(row, title_cells("optimistic"))]
     );
-}
-
-#[test]
-fn remote_history_rejects_noncanonical_parent_order_before_parking() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x76));
-    let tx_id = TxId::new(TxTime::from(30), node(0x77));
-    let later = TxId::new(TxTime::from(20), node(0x01));
-    let earlier = TxId::new(TxTime::from(10), node(0x01));
-
-    // `VersionRecord::from_cells` is an authoring helper and deliberately
-    // canonicalizes its parent set. A remote peer can instead construct the
-    // physical wire record directly, so make the malformed spelling below
-    // that guarded helper and prove authority ingress rejects it before it
-    // can become a parked missing-parent edge.
-    let canonical = version_record(
-        row(0x76),
-        vec![later, earlier],
-        title_cells("must reject before parking"),
-        None,
-    );
-    let mut values = (0..canonical.record().descriptor().fields().len())
-        .map(|index| canonical.record().get_idx(index).unwrap())
-        .collect::<Vec<_>>();
-    values[1] = Value::Array(
-        [later, earlier]
-            .into_iter()
-            .map(|parent| Value::Tuple(vec![Value::U64(parent.time.0), Value::Uuid(parent.node.0)]))
-            .collect(),
-    );
-    let raw = canonical.record().descriptor().create(&values).unwrap();
-    let malformed = VersionRecord::new(
-        canonical.table(),
-        canonical.schema_version(),
-        OwnedRecord::new(raw, *canonical.record().descriptor()),
-    );
-    assert!(canonical.validate_receipt().is_ok());
-    assert!(malformed.validate_receipt().is_err());
-
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(tx_id.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![malformed],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-
-    let fate = core.transaction_record(tx_id).unwrap().fate;
-    assert!(matches!(
-        fate,
-        Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
-            if detail == "malformed version receipt"
-    ));
-    assert_eq!(core.sync_metrics().parked_orphans, 0);
 }
 
 #[test]

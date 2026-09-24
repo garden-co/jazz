@@ -1012,7 +1012,6 @@ where
                 &table_schema,
                 write.schema_version,
                 write.row_uuid,
-                Vec::new(),
                 created_by,
                 created_at.physical_ms(),
                 made_by,
