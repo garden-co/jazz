@@ -1,19 +1,19 @@
 import { createJazzSession } from "../../src/backend/create-jazz-session.js";
 import {
-  liveEdgeApp as app,
-  liveEdgePermissions,
-  type LiveEdgeSeed,
-} from "./live-edge-replay-schema.js";
+  liveAuthorityApp as app,
+  liveAuthorityPermissions,
+  type LiveAuthoritySeed,
+} from "./live-authority-replay-schema.js";
 import type { JazzServerInfo } from "./testing-server.js";
 
 const sessions = new Map<string, Awaited<ReturnType<typeof createJazzSession>>>();
-export async function liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdgeSeed> {
+export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<LiveAuthoritySeed> {
   const session = await createJazzSession({
     appId: info.appId,
     serverUrl: info.serverUrl,
     initial: { backendSecret: "jazz-browser-test-backend" },
     app,
-    permissions: liveEdgePermissions,
+    permissions: liveAuthorityPermissions,
     driver: { type: "memory" },
     tier: "global",
     defaultDurabilityTier: "global",
@@ -30,24 +30,24 @@ export async function liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdg
     const label = await db.insert(app.labels, { name: "Label" }).wait({ tier: "global" });
     await db.insert(app.unrelated, { value: "still usable" }).wait({ tier: "global" });
     const seed = { parentId: parent.id, authorId: author.id, labelId: label.id, itemId: "" };
-    seed.itemId = await liveEdgeBackendInsert(info.appId, seed, "hydrated");
+    seed.itemId = await liveAuthorityBackendInsert(info.appId, seed, "hydrated");
     return seed;
   } catch (error) {
     try {
-      await liveEdgeBackendClose(info.appId);
+      await liveAuthorityBackendClose(info.appId);
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "Backend seed and cleanup failed");
     }
     throw error;
   }
 }
-export async function liveEdgeBackendInsert(
+export async function liveAuthorityBackendInsert(
   appId: string,
-  seed: LiveEdgeSeed,
+  seed: LiveAuthoritySeed,
   title: string,
 ): Promise<string> {
   const session = sessions.get(appId);
-  if (!session) throw new Error("Live-edge backend was not opened");
+  if (!session) throw new Error("Live-authority backend was not opened");
   const snapshot = session.getSnapshot();
   if (snapshot.status !== "ready" || !snapshot.client) {
     throw snapshot.error ?? new Error("Backend session is not ready");
@@ -65,7 +65,7 @@ export async function liveEdgeBackendInsert(
   if (readable.length !== 1) throw new Error("Globally settled backend insert is not readable");
   return row.id;
 }
-export async function liveEdgeBackendClose(appId: string): Promise<void> {
+export async function liveAuthorityBackendClose(appId: string): Promise<void> {
   const session = sessions.get(appId);
   await session?.close();
   if (sessions.get(appId) === session) sessions.delete(appId);

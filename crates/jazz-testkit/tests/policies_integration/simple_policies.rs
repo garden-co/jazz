@@ -435,7 +435,7 @@ async fn select_exists_policy_does_not_implicitly_fetch_readable_grants_inner() 
     let (record_id, _, record_transaction_id) = writer
         .insert("protected_records", jazz::row_input!("body" => "visible"))
         .expect("seed protected record");
-    jazz_testkit::wait_for_edge_txs(
+    jazz_testkit::wait_for_global_txs(
         &writer,
         &[
             grant_transaction_id.expect("access grant insert should commit immediately"),
@@ -1882,7 +1882,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 }
 
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner() {
-    use jazz_testkit::wait_for_edge_txs;
+    use jazz_testkit::wait_for_global_txs;
 
     let table_name = "documents_visibility_deltas";
     let schema = SchemaBuilder::new()
@@ -1933,7 +1933,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
             boolean_policy_document_input(super::ALICE_ID, "visible", false),
         )
         .expect("insert visible document");
-    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
+    wait_for_global_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1949,7 +1949,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
             boolean_policy_document_input(super::ALICE_ID, "hidden", true),
         )
         .expect("insert hidden document");
-    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
+    wait_for_global_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     let verifier_after_hidden_insert = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1990,7 +1990,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         )
         .expect("rename visible document")
         .expect("update commits immediately");
-    wait_for_edge_txs(&alice, &[transaction]).await;
+    wait_for_global_txs(&alice, &[transaction]).await;
     let verifier_after_visible_update = connect_ready_user(
         &server,
         &verifier_schema,
@@ -2040,7 +2040,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         )
         .expect("hide document from other readers")
         .expect("update commits immediately");
-    wait_for_edge_txs(&alice, &[transaction]).await;
+    wait_for_global_txs(&alice, &[transaction]).await;
     let verifier_after_hide = connect_ready_user(
         &server,
         &verifier_schema,
@@ -2087,7 +2087,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         )
         .expect("reveal owned archived document")
         .expect("update commits immediately");
-    wait_for_edge_txs(&alice, &[transaction]).await;
+    wait_for_global_txs(&alice, &[transaction]).await;
     let verifier_after_reveal = connect_ready_user(
         &server,
         &verifier_schema,

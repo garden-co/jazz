@@ -3,10 +3,10 @@ import { commands } from "vitest/browser";
 import { generateAuthSecret, type Db } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
-  liveEdgeApp as app,
-  liveEdgePermissions,
-  type LiveEdgeSeed,
-} from "./live-edge-replay-schema.js";
+  liveAuthorityApp as app,
+  liveAuthorityPermissions,
+  type LiveAuthoritySeed,
+} from "./live-authority-replay-schema.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
@@ -17,28 +17,32 @@ import {
 } from "./support.js";
 
 interface BackendCommands {
-  liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdgeSeed>;
-  liveEdgeBackendInsert(appId: string, seed: LiveEdgeSeed, title: string): Promise<string>;
-  liveEdgeBackendClose(appId: string): Promise<void>;
+  liveAuthorityBackendOpen(info: JazzServerInfo): Promise<LiveAuthoritySeed>;
+  liveAuthorityBackendInsert(
+    appId: string,
+    seed: LiveAuthoritySeed,
+    title: string,
+  ): Promise<string>;
+  liveAuthorityBackendClose(appId: string): Promise<void>;
 }
 const backend = commands as unknown as BackendCommands;
 const cleanup = new TestCleanup();
 let backendAppId: string | undefined;
 afterEach(async () => {
   await cleanup.cleanup();
-  if (backendAppId) await backend.liveEdgeBackendClose(backendAppId);
+  if (backendAppId) await backend.liveAuthorityBackendClose(backendAppId);
   backendAppId = undefined;
 });
 
 // #2363: a fresh root hydrated successfully but overlapping forward includes
 // poisoned it after a live authoritative insert. Keep both carriers active and
-// prove subsequent unrelated Edge reads work, not merely backend settlement.
+// prove subsequent unrelated remote reads work, not merely backend settlement.
 describe("live authoritative overlapping relation replay", () => {
   it("keeps fresh, reopened and reconnected persistent roots usable after live inserts", async () => {
-    const info = await getJazzServerInfo(uniqueDbName("live-edge-replay"));
-    await deploy({ ...info, schema: app.wasmSchema, permissions: liveEdgePermissions });
+    const info = await getJazzServerInfo(uniqueDbName("live-authority-replay"));
+    await deploy({ ...info, schema: app.wasmSchema, permissions: liveAuthorityPermissions });
     backendAppId = info.appId;
-    const seed = await withTimeout(backend.liveEdgeBackendOpen(info), 20_000, "backend seed");
+    const seed = await withTimeout(backend.liveAuthorityBackendOpen(info), 20_000, "backend seed");
     const expected = [seed.itemId];
     const roots: string[] = [];
     const secret = generateAuthSecret();
@@ -47,7 +51,7 @@ describe("live authoritative overlapping relation replay", () => {
         appId: info.appId,
         serverUrl: info.serverUrl,
         secret,
-        driver: { type: "persistent" as const, dbName: uniqueDbName("live-edge-root") },
+        driver: { type: "persistent" as const, dbName: uniqueDbName("live-authority-root") },
       };
       const databasesBeforeOpen = (await indexedDB.databases()).map((entry) => entry.name);
       let physical: string | undefined;
@@ -111,7 +115,7 @@ describe("live authoritative overlapping relation replay", () => {
         await assertUnrelatedRead(db);
         expect((await indexedDB.databases()).map((entry) => entry.name)).toContain(physical);
         const live = await withTimeout(
-          backend.liveEdgeBackendInsert(info.appId, seed, `live-${fresh}-${reopen}`),
+          backend.liveAuthorityBackendInsert(info.appId, seed, `live-${fresh}-${reopen}`),
           15_000,
           "live global insert",
         );
@@ -121,7 +125,7 @@ describe("live authoritative overlapping relation replay", () => {
 
         await db.disconnect();
         const offline = await withTimeout(
-          backend.liveEdgeBackendInsert(info.appId, seed, `offline-${fresh}-${reopen}`),
+          backend.liveAuthorityBackendInsert(info.appId, seed, `offline-${fresh}-${reopen}`),
           15_000,
           "disconnected global insert",
         );
@@ -130,7 +134,7 @@ describe("live authoritative overlapping relation replay", () => {
         await waitForBoth();
         await assertUnrelatedRead(db);
         const resumed = await withTimeout(
-          backend.liveEdgeBackendInsert(info.appId, seed, `resumed-${fresh}-${reopen}`),
+          backend.liveAuthorityBackendInsert(info.appId, seed, `resumed-${fresh}-${reopen}`),
           15_000,
           "resumed global insert",
         );

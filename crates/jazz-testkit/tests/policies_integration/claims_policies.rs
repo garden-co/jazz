@@ -559,7 +559,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         )
         .expect("claim-authorized update succeeds")
         .expect("allowed update has a transaction");
-    jazz_testkit::wait_for_edge_txs(&alice, &[allowed_tx]).await;
+    jazz_testkit::wait_for_global_txs(&alice, &[allowed_tx]).await;
 
     wait_for_query(
         &observer,

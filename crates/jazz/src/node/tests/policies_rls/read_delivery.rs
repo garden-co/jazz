@@ -1,4 +1,4 @@
-// Identity-scoped reads, peer delivery, Edge rehydration, and deletion visibility.
+// Identity-scoped reads, peer delivery, client-link rehydration, and deletion visibility.
 
 fn private_message_membership_schema() -> JazzSchema {
     let member_exists = |outer_column: &str| {
@@ -168,27 +168,11 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_message])
     );
-    assert_eq!(
-        core.query_rows(&public_shape, &public_binding, DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([public_message])
-    );
 
     let shape = Query::from("messages")
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([public_message, private_message])
-    );
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()
@@ -660,7 +644,7 @@ fn core_read_policy_joins_require_confirmed_dependency_rows() {
 }
 
 #[test]
-fn edge_membership_insert_updates_previously_empty_private_message_query() {
+fn client_membership_insert_updates_previously_empty_private_message_query() {
     let alice = user(0xa1);
     let bob = user(0xb2);
     let chat = row(0x18);
@@ -769,12 +753,12 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
             seed_message,
             seed_tx
         )),
-        "the covered closure must include the edge-visible message source"
+        "the covered closure must include the client-visible message source"
     );
 }
 
 #[test]
-fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
+fn client_rehydrate_refreshes_previously_covered_private_message_query() {
     let alice = user(0xa1);
     let bob = user(0xb2);
     let chat = row(0x18);
@@ -913,7 +897,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
 }
 
 #[test]
-fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
+fn client_public_or_owner_claim_policy_rehydrates_empty_result_set() {
     let alice = user(0xa1);
     let bob = user(0xb2);
     let private_chat = row(0x18);
@@ -1155,7 +1139,7 @@ fn system_identity_read_policy_sees_everything() {
 }
 
 #[test]
-fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
+fn relay_and_client_peer_identities_drive_policy_composed_reads() {
     let schema = owner_policy_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let owner = user(0xa1);
@@ -1169,23 +1153,23 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
         "an unbound relay must not acquire SYSTEM policy bypass to serve a query"
     );
 
-    let mut edge_owner = PeerState::client_link(owner);
-    assert_eq!(edge_owner.permission_subject(), Some(owner));
+    let mut client_owner = PeerState::client_link(owner);
+    assert_eq!(client_owner.permission_subject(), Some(owner));
     assert_view_update_only_references_rows(
-        &edge_owner.current_rows_update(&mut core, "todos").unwrap(),
+        &client_owner.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),
     );
 
-    let mut edge_other = PeerState::client_link(other);
-    assert_eq!(edge_other.permission_subject(), Some(other));
+    let mut client_other = PeerState::client_link(other);
+    assert_eq!(client_other.permission_subject(), Some(other));
     assert_view_update_only_references_rows(
-        &edge_other.current_rows_update(&mut core, "todos").unwrap(),
+        &client_other.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
     );
 }
 
 #[test]
-fn edge_query_rehydrate_applies_session_user_id_read_policy() {
+fn client_query_rehydrate_applies_session_user_id_read_policy() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -1314,7 +1298,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
 }
 
 #[test]
-fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
+fn client_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
     let member_exists = public_outer_exists(
         "chat_members",
         "chat_id",
@@ -1379,7 +1363,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
 }
 
 /// A source-harness regression for row-scoped read policy plus query output
-/// projection. Two fresh edge-client links ask for the same readable chat via
+/// projection. Two fresh client links ask for the same readable chat via
 /// different public projections; both wire payloads must be the identical
 /// complete canonical row version. `select` shapes terminal output only.
 #[test]
@@ -1481,7 +1465,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
 }
 
 #[test]
-fn nullable_join_code_claim_branch_allows_edge_chat_read() {
+fn nullable_join_code_claim_branch_allows_client_chat_read() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")
@@ -1549,7 +1533,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
 }
 
 #[test]
-fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
+fn client_query_rehydrate_resets_empty_result_for_denied_private_chat() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")

@@ -694,7 +694,7 @@ mod trace_entry_tests {
             let peer_kind = "server";
             let peer_id = "00000000-0000-0000-0000-000000000000";
             let payload = "RowBatchCreated";
-            let tier = "edge";
+            let tier = "global";
             let _entered = tracing::debug_span!(
                 "sync.send",
                 peer_kind = peer_kind,
@@ -722,7 +722,7 @@ mod trace_entry_tests {
             fields.get("payload").map(String::as_str),
             Some("RowBatchCreated"),
         );
-        assert_eq!(fields.get("tier").map(String::as_str), Some("edge"));
+        assert_eq!(fields.get("tier").map(String::as_str), Some("global"));
     }
 
     #[test]

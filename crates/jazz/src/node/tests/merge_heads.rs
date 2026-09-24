@@ -155,15 +155,12 @@ fn merge_heads_match_history_for_ordinary_concurrent_units() {
         .unwrap();
 }
 
-
-
-
 #[test]
-fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
+fn merge_heads_match_history_for_relay_pending_then_global_fate() {
     let schema = two_column_schema();
     let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(0xf1), schema.clone());
     let (_writer_b_dir, mut writer_b) = open_node_with_schema(node(0xf2), schema.clone());
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xf9), schema);
+    let (_relay_dir, mut relay) = open_node_with_schema(node(0xf9), schema);
     let row = row(0xfa);
 
     let (left, left_unit) = writer_a
@@ -193,17 +190,17 @@ fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
         panic!("expected commit unit");
     };
 
-    edge.ingest_relay_commit_unit(right_tx, right_versions)
+    relay.ingest_relay_commit_unit(right_tx, right_versions)
         .unwrap();
-    edge.accept_global_for_test(right)
+    relay.accept_global_for_test(right)
         .unwrap();
-    edge.assert_merge_heads_match_history_for_test("todos", row)
+    relay.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
-    edge.ingest_relay_commit_unit(left_tx, left_versions)
+    relay.ingest_relay_commit_unit(left_tx, left_versions)
         .unwrap();
-    edge.accept_global_for_test(left)
+    relay.accept_global_for_test(left)
         .unwrap();
-    edge.assert_merge_heads_match_history_for_test("todos", row)
+    relay.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
 
@@ -214,7 +211,7 @@ fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
     // delivers the fates newest-first. Rewalking the chain here made a 500
     // revision subscription starve unrelated query tests.
     let schema = two_column_schema();
-    let (_edge_dir, mut edge) = open_node_with_schema(node(0xfb), schema);
+    let (_relay_dir, mut relay) = open_node_with_schema(node(0xfb), schema);
     let row = row(0xfb);
     let mut versions = Vec::new();
     let mut parent = None;
@@ -225,24 +222,24 @@ fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
         if let Some(parent) = parent {
             commit = commit.parents(vec![parent]);
         }
-        let published = edge.commit_mergeable(commit).unwrap();
-        let tx_id = settle_published(&mut edge, published).unwrap();
+        let published = relay.commit_mergeable(commit).unwrap();
+        let tx_id = settle_published(&mut relay, published).unwrap();
         parent = Some(tx_id);
         versions.push(tx_id);
     }
 
-    edge.reset_merge_head_reachability_walks_for_test();
+    relay.reset_merge_head_reachability_walks_for_test();
     for tx_id in versions.into_iter().rev() {
-        edge.accept_global_for_test(tx_id)
+        relay.accept_global_for_test(tx_id)
             .unwrap();
     }
 
     assert_eq!(
-        edge.merge_head_reachability_walks_for_test(),
+        relay.merge_head_reachability_walks_for_test(),
         0,
         "accepting a pending chain must not replay historical reachability"
     );
-    edge.assert_merge_heads_match_history_for_test("todos", row)
+    relay.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
 

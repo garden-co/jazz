@@ -44,12 +44,8 @@ fn shared_row_set_dag_reaches_owned_plan_and_groove_lowering() {
 }
 
 #[test]
-fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs() {
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Global,
-        DurabilityTier::Global,
-    ] {
+fn simple_current_table_root_query_lowers_for_local_and_global_sync_outputs() {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: QueryReadSet::primary(current_read_view_at(tier)),

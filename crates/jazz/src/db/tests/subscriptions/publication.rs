@@ -107,52 +107,51 @@ fn subscription_publication_coalesces_from_last_emitted_occurrences() {
     let initial = snapshot(vec![rows[0].clone(), rows[1].clone()]);
     let intermediate = snapshot(vec![rows[2].clone(), rows[1].clone()]);
     let final_rows = snapshot(vec![rows[1].clone(), rows[0].clone()]);
-    for tier in [DurabilityTier::Global] {
-        let (sender, mut receiver) = sender(tier);
-        publish(
-            &sender,
-            &snapshot(Vec::new()),
-            &initial,
-            tier,
-            true,
-            true,
-            true,
-        )
-        .unwrap();
-        receiver.try_recv().unwrap();
-        publish(&sender, &initial, &intermediate, tier, false, false, true).unwrap();
-        publish(
-            &sender,
-            &intermediate,
-            &final_rows,
-            tier,
-            false,
-            false,
-            true,
-        )
-        .unwrap();
-        assert!(receiver.try_recv().is_err());
-        publish(&sender, &final_rows, &final_rows, tier, true, false, true).unwrap();
-        let SubscriptionEvent::Delta {
-            reset,
-            added,
-            updated,
-            removed,
-            terminal_operations,
-            ..
-        } = receiver.try_recv().unwrap()
-        else {
-            panic!("expected delta");
-        };
-        assert!(!reset);
-        assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
-        assert_eq!(updated.len(), 2);
-        assert_eq!((updated[0].previous_index, updated[0].index), (Some(1), 0));
-        assert_eq!((updated[1].previous_index, updated[1].index), (Some(0), 1));
-        assert_eq!(updated[0].row, rows[1]);
-        assert_eq!(updated[1].row, rows[0]);
-        assert!(sender.publication.borrow().deferred.is_none());
-    }
+    let tier = DurabilityTier::Global;
+    let (sender, mut receiver) = sender(tier);
+    publish(
+        &sender,
+        &snapshot(Vec::new()),
+        &initial,
+        tier,
+        true,
+        true,
+        true,
+    )
+    .unwrap();
+    receiver.try_recv().unwrap();
+    publish(&sender, &initial, &intermediate, tier, false, false, true).unwrap();
+    publish(
+        &sender,
+        &intermediate,
+        &final_rows,
+        tier,
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(receiver.try_recv().is_err());
+    publish(&sender, &final_rows, &final_rows, tier, true, false, true).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = receiver.try_recv().unwrap()
+    else {
+        panic!("expected delta");
+    };
+    assert!(!reset);
+    assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
+    assert_eq!(updated.len(), 2);
+    assert_eq!((updated[0].previous_index, updated[0].index), (Some(1), 0));
+    assert_eq!((updated[1].previous_index, updated[1].index), (Some(0), 1));
+    assert_eq!(updated[0].row, rows[1]);
+    assert_eq!(updated[1].row, rows[0]);
+    assert!(sender.publication.borrow().deferred.is_none());
 }
 
 #[test]

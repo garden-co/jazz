@@ -880,7 +880,7 @@ fn local_live_subscription_requests_global_upstream_coverage() {
 }
 
 #[test]
-fn edge_live_subscription_requests_global_upstream_coverage() {
+fn client_live_subscription_requests_global_upstream_coverage() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -890,16 +890,16 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     server.tick().unwrap();
 
-    // Edge-tier is the local visible tier for browser clients, but propagated
-    // upstream coverage is still registered at global tier. Edge serving is
-    // link-local; the subscription's settled contract is satisfied when the
-    // globally settled coverage arrives back at the client.
+    // The client's live subscription propagates upstream as coverage
+    // registered at global tier on Core's subscriber link; the subscription's
+    // settled contract is satisfied when the globally settled coverage arrives
+    // back at the client.
     let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..

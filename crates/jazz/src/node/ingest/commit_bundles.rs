@@ -458,9 +458,10 @@ where
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if tx.kind == TxKind::Mergeable && matches!(existing.fate, Fate::Pending) {
-                // Edge fate assignment can relay a mergeable unit as pending
-                // before its permission scope settles, then re-enter authority
-                // validation once that link-local subscription has hydrated.
+                // A stored Pending mergeable unit has no authority fate yet
+                // (for example one this node relayed or recovered before Core
+                // settled it). A retransmission therefore re-enters authority
+                // validation below instead of echoing Pending back.
             } else {
                 return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,

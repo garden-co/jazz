@@ -96,16 +96,16 @@ afterEach(async () => {
 
 describe("websocket include subscriptions", () => {
   /**
-   * A client may attach several independently bound strict-edge reads after an
+   * A client may attach several independently bound strict-global reads after an
    * authority has accepted an exclusive transaction. Each attachment
    * needs its own current authority receipt; one must not strand the others.
    *
    * owner ──exclusive todo──► server
-   * observer ──three Edge attachments──► server ──current receipts──► observer
+   * observer ──three Global attachments──► server ──current receipts──► observer
    */
-  it("covers concurrent edge queries attached after an exclusive commit", async () => {
+  it("covers concurrent global queries attached after an exclusive commit", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("exclusive-then-edge-coverage"),
+      uniqueDbName("exclusive-then-global-coverage"),
     );
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
@@ -114,14 +114,14 @@ describe("websocket include subscriptions", () => {
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-edge-owner",
+      "exclusive-then-global-owner",
       sharedSecret,
     );
     const observer = await openDb(
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-edge-observer",
+      "exclusive-then-global-observer",
       sharedSecret,
     );
     await ensureNativeRuntimeAdapterReady(owner);
@@ -174,7 +174,7 @@ describe("websocket include subscriptions", () => {
         observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "global" }),
       ]),
       20_000,
-      "concurrent strict-edge query coverage did not settle",
+      "concurrent strict-global query coverage did not settle",
     );
     await waitForCondition(
       async () => subscribedTodoIds.includes(todo.id),

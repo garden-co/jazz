@@ -585,13 +585,13 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     )
     .expect("one-shot nested policy claim routes must bind against the root descriptor");
 
-    let mut edge = PeerState::client_link(identity);
+    let mut client_peer = PeerState::client_link(identity);
     let client_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
     };
-    edge.set_subscription_policy_binding(
+    client_peer.set_subscription_policy_binding(
         client_subscription,
         (
             identity,
@@ -601,7 +601,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             )]),
         ),
     );
-    let update = edge
+    let update = client_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut node,
             client_subscription,
@@ -644,7 +644,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         Some(DurabilityTier::Global),
     )
     .expect("a live invite subscription must tolerate its membership CommitUnit");
-    let changed = edge
+    let changed = client_peer
         .query_update_for_subscription_with_opts(
             &mut node,
             client_subscription,
@@ -659,7 +659,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         changed.is_none(),
         "membership does not change the already readable supporting rows"
     );
-    let refreshed = edge
+    let refreshed = client_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut node,
             client_subscription,

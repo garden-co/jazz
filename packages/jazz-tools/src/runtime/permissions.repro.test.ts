@@ -316,7 +316,7 @@ async function createServerBackedReproContext(
 }
 
 describe("runtime permission repros for recursive gather and qualified predicates", () => {
-  it("keeps reader child inserts denied while editor child inserts settle at Edge", async () => {
+  it("keeps reader child inserts denied while editor child inserts settle at Global", async () => {
     const appId = randomUUID();
     const backendSecret = `related-write-repro-backend-${appId}`;
     const adminSecret = `related-write-repro-admin-${appId}`;

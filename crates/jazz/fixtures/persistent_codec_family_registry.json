@@ -170,7 +170,7 @@
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
-        "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+        "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
       },
       "rejection_receipt": {
         "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
@@ -179,7 +179,7 @@
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
-          "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+          "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
         }
       ]
     },
@@ -193,16 +193,16 @@
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
-        "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+        "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
       },
       "rejection_receipt": {
         "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
-        "anchor": "dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker"
+        "anchor": "dynamic_catalogue_reopen_rejects_catalogue_prefix_without_bootstrap_marker"
       },
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
-          "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+          "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
         }
       ]
     },

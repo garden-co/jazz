@@ -424,9 +424,10 @@ fn admitted_provenance_matches(admitted: AuthorSubject, made_by: AuthorSubject) 
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
-/// serving one subscriber under their identity. An edge is simply both at once
-/// (one upstream connection plus many subscriber connections); edge authority
-/// (relay/edge/core) stays below this facade in [`crate::peer`].
+/// serving one subscriber under their identity. A relay or browser worker is
+/// simply both at once (one upstream connection plus many subscriber
+/// connections); peer authority (relay/core) stays below this facade in
+/// [`crate::peer`].
 pub struct PeerConnection<S>
 where
     S: OrderedKvStorage,
@@ -4808,7 +4809,7 @@ where
                                 // Settled authority membership survives a
                                 // RocksDB reopen, while its wire registration
                                 // does not. Do not let that ownerless result
-                                // settle this fresh Edge usage site before the
+                                // settle this fresh Global usage site before the
                                 // new relay authority registration receives a
                                 // current reset from upstream.
                                 self.node
@@ -6349,7 +6350,7 @@ where
     }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
-        // Edge child. Advance the shared generation only after the validated
+        // Global child. Advance the shared generation only after the validated
         // batch commits, so a later tab is rehydrated from the worker's
         // resident authority membership without unrelated upstream traffic.
         let next = subscriber_dirty_epoch.get().wrapping_add(1);
@@ -7335,7 +7336,7 @@ fn stamp_subscriber_opening_state<S>(
             // source exists conceptually at admission but has not delivered a
             // live authority reset yet. Every route to the foreground—including
             // recovery/rehydration—must retain that fact; an ordinary empty reset
-            // would otherwise complete a strict Edge read and release U before
+            // would otherwise complete a strict Global read and release U before
             // the authority reply can arrive.
             payload.peer_payload_inventory.opening_pending = true;
         }
@@ -7502,7 +7503,7 @@ where
 }
 
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.
-/// Trusted edge links have no application subscription during bootstrap, so
+/// Trusted relay links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
 fn send_catalogue_snapshot_if_needed<S>(
     node: &SharedNodeState<S>,

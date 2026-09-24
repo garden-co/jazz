@@ -1329,7 +1329,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls[2]?.at(-1)).toMatchObject({ head, base });
   });
 
-  it("runs scheduled core ticks before post-wait edge reads", async () => {
+  it("runs scheduled core ticks before post-wait global reads", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let ticked = false;
     let subscriptionDrained = false;
@@ -3511,7 +3511,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(all).toHaveBeenCalledOnce();
   });
 
-  it("hydrates broad Edge members with one native read", async () => {
+  it("hydrates broad Global members with one native read", async () => {
     const readOptions: unknown[] = [];
     const row = {
       table: "todos",
@@ -3554,7 +3554,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "global" }]);
   });
 
-  it("forwards a standalone exact Edge read through all", async () => {
+  it("forwards a standalone exact Global read through all", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {

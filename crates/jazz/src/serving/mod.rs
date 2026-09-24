@@ -853,7 +853,7 @@ impl InMemoryServerShell {
         self.db.trusted_catalogue_snapshot()
     }
 
-    /// Apply the authenticated authority catalogue to an already-open edge.
+    /// Apply the authenticated authority catalogue to an already-open downstream server.
     /// The node-level adoption rebuilds physical projections before returning.
     pub(crate) fn apply_trusted_catalogue_snapshot(
         &self,
@@ -1102,7 +1102,7 @@ impl InMemoryServerShell {
         Ok(session)
     }
 
-    /// Attach this edge shell to an upstream core transport.
+    /// Attach this server shell to an upstream Core transport.
     pub fn connect_upstream(&mut self, transport: Box<dyn Transport>) -> ShellResult<()> {
         let connection = self.db.connect_upstream(transport);
         self.upstream_connections.push(connection);
@@ -2121,7 +2121,7 @@ pub enum ConfigError {
     },
     /// Production profile requires durable storage.
     ProductionRequiresDurableStorage,
-    /// Production core and edge roles require coordinated drain.
+    /// Production Core role requires coordinated drain.
     ProductionRequiresDrain,
     /// Durable storage config did not name a usable path.
     MissingStoragePath {
@@ -2149,10 +2149,7 @@ impl fmt::Display for ConfigError {
                 write!(f, "production profile requires durable storage")
             }
             Self::ProductionRequiresDrain => {
-                write!(
-                    f,
-                    "production core and edge roles require drain_on_shutdown"
-                )
+                write!(f, "production core role requires drain_on_shutdown")
             }
             Self::MissingStoragePath { storage_kind } => {
                 write!(f, "{storage_kind:?} storage path must not be empty")

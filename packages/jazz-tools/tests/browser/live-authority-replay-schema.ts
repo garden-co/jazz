@@ -1,7 +1,7 @@
 import { schema } from "../../src/index.js";
 
 // Name-blind public fixture for #2363's two forward-reference carriers.
-export const liveEdgeApp = schema.defineApp({
+export const liveAuthorityApp = schema.defineApp({
   parents: schema.table(
     { name: schema.string() },
     { itemsViaParent: schema.reverse("items", "parent") },
@@ -29,7 +29,7 @@ export const liveEdgeApp = schema.defineApp({
   ),
   unrelated: schema.table({ value: schema.string() }, {}),
 });
-export const liveEdgePermissions = schema.definePermissions(liveEdgeApp, ({ policy }) => [
+export const liveAuthorityPermissions = schema.definePermissions(liveAuthorityApp, ({ policy }) => [
   policy.parents.allowRead.always(),
   policy.parents.allowInsert.always(),
   policy.authors.allowRead.always(),
@@ -41,7 +41,7 @@ export const liveEdgePermissions = schema.definePermissions(liveEdgeApp, ({ poli
   policy.unrelated.allowRead.always(),
   policy.unrelated.allowInsert.always(),
 ]);
-export interface LiveEdgeSeed {
+export interface LiveAuthoritySeed {
   parentId: string;
   authorId: string;
   labelId: string;

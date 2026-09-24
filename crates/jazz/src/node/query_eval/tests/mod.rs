@@ -53,7 +53,7 @@ use crate::tools::{
 ///
 /// authority ──re-admit alice──► replacement set
 /// bob ──content update─────────► ordinary add (not replacement)
-/// A real settled Edge ViewUpdate seeds the client's authority membership;
+/// A real settled Global ViewUpdate seeds the client's authority membership;
 /// a later local content version of that occurrence remains an update when
 /// the ClientLocal maintained graph drains.
 ///
@@ -555,7 +555,7 @@ fn evolved_todos_version() -> (
 ///
 /// This is deliberately an internal seam test: the production relation
 /// snapshot receives only an exact `(table, row, tx)` witness here; the
-/// broader client/edge scenario remains the black-box catalogue test.
+/// broader client/server scenario remains the black-box catalogue test.
 /// Proves that a remote authority reset renders an old joined target in
 /// the subscription schema, including table rename and added-column lens
 /// operations.

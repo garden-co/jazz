@@ -933,7 +933,7 @@ where
         let lowered_binding;
         // Prepared binding sources are a serving-side optimization. Client
         // local execution must lower concrete bindings into its locally
-        // available (already upstream-scoped at Edge/Global) data, rather
+        // available (already upstream-scoped at Global) data, rather
         // than trying to evaluate a server-maintained binding graph.
         let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
             && !force_inline_binding_source
@@ -1159,7 +1159,7 @@ where
         .await
     }
 
-    /// Execute an ordinary local client read. The upstream serving edge is the
+    /// Execute an ordinary local client read. The upstream serving host is the
     /// confidentiality boundary; this path must not re-evaluate row policy.
     pub(crate) async fn query_rows_for_client(
         &mut self,
@@ -1446,7 +1446,7 @@ where
             // not a server-side cache or an alternate trusted read path.
             QueryAuthorizationMode::TrustedServing => None,
         };
-        // Ordinary Edge/Global reads are allowed to consume only a source
+        // Ordinary Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
         // without that host-owned route must not fall back to its raw overlay.
         if authorization_mode == QueryAuthorizationMode::ClientLocal
@@ -1704,7 +1704,7 @@ where
     /// Select the server-owned result boundary for an ordinary client read.
     ///
     /// Local and process-only reads intentionally scan the complete local
-    /// overlay. Edge/global reads consume only the identity-scoped result
+    /// overlay. Global reads consume only the identity-scoped result
     /// members emitted by the serving host. This is host-owned routing, not
     /// request-controlled authorization.
     fn client_settled_binding_view_key_for_query(

@@ -1,4 +1,4 @@
-//! Bounded, ephemeral known-row routing. A serving Edge is trusted by its client;
+//! Bounded, ephemeral known-row routing. A serving relay is trusted by its client;
 //! it proxies only replies correlated to its selected authenticated upstream.
 use super::peer_connection::{ConnectionLink, PeerConnection, transport_error};
 use super::*;
@@ -178,7 +178,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
     }
 }
 
-/// Owned requester shared by local operations and partial-Edge repair owners.
+/// Owned requester shared by local operations and relay repair owners.
 pub(super) fn request_current_rows_for_owner(
     router: SharedCurrentRows,
     scheduler: SharedTickScheduler,

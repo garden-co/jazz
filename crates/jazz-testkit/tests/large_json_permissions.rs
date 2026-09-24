@@ -5,7 +5,7 @@ use jazz::row_input;
 use jazz::tools::{
     ColumnType, DurabilityTier, SchemaBuilder, TableSchema, Value, permissions, policy_expr as pe,
 };
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 
 const ALICE: &str = "9750dcc2-516e-5ea0-8a26-54fa6ff6986b";
 const BOB: &str = "756886b3-2033-583f-bd5a-a22f02fb5a6b";
@@ -68,7 +68,7 @@ async fn run_matrix(private_reads: bool) {
                             row_input!("owner" => ALICE, "payload" => payload(size, 'x')),
                         )
                         .unwrap();
-                    wait_for_edge_txs(client, &[tx.unwrap()]).await;
+                    wait_for_global_txs(client, &[tx.unwrap()]).await;
                     eprintln!("{label} {size}: update");
                     let updated = payload(size, 'y');
                     let tx = client
@@ -79,7 +79,7 @@ async fn run_matrix(private_reads: bool) {
                         )
                         .unwrap()
                         .unwrap();
-                    wait_for_edge_txs(client, &[tx]).await;
+                    wait_for_global_txs(client, &[tx]).await;
                     eprintln!("{label} {size}: deny takeover");
                     // Unknown/undisclosed rows may reject locally; if the
                     // client stages the write, authority settlement must deny it.

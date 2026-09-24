@@ -718,7 +718,7 @@ async fn exists_rel_chained_join_preserves_operand_sources_inner(correlated: boo
             jazz::row_input!("code" => "wrong", "user_id" => super::DAVE_ID),
         )
         .expect("insert dave");
-    jazz_testkit::wait_for_edge_txs(&admin, &[tx.expect("committed insert")]).await;
+    jazz_testkit::wait_for_global_txs(&admin, &[tx.expect("committed insert")]).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let dave =
         connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
@@ -1169,7 +1169,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
         )
         .expect("chat name update should satisfy same-table EXISTS with_check")
         .expect("chat name update should commit immediately");
-    jazz_testkit::wait_for_edge_txs(&alice, &[transaction_id]).await;
+    jazz_testkit::wait_for_global_txs(&alice, &[transaction_id]).await;
 
     wait_for_rows(
         &observer,
