@@ -4,6 +4,11 @@ import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
+import {
+  composerEcho,
+  measureTypingComposer,
+  type TypingComposerMetrics,
+} from "./typing-composer.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }, {}),
@@ -159,6 +164,75 @@ export async function proveHighLevelForegroundRestart(
     failed = true;
     throw error;
   } finally {
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
+  }
+}
+
+/**
+ * Type into one composer row through the public API while a maintained
+ * subscription watches it (#3273). The measurement and its correctness
+ * checks live in `typing-composer.ts`; this only binds them to a real
+ * `createJazzClient` foreground on the admitted relay.
+ */
+export async function proveTypingComposer(
+  admitted: {
+    capability: Uint8Array;
+    account: JazzClientConfig["account"];
+  },
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+): Promise<TypingComposerMetrics> {
+  markFailure("typing-composer-open-failed");
+  const client = await createJazzClient(clientConfig(admitted));
+  let unsubscribe = () => {},
+    failed = false;
+  let stopMutationErrors = () => {};
+  try {
+    const echo = composerEcho();
+    // Diagnostics only: tell a subscription that never delivered anything
+    // from one that delivered without the composer row, and from a write the
+    // owner rejected, without changing what the receipt measures.
+    let deliveries = 0;
+    let rejected = false;
+    stopMutationErrors = client.db.onMutationError(() => {
+      rejected = true;
+    });
+    markFailure("typing-composer-subscribe-failed");
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      deliveries += 1;
+      echo.onSnapshot(todos);
+    });
+    return await measureTypingComposer({
+      async open() {
+        markFailure("typing-composer-insert-failed");
+        const { value } = client.db.insert(app.todos, { title: "" });
+        echo.follow(value.id);
+        markFailure("typing-composer-snapshot-failed");
+        if (!(await waitForPublication(() => echo.observed.length > 0))) {
+          markFailure(
+            rejected
+              ? "typing-composer-insert-rejected-failed"
+              : deliveries > 0
+                ? "typing-composer-echo-failed"
+                : "typing-composer-snapshot-failed",
+          );
+          throw new Error("typing composer row never reached its subscription");
+        }
+        echo.observed.length = 0;
+        return value.id;
+      },
+      type(id, text) {
+        client.db.update(app.todos, id, { title: text });
+      },
+      observedTexts: () => echo.observed,
+      now: () => performance.now(),
+      yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      stage: (phase) => markFailure(`typing-composer-${phase}-failed`),
+    });
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    stopMutationErrors();
     await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }

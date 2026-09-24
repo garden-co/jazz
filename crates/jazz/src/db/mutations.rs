@@ -3358,6 +3358,17 @@ where
         }
     }
 
+    /// Decide, without applying anything, the admission failures of a queued
+    /// mutation that NAPI and WASM also report synchronously: a closed or
+    /// non-admitting Db and an unknown table. Row-state failures, such as a
+    /// resident tombstone, are left to the queued apply and its write handle.
+    #[doc(hidden)]
+    pub fn precheck_mutation_admission(&self, table: &str) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
+        self.table_schema(table)?;
+        Ok(())
+    }
+
     pub(super) async fn ensure_branch_view_row_not_deleted(
         &self,
         table: &str,

@@ -22,7 +22,30 @@ export interface ScenarioResult {
   state: ScenarioState;
   detail: string;
   receipt?: DeviceReceipt;
+  /** Measurements observed on the device for this passed scenario. */
+  metrics?: Record<string, number>;
 }
+
+/** Scenarios whose pass is only evidence together with these measurements. */
+export const REQUIRED_METRICS: Readonly<Record<string, readonly string[]>> = {
+  "typing-composer": [
+    "keystrokes",
+    "burst",
+    "blockedP50Ms",
+    "blockedP95Ms",
+    "blockedMaxMs",
+    "echoP50Ms",
+    "echoP95Ms",
+    "echoMaxMs",
+    "burstEchoMs",
+    "dropped",
+    "reordered",
+    "reappeared",
+  ],
+};
+
+/** Correctness counters that must be zero for a typing receipt to pass. */
+const ZERO_METRICS = ["dropped", "reordered", "reappeared"];
 
 /**
  * A passed device result is evidence, not an assertion. This makes a fixture
@@ -57,6 +80,7 @@ export function result(value: ScenarioResult): ScenarioResult {
   } else if (value.receipt) {
     throw new Error(`Only passed scenario results may carry a device receipt`);
   }
+  validateMetrics(value);
   return value;
 }
 
@@ -74,6 +98,32 @@ export function parseResult(line: string): ScenarioResult | null {
     throw new Error(
       `Invalid Jazz device result: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+}
+
+function validateMetrics(value: ScenarioResult): void {
+  const required = REQUIRED_METRICS[value.scenario];
+  if (value.metrics === undefined) {
+    if (value.state === "passed" && required) {
+      throw new Error(`Scenario ${value.scenario} cannot pass without its device metrics`);
+    }
+    return;
+  }
+  if (value.state !== "passed" || !isRecord(value.metrics)) {
+    throw new Error(`Only passed scenario results may carry device metrics`);
+  }
+  for (const [key, metric] of Object.entries(value.metrics)) {
+    if (typeof metric !== "number" || !Number.isFinite(metric) || metric < 0) {
+      throw new Error(`Scenario ${value.scenario} has an invalid metric ${key}`);
+    }
+  }
+  for (const key of required ?? []) {
+    if (!(key in value.metrics)) {
+      throw new Error(`Scenario ${value.scenario} is missing metric ${key}`);
+    }
+    if (ZERO_METRICS.includes(key) && value.metrics[key] !== 0) {
+      throw new Error(`Scenario ${value.scenario} observed ${key}=${value.metrics[key]}`);
+    }
   }
 }
 
