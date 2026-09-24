@@ -703,6 +703,8 @@ pub(super) enum MultisinkSubscriptionTarget {
     RoutedShape {
         shape_id: PreparedShapeId,
         binding_key: BindingKey,
+        /// Route barriers this subscription holds a reference to (#3288).
+        route_barriers: Vec<NodeId>,
     },
 }
 
@@ -3557,7 +3559,7 @@ impl IvmRuntime {
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record);
         let subscription_id = self.next_subscription_id();
-        let (outputs, binding_snapshots) = {
+        let (outputs, binding_snapshots, route_barriers) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += shape
@@ -3566,6 +3568,7 @@ impl IvmRuntime {
                 .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
                 .sum::<usize>() as u64;
             let mut outputs = BTreeMap::new();
+            let mut route_barriers = Vec::new();
             for (sink, prepared_terminal) in &shape.terminals {
                 let mut terminal = prepared_terminal.terminal.clone();
                 if let Some(fields) = public_fields.get(sink) {
@@ -3577,6 +3580,16 @@ impl IvmRuntime {
                     &prepared_terminal.output.output,
                 )?;
                 let output = runtime.add_dedup_graph(&graph)?;
+                if lifetime == SubscriptionLifetime::Retained
+                    && let Some(barrier) = runtime.register_route_barrier(
+                        &terminal,
+                        &prepared_terminal.output,
+                        &output,
+                        binding_values,
+                    )
+                {
+                    route_barriers.push(barrier);
+                }
                 outputs.insert(sink.clone(), output);
             }
             let binding_shape = runtime.binding_source_shape_name(shape_id)?;
@@ -3611,7 +3624,7 @@ impl IvmRuntime {
                 runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
             }
             install.commit();
-            (outputs, binding_snapshots)
+            (outputs, binding_snapshots, route_barriers)
         };
         let (sender, receiver) = mpsc::channel();
         let waiter = Arc::new(Mutex::new(None));
@@ -3630,6 +3643,7 @@ impl IvmRuntime {
                     MultisinkSubscriptionTarget::RoutedShape {
                         shape_id,
                         binding_key: binding_key.clone(),
+                        route_barriers,
                     }
                 } else {
                     MultisinkSubscriptionTarget::Direct
@@ -3799,6 +3813,66 @@ impl IvmRuntime {
         Ok(subscription)
     }
 
+    /// Mark a bound terminal's route filter as a route barrier (#3288), so a
+    /// write activates this binding only when the shared terminal's delta
+    /// carries its route key. Returns the barrier, or `None` when the binding
+    /// keeps ordinary activation (collectors, unroutable types, or a bound
+    /// graph that is not exactly `Project(Filter(shared terminal))`).
+    fn register_route_barrier(
+        &mut self,
+        terminal: &RoutedMultisinkTerminal,
+        shared: &CompiledNode,
+        bound: &CompiledNode,
+        binding_values: &[Value],
+    ) -> Option<NodeId> {
+        if terminal.route_fields.is_empty()
+            || matches!(terminal.graph, GraphBuilder::CollectBy { .. })
+        {
+            return None;
+        }
+        let project = self.graph.node(bound.node)?;
+        if !matches!(project.descriptor.operator, OpType::MapProject(_)) {
+            return None;
+        }
+        let [barrier] = project.descriptor.inputs.as_slice() else {
+            return None;
+        };
+        let filter = self.graph.node(*barrier)?;
+        if !matches!(filter.descriptor.operator, OpType::Filter(_))
+            || filter.descriptor.inputs.as_slice() != [shared.node]
+        {
+            return None;
+        }
+        let mut field_indices = Vec::with_capacity(terminal.route_fields.len());
+        let mut field_types = Vec::with_capacity(terminal.route_fields.len());
+        let mut values = Vec::with_capacity(terminal.route_fields.len());
+        for (field, value_index) in terminal
+            .route_fields
+            .iter()
+            .zip(&terminal.route_value_indices)
+        {
+            let index = shared.output.field_index(field)?;
+            let value_type = shared.output.fields()[index].value_type.clone();
+            if !crate::ivm::routes::is_routable_type(&value_type) {
+                return None;
+            }
+            field_indices.push(index);
+            field_types.push(value_type);
+            values.push(binding_values.get(*value_index)?.clone());
+        }
+        let key = crate::ivm::routes::encode_route_key(&values, &field_types)?;
+        let barrier = *barrier;
+        self.graph.add_route_barrier(
+            shared.node,
+            barrier,
+            field_indices,
+            field_types,
+            key,
+            bound.root_ordering_node,
+        );
+        Some(barrier)
+    }
+
     fn index_subscription_outputs(
         &mut self,
         subscription_id: SubscriptionId,
@@ -3836,9 +3910,17 @@ impl IvmRuntime {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            if let MultisinkSubscriptionTarget::RoutedShape { route_barriers, .. } =
+                &subscription.target
+            {
+                for barrier in route_barriers {
+                    self.graph.release_route_barrier(*barrier);
+                }
+            }
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
+                ..
             } = subscription.target
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
@@ -3864,9 +3946,17 @@ impl IvmRuntime {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            if let MultisinkSubscriptionTarget::RoutedShape { route_barriers, .. } =
+                &subscription.target
+            {
+                for barrier in route_barriers {
+                    self.graph.release_route_barrier(*barrier);
+                }
+            }
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
+                ..
             } = subscription.target
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
