@@ -239,10 +239,10 @@ where
         Ok(result)
     }
 
-    /// Classify an explicit exclusive insert against its frozen snapshot and
-    /// the transaction's own staged writes. A hidden row or any staged
-    /// mutation occupies the target even when ordinary reads would show it as
-    /// absent.
+    /// Classify an explicit exclusive insert target that the transaction's
+    /// overlaid point read reports as absent: a committed or staged deletion
+    /// still occupies the id. The staged overlay is keyed by `(table, row)`,
+    /// so the same row UUID in another table never counts.
     pub(crate) async fn tx_insert_target_state_in_schema(
         &mut self,
         tx_id: OpenTransactionId,
@@ -250,21 +250,31 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<TransactionInsertTargetState, Error> {
-        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let snapshot_row = self
-            .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
-            .await?;
-        if snapshot_row.content_cells.is_some() || snapshot_row.deleted {
-            return Ok(TransactionInsertTargetState::Occupied);
-        }
-        let staged = self.open_tx(tx_id)?.writes.iter().any(|write| {
-            write.table == table && write.row_uuid == row_uuid
-        });
-        Ok(if staged {
-            TransactionInsertTargetState::Occupied
-        } else {
-            TransactionInsertTargetState::Absent
-        })
+        let cached = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&(schema_version, table.to_owned(), row_uuid))
+            .cloned();
+        let snapshot_row = match cached {
+            Some(snapshot_row) => snapshot_row,
+            None => {
+                let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                    .await?
+            }
+        };
+        let staged = self
+            .open_tx(tx_id)?
+            .writes
+            .iter()
+            .any(|write| write.table == table && write.row_uuid == row_uuid);
+        Ok(
+            if snapshot_row.content_cells.is_some() || snapshot_row.deleted || staged {
+                TransactionInsertTargetState::Deleted
+            } else {
+                TransactionInsertTargetState::Absent
+            },
+        )
     }
 
     /// Read all current rows inside an exclusive transaction.
@@ -1860,7 +1870,7 @@ pub(crate) enum TransactionBranchRowState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionInsertTargetState {
     Absent,
-    Occupied,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
