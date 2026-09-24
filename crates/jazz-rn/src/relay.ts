@@ -171,7 +171,12 @@ export type NativeForegroundCommand =
       optionsJson: string;
     }
   | { type: "pushStreamingMutation"; upload: number; chunk: Uint8Array }
-  | { type: "finishStreamingMutation" | "abortStreamingMutation"; upload: number }
+  | {
+      type: "finishStreamingMutation" | "abortStreamingMutation" | "stageStreamingMutation";
+      upload: number;
+    }
+  | { type: "attachStagedStreamingMutation"; staged: number; transaction: number }
+  | { type: "abortStagedStreamingMutation"; staged: number }
   | {
       type: "updateLargeValues";
       table: string;
@@ -224,6 +229,9 @@ export type NativeForegroundResponse =
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
   | { type: "streamingMutationAborted"; aborted: boolean }
+  | { type: "streamingMutationStaged"; staged: number }
+  | { type: "stagedStreamingMutationAttached" }
+  | { type: "stagedStreamingMutationAborted"; aborted: boolean }
   | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array }
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" };
 
@@ -536,6 +544,19 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
         : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)),
     );
   }
+  if (command.type === "stageStreamingMutation") {
+    return concatForegroundBytes(Uint8Array.of(34), encodeForegroundU64(command.upload));
+  }
+  if (command.type === "attachStagedStreamingMutation") {
+    return concatForegroundBytes(
+      Uint8Array.of(35),
+      encodeForegroundU64(command.staged),
+      encodeForegroundU64(command.transaction),
+    );
+  }
+  if (command.type === "abortStagedStreamingMutation") {
+    return concatForegroundBytes(Uint8Array.of(36), encodeForegroundU64(command.staged));
+  }
   throw new Error("Unsupported native foreground command");
 }
 /** Decode the first vertical-slice foreground NativeDb response vocabulary. */
@@ -694,6 +715,14 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       reason: decodeForegroundString(bytes.subarray(next), "operation error"),
     };
   }
+  if (tag === 26)
+    return {
+      type: "streamingMutationStaged",
+      staged: decodeForegroundU64(bytes.subarray(1), "staged upload"),
+    };
+  if (tag === 27 && bytes.length === 1) return { type: "stagedStreamingMutationAttached" };
+  if (tag === 28 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
+    return { type: "stagedStreamingMutationAborted", aborted: bytes[1] === 1 };
   if (
     tag === 16 &&
     bytes.length === 4 &&
