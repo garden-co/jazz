@@ -545,6 +545,7 @@ pub(super) fn select_current_access_path(
     Some(CurrentAccessPath::Index {
         column,
         order_column: None,
+        reverse: false,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
         maintained: false,

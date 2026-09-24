@@ -64,6 +64,9 @@ pub(super) enum CurrentAccessPath {
         /// When set, `prefix` addresses that composite index rather than the
         /// single-column index on `column`.
         order_column: Option<String>,
+        /// Scan the (composite) index prefix from its last key. Only a bounded
+        /// one-shot ordered-page probe sets this, together with `source_limit`.
+        reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
         /// A maintained source keeps every equality probe as an ordinary IVM
@@ -2408,6 +2411,7 @@ where
             CurrentAccessPath::Index {
                 column,
                 order_column,
+                reverse,
                 prefix,
                 intersections,
                 source_limit,
@@ -2416,7 +2420,8 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
-                let source_limit = (request.visibility == RowVisibility::IncludeDeleted)
+                let source_limit = (order_column.is_some()
+                    || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
@@ -2427,6 +2432,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         order_column.as_deref(),
+                        reverse,
                         &prefix,
                         &intersections,
                         false,
@@ -2763,12 +2769,17 @@ where
                     Some(CurrentAccessPath::Index {
                         column,
                         order_column,
+                        reverse,
                         prefix,
                         intersections,
                         source_limit,
                         maintained,
                     }) => {
-                        let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                        // An ordered-page probe re-proves its page after the
+                        // deletion anti-join, so its cap survives it.
+                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                            .then_some(source_limit)
+                            .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
                             1 + intersections.len() as u64;
                         self.node
@@ -2777,6 +2788,7 @@ where
                                 self.read_view.read_schema,
                                 &column,
                                 order_column.as_deref(),
+                                reverse,
                                 &prefix,
                                 &intersections,
                                 maintained,
@@ -2862,6 +2874,7 @@ where
                 Some(CurrentAccessPath::Index {
                     column,
                     order_column,
+                    reverse,
                     prefix,
                     intersections,
                     source_limit,
@@ -2878,6 +2891,7 @@ where
                             self.read_view.read_schema,
                             column,
                             order_column.as_deref(),
+                            *reverse,
                             prefix,
                             intersections,
                             *maintained,
@@ -4464,6 +4478,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4475,6 +4490,7 @@ where
             schema_version,
             column,
             order_column,
+            reverse,
             prefix,
             intersections,
             maintained,
@@ -4490,6 +4506,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4523,6 +4540,14 @@ where
         };
         let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
+            Some(max_items) if reverse => StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+                max_items,
+            },
             Some(max_items) => StaticScanSpec::PrefixLimit {
                 prefix: scan_prefix
                     .iter()

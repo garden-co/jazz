@@ -1,10 +1,11 @@
 //! Public-API document sharing fixture, adapted from Tobias Lins's #2996.
-//! Query-only timing; no planner changes. See the example README for boundaries.
+//! Query-only timing with a separate reopen/first-read receipt. See the example README.
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
+    Db, DbConfig, DbIdentity, DbOpenReceipt, InsertOptions, LocalUpdates, MergeableTxOps,
+    PreparedQuery, Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    block_on,
 };
 use jazz::groove::{db::StorageReadMetrics, records::Value};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -59,6 +60,10 @@ fn org_row(index: usize) -> RowUuid {
 }
 
 pub fn schema(policy: Policy) -> JazzSchema {
+    schema_with_composite_indexes(policy, true)
+}
+
+pub fn schema_with_composite_indexes(policy: Policy, composite_indexes: bool) -> JazzSchema {
     let account =
         |column: &str| PolicyExpr::eq_session(column, vec!["user".into(), "account".into()]);
     let orgs = TableSchemaBuilder::new("orgs")
@@ -71,8 +76,12 @@ pub fn schema(policy: Policy) -> JazzSchema {
         .column("updated_at", ColumnType::Timestamp)
         .column("title", ColumnType::Text)
         .fk_column("org_id", "orgs")
-        // Separate single-column indexes, NOT a compound ordered index.
         .index_only(["owner_id", "org_id", "updated_at"]);
+    if composite_indexes {
+        documents = documents
+            .composite_index(["owner_id", "updated_at"])
+            .composite_index(["org_id", "updated_at"]);
+    }
     documents = match policy {
         // Missing policies deny reads; this control explicitly permits all
         // document rows while retaining the same non-SYSTEM identity.
@@ -96,16 +105,30 @@ pub fn schema(policy: Policy) -> JazzSchema {
 }
 
 fn open(path: &Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+    open_measured(path, schema).0
+}
+
+struct OpenTimings {
+    storage_us: u128,
+    jazz_us: u128,
+    receipt: DbOpenReceipt,
+}
+
+fn open_measured(path: &Path, schema: &JazzSchema) -> (Db<RocksDbStorage>, OpenTimings) {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    block_on(Db::open_history_complete(
+    let start = Instant::now();
+    let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
+        .expect("open document RocksDB");
+    let storage_us = start.elapsed().as_micros();
+    let start = Instant::now();
+    let (db, receipt) = block_on(Db::open_history_complete_with_receipt_for_test(
         DbConfig::new(
             schema.clone(),
-            RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
-                .expect("open document RocksDB"),
+            storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x4b; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -113,7 +136,16 @@ fn open(path: &Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
         )
         .with_id_source(SeededRowIdSource::new(0x4b)),
     ))
-    .expect("open document database")
+    .expect("open document database");
+    let jazz_us = start.elapsed().as_micros();
+    (
+        db,
+        OpenTimings {
+            storage_us,
+            jazz_us,
+            receipt,
+        },
+    )
 }
 
 pub struct Fixture {
@@ -126,9 +158,36 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new(table_rows: usize, policy: Policy) -> Self {
+        Self::with_order_values_and_indexes(table_rows, policy, true, |index| index as u64)
+    }
+
+    pub fn with_composite_indexes(
+        table_rows: usize,
+        policy: Policy,
+        composite_indexes: bool,
+    ) -> Self {
+        Self::with_order_values_and_indexes(table_rows, policy, composite_indexes, |index| {
+            index as u64
+        })
+    }
+
+    pub fn with_order_values(
+        table_rows: usize,
+        policy: Policy,
+        order_value: impl Fn(usize) -> u64,
+    ) -> Self {
+        Self::with_order_values_and_indexes(table_rows, policy, true, order_value)
+    }
+
+    fn with_order_values_and_indexes(
+        table_rows: usize,
+        policy: Policy,
+        composite_indexes: bool,
+        order_value: impl Fn(usize) -> u64,
+    ) -> Self {
         assert!(table_rows >= OWNERS && table_rows.is_multiple_of(OWNERS));
         let directory = tempfile::tempdir().expect("fixture directory");
-        let schema = schema(policy);
+        let schema = schema_with_composite_indexes(policy, composite_indexes);
         let db = open(directory.path(), &schema);
         let start = Instant::now();
         let tx = block_on(db.mergeable_tx()).expect("org seed tx");
@@ -161,7 +220,7 @@ impl Fixture {
                     BTreeMap::from([
                         ("owner_id".into(), Value::Uuid(user(owner).test_uuid())),
                         ("done".into(), Value::Bool(index % 3 == 0)),
-                        ("updated_at".into(), Value::U64(index as u64)),
+                        ("updated_at".into(), Value::U64(order_value(index))),
                         ("title".into(), Value::String(format!("document-{index}"))),
                         (
                             "org_id".into(),
@@ -190,10 +249,51 @@ impl Fixture {
         }
     }
 
+    pub fn delete_documents(&self, indices: &[usize]) {
+        let db = open(self.directory.path(), &self.schema);
+        let tx = block_on(db.mergeable_tx()).expect("document deletion tx");
+        for &index in indices {
+            block_on(tx.delete("documents", document_row(index), Default::default()))
+                .expect("delete document");
+        }
+        let id = block_on(tx.commit()).expect("commit document deletions");
+        db.finalize_local_mergeable_commit_for_test(id)
+            .expect("settle document deletions");
+        block_on(db.close()).expect("close deletion database");
+    }
+
+    pub fn restore_documents(&self, indices: &[usize], order_value: impl Fn(usize) -> u64) {
+        let db = open(self.directory.path(), &self.schema);
+        let tx = block_on(db.mergeable_tx()).expect("document restoration tx");
+        for &index in indices {
+            let owner = index / (self.table_rows / OWNERS);
+            block_on(tx.restore(
+                "documents",
+                document_row(index),
+                Some(BTreeMap::from([
+                    ("owner_id".into(), Value::Uuid(user(owner).test_uuid())),
+                    ("done".into(), Value::Bool(index % 3 == 0)),
+                    ("updated_at".into(), Value::U64(order_value(index))),
+                    ("title".into(), Value::String(format!("document-{index}"))),
+                    (
+                        "org_id".into(),
+                        Value::Uuid(org_row(owner / OWNERS_PER_ORG).0),
+                    ),
+                ])),
+                Default::default(),
+            ))
+            .expect("restore document");
+        }
+        let id = block_on(tx.commit()).expect("commit document restorations");
+        db.finalize_local_mergeable_commit_for_test(id)
+            .expect("settle document restorations");
+        block_on(db.close()).expect("close restoration database");
+    }
+
     /// Runtime-cold, not OS-cache-cold. Only one session may be live per fixture.
     pub fn session(&self, page: Page, limit: usize, identity: AuthorSubject) -> Session {
         let start = Instant::now();
-        let db = open(self.directory.path(), &self.schema);
+        let (db, open_timings) = open_measured(self.directory.path(), &self.schema);
         let reopen_us = start.elapsed().as_micros();
         let start = Instant::now();
         let predicate = match page {
@@ -214,6 +314,9 @@ impl Fixture {
             prepared,
             identity,
             reopen_us,
+            storage_open_us: open_timings.storage_us,
+            jazz_open_us: open_timings.jazz_us,
+            open_receipt: open_timings.receipt,
             prepare_us,
             executed: false,
         }
@@ -225,6 +328,9 @@ pub struct Session {
     prepared: PreparedQuery,
     identity: AuthorSubject,
     pub reopen_us: u128,
+    pub storage_open_us: u128,
+    pub jazz_open_us: u128,
+    pub open_receipt: DbOpenReceipt,
     pub prepare_us: u128,
     executed: bool,
 }

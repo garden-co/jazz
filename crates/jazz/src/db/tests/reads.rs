@@ -907,6 +907,207 @@ fn point_join_tracks_unsettled_link_insert_move_and_delete_like_control() {
     }
 }
 
+fn open_ordered_page_db() -> Db<RocksDbStorage> {
+    let grants = PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .column("flag", PublicColumnType::Boolean)
+                .index_only(["bucket"])
+                .composite_index(["bucket", "rank"])
+                .policies(grants),
+        ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc3; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+    }))
+    .unwrap();
+    // Bucket "a" is long with rank ties (three rows per rank) and a sparse
+    // flag; bucket "b" is shorter than most requested pages.
+    for n in 1..=60u8 {
+        let (bucket, rank) = if n <= 54 {
+            ("a", i64::from(n / 3))
+        } else {
+            ("b", i64::from(n))
+        };
+        db.seed_settled_mergeable_for_bootstrap(
+            "entries",
+            row(n),
+            AuthorSubject::SYSTEM,
+            ordered_page_cells(bucket, rank, n % 7 == 0),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn ordered_page_cells(bucket: &str, rank: i64, flag: bool) -> RowCells {
+    BTreeMap::from([
+        ("bucket".to_owned(), Value::String(bucket.to_owned())),
+        ("rank".to_owned(), Value::I64(rank)),
+        ("flag".to_owned(), Value::Bool(flag)),
+    ])
+}
+
+/// Reads every page shape for `bucket` and compares it with the same query
+/// without a limit, truncated afterwards. The unlimited query never takes the
+/// bounded ordered-page probe, so it is the unbounded control.
+fn ordered_pages_match_unbounded_control(
+    db: &Db<RocksDbStorage>,
+    tier: DurabilityTier,
+    label: &str,
+) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        )
+    };
+    for bucket in ["a", "b", "missing"] {
+        for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+            for sparse in [false, true] {
+                let query = || {
+                    let query = Query::from("entries")
+                        .filter(eq(col("bucket"), lit(bucket)))
+                        .order_by("rank", direction);
+                    if sparse {
+                        query.filter(eq(col("flag"), lit(true)))
+                    } else {
+                        query
+                    }
+                };
+                let control = read(query());
+                for limit in [1, 2, 3, 4, 5, 7, 20, 100] {
+                    let page = read(query().limit(limit));
+                    let expected = control.iter().copied().take(limit).collect::<Vec<_>>();
+                    assert_eq!(
+                        page, expected,
+                        "{label} {tier:?}: bucket={bucket} {direction:?} sparse={sparse} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A bounded ordered-page probe over a declared `(bucket, rank)` composite
+/// index must return exactly the page of the unbounded query: across rank
+/// ties, short and empty buckets, sparse visibility, order-column updates that
+/// move rows across the page boundary, bucket moves, and deletions, both
+/// before and after those writes settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the bounded-read assertion needs the internal storage metric; row
+/// correctness is checked through the public Db read API.
+/// system: seed -> pages match control -> pending rank/bucket/delete writes ->
+///   pages match control at Global and Local -> settle -> pages match again
+#[test]
+fn ordered_composite_pages_match_unbounded_query() {
+    let db = open_ordered_page_db();
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "seeded");
+
+    // The probe is actually bounded: a one-row page of the 54-row bucket
+    // must not hydrate the whole bucket. Rank 18 holds only row 54, so the
+    // first extra row (rank 17) is strictly worse and proves the page.
+    let prepared = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Desc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+
+    let mut writes = Vec::new();
+    // Move the current top row to the bottom, and a bottom row to the top.
+    for (id, rank) in [(54, -5), (1, 100), (30, 17)] {
+        writes.push(
+            block_on(db.update(
+                "entries",
+                row(id),
+                BTreeMap::from([("rank".to_owned(), Value::I64(rank))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    // Delete the next rows at the top of the descending page, and a row in
+    // the middle of a tie group.
+    for id in [53, 52, 20] {
+        writes.push(
+            block_on(db.delete("entries", row(id), Default::default()))
+                .unwrap()
+                .mergeable_tx_id(),
+        );
+    }
+    // Move one row from the long bucket into the short one.
+    writes.push(
+        block_on(db.update(
+            "entries",
+            row(51),
+            BTreeMap::from([("bucket".to_owned(), Value::String("b".to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+    );
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "pending");
+    }
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "settled");
+    }
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();
