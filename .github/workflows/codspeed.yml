@@ -158,9 +158,10 @@ jobs:
 
   groove-pull-vs-snapshot-walltime:
     # IVM-replacement experiment: hand-written index-probe (pull) plans versus
-    # Groove snapshot and prepared-bind one-shot reads, at two table sizes.
+    # Groove snapshot and prepared-bind one-shot reads, at two table sizes; and
+    # steady-state IVM versus rerun-and-diff (SQLite, pull, Groove snapshot).
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: Groove pull vs snapshot wall time
+    name: Groove IVM experiment wall time
     runs-on: codspeed-macro
     timeout-minutes: 25
     steps:
@@ -179,14 +180,14 @@ jobs:
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --version 5.0.1 --locked
 
-      - name: Build Groove pull vs snapshot benchmark
-        run: cargo codspeed build -m walltime --package groove --bench pull_vs_snapshot
+      - name: Build Groove IVM experiment benchmarks
+        run: cargo codspeed build -m walltime --package groove --bench pull_vs_snapshot --bench steady_state
 
-      - name: Run Groove pull vs snapshot benchmark
+      - name: Run Groove IVM experiment benchmarks
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
-          run: cargo codspeed run -m walltime --package groove --bench pull_vs_snapshot
+          run: cargo codspeed run -m walltime --package groove --bench pull_vs_snapshot --bench steady_state
 
   maintained-selective-hydration-walltime:
     # This is the direct receipt for #2077: fixed owner/result cardinality
