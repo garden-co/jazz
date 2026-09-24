@@ -13,7 +13,7 @@ A Jazz project has a small set of files at the app root:
 ```text
 app-root/
 ├── schema.ts            # Structural schema — tables and columns
-├── permissions.ts       # Optional row-level policies
+├── permissions.ts       # Explicit operation policies
 └── migrations/          # Reviewed migration edges
     └── 20260331-add-description-aaa-bbb.ts
 ```
@@ -32,20 +32,22 @@ The second argument is required; pass `{}` when the table has no relations.
 
 ## Explicit relations
 
-Store row IDs in UUID columns and declare each traversal separately:
+Store row IDs in UUID columns, then use `s.rel` to name a forward relationship.
+In the example below, `posts.author` follows `authorId` to a user. Once that forward
+relationship is declared, `s.reverse` lets a user find their `authoredPosts`:
 
 ```ts
 const schema = {
-  users: s.table(
-    { name: s.string() },
-    {
-      authoredPosts: s.reverse("posts", "author"),
-    },
-  ),
   posts: s.table(
     { authorId: s.uuid(), title: s.string() },
     {
       author: s.rel("users", "authorId"),
+    },
+  ),
+  users: s.table(
+    { name: s.string() },
+    {
+      authoredPosts: s.reverse("posts", "author"),
     },
   ),
 };
@@ -53,7 +55,9 @@ const app = s.defineApp(schema);
 ```
 
 `author` is the public relation name, `users` is its target table, and `authorId` is the
-local UUID column. `authoredPosts` names a reverse traversal of the `posts.author` relation;
+local UUID column.
+
+`authoredPosts` names a reverse traversal of the `posts.author` relation;
 the second argument to `s.reverse` is a **forward relation name**, not a column name.
 No suffix convention, generated code, or automatic reverse relation is involved. A UUID
 column without a relation declaration remains an ordinary UUID column.
@@ -69,25 +73,11 @@ Targets and local columns must exist, forward columns must have supported UUID s
 reverse declarations must resolve to a forward relation pointing back to their table.
 Relation names must not collide with stored column names.
 
-### Migrating from inferred relations
-
-Replace each `s.ref("users")` column builder with `s.uuid()`, preserving modifiers such as
-`.optional()` and `s.array(...)`. Add `author: s.rel("users", "authorId")` in the table's
-second argument to preserve an existing `author` include. Add reverse relations explicitly
-on their target tables. You can preserve an old query name with
-`postsViaAuthor: s.reverse("posts", "author")`, or choose an intentional name such as
-`authoredPosts` and update callers. Add `{}` to tables with no relations.
-
-Column names no longer determine relations. Renaming a relation does not rename its stored
-UUID column; forward declarations retain the same underlying column reference metadata.
-
 ## Validate locally
 
 <SchemaSetup />
 
 When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
-
-If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
 ## Exporting the app
 
@@ -129,20 +119,7 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   accounts: s.table({ name: s.string() }, {}),
-  workspaces: s.table(
-    { name: s.string(), accountId: s.uuid() },
-    {
-      account: s.rel("accounts", "accountId"),
-      tickets: s.reverse("support_tickets", "workspace"),
-    },
-  ),
-  catalog_items: s.table(
-    { title: s.string(), workspaceId: s.uuid() },
-    {
-      workspace: s.rel("workspaces", "workspaceId"),
-      orders: s.reverse("orders", "catalogItem"),
-    },
-  ),
+  users: s.table({ name: s.string() }, {}),
   orders: s.table(
     { number: s.string(), catalogItemId: s.uuid(), buyerId: s.uuid() },
     {
@@ -156,12 +133,25 @@ const schema = {
       order: s.rel("orders", "orderId"),
     },
   ),
-  users: s.table({ name: s.string() }, {}),
   support_tickets: s.table(
     { workspaceId: s.uuid(), requesterId: s.uuid() },
     {
       workspace: s.rel("workspaces", "workspaceId"),
       requester: s.rel("users", "requesterId"),
+    },
+  ),
+  catalog_items: s.table(
+    { title: s.string(), workspaceId: s.uuid() },
+    {
+      workspace: s.rel("workspaces", "workspaceId"),
+      orders: s.reverse("orders", "catalogItem"),
+    },
+  ),
+  workspaces: s.table(
+    { name: s.string(), accountId: s.uuid() },
+    {
+      account: s.rel("accounts", "accountId"),
+      tickets: s.reverse("support_tickets", "workspace"),
     },
   ),
 };

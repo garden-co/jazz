@@ -1660,12 +1660,12 @@ describe("NAPI integration", () => {
             policy.dropdowns_access_edges.allowUpdate.where({});
             policy.dropdowns_access_edges.allowDelete.where({});
 
-            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns_id"));
-            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns"));
+            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns"));
             policy.dropdown_entry.allowUpdate
-              .whereOld(allowedTo.update("dropdowns_id"))
-              .whereNew(allowedTo.update("dropdowns_id"));
-            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns_id"));
+              .whereOld(allowedTo.update("dropdowns"))
+              .whereNew(allowedTo.update("dropdowns"));
+            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns"));
           });
         `,
       );

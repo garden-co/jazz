@@ -124,3 +124,14 @@ it must not be merged into main. It retains every released engine crate tree,
 released dependency versions and profiles, and imports the five later CodSpeed
 workloads with harness-only API adaptations. The standalone native Groove
 `record_validation` receipt is outside the CodSpeed workload inventory.
+
+One release may have several registry entries, one per harness commit; each
+entry allowlists only its own run/result IDs, and all entries for a release must
+agree on engine SHA and effective date (`backfills.test.ts` audits the registry).
+The alpha.55 policy harness lives on `chore/alpha55-codspeed-new-bench-backfill`.
+The W1 `subscription_fanout_memory` cases added after alpha.56 are backfilled
+from `bench/alpha5{4,5,6}-fanout-backfill`; each branch documents its single
+diagnostic-only adaptation in `dev/benchmarks/ALPHA5x_FANOUT_BACKFILL.md`.
+`first_sync_local_relay_27518_rocksdb` has no release points: its harness needs
+the `Node::accept_scope_isolated_relay_subscriber_for_test` engine hook added
+after alpha.56, and adding it would change pinned engine bytes.

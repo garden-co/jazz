@@ -678,7 +678,7 @@ describe("permissions DSL", () => {
   it("composes a type-column row predicate with allowedTo", () => {
     const compiled = definePermissions(documentApp, ({ policy, allOf, allowedTo }) => [
       policy.documents.allowUpdate.where(
-        allOf([{ type: "Inherits" }, allowedTo.update("projectId")]),
+        allOf([{ type: "Inherits" }, allowedTo.update("project")]),
       ),
     ]);
 
@@ -706,8 +706,8 @@ describe("permissions DSL", () => {
       policy.todos.allowRead.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowInsert.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowUpdate
-        .whereOld(allOf([allowedTo.update("projectId"), { archived: false }]))
-        .whereNew(allowedTo.update("projectId")),
+        .whereOld(allOf([allowedTo.update("project"), { archived: false }]))
+        .whereNew(allowedTo.update("project")),
       policy.todos.allowDelete.where({ ownerId: session.claims["sub"] }),
     ]);
 
@@ -929,7 +929,7 @@ describe("permissions DSL", () => {
   it("supports plural action aliases and OR-merges repeated rules", () => {
     const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowReads.where({ ownerId: session.claims["sub"] }),
-      policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("projectId")])),
+      policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("project")])),
       policy.todos.allowInserts.where({ ownerId: session.claims["sub"] }),
     ]);
 
@@ -1013,8 +1013,8 @@ describe("permissions DSL", () => {
 
   it("supports allowedTo.insert and allowedTo.delete helpers", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowInsert.where(allowedTo.insert("projectId")),
-      policy.todos.allowDelete.where(allowedTo.delete("projectId")),
+      policy.todos.allowInsert.where(allowedTo.insert("project")),
+      policy.todos.allowDelete.where(allowedTo.delete("project")),
     ]);
 
     expect(compiled.todos!.insert?.with_check).toEqual({
@@ -1061,7 +1061,7 @@ describe("permissions DSL", () => {
 
   it("supports allowedTo.readReferencing helper", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
     ]);
 
     expect(compiled.projects!.select?.using).toEqual({
@@ -1072,28 +1072,22 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("supports zero recursive referencing inherits depth", () => {
-    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.projects.allowRead.where(
-        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 0 }),
-      ),
-    ]);
-
-    expect(compiled.projects!.select?.using).toEqual({
-      type: "InheritsReferencing",
-      operation: "Select",
-      source_table: "todos",
-      via_column: "projectId",
-      max_depth: 0,
-    });
+  it("rejects unsupported reverse depth bounds", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.projects.allowRead.where(
+          allowedTo.readReferencing(policy.todos, "project", { maxDepth: 0 }),
+        ),
+      ]),
+    ).toThrow(/reverse relationships do not support maxDepth/);
   });
 
   it("rejects referencing inherits when source FK does not target current table", () => {
     expect(() =>
       definePermissions(app, ({ policy, allowedTo }) => [
-        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todoId")),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todo")),
       ]),
-    ).toThrow(/references "todos" but this rule is for "projects"/i);
+    ).toThrow(/requires a declared forward relationship targeting "projects"/i);
   });
 
   it("supports split friend-profile chain style (friendships + readReferencing)", () => {
@@ -1110,7 +1104,7 @@ describe("permissions DSL", () => {
           }),
         ]),
       ),
-      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
+      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profile")),
     ]);
 
     expect(compiled.profiles!.select?.using).toEqual({
@@ -1446,7 +1440,7 @@ describe("permissions DSL", () => {
 
   it("supports zero bounded recursive inherits depth and rejects invalid overrides", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
+      policy.todos.allowRead.where(allowedTo.read("project", { maxDepth: 0 })),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -1458,7 +1452,7 @@ describe("permissions DSL", () => {
     for (const maxDepth of [-1, 1.5]) {
       expect(() =>
         definePermissions(app, ({ policy, allowedTo }) => [
-          policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth })),
+          policy.todos.allowRead.where(allowedTo.read("project", { maxDepth })),
         ]),
       ).toThrow(/maxdepth must be a non-negative integer/i);
     }
@@ -2132,7 +2126,7 @@ describe("permissions DSL", () => {
     ).toThrow(/qualified.*start|ambiguous/i);
   });
 
-  it("resolves allowedTo without Id suffix to the FK column", () => {
+  it("resolves declared allowedTo relationship names to the FK column", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where(allowedTo.read("project")),
     ]);
@@ -2144,7 +2138,7 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("resolves allowedTo without Id suffix for insert/update/delete", () => {
+  it("resolves declared allowedTo relationship names for insert/update/delete", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowInsert.where(allowedTo.insert("project")),
       policy.todos.allowDelete.where(allowedTo.delete("project")),
@@ -2170,7 +2164,7 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("resolves readReferencing without Id suffix", () => {
+  it("resolves readReferencing by the declared forward name", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
     ]);
@@ -2183,16 +2177,12 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("still accepts the full FK column name with Id suffix", () => {
-    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId")),
-    ]);
-
-    expect(compiled.todos!.select?.using).toEqual({
-      type: "Inherits",
-      operation: "Select",
-      via_column: "projectId",
-    });
+  it("rejects the raw FK column even when it has a declared relationship", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.todos.allowRead.where(allowedTo.read("projectId")),
+      ]),
+    ).toThrow(/Unknown relation "projectId"/);
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {
@@ -2200,15 +2190,15 @@ describe("permissions DSL", () => {
       definePermissions(app, ({ policy, allowedTo }) => [
         policy.todos.allowRead.where(allowedTo.read("ownerId")),
       ]),
-    ).toThrow(/available fk columns: projectId/i);
+    ).toThrow(/Unknown relation "ownerId"/);
   });
 
   it("rejects allowedTo when app.wasmSchema metadata is missing", () => {
     expect(() =>
       definePermissions(appWithoutSchema, ({ policy, allowedTo }) => [
-        policy.todos.allowRead.where(allowedTo.read("projectId")),
+        policy.todos.allowRead.where(allowedTo.read("project")),
       ]),
-    ).toThrow(/table metadata is missing in app\.wasmSchema/i);
+    ).toThrow(/Unknown relation/);
   });
 
   it("rejects row references outside exists clauses", () => {
@@ -2494,7 +2484,7 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowRead.where((todo) =>
         anyOf([
-          allowedTo.read("projectId"),
+          allowedTo.read("project"),
           policy.todoShares.exists.where({
             todoId: todo.id,
             userId: session.claims["sub"],

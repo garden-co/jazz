@@ -3,6 +3,11 @@ name: Promote inspector production
 on:
   workflow_dispatch:
     inputs:
+      dry-run:
+        description: "Verify the exact deployment and project without promoting"
+        required: false
+        default: false
+        type: boolean
       deploy-sha:
         description: "Exact GitHub source commit SHA of the verified staged deployment"
         required: true
@@ -41,11 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.14.0
-          run_install: false
-
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
@@ -63,10 +63,8 @@ jobs:
         id: inspector-deployment
         run: GITHUB_SHA="${DEPLOY_SHA}" node dev/scripts/resolve-inspector-deployment.mjs
 
-      - name: Promote staged inspector deployment
-        if: steps.inspector-deployment.outputs.already_promoted != 'true'
-        run: pnpm dlx vercel@latest promote "${{ steps.inspector-deployment.outputs.deployment_url }}" --yes --timeout=5m --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}"
-
-      - name: Skip already promoted inspector deployment
-        if: steps.inspector-deployment.outputs.already_promoted == 'true'
-        run: echo "Inspector deployment ${{ steps.inspector-deployment.outputs.deployment_url }} is already promoted."
+      - name: Verify or promote staged inspector deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.inspector-deployment.outputs.deployment_url }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
+        run: node dev/scripts/promote-inspector-deployment.mjs
