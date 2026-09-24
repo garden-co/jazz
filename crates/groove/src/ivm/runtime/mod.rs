@@ -78,7 +78,9 @@ pub use state::{ExecutionLayoutStats, RuntimeStats, TickMetrics};
 pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };
-use terminal::{order_terminal_snapshot, terminal_deltas_from_record_deltas};
+use terminal::{
+    order_terminal_snapshot, terminal_deltas_from_record_deltas, terminal_deltas_keyed_by_identity,
+};
 
 const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;

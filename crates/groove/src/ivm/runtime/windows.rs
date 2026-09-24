@@ -1349,6 +1349,97 @@ pub(super) fn encoded_record_key_part(
     Ok(key)
 }
 
+/// Terminal root identity key of `field_indices` (#3309). Unlike
+/// [`encoded_record_key_part`] this keys every value a record can hold: the
+/// runtime primary-key bytes for every value that encoder supports (so group
+/// prefixes match the TopBy's own group keys), extended with arrays, enum
+/// payloads and indirect large values. It is a process-local opaque key, not a
+/// durable codec: nothing persists it and consumers only compare it.
+pub(super) fn encoded_identity_key_part(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    field_indices: &[usize],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in field_indices {
+        let value = descriptor.get_idx(record, *field_idx)?;
+        encode_identity_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encode_identity_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::Tuple(values) => {
+            key.push(11);
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Nullable(None) => {
+            key.push(12);
+            key.push(0);
+        }
+        Value::Nullable(Some(value)) => {
+            key.push(12);
+            key.push(1);
+            encode_identity_key_part(key, value)?;
+        }
+        Value::Array(values) => {
+            key.push(16);
+            key.extend((values.len() as u64).to_be_bytes());
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Enum(value) => {
+            // The column's schema fixes each case's payload descriptor, so the
+            // tag plus the payload values identify the value.
+            key.push(17);
+            key.extend(value.tag().to_be_bytes());
+            let payload = value.record();
+            let fields = payload.descriptor().fields().len();
+            key.extend((fields as u64).to_be_bytes());
+            for index in 0..fields {
+                encode_identity_key_part(key, &payload.get_idx(index)?)?;
+            }
+        }
+        Value::Large(large) => {
+            // An indirect value is identified by its content, not by where its
+            // chunks live: the structural content hash of its base, its
+            // lengths and its pending edits. The root locator is left out, so
+            // two references to the same content share a key.
+            key.push(18);
+            key.push(match large.kind {
+                crate::large_values::LargeValueKind::String => 0,
+                crate::large_values::LargeValueKind::Bytes => 1,
+                crate::large_values::LargeValueKind::Json => 2,
+            });
+            key.push(large.format_version);
+            key.extend_from_slice(&large.logical_hash.0);
+            key.extend(large.byte_length.to_be_bytes());
+            match large.utf16_length {
+                Some(length) => {
+                    key.push(1);
+                    key.extend(length.to_be_bytes());
+                }
+                None => key.push(0),
+            }
+            key.extend((large.edit_tail.len() as u64).to_be_bytes());
+            for edit in &large.edit_tail {
+                key.extend(edit.offset.to_be_bytes());
+                key.extend(edit.delete_length.to_be_bytes());
+                key.extend(edit.utf16_offset.to_be_bytes());
+                key.extend(edit.delete_utf16_length.to_be_bytes());
+                key.extend(edit.insert_utf16_length.to_be_bytes());
+                encode_runtime_ordered_bytes(key, &edit.insert_bytes);
+            }
+        }
+        value => encode_runtime_primary_key_part(key, value)?,
+    }
+    Ok(())
+}
+
 pub(super) fn encoded_arrangement_key_part(
     descriptor: RecordDescriptor,
     record: &[u8],

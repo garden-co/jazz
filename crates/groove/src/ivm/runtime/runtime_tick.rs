@@ -86,7 +86,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
-    pending_subscription_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
+    /// Each entry is the physical output and, once loaded, its materialized
+    /// form. TopBy root keys are taken from the physical form (#3309).
+    pending_subscription_outputs: HashMap<NodeId, (Arc<RecordDeltas>, Option<Arc<RecordDeltas>>)>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -1235,10 +1237,10 @@ impl<'a> IncrementalEvaluation<'a> {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let physical_records = if let Some(records) =
+                let (physical_records, materialized) = if let Some((physical, materialized)) =
                     self.pending_subscription_outputs.get(&output.node)
                 {
-                    Arc::clone(records)
+                    (Arc::clone(physical), materialized.clone())
                 } else {
                     let records = {
                         let mut future = evaluator.update_node(output.node);
@@ -1250,13 +1252,19 @@ impl<'a> IncrementalEvaluation<'a> {
                         }
                     };
                     self.pending_subscription_outputs
-                        .insert(output.node, Arc::clone(&records));
-                    records
+                        .insert(output.node, (Arc::clone(&records), None));
+                    (records, None)
                 };
-                let records = match evaluator.materialize_indirect_input(&physical_records) {
+                let materialized = match materialized {
+                    Some(records) => Ok(records),
+                    None => evaluator.materialize_indirect_input(&physical_records),
+                };
+                let records = match materialized {
                     Ok(records) => {
-                        self.pending_subscription_outputs
-                            .insert(output.node, Arc::clone(&records));
+                        self.pending_subscription_outputs.insert(
+                            output.node,
+                            (Arc::clone(&physical_records), Some(Arc::clone(&records))),
+                        );
                         records
                     }
                     Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -1299,12 +1307,12 @@ impl<'a> IncrementalEvaluation<'a> {
                     }
                     Err(error) => return Poll::Ready(Err(error.into())),
                 };
-                prepared_outputs.push((sink, output, records));
+                prepared_outputs.push((sink, output, physical_records, records));
             }
 
             let mut sinks = BTreeMap::new();
             let mut terminal_sinks = BTreeMap::new();
-            for (sink, output, records) in prepared_outputs {
+            for (sink, output, physical_records, records) in prepared_outputs {
                 if !records.deltas.is_empty()
                     && !records.descriptor.registry_compatible_with(&output.output)
                 {
@@ -1313,7 +1321,31 @@ impl<'a> IncrementalEvaluation<'a> {
                 let structured = evaluator.output_is_structured_collect_by(output.node)?;
                 let public_root = evaluator.output_has_public_root(output.node)?;
                 let terminal_owned = output.root_ordering_node.is_some() || structured;
+                let identity = match output.root_ordering_node {
+                    Some(ordering) if !structured => {
+                        root_identity_fields(evaluator.graph, output.node, ordering)?
+                    }
+                    _ => None,
+                };
                 let records = records.as_ref().clone();
+                // Only the groups this output's own deltas reach take part in
+                // its root ordering; the group fields lead the identity.
+                let identity_groups = identity
+                    .as_ref()
+                    .map(|identity| {
+                        physical_records
+                            .deltas
+                            .iter()
+                            .map(|delta| {
+                                encoded_identity_key_part(
+                                    physical_records.descriptor,
+                                    delta.raw(),
+                                    &identity.fields[..identity.group_len],
+                                )
+                            })
+                            .collect::<Result<BTreeSet<_>, _>>()
+                    })
+                    .transpose()?;
                 if terminal_owned {
                     let terminal = if structured {
                         if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
@@ -1332,7 +1364,14 @@ impl<'a> IncrementalEvaluation<'a> {
                             None
                         }
                     } else if !records.is_empty() {
-                        Some(terminal_deltas_from_record_deltas(&records)?)
+                        Some(match &identity {
+                            Some(identity) => terminal_deltas_keyed_by_identity(
+                                &records,
+                                &physical_records,
+                                &identity.fields,
+                            )?,
+                            None => terminal_deltas_from_record_deltas(&records)?,
+                        })
                     } else if output.root_ordering_node.is_some() {
                         Some(TerminalDeltas {
                             operations: Vec::new(),
@@ -1351,6 +1390,7 @@ impl<'a> IncrementalEvaluation<'a> {
                             evaluator.apply_root_ordering(
                                 root_ordering_node,
                                 output.output,
+                                identity.as_ref().zip(identity_groups.as_ref()),
                                 &mut terminal,
                             )?;
                         }
