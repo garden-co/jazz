@@ -532,11 +532,11 @@ fn local_unavailable_inputs_also_filter_include_deleted_app_sources() {
     assert_eq!(read(&mut node, alice), BTreeSet::from([row(1), row(2)]));
 }
 
-/// Alice opens a cold Edge receiver before RegisterShape. Later authority
+/// Alice opens a cold Global receiver before RegisterShape. Later authority
 /// inputs and local unavailable markers must both reach its existing graph.
 /// cold [] ──admitted row──► [1] ──unavailable──► [] ──readmit──► [1]
 #[test]
-fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
+fn local_unavailable_inputs_follow_cold_current_global_receivers() {
     let (_dir, mut node, schema) = fixture();
     let alice = author(1);
     let shape = Query::from("parents").validate(&schema).unwrap();

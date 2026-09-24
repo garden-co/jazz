@@ -1452,9 +1452,9 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
     let base = schema();
     let core = open_core(0x5e, AuthorSubject::SYSTEM, &base);
 
-    let (mut edge_transport, core_edge_transport) = duplex();
-    let edge_link = core.accept_subscriber_with_trust(
-        core_edge_transport,
+    let (mut backend_transport, core_backend_transport) = duplex();
+    let backend_link = core.accept_subscriber_with_trust(
+        core_backend_transport,
         AuthorSubject::for_test_bytes([0xe1; 16]),
         CommitUnitTrust::TrustedBackend,
     );
@@ -1464,15 +1464,15 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
         AuthorSubject::for_test_bytes([0xc1; 16]),
     );
 
-    edge_link.borrow_mut().tick().unwrap();
+    backend_link.borrow_mut().tick().unwrap();
     assert!(matches!(
-        edge_transport.try_recv(),
+        backend_transport.try_recv(),
         Some(SyncMessage::CatalogueSnapshot(_))
     ));
-    assert!(edge_transport.try_recv().is_none());
-    edge_link.borrow_mut().tick().unwrap();
+    assert!(backend_transport.try_recv().is_none());
+    backend_link.borrow_mut().tick().unwrap();
     assert!(
-        edge_transport.try_recv().is_none(),
+        backend_transport.try_recv().is_none(),
         "an unchanged catalogue fingerprint must not resend its snapshot"
     );
     client_link.borrow_mut().tick().unwrap();
@@ -1543,9 +1543,9 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
         })
         .unwrap();
 
-    edge_link.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = edge_transport.try_recv() else {
-        panic!("trusted edge must receive the changed catalogue before any subscription");
+    backend_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = backend_transport.try_recv() else {
+        panic!("trusted backend must receive the changed catalogue before any subscription");
     };
     assert!(
         snapshot
@@ -1554,7 +1554,7 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
             .any(|schema| schema.id == evolved.id),
         "changed snapshot carries the newly published schema"
     );
-    assert!(edge_transport.try_recv().is_none());
+    assert!(backend_transport.try_recv().is_none());
 
     client_link.borrow_mut().tick().unwrap();
     assert!(
@@ -2736,8 +2736,8 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     );
 }
 
-/// A direct session served by an Edge must replace its propagated, delegated
-/// Core usage site on refresh. Rebinding only the Edge-local evaluator makes a
+/// A direct session served by a relay must replace its propagated, delegated
+/// Core usage site on refresh. Rebinding only the relay-local evaluator makes a
 /// broader session permanently miss Core-only rows; retaining the old handle
 /// also leaves the old policy-bearing Core receiver resident.
 #[test]
@@ -2751,28 +2751,28 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .insert("todos", cells("only at core", false, allowed_owner))
         .unwrap()
         .row_uuid();
-    let edge = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
-    edge.set_relay_authority_session_owner_for_test();
+    let relay = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
+    relay.set_relay_authority_session_owner_for_test();
     let client = open_db(0xc1, session_subject, &schema);
     let allowed_claims = test_provider_claims(allowed_owner);
     let denied_claims = test_provider_claims(denied_owner);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
 
-    let (edge_transport, core_transport) = duplex();
-    let edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let (relay_transport, core_transport) = duplex();
+    let relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
     // The Core does not infer a user session from a trusted/backend transport.
     // This test models the production scope-relay handshake that admits the
-    // exact foreground binding forwarded by the Edge.
-    let core_edge = core.accept_scope_isolated_relay_subscriber(
+    // exact foreground binding forwarded by the relay.
+    let core_relay = core.accept_scope_isolated_relay_subscriber(
         core_transport,
         session_subject,
         allowed_claims.clone(),
         1,
     );
-    let (client_transport, edge_client_transport, _client_sent, edge_sent) = duplex_with_taps();
+    let (client_transport, relay_client_transport, _client_sent, relay_sent) = duplex_with_taps();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge.accept_subscriber_with_claims(
-        edge_client_transport,
+    let relay_client = relay.accept_subscriber_with_claims(
+        relay_client_transport,
         session_subject,
         allowed_claims.clone(),
     );
@@ -2784,9 +2784,9 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .unwrap();
     for _ in 0..96 {
         client.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         core.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         client.tick().unwrap();
         if client.query_attachment_is_covered(&attachment)
             && row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![remote_row]
@@ -2799,9 +2799,9 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         vec![remote_row]
     );
     let (downstream_subscription, old_upstream_subscription, old_maintained_subscription) = {
-        let connection = edge_client.borrow();
+        let connection = relay_client.borrow();
         let ConnectionLink::Subscriber(state) = &connection.link else {
-            unreachable!("edge serves the direct client")
+            unreachable!("relay serves the direct client")
         };
         let downstream_subscription = attachment.subscription();
         let coverage = &state.served[&downstream_subscription];
@@ -2812,14 +2812,14 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         )
     };
     assert!(matches!(
-        &core_edge.borrow().link,
+        &core_relay.borrow().link,
         ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
     ));
     assert!(matches!(
-        &edge_client.borrow().link,
+        &relay_client.borrow().link,
         ConnectionLink::Subscriber(state) if state.peer.has_maintained_subscription(old_maintained_subscription)
     ));
-    let expected_group_source = edge
+    let expected_group_source = relay
         .node
         .node()
         .borrow()
@@ -2827,7 +2827,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .expect("scope relay installs the exact upstream authority result");
     assert!(
         matches!(
-            &edge_client.borrow().link,
+            &relay_client.borrow().link,
             ConnectionLink::Subscriber(state)
                 if state
                     .peer
@@ -2840,7 +2840,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
     // The original Core capability is immutable. A direct client claim
     // refresh cannot widen or narrow it in place; production `updateAuth`
     // disconnects and re-admits the scope relay under a fresh epoch.
-    let old_core_binding = match &core_edge.borrow().link {
+    let old_core_binding = match &core_relay.borrow().link {
         ConnectionLink::Subscriber(state) => state
             .peer
             .subscription_policy_binding(old_upstream_subscription),
@@ -2850,28 +2850,28 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         old_core_binding,
         Some((session_subject, allowed_claims.clone()))
     );
-    assert!(edge.detach_connection(&edge_upstream));
+    assert!(relay.detach_connection(&relay_upstream));
 
-    let (replacement_edge_transport, replacement_core_transport) = duplex();
-    let _replacement_edge_upstream =
-        crate::db::block_on(edge.connect_upstream(replacement_edge_transport));
-    let replacement_core_edge = core.accept_scope_isolated_relay_subscriber(
+    let (replacement_relay_transport, replacement_core_transport) = duplex();
+    let _replacement_relay_upstream =
+        crate::db::block_on(relay.connect_upstream(replacement_relay_transport));
+    let replacement_core_relay = core.accept_scope_isolated_relay_subscriber(
         replacement_core_transport,
         session_subject,
         denied_claims.clone(),
         2,
     );
     client.set_test_provider_claims(session_subject, denied_claims.clone());
-    edge_client
+    relay_client
         .borrow_mut()
         .update_authenticated_session_claims(denied_claims);
     let mut saw_fresh_downstream_reset = false;
     for _ in 0..96 {
         client.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         core.tick().unwrap();
-        edge.tick().unwrap();
-        saw_fresh_downstream_reset |= edge_sent.borrow().iter().any(|message| {
+        relay.tick().unwrap();
+        saw_fresh_downstream_reset |= relay_sent.borrow().iter().any(|message| {
             matches!(
                 message,
                 SyncMessage::ViewUpdate(update)
@@ -2882,22 +2882,22 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         client.tick().unwrap();
         if saw_fresh_downstream_reset
             && !matches!(
-                &replacement_core_edge.borrow().link,
+                &replacement_core_relay.borrow().link,
                 ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
             )
         {
             break;
         }
     }
-    let connection = edge_client.borrow();
+    let connection = relay_client.borrow();
     let ConnectionLink::Subscriber(state) = &connection.link else {
-        unreachable!("edge keeps serving the direct client")
+        unreachable!("relay keeps serving the direct client")
     };
     let coverage = &state.served[&downstream_subscription];
     let fresh_group_subscription = coverage_group_subscription_key(coverage);
     let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
     drop(connection);
-    let core_fresh = match &replacement_core_edge.borrow().link {
+    let core_fresh = match &replacement_core_relay.borrow().link {
         ConnectionLink::Subscriber(state) => (
             state
                 .peer
@@ -2914,12 +2914,12 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         "the refreshed remote policy must publish a new empty membership reset"
     );
     assert!(matches!(
-        &replacement_core_edge.borrow().link,
+        &replacement_core_relay.borrow().link,
         ConnectionLink::Subscriber(state)
             if !state.served.contains_key(&old_upstream_subscription)
                 && state.served.contains_key(&fresh_upstream_subscription)
     ));
-    let fresh_authority_source = edge
+    let fresh_authority_source = relay
         .node
         .node()
         .borrow()
@@ -2927,7 +2927,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .expect("fresh upstream usage has an exact authority result");
     assert!(
         matches!(
-            &edge_client.borrow().link,
+            &relay_client.borrow().link,
             ConnectionLink::Subscriber(state)
                 if fresh_group_subscription != old_maintained_subscription
                     && !state.peer.has_maintained_subscription(old_maintained_subscription)
@@ -2953,7 +2953,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     // A Core may also maintain an upstream relay; that topology fact must not
-    // turn its client ingress into Edge routing or bypass local proof.
+    // turn its client ingress into relay routing or bypass local proof.
     let (core_upstream, _upstream_peer) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0x5e; 16]),
@@ -3512,38 +3512,38 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
 fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let schema = schema();
     let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_db(0xe0, identity, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let relay = open_db(0xe0, identity, &schema);
+    let relay_node = NodeUuid::from_bytes([0xe0; 16]);
     let (a_transport, _a_peer) = duplex_with_admitted_session_context(
         identity,
-        edge_node,
+        relay_node,
         10,
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let a = crate::db::block_on(edge.node.connect_upstream(a_transport));
-    let first = *edge.node.admitted_upstream_authority.borrow();
+    let a = crate::db::block_on(relay.node.connect_upstream(a_transport));
+    let first = *relay.node.admitted_upstream_authority.borrow();
     let (b_transport, _b_peer) = duplex_with_admitted_session_context(
         identity,
-        edge_node,
+        relay_node,
         11,
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let _b = crate::db::block_on(edge.node.connect_upstream(b_transport));
+    let _b = crate::db::block_on(relay.node.connect_upstream(b_transport));
     assert_eq!(
-        *edge.node.admitted_upstream_authority.borrow(),
+        *relay.node.admitted_upstream_authority.borrow(),
         first,
         "a concurrent admitted upstream must not steal existing route ownership"
     );
-    assert_eq!(edge.node.admitted_upstream_authorities.borrow().len(), 2);
-    assert!(edge.node.detach_connection(&a));
+    assert_eq!(relay.node.admitted_upstream_authorities.borrow().len(), 2);
+    assert!(relay.node.detach_connection(&a));
     assert_ne!(
-        *edge.node.admitted_upstream_authority.borrow(),
+        *relay.node.admitted_upstream_authority.borrow(),
         first,
         "detaching the selected owner must deterministically hand off future routes"
     );
-    assert_eq!(edge.node.admitted_upstream_authorities.borrow().len(), 1);
+    assert_eq!(relay.node.admitted_upstream_authorities.borrow().len(), 1);
 }
 
 #[test]
@@ -4082,7 +4082,7 @@ fn authority_query_delegation_requires_explicit_host_admission() {
     }
 }
 
-// Internal transport fixture: only host admission can mark a partial Edge.
+// Internal transport fixture: only host admission can mark subscriber trust.
 // Observe raw native delivery/rejection because a client facade cannot express
 // the unsupported remote propagation option or delegated transport scope.
 #[derive(Clone, Copy, Debug)]
@@ -4105,16 +4105,16 @@ fn remote_query_delivery(
 ) -> (bool, bool) {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0x75; 16]);
-    let edge = open_core(0x76, AuthorSubject::SYSTEM, &schema);
+    let core = open_core(0x76, AuthorSubject::SYSTEM, &schema);
     let target = row(0x77);
-    edge.insert_with_id(
+    core.insert_with_id(
         "todos",
         target,
         cells("unverified shared bytes", false, alice),
     )
     .unwrap();
     let forbidden = row(0x78);
-    edge.insert_with_id(
+    core.insert_with_id(
         "todos",
         forbidden,
         cells(
@@ -4139,7 +4139,7 @@ fn remote_query_delivery(
     let (mut client, transport) = duplex();
     let delegated = matches!(client_scope, QueryTestClient::Delegated);
     let subscriber = if delegated {
-        let subscriber = edge.accept_subscriber_with_trust(
+        let subscriber = core.accept_subscriber_with_trust(
             transport,
             AuthorSubject::SYSTEM,
             CommitUnitTrust::TrustedAuthority,
@@ -4147,13 +4147,13 @@ fn remote_query_delivery(
         subscriber.borrow_mut().admit_authority_query_delegate();
         subscriber
     } else if matches!(client_scope, QueryTestClient::System) {
-        edge.accept_subscriber_with_trust(
+        core.accept_subscriber_with_trust(
             transport,
             AuthorSubject::SYSTEM,
             CommitUnitTrust::TrustedBackend,
         )
     } else {
-        edge.accept_subscriber(transport, alice)
+        core.accept_subscriber(transport, alice)
     };
     client
         .send(SyncMessage::RegisterShape {
@@ -4192,7 +4192,7 @@ fn remote_query_delivery(
                                     .versions
                                     .iter()
                                     .any(|version| version.row_uuid() == forbidden),
-                                "local Edge evaluation must narrow payloads under the admitted reader"
+                                "local Core evaluation must narrow payloads under the admitted reader"
                             );
                         }
                         emitted |= bundle
@@ -4233,7 +4233,7 @@ fn remote_queries_cannot_disable_upstream_propagation() {
 }
 
 // Internal transport fixture isolates local serving from upstream hydration:
-// no Core is connected. The Edge must evaluate cached data under the admitted
+// no Core is connected. The serving node must evaluate cached data under the admitted
 // reader instead of waiting for a selected Core result for this exact query.
 
 // Rust equivalent of a memory-only browser foreground: LocalOnly can read its

@@ -49,7 +49,8 @@ shared coordination surface small:
   ownership key, likely a reference path to a root (workspace/org/warehouse).
 - **Mergeable authority.** Mergeable transactions require permission
   evaluation at the owning Core. How this authority composes across shards
-  remains exploratory; there is no intermediary edge authority (ch. 9).
+  remains exploratory; there is no intermediary authority between relays and
+  Core (ch. 9).
 - **Exclusive authority.** **Exclusive transactions are single-shard only**
   unless an explicit cross-shard serialization mechanism is specified. S4's
   per-warehouse cap discipline (appendix B) is exactly this

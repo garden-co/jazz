@@ -1,8 +1,8 @@
-//! Peer-local subscription and edge-authority support state.
+//! Peer-local subscription and relay-authority support state.
 //!
 //! The transport/update algorithms remain in the parent `peer` module. This
 //! module owns the state that those algorithms retain between deliveries,
-//! including the short-lived authority-scope subscriptions used for edge fate
+//! including the short-lived authority-scope subscriptions used for relay fate
 //! assignment.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -190,11 +190,11 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
-    /// Exact receiver-owned inputs for a relay Edge child. `None` means this
+    /// Exact receiver-owned inputs for a relay child. `None` means this
     /// is an ordinary trusted-serving maintained view, not a receiver.
     pub(super) covered_input_receiver: Option<CoveredInputReceiver>,
     pub(super) result_schema_version: SchemaVersionId,
-    /// Exact authoritative source membership for an Edge child of a durable
+    /// Exact authoritative source membership for a child of a durable
     /// relay. A canonical binding view alone is not a permission boundary.
     pub(super) source_authority_result: Option<AuthorityResultKey>,
     pub(super) initial_received: bool,

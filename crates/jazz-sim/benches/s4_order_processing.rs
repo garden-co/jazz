@@ -479,9 +479,9 @@ struct JazzSummary {
     rejects: usize,
     retries: usize,
     latency: Histogram<u64>,
-    edge_acceptance: Histogram<u64>,
-    edge_hydration_bytes: u64,
-    edge_hydration_rows: usize,
+    relay_acceptance: Histogram<u64>,
+    relay_hydration_bytes: u64,
+    relay_hydration_rows: usize,
     settle_elapsed_us: u128,
     propagation: Histogram<u64>,
     elapsed_us: u128,
@@ -512,9 +512,9 @@ struct SqliteSummary {
 struct ClientHarness {
     _dir: tempfile::TempDir,
     db: Db<RocksDbStorage>,
-    _edge_dir: tempfile::TempDir,
-    edge: NodeState<RocksDbStorage>,
-    edge_peer: PeerState,
+    _relay_dir: tempfile::TempDir,
+    relay: NodeState<RocksDbStorage>,
+    relay_peer: PeerState,
     client_peer: PeerState,
     query_server: DirectDbQueryServer,
     attachments: Vec<jazz::db::QueryAttachment>,
@@ -577,7 +577,7 @@ fn run_jazz_workload(
     let mut rejects = 0;
     let mut retries = 0;
     let mut latency = Histogram::new(3).unwrap();
-    let mut edge_acceptance = Histogram::new(3).unwrap();
+    let mut relay_acceptance = Histogram::new(3).unwrap();
     let mut settle_elapsed_us = 0_u128;
     let mut propagation = Histogram::new(3).unwrap();
     let start = Instant::now();
@@ -600,7 +600,7 @@ fn run_jazz_workload(
             &mut core,
             &op,
             now_ms,
-            &mut edge_acceptance,
+            &mut relay_acceptance,
         ));
         now_ms += match mode {
             RunMode::ThroughputSettlement | RunMode::ThroughputPropagationInclusive => 1,
@@ -647,9 +647,9 @@ fn run_jazz_workload(
         rejects,
         retries,
         latency,
-        edge_acceptance,
-        edge_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
-        edge_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
+        relay_acceptance,
+        relay_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
+        relay_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
         settle_elapsed_us,
         propagation,
         elapsed_us,
@@ -667,7 +667,7 @@ fn run_jazz_hot_item_contention(config: &Config) -> JazzSummary {
     let rejects = 0;
     let retries = 0;
     let mut latency = Histogram::new(3).unwrap();
-    let mut edge_acceptance = Histogram::new(3).unwrap();
+    let mut relay_acceptance = Histogram::new(3).unwrap();
     let mut settle_elapsed_us = 0_u128;
     let mut propagation = Histogram::new(3).unwrap();
     let start = Instant::now();
@@ -687,7 +687,7 @@ fn run_jazz_hot_item_contention(config: &Config) -> JazzSummary {
             &mut core,
             &op,
             now_ms,
-            &mut edge_acceptance,
+            &mut relay_acceptance,
         )) {
             Ok(true) => {
                 let settle_us = submit.elapsed().as_micros() as u64;
@@ -713,9 +713,9 @@ fn run_jazz_hot_item_contention(config: &Config) -> JazzSummary {
         rejects,
         retries,
         latency,
-        edge_acceptance,
-        edge_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
-        edge_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
+        relay_acceptance,
+        relay_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
+        relay_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
         settle_elapsed_us,
         propagation,
         elapsed_us,
@@ -735,7 +735,7 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
     let mut rejects = 0;
     let mut retries = 0;
     let mut latency = Histogram::new(3).unwrap();
-    let mut edge_acceptance = Histogram::new(3).unwrap();
+    let mut relay_acceptance = Histogram::new(3).unwrap();
     let mut settle_elapsed_us = 0_u128;
     let mut propagation = Histogram::new(3).unwrap();
     let start = Instant::now();
@@ -756,7 +756,7 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
                 &mut core,
                 &op,
                 now_ms,
-                &mut edge_acceptance,
+                &mut relay_acceptance,
             )) {
                 Ok(true) => {
                     let settle_us = submit.elapsed().as_micros() as u64;
@@ -794,9 +794,9 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
         rejects,
         retries,
         latency,
-        edge_acceptance,
-        edge_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
-        edge_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
+        relay_acceptance,
+        relay_hydration_bytes: clients.iter().map(|client| client.hydration_bytes).sum(),
+        relay_hydration_rows: clients.iter().map(|client| client.hydration_rows).sum(),
         settle_elapsed_us,
         propagation,
         elapsed_us,
@@ -809,7 +809,7 @@ async fn apply_jazz_op(
     core: &mut NodeState<RocksDbStorage>,
     op: &Op,
     now_ms: u64,
-    edge_acceptance: &mut Histogram<u64>,
+    relay_acceptance: &mut Histogram<u64>,
 ) -> Result<bool, jazz::db::Error> {
     let tx = client.db.exclusive_tx().await?;
     match op {
@@ -1092,11 +1092,11 @@ async fn apply_jazz_op(
         .pop_front()
         .expect("db exclusive commit should upload a commit unit");
     if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
-        let edge_start = Instant::now();
+        let relay_start = Instant::now();
         let _ = now_ms;
-        client.edge.ingest_relay_commit_unit(tx, versions).await?;
-        edge_acceptance
-            .record(edge_start.elapsed().as_micros() as u64)
+        client.relay.ingest_relay_commit_unit(tx, versions).await?;
+        relay_acceptance
+            .record(relay_start.elapsed().as_micros() as u64)
             .unwrap();
     } else {
         unreachable!();
@@ -1112,8 +1112,8 @@ async fn apply_jazz_op(
         {
             accepted = true;
         }
-        let outcome = client.edge.apply_sync_message(update.clone()).await?;
-        client.edge.persist_and_settle_outcome(outcome).await?;
+        let outcome = client.relay.apply_sync_message(update.clone()).await?;
+        client.relay.persist_and_settle_outcome(outcome).await?;
         client.inbound.borrow_mut().push_back(update);
         client.db.tick().await?;
     }
@@ -1140,13 +1140,13 @@ fn open_clients(
                 outbound: Rc::clone(&outbound),
                 inbound: Rc::clone(&inbound),
             })));
-            let (edge_dir, edge) = open_node(node(base_node + 100 + idx as u8), schema.clone());
+            let (relay_dir, relay) = open_node(node(base_node + 100 + idx as u8), schema.clone());
             let mut client = ClientHarness {
                 _dir: dir,
                 db,
-                _edge_dir: edge_dir,
-                edge,
-                edge_peer: PeerState::new(),
+                _relay_dir: relay_dir,
+                relay,
+                relay_peer: PeerState::new(),
                 client_peer: PeerState::client_link(AuthorSubject::for_test_bytes([byte; 16])),
                 query_server: DirectDbQueryServer::new(jazz::protocol::DelegatedSessionBinding {
                     identity: AuthorSubject::for_test_bytes([byte; 16]),
@@ -1160,7 +1160,7 @@ fn open_clients(
                 inbound,
                 _upstream: upstream,
             };
-            client.edge_peer.set_ship_complete_exclusive_payloads(true);
+            client.relay_peer.set_ship_complete_exclusive_payloads(true);
             client
                 .client_peer
                 .set_ship_complete_exclusive_payloads(true);
@@ -1187,7 +1187,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
         let shape = Query::from(table).validate(&schema()).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         register_query_receiver(
-            &mut client.edge,
+            &mut client.relay,
             &shape,
             &binding,
             Default::default(),
@@ -1197,7 +1197,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
             },
         )
         .unwrap();
-        client.edge_peer.set_subscription_policy_binding(
+        client.relay_peer.set_subscription_policy_binding(
             jazz::protocol::SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
@@ -1206,13 +1206,13 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
             (AuthorSubject::SYSTEM, BTreeMap::new()),
         );
         let update = if client.hydrated {
-            jazz::db::block_on(client.edge_peer.query_update(core, &shape, &binding)).unwrap()
+            jazz::db::block_on(client.relay_peer.query_update(core, &shape, &binding)).unwrap()
         } else {
-            jazz::db::block_on(client.edge_peer.rehydrate_query(core, &shape, &binding)).unwrap()
+            jazz::db::block_on(client.relay_peer.rehydrate_query(core, &shape, &binding)).unwrap()
         };
         client.hydration_bytes += view_update_bytes(&update);
         client.hydration_rows += result_row_count(&update, table);
-        apply_sync_message_settled(&mut client.edge, update).unwrap();
+        apply_sync_message_settled(&mut client.relay, update).unwrap();
     }
     client.hydrated = true;
     jazz::db::block_on(client.db.tick()).unwrap();
@@ -1221,7 +1221,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
         if !client
             .query_server
             .handle(
-                &mut client.edge,
+                &mut client.relay,
                 &mut client.client_peer,
                 &schema(),
                 &message,
@@ -1233,7 +1233,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
     }
     for update in client
         .query_server
-        .updates(&mut client.edge, &mut client.client_peer)
+        .updates(&mut client.relay, &mut client.client_peer)
         .unwrap()
     {
         client.inbound.borrow_mut().push_back(update);
@@ -1953,10 +1953,10 @@ fn emit_summary(
     }
     let line = JsonValue::Object(fields).to_string();
     emit_json_line("s4_order_processing", &line);
-    emit_edge_phase_summaries(config, profile, jazz);
+    emit_relay_phase_summaries(config, profile, jazz);
 }
 
-fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
+fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
     let mut acceptance = metadata_fields(
         "s4_order_processing",
         "synchronous",
@@ -1966,11 +1966,11 @@ fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jazz
     acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
     acceptance.insert(
         "acceptance_p50_us".to_owned(),
-        json!(jazz.edge_acceptance.value_at_quantile(0.50)),
+        json!(jazz.relay_acceptance.value_at_quantile(0.50)),
     );
     acceptance.insert(
         "acceptance_p95_us".to_owned(),
-        json!(jazz.edge_acceptance.value_at_quantile(0.95)),
+        json!(jazz.relay_acceptance.value_at_quantile(0.95)),
     );
     acceptance.insert("durability_tier".to_owned(), json!("Edge"));
     acceptance.insert("clients".to_owned(), json!(config.clients));
@@ -1989,13 +1989,16 @@ fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jazz
     hydration.insert("scope".to_owned(), json!("order_processing_table_surface"));
     hydration.insert(
         "hydration_bytes".to_owned(),
-        json!(jazz.edge_hydration_bytes),
+        json!(jazz.relay_hydration_bytes),
     );
     hydration.insert(
         "hydration_floor_bytes".to_owned(),
-        json!(jazz.edge_hydration_bytes),
+        json!(jazz.relay_hydration_bytes),
     );
-    hydration.insert("hydration_rows".to_owned(), json!(jazz.edge_hydration_rows));
+    hydration.insert(
+        "hydration_rows".to_owned(),
+        json!(jazz.relay_hydration_rows),
+    );
     emit_json_line(
         "s4_order_processing",
         &JsonValue::Object(hydration).to_string(),

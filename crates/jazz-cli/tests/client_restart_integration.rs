@@ -321,7 +321,7 @@ async fn wait_for_todos_count(
     );
 }
 
-async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
+async fn wait_for_remote_query_ready(client: &JazzClient, timeout: Duration) {
     let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
 
@@ -386,7 +386,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         .await
         .expect("enroll the restart fixture before public admission");
     let client = connect_native(context).await.expect("connect client");
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&client, Duration::from_secs(30)).await;
 
     let (_, _, transaction_id) = client
         .insert(
@@ -432,7 +432,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     assert_eq!(
         rows_after_restart.len(),
         1,
-        "existing client should continue serving Edge-settled queries after server restart"
+        "existing client should continue serving Remote-settled queries after server restart"
     );
 
     let (_, _, transaction_id) = client
@@ -465,7 +465,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     assert_eq!(
         rows_after_create.len(),
         2,
-        "mutations after restart should still settle at Edge without explicit catalogue re-sync"
+        "mutations after restart should still settle at Global without explicit catalogue re-sync"
     );
 
     client.shutdown().await.expect("shutdown client");

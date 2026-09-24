@@ -31,7 +31,7 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 }
 
 #[test]
-fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
+fn one_shot_global_coverage_requires_current_authority_after_reconnect() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -53,7 +53,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     assert!(client.detach_connection(&first_upstream));
     assert!(
         !client.query_attachment_is_covered(&attachment),
-        "disconnect must invalidate an Edge/Global one-shot coverage witness"
+        "disconnect must invalidate a Global one-shot coverage witness"
     );
 
     let (second_client_transport, second_server_transport) = duplex();
@@ -807,7 +807,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
 }
 
 #[test]
-fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
+fn one_shot_global_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
@@ -898,7 +898,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 }
 
 #[test]
-fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
+fn one_shot_global_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")
@@ -983,7 +983,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 }
 
 #[test]
-fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
+fn global_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")

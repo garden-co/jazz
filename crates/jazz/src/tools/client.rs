@@ -6344,7 +6344,7 @@ mod tests {
                 Duration::ZERO,
             )
             .await
-            .expect_err("offline transaction cannot reach edge");
+            .expect_err("offline transaction cannot reach the global server");
         assert!(
             matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach GlobalServer"),
             "unexpected transaction timeout error: {timeout_error}"

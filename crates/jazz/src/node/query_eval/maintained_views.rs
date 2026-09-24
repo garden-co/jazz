@@ -619,7 +619,7 @@ where
     /// Install an already-claimed exact authority closure into a newly opened
     /// receiver, drive the one shared Groove graph to quiescence, and fold the
     /// resulting local terminal into its retained state.  Both ordinary late
-    /// client opening and seeded relay-edge opening use this sequence: neither
+    /// client opening and seeded relay opening use this sequence: neither
     /// may read an authority result/output cache to synthesize its reset.
     ///
     /// `None` means the receipt has not claimed a complete closure yet.  A

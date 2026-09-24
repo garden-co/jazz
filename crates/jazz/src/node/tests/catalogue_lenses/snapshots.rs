@@ -1,4 +1,4 @@
-// Catalogue snapshot installation, durable validation, and dynamic-edge bootstrap.
+// Catalogue snapshot installation, durable validation, and dynamic-catalogue bootstrap.
 
 #[test]
 fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
@@ -35,7 +35,7 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
 }
 
 #[test]
-fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() {
+fn trusted_snapshot_carries_policy_source_and_receiver_recompiles_it_after_reopen() {
     let public = crate::tools::SchemaBuilder::new()
         .table(
             crate::tools::TableSchema::builder("todos")
@@ -55,31 +55,31 @@ fn trusted_snapshot_carries_policy_source_and_edge_recompiles_it_after_reopen() 
         postcard::from_bytes(&encoded).expect("decode and compile source snapshot");
 
     let empty = empty_public_test_schema();
-    let edge_dir = tempfile::tempdir().expect("create edge store");
+    let receiver_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(edge_dir.path(), &refs).expect("open edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x34), storage)
-        .expect("open uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot)
+    let storage = RocksDbStorage::open(receiver_dir.path(), &refs).expect("open receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x34), storage)
+        .expect("open uninitialized receiver");
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot)
         .expect("install source snapshot");
     assert!(
-        edge.try_current_schema()
-            .expect("edge has a current schema")
+        receiver.try_current_schema()
+            .expect("receiver has a current schema")
             .tables
             .iter()
             .find(|table| table.name == "todos")
             .and_then(|table| table.read_policy.as_ref())
             .is_some(),
-        "edge compiles the source PolicyExpr"
+        "receiver compiles the source PolicyExpr"
     );
 
-    drop(edge);
+    drop(receiver);
     let cfs = empty.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(edge_dir.path(), &refs).expect("reopen edge store");
+    let storage = RocksDbStorage::open(receiver_dir.path(), &refs).expect("reopen receiver store");
     let reopened = NodeState::new_catalogue_uninitialized(node(0x34), storage)
-        .expect("reopen edge from persisted source");
+        .expect("reopen receiver from persisted source");
     assert_eq!(reopened.try_current_schema().unwrap(), &compiled);
     assert_eq!(
         reopened.try_current_schema().unwrap().public_schema(),
@@ -937,19 +937,19 @@ fn write_raw_catalogue_kind(
 /// The epoch-pinned kernel is closed.  An unrecognized record kind must not
 /// be ignored as a future extension or decoded under a current descriptor.
 #[test]
-fn dynamic_edge_reopen_fails_closed_on_unknown_catalogue_kernel_kind() {
+fn dynamic_catalogue_reopen_fails_closed_on_unknown_catalogue_kernel_kind() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0xa0), storage)
-        .expect("open explicit uninitialized edge");
-    write_raw_catalogue_kind(&mut edge, 0xff, uuid::Uuid::from_bytes([0xa0; 16]));
-    drop(edge);
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0xa0), storage)
+        .expect("open explicit uninitialized receiver");
+    write_raw_catalogue_kind(&mut receiver, 0xff, uuid::Uuid::from_bytes([0xa0; 16]));
+    drop(receiver);
 
     for attempt in 0..2 {
-        assert!(fresh_dynamic_edge_open(temp_dir.path(), node(0xa0)).is_err(),
+        assert!(fresh_dynamic_catalogue_open(temp_dir.path(), node(0xa0)).is_err(),
             "open attempt {attempt} must reject an unknown catalogue kernel kind");
     }
 }
@@ -1019,7 +1019,7 @@ let persisted = crate::db::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
-fn fresh_dynamic_edge_open(
+fn fresh_dynamic_catalogue_open(
     path: &std::path::Path,
     node_uuid: NodeUuid,
 ) -> Result<NodeState<RocksDbStorage>, Error> {
@@ -1482,9 +1482,9 @@ fn reopen_rejects_staged_table_partition_mismatch() {
 #[test]
 fn reopen_rejects_mapping_manifest_smuggled_under_active_lineage() {
     let snapshot = catalogue_snapshot_fixture();
-    let dir = tempfile::tempdir().expect("create dynamic edge store");
-    let mut receiver = fresh_dynamic_edge_open(dir.path(), node(0x4e))
-        .expect("open uninitialized edge");
+    let dir = tempfile::tempdir().expect("create dynamic-catalogue node store");
+    let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0x4e))
+        .expect("open uninitialized receiver");
     receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     let active = receiver
         .catalogue
@@ -1574,65 +1574,65 @@ fn reopen_rejects_standalone_lens_semantic_tamper() {
     );
 }
 
-/// A dynamic edge without a local catalogue must not manufacture the empty
+/// A dynamic-catalogue node without a local catalogue must not manufacture the empty
 /// constructor schema as durable genesis; after its trusted core snapshot it
 /// atomically adopts the core lineage and survives reopen.
 ///
 /// ```text
-/// core catalogue snapshot ──trusted install──► edge(Uninitialized -> Ready)
-///                                                        │
-///                                                        └──reopen──► exact core genesis
+/// core catalogue snapshot ──trusted install──► receiver(Uninitialized -> Ready)
+///                                                            │
+///                                                            └──reopen──► exact core genesis
 /// ```
 #[test]
-fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready() {
+fn dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x91), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x91), storage)
+        .expect("open explicit uninitialized receiver");
 
     assert_eq!(
-        edge.catalogue_bootstrap_state(),
+        receiver.catalogue_bootstrap_state(),
         CatalogueBootstrapState::Uninitialized
     );
     assert!(matches!(
-        edge.try_current_write_schema(),
+        receiver.try_current_write_schema(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.current_write_schema(),
+        receiver.current_write_schema(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.try_current_schema(),
+        receiver.try_current_schema(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.catalogue_snapshot(),
+        receiver.catalogue_snapshot(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_catalogue", &[])
             .expect("scan empty durable catalogue")
             .is_empty(),
-        "uninitialized edge must not persist an empty-schema genesis marker"
+        "uninitialized receiver must not persist an empty-schema genesis marker"
     );
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_schema_versions", &[])
             .expect("scan empty durable physical mappings")
             .is_empty(),
-        "uninitialized edge must not persist a provisional physical mapping"
+        "uninitialized receiver must not persist a provisional physical mapping"
     );
     assert!(matches!(
-        edge.current_rows("todos", DurabilityTier::Local).resolve(),
+        receiver.current_rows("todos", DurabilityTier::Local).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.commit_mergeable_settled(MergeableCommit::new("todos", row(0x92), 1).cells(BTreeMap::from([
+        receiver.commit_mergeable_settled(MergeableCommit::new("todos", row(0x92), 1).cells(BTreeMap::from([
             ("title".to_owned(), v("must not write before catalogue bootstrap")),
         ]))),
         Err(Error::CatalogueUninitialized)
@@ -1640,18 +1640,18 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
 
     let snapshot = catalogue_snapshot_fixture();
     let authority_genesis = schema().version_id();
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install exact trusted core catalogue");
-    assert_eq!(edge.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
-    assert_eq!(edge.catalogue.local_schema_version_id, authority_genesis);
-    assert_eq!(edge.catalogue.schema, schema());
-    assert_eq!(edge.current_write_schema().unwrap(), snapshot.current_write_schema);
-    assert_eq!(edge.active_catalogue_seq(), 1);
-    assert_eq!(edge.catalogue_schemas().len(), 2);
-    drop(edge);
+    assert_eq!(receiver.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
+    assert_eq!(receiver.catalogue.local_schema_version_id, authority_genesis);
+    assert_eq!(receiver.catalogue.schema, schema());
+    assert_eq!(receiver.current_write_schema().unwrap(), snapshot.current_write_schema);
+    assert_eq!(receiver.active_catalogue_seq(), 1);
+    assert_eq!(receiver.catalogue_schemas().len(), 2);
+    drop(receiver);
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("reopen edge store");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("reopen receiver store");
     let reopened = NodeState::new_catalogue_uninitialized(node(0x91), storage)
         .expect("fresh process discovers durable authority genesis");
     assert_eq!(reopened.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
@@ -1668,56 +1668,56 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
     assert_eq!(reopened.catalogue_schemas().len(), 2);
 }
 
-/// A failed first trusted snapshot leaves a dynamic edge uninitialized, so a
+/// A failed first trusted snapshot leaves a dynamic-catalogue node uninitialized, so a
 /// later reopen cannot observe a partially installed genesis or pointer.
 ///
 /// ```text
-/// core snapshot ──durable failpoint──► edge(Uninitialized) ──reopen──► Uninitialized
+/// core snapshot ──durable failpoint──► receiver(Uninitialized) ──reopen──► Uninitialized
 /// ```
 #[test]
-fn dynamic_edge_bootstrap_failure_never_persists_a_partial_authority_catalogue() {
+fn dynamic_catalogue_bootstrap_failure_never_persists_a_partial_authority_catalogue() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x93), storage)
-        .expect("open explicit uninitialized edge");
-    edge.set_catalogue_activation_failpoint(
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x93), storage)
+        .expect("open explicit uninitialized receiver");
+    receiver.set_catalogue_activation_failpoint(
         CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
     );
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture()),
+        receiver.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture()),
         Err(Error::CatalogueActivationFailed)
     ));
     assert_eq!(
-        edge.catalogue_bootstrap_state(),
+        receiver.catalogue_bootstrap_state(),
         CatalogueBootstrapState::Uninitialized
     );
     assert!(matches!(
-        edge.try_current_write_schema(),
+        receiver.try_current_write_schema(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_catalogue", &[])
             .expect("scan failed bootstrap catalogue")
             .is_empty(),
         "failed bootstrap must not leave a genesis, pointer, or lineage prefix"
     );
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_schema_versions", &[])
             .expect("scan failed bootstrap mappings")
             .is_empty(),
         "failed bootstrap must not leave a physical mapping prefix"
     );
 
-    drop(edge);
+    drop(receiver);
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("reopen empty edge store");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("reopen empty receiver store");
     let reopened = NodeState::new_catalogue_uninitialized(node(0x93), storage)
         .expect("fresh process retains no failed bootstrap state");
     assert_eq!(
@@ -1730,31 +1730,31 @@ fn dynamic_edge_bootstrap_failure_never_persists_a_partial_authority_catalogue()
     ));
 }
 
-/// A fresh dynamic-edge open treats every durable catalogue row as a completed
+/// A fresh dynamic-catalogue open treats every durable catalogue row as a completed
 /// bootstrap only when its atomic completion record is present.  A raw
 /// genesis/schema prefix is corrupt, not an invitation to repair it using an
 /// empty local schema.
 #[test]
-fn dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
+fn dynamic_catalogue_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x9a), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x9a), storage)
+        .expect("open explicit uninitialized receiver");
     let snapshot = catalogue_snapshot_fixture();
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     delete_catalogue_record(
-        &mut edge,
+        &mut receiver,
         b"bootstrap_ready",
         schema().version_id().0,
     );
-    drop(edge);
+    drop(receiver);
 
     for attempt in 0..2 {
         assert!(matches!(
-            fresh_dynamic_edge_open(temp_dir.path(), node(0x9a)),
+            fresh_dynamic_catalogue_open(temp_dir.path(), node(0x9a)),
             Err(Error::InvalidStoredValue(
                 "dynamic catalogue state has no bootstrap completion marker"
             ))
@@ -1763,10 +1763,10 @@ fn dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker() {
 }
 
 /// Removing a normal node's catalogue cannot turn its remaining transaction
-/// history into a blank dynamic edge.  Discovery must fail before an
+/// history into a blank dynamic-catalogue node.  Discovery must fail before an
 /// uninitialized constructor can adopt a new authority over stale data.
 #[test]
-fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
+fn dynamic_catalogue_reopen_rejects_catalogue_stripped_history() {
     let base = schema();
     let (temp_dir, mut durable_node) = open_node_with_schema(node(0x9e), base.clone());
     durable_node.commit_mergeable_settled(
@@ -1781,7 +1781,7 @@ fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
 
     for attempt in 0..2 {
         assert!(matches!(
-            fresh_dynamic_edge_open(temp_dir.path(), node(0x9e)),
+            fresh_dynamic_catalogue_open(temp_dir.path(), node(0x9e)),
             Err(Error::InvalidStoredValue(
                 "dynamic catalogue state cannot initialize over durable history"
             ))
@@ -1793,35 +1793,35 @@ fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
 /// high-water.  Removing either side, or changing the receipt, must reject a
 /// fresh recovery before normal catalogue open can repair missing metadata.
 #[test]
-fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
+fn dynamic_catalogue_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x9b), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x9b), storage)
+        .expect("open explicit uninitialized receiver");
     let snapshot = catalogue_snapshot_fixture();
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
-    delete_catalogue_pointer(&mut edge, snapshot.current_write_schema.revision);
-    drop(edge);
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    delete_catalogue_pointer(&mut receiver, snapshot.current_write_schema.revision);
+    drop(receiver);
 
     assert!(matches!(
-        fresh_dynamic_edge_open(temp_dir.path(), node(0x9b)),
+        fresh_dynamic_catalogue_open(temp_dir.path(), node(0x9b)),
         Err(Error::InvalidStoredValue(
             "catalogue bootstrap completion marker does not match durable catalogue"
         ))
     ));
 
-    let temp_dir = tempfile::tempdir().expect("create second edge store");
+    let temp_dir = tempfile::tempdir().expect("create second receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open second edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x9c), storage)
-        .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open second receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x9c), storage)
+        .expect("open explicit uninitialized receiver");
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
     write_catalogue_record(
-        &mut edge,
+        &mut receiver,
         b"bootstrap_ready",
         schema().version_id().0,
         codec::encode_catalogue_bootstrap_ready(&CatalogueBootstrapReady {
@@ -1830,10 +1830,10 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
             active_catalogue_seq: 0,
         }),
     );
-    drop(edge);
+    drop(receiver);
 
     assert!(matches!(
-        fresh_dynamic_edge_open(temp_dir.path(), node(0x9c)),
+        fresh_dynamic_catalogue_open(temp_dir.path(), node(0x9c)),
         Err(Error::InvalidStoredValue(
             "catalogue bootstrap completion marker does not match durable catalogue"
         ))
@@ -1845,15 +1845,15 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
 /// staged lineage payload; a raw-added standalone schema remains corrupt even
 /// when it carries an otherwise valid physical mapping.
 #[test]
-fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
+fn dynamic_catalogue_reopen_rejects_smuggled_schema_and_mapping() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x9d), storage)
-        .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture())
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x9d), storage)
+        .expect("open explicit uninitialized receiver");
+    receiver.apply_trusted_catalogue_snapshot_settled(catalogue_snapshot_fixture())
         .unwrap();
 
     let smuggled = SchemaVersion::new(build_public_test_schema(
@@ -1872,17 +1872,17 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
     )
     .unwrap();
     write_catalogue_record(
-        &mut edge,
+        &mut receiver,
         b"schema",
         smuggled.id.0,
         codec::encode_catalogue_schema(&smuggled).unwrap(),
     );
-    write_schema_mapping_record(&mut edge, SchemaVersionAlias(99), smuggled.id, &mapping);
-    drop(edge);
+    write_schema_mapping_record(&mut receiver, SchemaVersionAlias(99), smuggled.id, &mapping);
+    drop(receiver);
 
     for attempt in 0..2 {
         assert!(matches!(
-            fresh_dynamic_edge_open(temp_dir.path(), node(0x9d)),
+            fresh_dynamic_catalogue_open(temp_dir.path(), node(0x9d)),
             Err(Error::InvalidStoredValue(
                 "catalogue bootstrap completion marker does not match durable catalogue"
             ))
@@ -1891,20 +1891,20 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
 }
 
 /// A crash after canonical lineage staging but before activation leaves no
-/// target schema or mapping.  A fresh dynamic edge must accept that exact
+/// target schema or mapping.  A fresh dynamic-catalogue node must accept that exact
 /// durable seam, drain it into one atomic activation, and refresh its
 /// bootstrap receipt for the next process open.
 #[test]
-fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
+fn dynamic_catalogue_reopen_drains_after_staged_lineage_crash() {
     let base = schema();
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0xa1), storage)
-        .expect("open explicit uninitialized edge");
-    edge.apply_trusted_catalogue_snapshot_settled(crate::protocol::CatalogueSnapshot {
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0xa1), storage)
+        .expect("open explicit uninitialized receiver");
+    receiver.apply_trusted_catalogue_snapshot_settled(crate::protocol::CatalogueSnapshot {
         genesis_physical_identities: PhysicalIdentityManifest::allocate(&base),
         schemas: vec![SchemaVersion::new(base.clone())],
         lineages: Vec::new(),
@@ -1916,7 +1916,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     .unwrap();
 
     let target = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = edge.author_schema_lineage_publication(
+    let publication = receiver.author_schema_lineage_publication(
         target.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -1933,9 +1933,9 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
         Vec::<String>::new(),
         Vec::<String>::new(),
     ).unwrap();
-    edge.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
+    receiver.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
     assert!(matches!(
-        edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        receiver.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -1943,7 +1943,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
         Err(Error::CatalogueActivationFailed)
     ));
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_schema_versions", &[])
             .unwrap()
             .iter()
@@ -1951,35 +1951,35 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
                 != target.id.0),
         "AfterStaged must not persist the inactive target mapping"
     );
-    drop(edge);
+    drop(receiver);
 
-    let reopened = fresh_dynamic_edge_open(temp_dir.path(), node(0xa1))
+    let reopened = fresh_dynamic_catalogue_open(temp_dir.path(), node(0xa1))
         .expect("fresh discovery accepts canonical inactive staging");
     assert_eq!(reopened.active_catalogue_seq(), 1);
     assert!(reopened.catalogue_schemas().contains_key(&target.id));
     drop(reopened);
 
-    let reopened = fresh_dynamic_edge_open(temp_dir.path(), node(0xa1))
+    let reopened = fresh_dynamic_catalogue_open(temp_dir.path(), node(0xa1))
         .expect("activation refreshes the dynamic bootstrap receipt");
     assert_eq!(reopened.active_catalogue_seq(), 1);
     assert!(reopened.catalogue_schemas().contains_key(&target.id));
 }
 
 /// A bootstrap snapshot has exactly one non-lineage schema: the authority's
-/// genesis.  Mallory cannot make an edge choose among multiple roots.
+/// genesis.  Mallory cannot make a receiver choose among multiple roots.
 ///
 /// ```text
-/// malformed snapshot(two roots) ──► edge(Uninitialized) ──reject──► no durable state
+/// malformed snapshot(two roots) ──► receiver(Uninitialized) ──reject──► no durable state
 /// ```
 #[test]
-fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
+fn dynamic_catalogue_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x94), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x94), storage)
+        .expect("open explicit uninitialized receiver");
     let mut snapshot = catalogue_snapshot_fixture();
     snapshot
         .schemas
@@ -1991,47 +1991,47 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
         )));
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_snapshot_settled(snapshot),
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot),
         Err(Error::InvalidCatalogueUpdate(
             "trusted catalogue snapshot must contain exactly one genesis schema"
         ))
     ));
     assert_eq!(
-        edge.catalogue_bootstrap_state(),
+        receiver.catalogue_bootstrap_state(),
         CatalogueBootstrapState::Uninitialized
     );
-    let reopened = edge.reopen_in_place().expect("no malformed bootstrap state persisted");
+    let reopened = receiver.reopen_in_place().expect("no malformed bootstrap state persisted");
     assert_eq!(
         reopened.catalogue_bootstrap_state(),
         CatalogueBootstrapState::Uninitialized
     );
 }
 
-/// Incremental protocol traffic cannot establish a dynamic edge's catalogue;
+/// Incremental protocol traffic cannot establish a dynamic-catalogue node's catalogue;
 /// only one complete trusted snapshot may cross the bootstrap boundary.
 ///
 /// ```text
-/// incremental publication ──► edge(Uninitialized) ──reject──► no catalogue row
+/// incremental publication ──► receiver(Uninitialized) ──reject──► no catalogue row
 /// ```
 #[test]
-fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue() {
+fn dynamic_catalogue_bootstrap_rejects_incremental_catalogue_messages_without_residue() {
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x95), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x95), storage)
+        .expect("open explicit uninitialized receiver");
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
+        receiver.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
             author: AuthorSubject::SYSTEM,
             schema: Box::new(SchemaVersion::new(schema())),
         }),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(
-        edge.database
+        receiver.database
             .primary_key_scan_raw("jazz_catalogue", &[])
             .expect("scan rejected incremental message")
             .is_empty(),
@@ -2040,11 +2040,11 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
 }
 
 /// Direct public mutation APIs are the same catalogue admission boundary as
-/// sync dispatch.  An uninitialized edge must reject a structurally valid
+/// sync dispatch.  An uninitialized receiver must reject a structurally valid
 /// commit unit and fate update before either can create transaction or parked
 /// durable residue.
 #[test]
-fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
+fn dynamic_catalogue_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
     let (_source_dir, mut source) = open_node_with_schema(node(0x97), schema());
     let (_tx_id, unit) = source
         .commit_mergeable_unit_settled(
@@ -2056,27 +2056,27 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
     };
 
     let empty_schema = empty_public_test_schema();
-    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
-    let mut edge = NodeState::new_catalogue_uninitialized(node(0x99), storage)
-        .expect("open explicit uninitialized edge");
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty receiver store");
+    let mut receiver = NodeState::new_catalogue_uninitialized(node(0x99), storage)
+        .expect("open explicit uninitialized receiver");
 
     assert!(matches!(
-        edge.open_exclusive(OpenTransactionId::new()).resolve(),
+        receiver.open_exclusive(OpenTransactionId::new()).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_commit_unit_settled(tx.clone(), versions.clone(), 20),
+        receiver.ingest_commit_unit_settled(tx.clone(), versions.clone(), 20),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.ingest_relay_commit_unit(tx.clone(), versions).resolve(),
+        receiver.ingest_relay_commit_unit(tx.clone(), versions).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(
-        edge.apply_fate_update(tx.tx_id, Fate::Accepted, None, Some(DurabilityTier::Global)).resolve(),
+        receiver.apply_fate_update(tx.tx_id, Fate::Accepted, None, Some(DurabilityTier::Global)).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     for table in [
@@ -2085,7 +2085,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         "jazz_transactions",
     ] {
         assert!(
-            edge.database
+            receiver.database
                 .primary_key_scan_raw(table, &[])
                 .expect("scan rejected direct mutation")
                 .is_empty(),
@@ -2333,10 +2333,10 @@ fn lineage_equality_preserves_content_and_declaration_multiplicity() {
     }
 }
 
-/// Opening an old edge upgrades storage before any snapshot is received.
+/// Opening an old receiver upgrades storage before any snapshot is received.
 /// Internal because creating an old durable layout requires writing catalogue records.
 #[test]
-fn legacy_edge_upgrades_active_schema_during_open() {
+fn legacy_receiver_upgrades_active_schema_during_open() {
     let base = schema();
     let (_authority_dir, authority) = open_node_with_schema(node(0xc8), base.clone());
     let mut current = authority.catalogue_snapshot().unwrap();
@@ -2344,44 +2344,44 @@ fn legacy_edge_upgrades_active_schema_during_open() {
     let mut legacy = current.clone();
     legacy.current_write_schema.revision = 7;
     let dir = tempfile::tempdir().unwrap();
-    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
-    edge.apply_trusted_catalogue_snapshot_settled(legacy)
+    let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(legacy)
         .unwrap();
-    // Old edges stored the selected permissions in the schema payload and had no active-schema record.
-    delete_catalogue_record(&mut edge, b"active_schema", uuid::Uuid::nil());
+    // Old receivers stored the selected permissions in the schema payload and had no active-schema record.
+    delete_catalogue_record(&mut receiver, b"active_schema", uuid::Uuid::nil());
     write_catalogue_record(
-        &mut edge,
+        &mut receiver,
         b"schema",
         base.version_id().0,
         codec::encode_catalogue_schema(&SchemaVersion::new(base)).unwrap(),
     );
-    drop(edge);
+    drop(receiver);
 
-    let edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
-    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
-    assert_eq!(edge.catalogue_snapshot().unwrap().schemas, current.schemas);
-    drop(edge);
+    let receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 0);
+    assert_eq!(receiver.catalogue_snapshot().unwrap().schemas, current.schemas);
+    drop(receiver);
     // The conversion is durable even if no server has connected yet.
-    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
-    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
-    edge.apply_trusted_catalogue_snapshot_settled(current.clone())
+    let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 0);
+    receiver.apply_trusted_catalogue_snapshot_settled(current.clone())
         .unwrap();
-    assert_eq!(edge.current_write_schema().unwrap().revision, 2);
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 2);
     let mut conflicting = current.clone();
     conflicting.schemas[0] =
         SchemaVersion::new(conflicting.schemas[0].schema.without_permissions());
     assert!(
-        edge.apply_trusted_catalogue_snapshot_settled(conflicting)
+        receiver.apply_trusted_catalogue_snapshot_settled(conflicting)
             .is_err()
     );
     let mut stale = current;
     stale.current_write_schema.revision = 1;
     assert!(
-        edge.apply_trusted_catalogue_snapshot_settled(stale.clone())
+        receiver.apply_trusted_catalogue_snapshot_settled(stale.clone())
             .is_err()
     );
-    drop(edge);
-    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    drop(receiver);
+    let mut reopened = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
     assert_eq!(reopened.current_write_schema().unwrap().revision, 2);
     assert!(
         reopened
@@ -2423,14 +2423,14 @@ fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_gran
     let denied = granted.without_permissions();
     snapshot.schemas[1] = SchemaVersion::new(denied.clone());
     let dir = tempfile::tempdir().unwrap();
-    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+    let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xca)).unwrap();
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
-    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
-    drop(edge);
+    drop(receiver);
 
-    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xca))
+    let mut reopened = fresh_dynamic_catalogue_open(dir.path(), node(0xca))
         .expect("replay must leave a reopenable catalogue");
     assert_eq!(
         reopened.catalogue.active_schema.compiled.public_schema(),
@@ -2444,7 +2444,7 @@ fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_gran
         .apply_trusted_catalogue_snapshot_settled(snapshot)
         .unwrap();
     drop(reopened);
-    let reopened = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
+    let reopened = fresh_dynamic_catalogue_open(dir.path(), node(0xca)).unwrap();
     assert_eq!(
         reopened.catalogue.active_schema.compiled.public_schema(),
         denied.public_schema()

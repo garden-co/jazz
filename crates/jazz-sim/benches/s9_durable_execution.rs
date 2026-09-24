@@ -45,9 +45,9 @@ struct WorkerHarness {
     _dir: TempDir,
     db: Db<RocksDbStorage>,
     author: AuthorSubject,
-    _edge_dir: TempDir,
-    edge: NodeState<RocksDbStorage>,
-    edge_peer: PeerState,
+    _relay_dir: TempDir,
+    relay: NodeState<RocksDbStorage>,
+    relay_peer: PeerState,
     client_peer: PeerState,
     query_server: DirectDbQueryServer,
     attachments: Vec<jazz::db::QueryAttachment>,
@@ -159,10 +159,10 @@ pub fn smoke() {
         "s9_durable_execution",
         &JsonValue::Object(fields).to_string(),
     );
-    emit_edge_phase_summaries(&config, &profile, &jazz);
+    emit_relay_phase_summaries(&config, &profile, &jazz);
 }
 
-fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
+fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
     let mut acceptance = metadata_fields(
         "s9_durable_execution",
         "synchronous",
@@ -597,7 +597,7 @@ fn apply_transition(
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         unreachable!();
     };
-    jazz::db::block_on(client.edge.ingest_relay_commit_unit(tx, versions)).unwrap();
+    jazz::db::block_on(client.relay.ingest_relay_commit_unit(tx, versions)).unwrap();
     let _ = now_ms;
     let outcome = jazz::db::block_on(core.apply_sync_message(unit)).unwrap();
     let updates = settle_outcome(core, outcome).unwrap();
@@ -611,7 +611,7 @@ fn apply_transition(
                 Fate::Pending => {}
             }
         }
-        apply_sync_message_settled(&mut client.edge, update.clone()).unwrap();
+        apply_sync_message_settled(&mut client.relay, update.clone()).unwrap();
         client.inbound.borrow_mut().push_back(update);
         jazz::db::block_on(client.db.tick())?;
     }
@@ -1065,10 +1065,10 @@ fn sync_worker_tables(
     for table in tables {
         let reset = worker.hydrated_tables.insert((*table).to_owned());
         if reset {
-            register_table_receiver(&mut worker.edge, table, worker.author);
+            register_table_receiver(&mut worker.relay, table, worker.author);
         }
-        let update = table_query_update(core, &mut worker.edge_peer, table, reset);
-        apply_sync_message_settled(&mut worker.edge, update).unwrap();
+        let update = table_query_update(core, &mut worker.relay_peer, table, reset);
+        apply_sync_message_settled(&mut worker.relay, update).unwrap();
     }
     jazz::db::block_on(worker.db.tick()).unwrap();
     let queued = worker.outbound.borrow_mut().drain(..).collect::<Vec<_>>();
@@ -1076,7 +1076,7 @@ fn sync_worker_tables(
         if !worker
             .query_server
             .handle(
-                &mut worker.edge,
+                &mut worker.relay,
                 &mut worker.client_peer,
                 &schema(),
                 &message,
@@ -1088,7 +1088,7 @@ fn sync_worker_tables(
     }
     for update in worker
         .query_server
-        .updates(&mut worker.edge, &mut worker.client_peer)
+        .updates(&mut worker.relay, &mut worker.client_peer)
         .unwrap()
     {
         worker.inbound.borrow_mut().push_back(update);
@@ -1116,7 +1116,7 @@ fn bind_worker_table_query(
     );
 }
 
-fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
+fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
     let author = AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]);
     let (dir, db) = open_db(node_uuid, schema.clone(), author.clone());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1125,14 +1125,14 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
     })));
-    let (edge_dir, edge) = open_node(edge_uuid, schema.clone());
+    let (relay_dir, relay) = open_node(relay_uuid, schema.clone());
     let mut worker = WorkerHarness {
         _dir: dir,
         db,
         author: author.clone(),
-        _edge_dir: edge_dir,
-        edge,
-        edge_peer: PeerState::relay(),
+        _relay_dir: relay_dir,
+        relay,
+        relay_peer: PeerState::relay(),
         client_peer: PeerState::client_link(author.clone()),
         query_server: DirectDbQueryServer::new(jazz::protocol::DelegatedSessionBinding {
             identity: author,
@@ -1144,9 +1144,9 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         inbound,
         _upstream: upstream,
     };
-    worker.edge_peer.set_ship_complete_exclusive_payloads(true);
+    worker.relay_peer.set_ship_complete_exclusive_payloads(true);
     for table in [WORKFLOWS, INSTANCES, STEPS, EVENTS] {
-        bind_worker_table_query(&mut worker.edge_peer, &schema, table, &worker.author);
+        bind_worker_table_query(&mut worker.relay_peer, &schema, table, &worker.author);
         let prepared = worker.db.prepare_query(&Query::from(table)).unwrap();
         worker
             .attachments

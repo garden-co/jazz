@@ -287,7 +287,7 @@ where
         // why this in-place checkpoint exists.
         let runtime_registry_checkpoint =
             (!runtime_semantics_changed).then(|| self.database.runtime_registry_checkpoint());
-        // Snapshot replay can install widened mappings after a persistent edge
+        // Snapshot replay can install widened mappings after a persistent runtime
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
         // trusted prefix is idempotent and must retain maintained/query state.
@@ -345,7 +345,7 @@ where
         {
             // This is intentionally in the same batch as every imported
             // schema, physical mapping, lineage activation, and write
-            // pointer.  A dynamic edge must never recover an empty local
+            // pointer.  A dynamic runtime must never recover an empty local
             // schema as a durable genesis if it crashes before the first
             // authority snapshot completes.  Existing bootstrap markers are
             // refreshed on every later trusted snapshot so a fresh process

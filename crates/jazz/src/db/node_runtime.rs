@@ -2150,7 +2150,7 @@ where
                 .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
             begin_open_schema_connection(&self.open_schema_admission, connection_epoch);
             // Durable settled-view state remains available for known-state
-            // payload repair, but a new upstream (including an edge switch) owns
+            // payload repair, but a new upstream (including a server switch) owns
             // no settlement receipts until it sends a fresh ViewUpdate.
             *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
                 connection_epoch,

@@ -534,13 +534,13 @@ mod relay_topology {
     }
 
     /// Detaching preserves a held remote subscription. Alice can still read
-    /// her row locally, but Edge and Global subscriptions wait for a fresh
+    /// her row locally, but Global subscriptions wait for a fresh
     /// authority response and deliver the settled answer without duplication.
     /// Public `Db` nodes let this test withhold authority processing across
     /// the exact detach/reattach transition.
     ///
     /// ```text
-    /// alice ──subscribe(Edge/Global)──► silent upstream [held]
+    /// alice ──subscribe(Global)──► silent upstream [held]
     ///   ├──detach──► Local read ✓, remote subscription held
     ///   ├──reattach──► remote subscription still held
     ///   ◄──one settled answer── authority confirms
@@ -740,7 +740,7 @@ mod client_transport {
                 let (document_id, _, transaction_id) = alice
                     .insert("documents", row_input!("title" => "settled before offline"))
                     .expect("insert document");
-                support::wait_for_edge_txs(
+                support::wait_for_global_txs(
                     &alice,
                     &[transaction_id.expect("ordinary mutation commits immediately")],
                 )
@@ -889,7 +889,7 @@ mod client_transport {
                 let alice = support::connect(context)
                     .await
                     .expect("connect through gate");
-                support::wait_for_edge_query_ready(&alice, "documents", Duration::from_secs(30))
+                support::wait_for_remote_query_ready(&alice, "documents", Duration::from_secs(30))
                     .await;
 
                 let (document_id, _, transaction_id) = alice
@@ -1004,7 +1004,7 @@ mod client_transport {
                 let (document_id, _, transaction_id) = alice
                     .insert("documents", row_input!("title" => "settled before expiry"))
                     .expect("insert document");
-                support::wait_for_edge_txs(
+                support::wait_for_global_txs(
                     &alice,
                     &[transaction_id.expect("ordinary mutation commits immediately")],
                 )

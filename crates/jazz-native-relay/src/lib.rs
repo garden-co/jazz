@@ -188,7 +188,7 @@ struct RelayScopeAdmissionRequest {
 /// Credential-bearing setup is a private platform-to-relay handoff.  The
 /// bearer is decoded only through Jazz's shared *unverified* scope projection
 /// so a refresh can select a distinct local cache.  It is never verified,
-/// turned into claims, or exposed to postcard/JSI; Edge authentication remains
+/// turned into claims, or exposed to postcard/JSI; Core authentication remains
 /// authoritative.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,10 +303,10 @@ fn reject_bearer_claims(claims: &BTreeMap<String, Value>) -> Result<(), JazzNati
     Ok(())
 }
 
-/// A bearer may traverse plaintext only to a platform-local Edge used by the
-/// test harness or an emulator. Real remote Edge sessions require HTTPS/WSS;
+/// A bearer may traverse plaintext only to a platform-local server used by the
+/// test harness or an emulator. Real remote server sessions require HTTPS/WSS;
 /// accepting arbitrary `http://` here would let a private-session bearer leak
-/// before Edge can authenticate it.
+/// before Core can authenticate it.
 fn validate_private_session_endpoint(server_url: &str) -> Result<url::Url, JazzNativeRelayStatus> {
     let url =
         url::Url::parse(server_url.trim()).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -476,7 +476,7 @@ pub enum ForegroundDbCommandRequest {
     },
     /// Wait for a committed foreground transaction to reach authoritative
     /// Core admission. This remains a pending operation so the platform keeps
-    /// driving its ordinary native relay ticks while the Edge/Core path runs.
+    /// driving its ordinary native relay ticks while the upstream Core path runs.
     WaitForCoreTransaction {
         tx_id: [u8; 16],
     },
@@ -4260,7 +4260,7 @@ impl NativeRelayWire {
 ///
 /// A native worker calls this in each bounded network turn, then requests the
 /// relay's ordinary pump. Keeping the bridge generic makes the production
-/// `WebSocketTransport` path and deterministic edge fixtures exercise exactly
+/// `WebSocketTransport` path and deterministic test fixtures exercise exactly
 /// the same framing boundary.
 enum NativeRelayWireBridgeError {
     Relay(RelayError),
@@ -4323,7 +4323,7 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
 ///
 /// Android and iOS call this shared worker from their private session setup;
 /// neither platform gets a raw protocol codec or reconnect loop.  The worker
-/// supplies the bearer only to the normal Edge WebSocket prelude and always
+/// supplies the bearer only to the normal Core WebSocket prelude and always
 /// uses the authenticated, non-SYSTEM connection mode.
 pub struct NativeRelaySocketWorker {
     activation: Mutex<Option<std::sync::mpsc::Sender<()>>>,
@@ -4376,7 +4376,7 @@ impl NativeRelaySocketWorker {
 
     /// Composition seam for deterministic native-host tests. Production uses
     /// [`NativeWebSocketConnector`] above; the connector still owns TLS,
-    /// WebSocket framing, and Edge's authenticated handshake.
+    /// WebSocket framing, and Core's authenticated handshake.
     pub fn start_with_connector(
         relay: NativeRelay,
         config: NativeRelaySocketConfig,
@@ -8324,13 +8324,13 @@ mod tests {
         );
     }
 
-    /// The C ABI must surface an actual Edge authentication denial, even though
+    /// The C ABI must surface an actual server authentication denial, even though
     /// a disconnected peer no longer disables local SQLite work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_invalid_bearer_still_fails_closed() {
         let issuer = TestJwtIssuer::start().await;
         let schema = schema();
-        let edge = JazzServer::builder()
+        let server = JazzServer::builder()
             .with_schema(schema.public_schema().clone())
             .with_jwks_url(issuer.endpoint())
             .start()
@@ -8341,8 +8341,8 @@ mod tests {
         let mut bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
         let initial = fixture
             .begin_account_session(
-                &edge.base_url(),
-                &edge.app_id().to_string(),
+                &server.base_url(),
+                &server.app_id().to_string(),
                 &bearer,
                 storage.path(),
                 &schema,
@@ -8360,8 +8360,8 @@ mod tests {
         bearer.replace_range(signature..signature + 1, replacement);
         let admitted = fixture
             .begin_account_session(
-                &edge.base_url(),
-                &edge.app_id().to_string(),
+                &server.base_url(),
+                &server.app_id().to_string(),
                 &bearer,
                 storage.path(),
                 &schema,
@@ -8380,7 +8380,7 @@ mod tests {
         .await;
         fixture.revoke_private_session(&admitted);
         assert_eq!(
-            edge.shutdown().await,
+            server.shutdown().await,
             jazz_server::ShutdownPhase::StorageClosed
         );
     }
@@ -12942,7 +12942,7 @@ mod tests {
 
     #[test]
     fn native_relay_storage_wake_progresses_unavailable_authority_and_recovers_once() {
-        // This is the native owner/authority liveness receipt: a retained Edge
+        // This is the native owner/authority liveness receipt: a retained Global
         // subscription remains unsettled while its authority is absent, an
         // unrelated owner RPC still completes, and one host wake is enough to
         // dirty the subscriber. Installing an in-process history-complete core
@@ -12993,11 +12993,11 @@ mod tests {
             ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
                 events,
             )) => events,
-            _ => panic!("initial Edge subscription did not drain"),
+            _ => panic!("initial Global subscription did not drain"),
         };
         assert!(
             initial_events.is_empty(),
-            "an unavailable authority keeps the Edge subscription opener pending"
+            "an unavailable authority keeps the Global subscription opener pending"
         );
         reader_wake.queued.lock().unwrap().clear();
         relay.wire().take_outbound().unwrap();
@@ -13141,7 +13141,7 @@ mod tests {
             baseline_network_depth,
             "idle authority waits must not grow network queues"
         );
-        // The pending Edge subscription must not monopolise the owner. An
+        // The pending Global subscription must not monopolise the owner. An
         // unrelated local query must complete through the same foreground RPC
         // surface while the authority remains unavailable.
         let read_started = std::time::Instant::now();
@@ -13827,7 +13827,7 @@ mod tests {
         assert_eq!(
             bearer_seen.lock().unwrap().as_slice(),
             ["edge-validated-bearer", "edge-validated-bearer"],
-            "each reconnect sends the bearer to Edge again, without exposing it to relay state"
+            "each reconnect sends the bearer to Core again, without exposing it to relay state"
         );
     }
 

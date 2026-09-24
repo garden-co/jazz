@@ -1039,7 +1039,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     // this raw event. Bindings always cross the explicit hydration boundary
     // before exposing it to application code; keep the public assertion below
     // on that boundary rather than requiring opening to synchronously fetch a
-    // cold chunk (which would deadlock an edge before its I/O pump starts).
+    // cold chunk (which would deadlock a server runtime before its I/O pump starts).
     block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
     let (descriptor, title_index, terminal_value) = {
         let SubscriptionEvent::Delta { added, .. } = &mut event else {
@@ -1966,7 +1966,7 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
 
 /// An authority rejection with no application waiter is delivered once through
 /// the mutation-error callback on the following scheduled database tick. This
-/// is an ordinary client connection, so the fate has no edge-forwarding route
+/// is an ordinary client connection, so the fate has no relay-forwarding route
 /// and must still run the local write-state handler.
 #[test]
 fn unhandled_rejection_is_delivered_as_mutation_error() {
@@ -2544,7 +2544,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
 
 /// A live application waiter consumes an authority rejection and prevents the
 /// fallback mutation-error callback from firing, including when the fate has
-/// no edge-forwarding route and only the ordinary local handler can notify it.
+/// no relay-forwarding route and only the ordinary local handler can notify it.
 #[test]
 fn waited_rejection_is_not_delivered_as_mutation_error() {
     let schema = schema();
@@ -2923,20 +2923,20 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     let schema = schema();
     let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe2; 16]);
-    let edge = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
+    let core_node = NodeUuid::from_bytes([0xe2; 16]);
+    let core = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc2, session_author, &schema);
 
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+    let (client_transport, core_transport) = duplex_with_admitted_session_context(
         session_author,
         NodeUuid::from_bytes([0xc2; 16]),
         1,
-        edge_node,
+        core_node,
         2,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge.server.accept_subscriber_with_claims_and_trust(
-        edge_transport,
+    let _subscriber = core.server.accept_subscriber_with_claims_and_trust(
+        core_transport,
         session_author,
         BTreeMap::new(),
         CommitUnitTrust::Session,
@@ -2967,13 +2967,13 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     ));
 
     client.tick().unwrap();
-    edge.tick().unwrap();
+    core.tick().unwrap();
     client.tick().unwrap();
 
     let SyncMessage::CommitUnit { tx, .. } =
-        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+        core.node().borrow_mut().commit_unit_for(tx_id).unwrap()
     else {
-        unreachable!("edge retained the accepted transaction");
+        unreachable!("core retained the accepted transaction");
     };
     assert_eq!(
         tx.permission_subject, None,
@@ -2981,7 +2981,7 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     );
 
     assert!(matches!(
-        crate::db::block_on(edge.node().borrow_mut().transaction_state(tx_id)),
+        crate::db::block_on(core.node().borrow_mut().transaction_state(tx_id)),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 }
@@ -4159,7 +4159,7 @@ fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionS
 }
 
 /// Alice registers application and internal waits before deferred persistence.
-/// Publishing locally must wake both Local waits, but cannot satisfy Edge.
+/// Publishing locally must wake both Local waits, but cannot satisfy Global.
 /// The Db facade is used to control owner turns without a client's tick driver.
 #[test]
 fn local_persistence_wakes_existing_transaction_waits() {
@@ -4208,11 +4208,11 @@ fn local_persistence_wakes_existing_transaction_waits() {
             observe_only: true,
         }
     ));
-    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Global));
+    let mut global = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     assert!(local.as_mut().poll(&mut context).is_pending());
     assert!(observer.as_mut().poll(&mut context).is_pending());
-    assert!(edge.as_mut().poll(&mut context).is_pending());
+    assert!(global.as_mut().poll(&mut context).is_pending());
 
     block_on(db.tick()).unwrap();
     assert_eq!(
@@ -4221,7 +4221,7 @@ fn local_persistence_wakes_existing_transaction_waits() {
     );
     assert!(matches!(local.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
     assert!(matches!(observer.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
-    assert!(edge.as_mut().poll(&mut context).is_pending());
+    assert!(global.as_mut().poll(&mut context).is_pending());
 }
 
 /// A deferred local writer transfers its publication to the node queue before

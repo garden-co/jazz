@@ -177,7 +177,7 @@ it.each(["finish", "abort"] as const)(
         );
         await upload.push(new TextEncoder().encode("retryable upload"));
         let saturated = false;
-        // Real edge waiters remain pending because this fixture has no authority.
+        // Real global-tier waiters remain pending because this fixture has no authority.
         // Stop at the host's reported bound rather than inventing pending handles.
         for (let attempt = 0; attempt < 128; attempt++) {
           const response = execute({ type: "waitForTransaction", txId, tier: "global" });

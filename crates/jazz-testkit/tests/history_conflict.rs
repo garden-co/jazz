@@ -14,7 +14,7 @@ use jazz::tools::{
 };
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added_id, wait_for_query, wait_for_remote_query_ready,
     wait_for_subscription_update,
 };
 use uuid::Uuid;
@@ -1172,7 +1172,7 @@ async fn establish_offline_reconnect_baseline(
     let bob = jazz_testkit::connect(bob_ctx.clone())
         .await
         .expect("connect persistent bob");
-    wait_for_edge_query_ready(&bob, "todos", READY_TIMEOUT).await;
+    wait_for_remote_query_ready(&bob, "todos", READY_TIMEOUT).await;
 
     let (todo_id, _, _) = alice
         .insert("todos", todo_values("create"))
@@ -1350,7 +1350,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         query.clone(),
         jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
-        "alice sees v4 at edge",
+        "alice sees v4 at the server",
         |rows| {
             (rows.len() == 1
                 && rows[0].1[0] == Value::Text("alice-v4".to_string())
@@ -1561,7 +1561,7 @@ async fn online_user_wins_on_reconnect_impl() {
         query.clone(),
         jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
-        "alice sees alice-v4 at edge",
+        "alice sees alice-v4 at the server",
         |rows| {
             (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v4".to_string())).then_some(())
         },

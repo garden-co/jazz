@@ -1874,7 +1874,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
     // Browser runtimes still materialize row bodies from their in-memory
-    // cache, but an Edge/Global read must keep its requested tier while doing
+    // cache, but a remote/global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.

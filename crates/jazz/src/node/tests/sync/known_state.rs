@@ -1761,7 +1761,7 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
 
 #[test]
 fn two_table_client_cache_budget_counts_shared_physical_history_once_without_eviction() {
-    // This is intentionally an internal storage-boundary receipt: the edge
+    // This is intentionally an internal storage-boundary receipt: the client cache
     // budget is the observable policy seam, but only the backing storage can
     // provide an independent byte count for its shared physical history class.
     let test_schema = todos_notes_schema();

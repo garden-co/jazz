@@ -1118,9 +1118,9 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let mut edge = PeerState::client_link(user(0xa1));
+    let mut client = PeerState::client_link(user(0xa1));
     assert_view_update_only_references_rows(
-        &edge.current_rows_update(&mut core, "todos").unwrap(),
+        &client.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
     );
 }
@@ -1162,9 +1162,9 @@ fn policy_free_table_denies_reads_and_writes() {
             .cells(owner_cells(user(0xa1), "privileged seed")),
     );
 
-    let mut edge = PeerState::client_link(user(0xcc));
+    let mut client = PeerState::client_link(user(0xcc));
     assert_view_update_only_references_rows(
-        &edge.current_rows_update(&mut core, "todos").unwrap(),
+        &client.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
     );
 
@@ -1218,9 +1218,9 @@ fn partial_policy_set_allows_its_declared_read_and_denies_omitted_writes_at_auth
         MergeableCommit::new("todos", seed, 10).cells(owner_cells(user(0xa1), "seed")),
     );
 
-    let mut edge = PeerState::client_link(user(0xcc));
+    let mut client = PeerState::client_link(user(0xcc));
     assert_view_update_only_references_rows(
-        &edge.current_rows_update(&mut core, "todos").unwrap(),
+        &client.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([seed]),
     );
 

@@ -405,31 +405,32 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
 }
 
 /// Internal topology canary: exact push-before-row ordering on both relay legs
-/// and pull forwarding after edge chunk eviction are protocol/runtime
+/// and pull forwarding after relay chunk eviction are protocol/runtime
 /// properties that are not observable through the public client API alone.
 /// The accepted write and reconstructed value are still asserted through that
 /// API. Every node is opened with its own storage directory.
 #[test]
-fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_eviction() {
+fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_eviction() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc4; 16]);
     let core = open_core(0xc5, AuthorSubject::SYSTEM, &schema);
-    let upload_edge = open_db(0xc6, AuthorSubject::SYSTEM, &schema);
+    let upload_relay = open_db(0xc6, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xc7, author, &schema);
 
-    let (upload_edge_transport, core_upload_transport, upload_edge_to_core) =
+    let (upload_relay_transport, core_upload_transport, upload_relay_to_core) =
         duplex_with_client_outbound_tap();
-    let _upload_edge_upstream =
-        crate::db::block_on(upload_edge.connect_upstream(upload_edge_transport));
-    let _core_upload_edge = core.accept_subscriber_with_trust(
+    let _upload_relay_upstream =
+        crate::db::block_on(upload_relay.connect_upstream(upload_relay_transport));
+    let _core_upload_relay = core.accept_subscriber_with_trust(
         core_upload_transport,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
-    let (writer_transport, upload_edge_client_transport, writer_to_upload_edge) =
+    let (writer_transport, upload_relay_client_transport, writer_to_upload_relay) =
         duplex_with_client_outbound_tap();
     let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
-    let _upload_edge_writer = upload_edge.accept_subscriber(upload_edge_client_transport, author);
+    let _upload_relay_writer =
+        upload_relay.accept_subscriber(upload_relay_client_transport, author);
 
     let title = "multi-hop-large-value/".repeat(8_000);
     let write = writer
@@ -445,14 +446,14 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         .unwrap();
 
     let mut writer_messages = Vec::new();
-    let mut upload_edge_messages = Vec::new();
+    let mut upload_relay_messages = Vec::new();
     for _ in 0..64 {
         writer.tick().unwrap();
-        writer_messages.extend(writer_to_upload_edge.borrow().iter().cloned());
-        upload_edge.tick().unwrap();
-        upload_edge_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        writer_messages.extend(writer_to_upload_relay.borrow().iter().cloned());
+        upload_relay.tick().unwrap();
+        upload_relay_messages.extend(upload_relay_to_core.borrow().iter().cloned());
         core.tick().unwrap();
-        upload_edge.tick().unwrap();
+        upload_relay.tick().unwrap();
         writer.tick().unwrap();
         if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
             break;
@@ -468,8 +469,8 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     );
 
     for (leg, messages) in [
-        ("writer-to-upload-edge", writer_messages),
-        ("upload-edge-to-core", upload_edge_messages),
+        ("writer-to-upload-relay", writer_messages),
+        ("upload-relay-to-core", upload_relay_messages),
     ] {
         let staged = messages
             .iter()
@@ -484,22 +485,22 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         assert!(staged < row, "{leg} stages the chunks before the row");
     }
     assert_eq!(
-        prepared_read(&upload_edge, &upload_edge.table("todos")).len(),
+        prepared_read(&upload_relay, &upload_relay.table("todos")).len(),
         1,
-        "the upload edge retained the accepted row"
+        "the upload relay retained the accepted row"
     );
 
     // Retain the accepted row and its disclosed locator, but replace only the
-    // edge's Groove chunk backend with an empty independent store. Its only
-    // route to the value bytes is now to forward this edge-local access to Core.
-    upload_edge
+    // relay's Groove chunk backend with an empty independent store. Its only
+    // route to the value bytes is now to forward this relay-local access to Core.
+    upload_relay
         .node
         .node
         .borrow_mut()
         .set_chunk_storage(Rc::new(groove::chunks::MemoryChunkStorage::new()));
-    let query = upload_edge.table("todos");
+    let query = upload_relay.table("todos");
     let mut subscription = prepared_subscribe(
-        &upload_edge,
+        &upload_relay,
         &query,
         ReadOpts {
             tier: DurabilityTier::Local,
@@ -513,10 +514,10 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     let mut pull_messages = Vec::new();
     let mut pending_event = None;
     for _ in 0..128 {
-        upload_edge.tick().unwrap();
-        pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        upload_relay.tick().unwrap();
+        pull_messages.extend(upload_relay_to_core.borrow().iter().cloned());
         core.tick().unwrap();
-        upload_edge.tick().unwrap();
+        upload_relay.tick().unwrap();
         if pending_event.is_none() {
             pending_event = subscription.try_next_event();
         }
@@ -525,7 +526,8 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
             .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_)))
             && let Some(event) = pending_event.as_mut()
         {
-            crate::db::block_on(upload_edge.hydrate_subscription_event_for_binding(event)).unwrap();
+            crate::db::block_on(upload_relay.hydrate_subscription_event_for_binding(event))
+                .unwrap();
             apply_subscription_event(&mut snapshot, pending_event.take().unwrap());
         }
         received = snapshot.rows.first().and_then(|row| row.cell_at(0));
@@ -536,18 +538,18 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     assert_eq!(
         snapshot.rows.len(),
         1,
-        "the empty edge delivers the referencing row",
+        "the empty relay delivers the referencing row",
     );
     assert!(
         pull_messages
             .iter()
             .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_))),
-        "the empty edge requests missing chunks from Core"
+        "the empty relay requests missing chunks from Core"
     );
     assert_eq!(
         received,
         Some(Value::String(title)),
-        "the empty edge forwards the missing chunk pull to Core"
+        "the empty relay forwards the missing chunk pull to Core"
     );
 }
 
@@ -1647,7 +1649,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
 }
 
 #[test]
-fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
+fn db_sync_surface_client_session_read_policy_filters_private_table_query() {
     let schema = owner_id_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -1965,7 +1967,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
 }
 
 #[test]
-fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
+fn db_sync_surface_client_session_read_policy_filters_after_runtime_schema_publish() {
     let public_schema = owner_id_public_schema();
     let permission_schema = owner_id_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -2953,7 +2955,7 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
 
 /// Upload entries remain replayable until an applied terminal fate either
 /// rejects them or carries accepted Global durability plus authority time. An
-/// Accepted fate at Local, Edge, or Global-without-time is only progress:
+/// Accepted fate at Local or Global-without-time is only progress:
 /// reconnect must resend it until a later time-bearing Global fate releases the
 /// shared outbox entry.
 #[test]

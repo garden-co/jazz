@@ -2711,7 +2711,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   }, 60_000);
 
-  it("resolves insert wait at edge tier through the worker bridge", async () => {
+  it("resolves insert wait at global tier through the worker bridge", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-wait-edge");
     const sharedLocalAuthToken = generateAuthSecret();
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
@@ -2723,20 +2723,20 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await withTimeout(
       inserted.wait({ tier: "global" }),
       10000,
-      "insert wait(edge) did not resolve",
+      "insert wait(global) did not resolve",
     );
 
     expect(insertedTodo.id).toBeTruthy();
     expect(insertedTodo.title).toBe(title);
 
-    const rowsAtEdge = await waitForTodos(
+    const rowsAtGlobal = await waitForTodos(
       db,
       (rows) => rows.some((row) => row.id === insertedTodo.id && row.title === title),
-      "insert wait(edge) row becomes queryable at edge",
+      "insert wait(global) row becomes queryable at global tier",
       20000,
       "global",
     );
-    expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
+    expect(rowsAtGlobal.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
 
   it("rejects backend credentials through the SharedWorker relay", async () => {
@@ -2867,7 +2867,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         transactionAllocated: txId !== undefined,
         callbackCount: mutationErrorSpy.mock.calls.length,
       });
-      // #2677: Read the existing redacted ledger only after failure. An edge wait
+      // #2677: Read the existing redacted ledger only after failure. A global-tier wait
       // would consume rejection handling and change the behavior under test.
       const inspection = (async () => {
         const port = await db.openInspectorControlPort();
@@ -3513,19 +3513,19 @@ describe("SharedWorker bridge with IndexedDB", () => {
     // Exercise loss of an established connection, not a race with its first Hello.
     await db.all(allTodos, { tier: "global" });
     await stopJazzServer(syncServer.serverUrl);
-    const edgeError = await withTimeout(
+    const globalReadError = await withTimeout(
       db.all(allTodos, { tier: "global" }),
       // The ten bounded reconnect attempts wait 7.5s in total before reporting
       // terminal loss. Leave room for the handshakes and worker delivery too.
       15000,
-      "edge read did not observe the stopped server",
+      "global read did not observe the stopped server",
     ).then(
       () => null,
       (error: unknown) => error,
     );
-    expect(edgeError).toBeInstanceOf(Error);
-    expect((edgeError as Error).message).not.toContain(
-      "edge read did not observe the stopped server",
+    expect(globalReadError).toBeInstanceOf(Error);
+    expect((globalReadError as Error).message).not.toContain(
+      "global read did not observe the stopped server",
     );
 
     const title = `local-after-server-shutdown-${Date.now()}`;
@@ -3544,11 +3544,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
   /**
    *   writer ──baseline write──► server
    *   fresh probe starts while server traffic is blocked
-   *   probe ──edge query pending──X server
+   *   probe ──global query pending──X server
    *   network unblocks
-   *   expected: the first fresh edge query completes without needing a second client recreate
+   *   expected: the first fresh global query completes without needing a second client recreate
    */
-  it("replays a fresh edge query once upstream attaches after init", async () => {
+  it("replays a fresh global query once upstream attaches after init", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("edge-late-attach");
     const sharedLocalAuthToken = generateAuthSecret();
     const { serverUrl } = syncServer;
@@ -3570,7 +3570,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await waitForTodos(
         dbWriter,
         (rows) => rows.some((row) => row.title === baselineTitle),
-        "Writer sees baseline row at edge before blocking",
+        "Writer sees baseline row at global tier before blocking",
         20000,
         "global",
       );
@@ -3587,7 +3587,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const probeRowsPromise = waitForTodos(
         dbProbe,
         (rows) => rows.some((row) => row.title === baselineTitle),
-        "Fresh edge query resolves after upstream attach",
+        "Fresh global query resolves after upstream attach",
         20000,
         "global",
       );
@@ -3608,7 +3608,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
    *   browser blocks Jazz server traffic without reloading the page
    *   A ──offline write(worker)──X server
    *   A ──new online write──► server ◄── B sees control write
-   *   expected: the earlier offline worker write also promotes to B + fresh edge client
+   *   expected: the earlier offline worker write also promotes to B + a fresh client
    */
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
@@ -3714,7 +3714,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const rowsOnProbe = await waitForTodos(
         dbProbe,
         (rows) => rows.some((row) => row.title === offlineTitle),
-        "Fresh client sees offline worker row at edge after reconnect",
+        "Fresh client sees offline worker row at global tier after reconnect",
         20000,
         "global",
       );

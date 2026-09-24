@@ -334,7 +334,7 @@ pub struct WireSession {
     pub session_id: String,
     /// Monotone session incarnation. Reconnects that abandon prior ordering use a new epoch.
     pub epoch: u64,
-    /// Authenticated user identity for edge/client links, once admission succeeds.
+    /// Authenticated user identity for client links, once admission succeeds.
     pub identity: Option<AuthorSubject>,
 }
 

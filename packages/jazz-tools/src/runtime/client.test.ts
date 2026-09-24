@@ -606,7 +606,7 @@ describe("resolveDefaultDurabilityTier", () => {
     expect(resolveDefaultDurabilityTier({})).toBe("local");
   });
 
-  it("still prefers edge when a server is configured outside the browser runtime", () => {
+  it("still prefers global when a server is configured outside the browser runtime", () => {
     expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("global");
   });
 });

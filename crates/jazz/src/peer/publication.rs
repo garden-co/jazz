@@ -1404,7 +1404,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        // Relay Edge children own a receiver-local graph. Before draining its
+        // Strict Global relay children own a receiver-local graph. Before draining its
         // terminal, atomically replace every compiled input source from the
         // exact selected authority closure. Do not let the generic
         // trusted-serving drain observe an authority output or a stale source
@@ -1666,12 +1666,12 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let relay_edge_requires_authority_source =
+        let relay_requires_authority_source =
             self.requires_selected_authority_source(subscription, purpose);
         // The downstream usage registration chose this policy scope.  Carry
         // that exact receipt into source resolution; the shared binding-view
         // key alone is not an authority identity in a multiplexed relay.
-        let source_authority_result_key = if relay_edge_requires_authority_source {
+        let source_authority_result_key = if relay_requires_authority_source {
             // The downstream opening can be serviced before the relay's
             // upstream Subscribe has been registered locally. That is normal
             // owner-loop ordering, not an invalid subscription. Suspend this
@@ -1705,11 +1705,11 @@ impl PeerState {
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             match purpose {
-                // A relay's selected Edge child is the browser half of a durable
-                // worker authority receipt. Every strict Edge child consumes the
+                // A relay's selected Global child is the browser half of a durable
+                // worker authority receipt. Every strict Global child consumes the
                 // same authority-selected membership, including unbounded
                 // filtered queries whose supporting rows are absent locally.
-                RehydratePurpose::Query if relay_edge_requires_authority_source => scoped
+                RehydratePurpose::Query if relay_requires_authority_source => scoped
                     .open_seeded_relay_subscription_view_with_waker(
                         shape,
                         binding,

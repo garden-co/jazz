@@ -2459,12 +2459,12 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 #[test]
 fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
-    let edge = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
-    let (edge_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let relay = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
+    let (relay_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
     let query = Query::from("todos");
-    let mut stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
-    edge.tick().unwrap();
+    let mut stream = prepared_subscribe(&relay, &query, global_subscribe_opts()).unwrap();
+    relay.tick().unwrap();
     let subscription = loop {
         match authority_transport
             .try_recv()
@@ -2492,31 +2492,32 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert!(
         stream.try_next_event().is_none(),
         "pending is neither a result nor a rejection"
     );
-    let authority_result_key = edge
+    let authority_result_key = relay
         .node
         .node
         .borrow()
         .authority_result_key_for_subscription(subscription)
         .unwrap();
     assert!(
-        edge.node
+        relay
+            .node
             .node
             .borrow()
             .opening_pending_for_authority_result(&authority_result_key),
         "normal authority opening must install the pending marker"
     );
-    let before_generation = edge
+    let before_generation = relay
         .node
         .node
         .borrow()
         .applied_authority_result_generation(&authority_result_key);
-    let before_watermark = edge.node.node.borrow().committed_global_time();
-    let before_drops = edge
+    let before_watermark = relay.node.node.borrow().committed_global_time();
+    let before_drops = relay
         .node
         .node
         .borrow()
@@ -2524,12 +2525,12 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         .dropped_peer_request_messages;
     let (mut client_transport, server_transport) = duplex();
     let subscriber =
-        edge.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
+        relay.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
 
     client_transport.send(view_update(false, 100)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
 
-    let node = Rc::clone(&edge.node.node);
+    let node = Rc::clone(&relay.node.node);
     let node = node.borrow();
     assert_eq!(node.committed_global_time(), before_watermark);
     assert_eq!(
@@ -2572,7 +2573,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             });
     }
     authority_transport.send(malformed_pending).unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert!(matches!(
         stream.try_next_event(),
         Some(SubscriptionEvent::Rejected {
@@ -2580,7 +2581,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         })
     ));
     assert_eq!(
-        edge.node
+        relay
+            .node
             .node
             .borrow()
             .applied_authority_result_generation(&authority_result_key),
@@ -2589,8 +2591,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     );
 
     authority_transport.send(view_update(false, 2)).unwrap();
-    edge.tick().unwrap();
-    let node = Rc::clone(&edge.node.node);
+    relay.tick().unwrap();
+    let node = Rc::clone(&relay.node.node);
     let node = node.borrow();
     assert_eq!(
         node.applied_authority_result_generation(&authority_result_key),
