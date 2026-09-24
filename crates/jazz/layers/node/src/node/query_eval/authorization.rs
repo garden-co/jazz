@@ -8,6 +8,22 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+pub(super) fn policy_uses_authorized_created_source(policy: &JazzQuery) -> bool {
+    fn join_uses_authorized_created_source(join: &JoinVia) -> bool {
+        join.source_mode == crate::query::CandidateSourceMode::IncludeAuthorizedCreatedV1
+            || join
+                .nested_joins
+                .iter()
+                .any(join_uses_authorized_created_source)
+    }
+
+    policy.joins.iter().any(join_uses_authorized_created_source)
+        || policy
+            .policy_branches
+            .iter()
+            .any(|branch| branch.joins.iter().any(join_uses_authorized_created_source))
+}
+
 pub(super) struct NormalizedReadPolicyInput {
     pub(super) shape: ValidatedQuery,
     pub(super) binding: Binding,
@@ -802,6 +818,12 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
     ) -> Result<bool, Error> {
+        // The public vocabulary can be deployed before candidate evidence is
+        // executable. Fail closed until the commit-scoped proof evaluator is
+        // installed; never silently interpret the marker as accepted-only.
+        if policy_uses_authorized_created_source(policy) {
+            return Ok(false);
+        }
         self.policy_query_allows_candidate_with_provenance_for_schema(
             policy_schema_version,
             table,

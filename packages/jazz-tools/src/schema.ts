@@ -220,6 +220,11 @@ export type PolicyExpr =
       condition: PolicyExpr;
     }
   | {
+      type: "ExistsIncludingCreated";
+      table: string;
+      condition: PolicyExpr;
+    }
+  | {
       type: "ExistsRel";
       rel: RelExpr;
     }
