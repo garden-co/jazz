@@ -67,7 +67,8 @@ where
             }) else {
                 continue;
             };
-            let created = self.create_fold_version_if_needed(candidate, version.clone()).await?;
+            let created =
+                Box::pin(self.create_fold_version_if_needed(candidate, version.clone())).await?;
             outcome.append_outcome(created);
         }
         Ok(outcome)
@@ -138,8 +139,8 @@ where
             .branch(branch)
             .cells(folded)
             .authored_columns(differing);
-        let publication = self.commit_mergeable_at(fold_commit, made_at).await?;
-        let work = self.resident_commit_unit(publication.tx_id).await?;
+        let publication = Box::pin(self.commit_mergeable_at(fold_commit, made_at)).await?;
+        let work = Box::pin(self.resident_commit_unit(publication.tx_id)).await?;
         Ok(PublicationOutcome::published_then(Vec::new(), publication, work))
     }
 

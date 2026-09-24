@@ -456,26 +456,6 @@ where
             .map(|(column, value)| (column, value.into()))
             .collect::<BTreeMap<_, _>>();
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let cache_key = (write_schema_version, table.to_owned(), row_uuid);
-        let snapshot_row = if let Some(snapshot_row) = self
-            .open_tx(tx_id)?
-            .base_snapshot_rows
-            .get(&cache_key)
-            .cloned()
-        {
-            snapshot_row
-        } else {
-            let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-            self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)
-                .await?
-        };
-        // Content and deletion are independent history registers.  A version
-        // parent is ancestry for the register being written, never a generic
-        // causal dependency on whichever row version happened to be read.
-        let parent = match deletion {
-            Some(_) => snapshot_row.deletion_version,
-            None => snapshot_row.content_version,
-        };
         positional_cells_from_map(&table_schema, &cells)?;
         let pending = PendingWrite {
             table: table.to_owned(),
@@ -484,9 +464,7 @@ where
             branch: BranchSelector::default(),
             cells: PendingCells::Replace(cells),
             deletion,
-            parents: parent.into_iter().collect(),
             now_ms,
-            refresh_parents_at_commit: false,
             known_fresh_row: false,
             verified_inherited_cells: None,
             branch_view_copy: None,
@@ -517,9 +495,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema(
             tx_id,
@@ -528,9 +504,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             false,
         )
         .await
@@ -544,9 +518,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema_and_branch(
@@ -556,9 +528,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             BranchSelector::default(),
             known_fresh_row,
         )
@@ -573,9 +543,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         branch: BranchSelector,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
@@ -586,9 +554,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             branch,
             known_fresh_row,
             None,
@@ -610,9 +576,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         branch: BranchSelector,
         known_fresh_row: bool,
         verified_inherited_cells: Option<BTreeMap<String, Value>>,
@@ -639,9 +603,7 @@ where
                 branch,
                 cells: PendingCells::Replace(cells),
                 deletion,
-                parents,
                 now_ms,
-                refresh_parents_at_commit,
                 known_fresh_row,
                 verified_inherited_cells,
                 branch_view_copy,
@@ -729,9 +691,7 @@ where
                 branch,
                 cells: PendingCells::Patch(patch),
                 deletion: None,
-                parents: Vec::new(),
                 now_ms,
-                refresh_parents_at_commit: false,
                 known_fresh_row: false,
                 verified_inherited_cells: None,
                 branch_view_copy: None,
@@ -975,24 +935,11 @@ where
                 })?;
             }
         }
-        for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
-            self.merge_tx_time(parent.time);
-        }
         let tx_id = match reserved {
             Some(reserved) => {
                 if reserved.node != self.node_uuid {
                     return Err(Error::InvalidMergeableCommit(
                         "reserved transaction identity belongs to another node",
-                    ));
-                }
-                if open_tx
-                    .writes
-                    .iter()
-                    .flat_map(|write| write.parents.iter())
-                    .any(|parent| parent.time >= reserved.time)
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "reserved transaction identity must dominate every parent",
                     ));
                 }
                 self.merge_tx_time(reserved.time);
@@ -1065,7 +1012,7 @@ where
                 &table_schema,
                 write.schema_version,
                 write.row_uuid,
-                write.parents,
+                Vec::new(),
                 created_by,
                 created_at.physical_ms(),
                 made_by,
@@ -1808,12 +1755,8 @@ pub(super) struct PendingWrite {
     cells: PendingCells,
     /// Deletion-register event, if any.
     pub(super) deletion: Option<DeletionEvent>,
-    /// Parent vector carried by the staged write.
-    pub(super) parents: Vec<TxId>,
     /// Per-write provenance time, or `None` for a commit-time clock value.
     pub(super) now_ms: Option<u64>,
-    /// Whether restore parents must follow the current layer winner at commit time.
-    pub(super) refresh_parents_at_commit: bool,
     /// The production UUID source generated this staged insert's id, so it may
     /// use the trusted fresh-coordinate fast path.
     pub(super) known_fresh_row: bool,

@@ -216,10 +216,7 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         coalesced_row,
         owner_cells(author, "coalesced insert"),
         None,
-        Vec::new(),
-        Some(25),
-        false,
-    ))
+        Some(25),))
     .unwrap();
     crate::db::block_on(core.tx_patch_mergeable(
         open_tx,

@@ -230,25 +230,25 @@ where
             }) {
                 continue;
             }
-            let operation = if self
-                .query_local_layer_winner_in_branch(
+            let layer = VersionLayer::for_commit(commit);
+            let exists_locally = Box::pin(self.query_local_layer_winner_in_branch(
+                &commit.table,
+                &head,
+                commit.row_uuid,
+                layer,
+            ))
+            .await?
+            .is_some();
+            let exists = exists_locally
+                || Box::pin(self.query_global_layer_winner_in_branch(
                     &commit.table,
                     &head,
                     commit.row_uuid,
-                    VersionLayer::for_commit(commit),
-                )
+                    layer,
+                ))
                 .await?
-                .is_some()
-                || self
-                    .query_global_layer_winner_in_branch(
-                        &commit.table,
-                        &head,
-                        commit.row_uuid,
-                        VersionLayer::for_commit(commit),
-                    )
-                    .await?
-                    .is_some()
-            {
+                .is_some();
+            let operation = if exists {
                 BranchWriteOperation::ExactHeadUpdate
             } else {
                 BranchWriteOperation::ExactHeadInsert

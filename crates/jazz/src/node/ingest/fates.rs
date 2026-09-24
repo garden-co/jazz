@@ -243,7 +243,7 @@ where
             // First committer wins: the written register must be unchanged
             // since the transaction's base snapshot.
             if let Some(current) = current
-                && !self.snapshot_covers(current, base_snapshot).await
+                && !Box::pin(self.snapshot_covers(current, base_snapshot)).await
             {
                 return Ok(false);
             }

@@ -1230,25 +1230,16 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         (Fate::Accepted, Some(global_time), DurabilityTier::Global),
     );
 
-    // Linear history (stage 2a): once the complete transaction is stored, a
-    // differing replay is not byte-compared; the stored row stays unchanged.
-    reader
-        .apply_view_updates_in_batch(vec![update(
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![update(
             conflicting,
             Fate::Accepted,
             Some(global_time),
             durability,
         )])
-        .unwrap();
-    assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>()[&row_uuid]["title"],
-        Value::String("visible title".to_owned())
-    );
+        .resolve(),
+        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+    ));
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1368,10 +1359,13 @@ fn reset_accepts_identical_annotated_duplicates() {
             ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![replay]).resolve(),
             ResetConflictPath::Single => reader.apply_view_update(replay).resolve(),
         };
-        // Linear history (stage 2a): a known complete transaction is immutable
-        // and Core-sequenced, so a differing replay is not byte-compared; only
-        // its fate advances and the stored payload is left untouched.
-        assert!(result.is_ok(), "known complete replay only advances fate: {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+            ),
+            "expected conflicting replay, got {result:?}"
+        );
         let stored = reader.query_versions_for_tx(tx_id).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(
@@ -1615,16 +1609,10 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
             )],
         );
         let result = reader.apply_view_update(conflicting_update).resolve();
-        if stored_complete {
-            // Linear history (stage 2a): a stored complete transaction is not
-            // byte-compared against a later replay; only its fate advances.
-            assert!(result.is_ok(), "{result:?}");
-        } else {
-            assert!(matches!(
-                result,
-                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
-            ));
-        }
+        assert!(matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+        ));
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.view_scoped_cardinality, !stored_complete);
         let versions = reader.query_versions_for_tx(tx_id).unwrap();

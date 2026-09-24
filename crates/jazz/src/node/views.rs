@@ -364,11 +364,6 @@ where
                 continue;
             };
             persisted_tx_ids.insert(*tx_id);
-            // Linear history: a stored complete transaction is immutable and
-            // Core-sequenced; only view-scoped fragments need assembly below.
-            if !stored.view_scoped_cardinality {
-                continue;
-            }
             let mut stored_identity = stored.tx.clone();
             stored_identity.n_total_writes = 0;
             stored_identity = transaction_without_permission_subject(&stored_identity);

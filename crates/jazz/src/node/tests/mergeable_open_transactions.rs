@@ -63,10 +63,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted,
             mergeable_open_cells("inserted", "initial-note"),
             None,
-            Vec::new(),
-            Some(101),
-            false,
-        )
+            Some(101),)
         .unwrap();
     actual
         .tx_patch_mergeable(
@@ -93,22 +90,9 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             deleted,
             BTreeMap::new(),
             Some(DeletionEvent::Deleted),
-            Vec::new(),
-            Some(104),
-            false,
-        )
+            Some(104),)
         .unwrap();
 
-    let staged_content_parents = actual
-        .local_content_winner_tx_id("todos", restored)
-        .unwrap()
-        .into_iter()
-        .collect();
-    let staged_deletion_parents = actual
-        .local_deletion_winner_tx_id("todos", restored)
-        .unwrap()
-        .into_iter()
-        .collect();
     actual
         .tx_write_mergeable(
             open_tx,
@@ -116,10 +100,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             restored,
             mergeable_open_cells("restored", "restored-note"),
             None,
-            staged_content_parents,
-            Some(105),
-            true,
-        )
+            Some(105),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -128,10 +109,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             restored,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            staged_deletion_parents,
-            Some(105),
-            true,
-        )
+            Some(105),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -140,10 +118,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted_then_deleted,
             mergeable_open_cells("doomed", "doomed-note"),
             None,
-            Vec::new(),
-            Some(106),
-            false,
-        )
+            Some(106),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -152,10 +127,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted_then_deleted,
             BTreeMap::new(),
             Some(DeletionEvent::Deleted),
-            Vec::new(),
-            None,
-            false,
-        )
+            None,)
         .unwrap();
 
     assert_eq!(
@@ -301,10 +273,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
         staged,
         title_cells("staged"),
         None,
-        Vec::new(),
-        Some(50),
-        false,
-    )
+        Some(50),)
     .unwrap();
 
     assert_eq!(
@@ -343,10 +312,7 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
             row(0x91),
             title_cells("valid first"),
             None,
-            Vec::new(),
-            Some(50),
-            false,
-        )
+            Some(50),)
         .unwrap();
         core.tx_write_mergeable(
             batch,
@@ -358,10 +324,7 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
                 title_cells("invalid second")
             },
             deletion,
-            Vec::new(),
-            Some(HLC_MAX_PHYSICAL_MS + 1),
-            false,
-        )
+            Some(HLC_MAX_PHYSICAL_MS + 1),)
         .unwrap();
 
         assert!(matches!(

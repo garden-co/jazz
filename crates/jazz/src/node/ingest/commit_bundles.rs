@@ -185,7 +185,7 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
-        let fold_candidates = self.fold_candidates_for_versions(&records).await?;
+        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&records)).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -195,7 +195,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = self.create_fold_versions_for(tx_id, fold_candidates).await?;
+        let merges = Box::pin(self.create_fold_versions_for(tx_id, fold_candidates)).await?;
         Ok(PublicationOutcome {
             value: (),
             publications: merges.publications,
@@ -249,7 +249,7 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
-        let fold_candidates = self.fold_candidates_for_versions(&versions).await?;
+        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&versions)).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -259,7 +259,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = self.create_fold_versions_for(tx_id, fold_candidates).await?;
+        let merges = Box::pin(self.create_fold_versions_for(tx_id, fold_candidates)).await?;
         Ok(PublicationOutcome {
             value: Fate::Accepted,
             publications: merges.publications,
@@ -528,7 +528,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let fold_candidates = self.fold_candidates_for_versions(&versions).await?;
+        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&versions)).await?;
         // Keep persistence and fold construction out of the policy admission frame.
         Box::pin(self.ingest_known_transaction(
             tx.clone(),
@@ -573,14 +573,6 @@ where
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            // Linear history: a complete transaction's versions are immutable
-            // once stored, and Core's sequence is authoritative. A known
-            // complete transaction only needs its fate advanced.
-            if !existing.view_scoped_cardinality {
-                return self
-                    .apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
-                    .await;
             }
             // Normalize aliases before establishing the batch's resident base.
             for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
