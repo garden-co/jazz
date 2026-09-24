@@ -894,6 +894,21 @@ impl Backend {
         .map(|_| ())
     }
 
+    fn exclusive_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: crate::db::RowCells,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
+            table,
+            row_id,
+            cells,
+            Default::default(),
+        ))
+    }
+
     fn exclusive_update(
         &self,
         tx_id: OpenTransactionId,
@@ -1362,7 +1377,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .exclusive_upsert(tx_id, &table, CoreRowUuid(row_id), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions

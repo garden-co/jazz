@@ -415,6 +415,41 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 // Client inserts one staged transactional row.
 // The transaction updates that same row again before sealing.
 // The latest accepted row should reflect the update.
+// Todo row visible on main.
+// A transaction-scoped upsert of that row id overwrites it; explicit-id
+// inserts in exclusive transactions are create-only, so upsert must not be
+// staged as one.
+local_tokio_test! {
+async fn transaction_upsert_overwrites_existing_row() {
+    let client = JazzClient::test_client(todo_schema()).await;
+    let (todo_id, _, _) = client
+        .insert(
+            "todos",
+            row_input!("title" => "original", "completed" => false),
+        )
+        .expect("insert todo on main");
+    let transaction_id = client
+        .begin_transaction()
+        .expect("begin transaction through client API")
+        .transaction_id();
+    let tx = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
+
+    tx.upsert(
+        "todos",
+        *todo_id.uuid(),
+        row_input!("title" => "upserted", "completed" => true),
+    )
+    .expect("transaction upsert of an existing row");
+    client
+        .commit_transaction(transaction_id)
+        .expect("commit transaction");
+
+    let rows = all_todos(&client).await;
+    assert_eq!(rows.len(), 1);
+    assert!(has_todo(&rows, todo_id, "upserted", true), "{rows:?}");
+}
+}
+
 local_tokio_test! {
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();

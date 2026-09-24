@@ -1992,15 +1992,8 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         .unwrap();
     let tx = db.exclusive_tx().unwrap();
     let pending_a = cells("selected", "table A pending");
-    tx.insert(
-        "table_a",
-        pending_a.clone(),
-        crate::db::InsertOptions {
-            row_id: Some(shared_row),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    tx.upsert("table_a", shared_row, pending_a.clone(), Default::default())
+        .unwrap();
 
     assert_reads(
         &tx,
@@ -2016,15 +2009,8 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
     );
 
     let pending_b = cells("selected", "table B pending");
-    tx.insert(
-        "table_b",
-        pending_b.clone(),
-        crate::db::InsertOptions {
-            row_id: Some(shared_row),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    tx.upsert("table_b", shared_row, pending_b.clone(), Default::default())
+        .unwrap();
     assert_reads(
         &tx,
         "table_a",
@@ -2888,6 +2874,81 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
     db.abandon_exclusive_handle(open).unwrap();
 }
 
+/// An explicit-id insert over Bob's read-hidden row answers exactly as an
+/// upsert over it does, so the create-only check never discloses that the row
+/// exists. Bob's row keeps its content.
+///
+/// alice tx ──INSERT(bob row id)──► same denial as UPSERT(bob row id)
+#[test]
+fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let target = row(0xc8);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.insert(
+        "todos",
+        cells("bob secret", false, bob),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
+            .unwrap()
+            .is_empty(),
+        "the planted target must be read-hidden from Alice"
+    );
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    let upsert_error = db
+        .exclusive_tx_ref(open)
+        .upsert(
+            "todos",
+            target,
+            cells("replacement", true, alice),
+            Default::default(),
+        )
+        .unwrap_err();
+    db.abandon_exclusive_handle(open).unwrap();
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    let insert_error = db
+        .exclusive_tx_ref(open)
+        .insert(
+            "todos",
+            cells("replacement", true, alice),
+            InsertOptions {
+                row_id: Some(target),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    db.abandon_exclusive_handle(open).unwrap();
+
+    assert_eq!(insert_error.code, upsert_error.code);
+    assert_eq!(insert_error.message, upsert_error.message);
+    assert_eq!(insert_error.code, ErrorCode::WriteRejected);
+    assert!(
+        !insert_error.message.contains("exists")
+            && !insert_error.message.contains(&target.0.to_string()),
+        "the rejection must not name the hidden row as existing: {}",
+        insert_error.message
+    );
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("bob secret".to_owned()))
+    );
+}
+
 /// Exclusive upsert distinguishes hidden-existing from absent internally: an
 /// absent row is inserted, while an intervening insert conflicts with the
 /// recorded absence rather than silently overwriting it.
@@ -3113,6 +3174,184 @@ fn identity_bound_mergeable_transaction_rejects_cross_identity_reads() {
         Err(error) if error.code == ErrorCode::Protocol
     ));
     db.abandon_transaction_handle(open).unwrap();
+}
+
+#[test]
+fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let existing = row(0xa1);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("original", false),
+        crate::db::InsertOptions {
+            row_id: Some(existing),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let duplicate = db.exclusive_tx().unwrap();
+    let error = duplicate
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(existing),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        db.one(&prepared).unwrap().unwrap().cell(table, "title"),
+        Some(Value::String("original".to_owned()))
+    );
+
+    db.delete("todos", existing, Default::default()).unwrap();
+    let hidden = db.exclusive_tx().unwrap();
+    let error = hidden
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(existing),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(db.read(&prepared).unwrap().is_empty());
+}
+
+#[test]
+fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let repeated = row(0xa2);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("first", false),
+        crate::db::InsertOptions {
+            row_id: Some(repeated),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = tx
+        .insert(
+            "todos",
+            doctest_support::todo_cells("replacement", true),
+            crate::db::InsertOptions {
+                row_id: Some(repeated),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    tx.commit().unwrap();
+    assert_eq!(
+        db.one(&prepared)
+            .unwrap()
+            .unwrap()
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("first".to_owned()))
+    );
+
+    let pending_delete = row(0xa3);
+    let tx = db.exclusive_tx().unwrap();
+    tx.delete("todos", pending_delete, Default::default())
+        .unwrap();
+    let error = tx
+        .insert(
+            "todos",
+            doctest_support::todo_cells("hidden", false),
+            crate::db::InsertOptions {
+                row_id: Some(pending_delete),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    tx.commit().unwrap();
+    assert_eq!(db.read(&prepared).unwrap().len(), 1);
+}
+
+/// Create-only insert existence is scoped by table: one row UUID absent from
+/// two tables can be created in both within one exclusive transaction.
+#[test]
+fn exclusive_tx_insert_same_row_uuid_in_two_tables_creates_both() {
+    fn table_schema(name: &str) -> PublicTableSchemaBuilder {
+        PublicTableSchemaBuilder::new(name).column("value", PublicColumnType::Text)
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(table_schema("table_a"))
+            .table(table_schema("table_b")),
+    );
+    let db = open_db(0x5f, AuthorSubject::SYSTEM, &schema);
+    let shared_row = row(0x45);
+
+    let tx = db.exclusive_tx().unwrap();
+    for table in ["table_a", "table_b"] {
+        tx.insert(
+            table,
+            BTreeMap::from([("value".to_owned(), Value::String(table.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(shared_row),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+
+    for (index, table) in ["table_a", "table_b"].into_iter().enumerate() {
+        let rows = db
+            .read(&db.prepare_query(&db.table(table)).unwrap())
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{table}");
+        assert_eq!(rows[0].row_uuid(), shared_row);
+        assert_eq!(
+            rows[0].cell(&schema.tables[index], "value"),
+            Some(Value::String(table.to_owned()))
+        );
+    }
+}
+
+/// Two concurrent exclusive transactions create the same absent explicit id.
+/// Both stage successfully against their snapshots; the first committer wins
+/// and the second is rejected rather than replacing the created row.
+#[test]
+fn exclusive_tx_concurrent_inserts_of_absent_id_are_first_committer_wins() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let target = row(0xa4);
+    let first = db.exclusive_tx().unwrap();
+    let second = db.exclusive_tx().unwrap();
+    for (tx, title) in [(&first, "first"), (&second, "second")] {
+        tx.insert(
+            "todos",
+            doctest_support::todo_cells(title, false),
+            crate::db::InsertOptions {
+                row_id: Some(target),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    first.commit().unwrap();
+    let error = second.commit().unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("first".to_owned()))
+    );
 }
 
 #[test]

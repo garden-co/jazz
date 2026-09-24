@@ -239,6 +239,44 @@ where
         Ok(result)
     }
 
+    /// Classify an explicit exclusive insert target that the transaction's
+    /// overlaid point read reports as absent: a committed or staged deletion
+    /// still occupies the id. The staged overlay is keyed by `(table, row)`,
+    /// so the same row UUID in another table never counts.
+    pub(crate) async fn tx_insert_target_state_in_schema(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<TransactionInsertTargetState, Error> {
+        let cached = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&(schema_version, table.to_owned(), row_uuid))
+            .cloned();
+        let snapshot_row = match cached {
+            Some(snapshot_row) => snapshot_row,
+            None => {
+                let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                    .await?
+            }
+        };
+        let staged = self
+            .open_tx(tx_id)?
+            .writes
+            .iter()
+            .any(|write| write.table == table && write.row_uuid == row_uuid);
+        Ok(
+            if snapshot_row.content_cells.is_some() || snapshot_row.deleted || staged {
+                TransactionInsertTargetState::Deleted
+            } else {
+                TransactionInsertTargetState::Absent
+            },
+        )
+    }
+
     /// Read all current rows inside an exclusive transaction.
     pub async fn tx_current_rows(
         &mut self,
@@ -1827,6 +1865,12 @@ pub(crate) enum TransactionBranchRowState {
     PendingDeletion,
     /// Neither committed nor staged content exists in the exact branch.
     Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionInsertTargetState {
+    Absent,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
