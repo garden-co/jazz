@@ -66,7 +66,7 @@ where
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
         if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
             global_current_updates =
-                self.global_current_updates_for_versions(tx_id, &tx_versions).await?;
+                self.global_current_updates_for_versions(&batch, tx_id, &tx_versions).await?;
         }
         let contribution_merge = self.contribution_merge_storage_value(
             stored.tx.contribution_merge.as_ref(),

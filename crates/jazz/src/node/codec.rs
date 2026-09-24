@@ -2158,6 +2158,20 @@ fn version_record_descriptors(
 }
 
 impl VersionRow {
+    /// The same row image with its record fields replaced, keeping the
+    /// record layout. Used by Core to build a merged post-image.
+    pub(super) fn with_record_values(&self, values: Vec<Value>) -> Result<Self, Error> {
+        let record = owned_record_from_storage_values_with_descriptor(
+            self.record.borrowed().descriptor(),
+            values,
+        )?;
+        Ok(Self {
+            table: self.table,
+            branch_key: self.branch_key.clone(),
+            record,
+        })
+    }
+
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,

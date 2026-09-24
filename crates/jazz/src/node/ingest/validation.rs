@@ -291,37 +291,22 @@ where
             stored_versions.push(stored.clone());
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if global_time.is_some() {
-                    let previous_global_current = self.query_global_winner_in_batch(
-                        batch,
-                        author_schema,
-                        &table_schema.name,
-                        stored.branch_key(),
-                        stored.row_uuid(),).await?;
-                    let previous_global_winner =
-                        if let Some(previous) = previous_global_current.as_ref() {
-                            Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
-                        } else {
-                            None
-                        };
-                    let new_is_global_current = version_wins_over_open_winner(
-                        &stored,
-                        tx.tx_id,
-                        tx.tx_id.time,
-                        previous_global_winner,
+                    let key = (
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
+                        stored.row_uuid(),
                     );
-                    debug_assert!(
-                        new_is_global_current || previous_global_current.is_some(),
-                        "clock condition violated: global winner after insert must be the previous winner or inserted version"
-                    );
-                    if new_is_global_current {
-                        pending_global_updates.insert(
-                            (
-                                stored.table().to_owned(),
-                                stored.branch_key().clone(),
-                                stored.row_uuid(),
-                            ),
-                            stored.clone(),
-                        );
+                    if let Some(merged) = self
+                        .merged_global_post_image(
+                            batch,
+                            author_schema,
+                            &table_schema,
+                            &stored,
+                            tx.tx_id,
+                        )
+                        .await?
+                    {
+                        pending_global_updates.insert(key, merged);
                     }
                 }
             }

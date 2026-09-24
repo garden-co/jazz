@@ -149,9 +149,9 @@ pub(super) fn source_requirements(
                     source_requirements
                         .metadata
                         .insert(SourceMetadataRequirement::VersionPayloads);
-                    source_requirements
-                        .metadata
-                        .insert(SourceMetadataRequirement::DeletionMarkers);
+                    // A deletion is an ordinary row delta: the deleted row
+                    // leaves the result like any other change, so programs
+                    // need no separate deleted-rows source.
                 }
             }
             ProgramFactKey::ProgramSourceCoverage(scope) => match scope {

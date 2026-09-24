@@ -186,53 +186,33 @@ where
             .and_then(|(tx_id, deleted)| (!deleted).then_some(tx_id))
     }
 
+    /// Apply this accepted transaction's writes to global current, merging
+    /// each into the row's post-image per column.
     pub(super) async fn global_current_updates_for_versions(
         &mut self,
+        batch: &DatabaseBatch,
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();
-        let version_made_at = self
-            .transaction_made_at(tx_id)
-            .await?
-            .ok_or(Error::MissingTransaction(tx_id))?;
         for version in versions {
             let authored_schema = self
                 .schema_version_for_alias(version.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue(
                     "global version schema alias must exist",
                 ))?;
-            let previous_current = self
-                .query_global_winner_in_schema_and_branch(
-                    authored_schema,
-                    &version.table,
-                    version.branch_key(),
-                    version.row_uuid(),
-                )
-                .await?;
-            let previous_winner = if let Some(previous) = previous_current.as_ref() {
-                Some((
-                    previous,
-                    self.version_tx_id(previous)?,
-                    self.version_made_at(previous).await?,
-                ))
-            } else {
-                None
-            };
-            let new_is_current =
-                version_wins_over_open_winner(&version, tx_id, version_made_at, previous_winner);
-            debug_assert!(
-                new_is_current || previous_current.is_some(),
-                "clock condition violated: global winner after state update must be the previous winner or stated version"
-            );
-            if new_is_current {
+            let table_schema = self.table_in_schema(version.table(), authored_schema)?;
+            if let Some(merged) = self
+                .merged_global_post_image(batch, authored_schema, &table_schema, version, tx_id)
+                .await?
+            {
                 updates.insert(
                     (
                         version.table().to_owned(),
                         version.branch_key().clone(),
                         version.row_uuid(),
                     ),
-                    version.clone(),
+                    merged,
                 );
             }
         }

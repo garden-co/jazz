@@ -94,12 +94,3 @@ fn fate_update_durability_claim(fate: &Fate, durability: DurabilityTier) -> Opti
 fn commit_unit_write_count_matches(tx: &Transaction, version_count: usize) -> bool {
     usize::try_from(tx.n_total_writes) == Ok(version_count)
 }
-
-/// A content row whose global current state was captured before a Core
-/// decision, for the post-acceptance linear fold check.
-pub(super) struct FoldCandidate {
-    table: String,
-    branch_key: BranchKey,
-    row_uuid: RowUuid,
-    previous: Option<VersionRow>,
-}

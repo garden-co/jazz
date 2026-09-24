@@ -185,7 +185,6 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
-        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&records)).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -195,12 +194,9 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = Box::pin(self.create_fold_versions_for(tx_id, fold_candidates)).await?;
-        Ok(PublicationOutcome {
-            value: (),
-            publications: merges.publications,
-            post_settlement_work: merges.post_settlement_work,
-        })
+        // Core merged the writes into each row's post-image per column;
+        // nothing further is minted.
+        Ok(PublicationOutcome::settled(()))
     }
 
     /// Finalize a locally-authored pending exclusive commit as the global
@@ -249,7 +245,6 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
-        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&versions)).await?;
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -259,12 +254,7 @@ where
             Some(global_time),
             Some(DurabilityTier::Global),
         ).await?;
-        let merges = Box::pin(self.create_fold_versions_for(tx_id, fold_candidates)).await?;
-        Ok(PublicationOutcome {
-            value: Fate::Accepted,
-            publications: merges.publications,
-            post_settlement_work: merges.post_settlement_work,
-        })
+        Ok(PublicationOutcome::settled(Fate::Accepted))
     }
 
     /// Ingest an unfated commit unit at a Local relay without assigning fate.
@@ -529,8 +519,7 @@ where
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let fold_candidates = Box::pin(self.fold_candidates_for_versions(&versions)).await?;
-        // Keep persistence and fold construction out of the policy admission frame.
+        // Keep persistence out of the policy admission frame.
         Box::pin(self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -540,16 +529,12 @@ where
         ))
         .await?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
-        let mut outcome = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+        Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
             global_time: Some(global_time),
             durability: Some(durability),
-        }]);
-        outcome.append_outcome(
-            Box::pin(self.create_fold_versions_for(tx.tx_id, fold_candidates)).await?,
-        );
-        Ok(outcome)
+        }]))
     }
 
     pub(super) async fn ingest_known_transaction(

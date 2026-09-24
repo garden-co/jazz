@@ -2,160 +2,103 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Capture each accepted content row's global current state before a
-    /// Core decision, so [`Self::create_fold_versions_for`] can check the
-    /// linear fold afterwards.
-    pub(super) async fn fold_candidates_for_versions(
+    /// Apply an accepted write to the row's post-image, one column at a time.
+    ///
+    /// Plain columns are last-writer-wins per column: a write sets each column
+    /// it authored unless a later write (by `(tx_time, node)`) already set that
+    /// column. `_deletion` is one more column. The row carries the identity
+    /// and update provenance of its newest write. Returns `None` when the
+    /// post-image does not change.
+    pub(super) async fn merged_global_post_image(
         &mut self,
-        records: &[VersionRecord],
-    ) -> Result<Vec<FoldCandidate>, Error> {
-        let mut candidates = Vec::with_capacity(records.len());
-        for record in records {
-            let (projected_schema, table) = self.translate_cells_to_current_write_schema(
-                record.schema_version(),
-                record.table(),
-                &mut BTreeMap::new(),
-            )?;
-            // Fold versions are authored in the current write schema. A
-            // version in an unreconciled schema has its own physical lineage
-            // and cannot be folded into the write schema until a lens exists.
-            if projected_schema != self.catalogue.active_schema.schema {
-                continue;
-            }
-            let previous = self
-                .query_global_winner_in_branch(
-                    &table,
-                    record.branch_key(),
-                    record.row_uuid(),)
-                .await?;
-            candidates.push(FoldCandidate {
-                table,
-                branch_key: record.branch_key().clone(),
-                row_uuid: record.row_uuid(),
-                previous,
-            });
-        }
-        Ok(candidates)
-    }
-
-    /// Linear history: an accepted write applies exactly its authored columns
-    /// on top of the row Core held before it. Winner selection installs whole
-    /// versions, so when a concurrent or late write leaves the installed row
-    /// different from that fold, Core mints one parentless fold version that
-    /// carries the folded row. Nothing is minted in the common, uncontended
-    /// case.
-    pub(super) async fn create_fold_versions_for(
-        &mut self,
-        tx_id: TxId,
-        candidates: Vec<FoldCandidate>,
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        let mut outcome = PublicationOutcome::settled(Vec::new());
-        if candidates.is_empty() {
-            return Ok(outcome);
-        }
-        let authored = self.query_versions_for_tx(tx_id).await?;
-        for candidate in candidates {
-            let Some(version) = authored.iter().find(|version| {
-                version.row_uuid() == candidate.row_uuid
-                    && version.branch_key() == &candidate.branch_key
-            }) else {
-                continue;
-            };
-            let created =
-                Box::pin(self.create_fold_version_if_needed(candidate, version.clone())).await?;
-            outcome.append_outcome(created);
-        }
-        Ok(outcome)
-    }
-
-    async fn create_fold_version_if_needed(
-        &mut self,
-        candidate: FoldCandidate,
-        authored: VersionRow,
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        let FoldCandidate {
-            table,
-            branch_key,
-            row_uuid,
-            previous,
-        } = candidate;
-        let table_schema = self.table_in_schema(&table, self.catalogue.active_schema.schema)?;
-        let Some(installed) = self
-            .query_global_winner_in_branch(&table, &branch_key, row_uuid)
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table_schema: &TableSchema,
+        incoming: &VersionRow,
+        incoming_tx: TxId,
+    ) -> Result<Option<VersionRow>, Error> {
+        let Some(previous) = self
+            .query_global_winner_in_batch(
+                batch,
+                schema_version,
+                &table_schema.name,
+                incoming.branch_key(),
+                incoming.row_uuid(),
+            )
             .await?
         else {
-            return Ok(PublicationOutcome::settled(Vec::new()));
+            return Ok(Some(incoming.clone()));
         };
-        let authored_columns = self.authored_columns_for_version(&authored)?;
-        let mut folded = match previous.as_ref() {
-            Some(previous) => previous.cells(&table_schema)?,
-            None => BTreeMap::new(),
-        };
-        for column in &table_schema.columns {
-            if authored_columns
-                .as_ref()
-                .is_some_and(|columns| !columns.contains(&column.name))
+        let previous_tx = self.version_tx_id(&previous)?;
+        if previous_tx == incoming_tx {
+            return Ok(None);
+        }
+        let incoming_is_newest = incoming_tx > previous_tx;
+        if previous.schema_version_alias() != incoming.schema_version_alias() {
+            // Different authored layouts: keep whole-row last-writer-wins
+            // until post-images are stored in physical form.
+            return Ok(incoming_is_newest.then(|| incoming.clone()));
+        }
+        let authored = self.authored_columns_for_version(incoming)?;
+        let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+        // Columns set by writes newer than this one keep their value. Only a
+        // late write needs this history scan.
+        let mut newer_sets = BTreeSet::<String>::new();
+        let mut newer_sets_everything = false;
+        if !incoming_is_newest {
+            for version in self
+                .query_row_versions_in_branch(
+                    &table_schema.name,
+                    incoming.branch_key(),
+                    incoming.row_uuid(),
+                )
+                .await?
             {
-                continue;
-            }
-            if let Some(value) = authored.cell(&table_schema, &column.name)? {
-                folded.insert(column.name.clone(), value);
+                if self.version_tx_id(&version)? <= incoming_tx {
+                    continue;
+                }
+                match self.authored_columns_for_version(&version)? {
+                    Some(columns) => newer_sets.extend(columns),
+                    None => newer_sets_everything = true,
+                }
             }
         }
-        // `_deletion` folds like any other cell: only a delete/restore
-        // authors it, so a concurrent content write cannot resurrect a row.
-        let authors_deletion = authored_columns
-            .as_ref()
-            .is_none_or(|columns| columns.contains(DELETION_COLUMN_NAME));
-        let folded_deleted = if authors_deletion {
-            authored.is_deleted()
-        } else {
-            previous.as_ref().is_some_and(VersionRow::is_deleted)
+        let wins = |name: &str| {
+            authors(name) && !newer_sets_everything && !newer_sets.contains(name)
         };
-        let installed_cells = installed.cells(&table_schema)?;
-        let differing = table_schema
-            .columns
-            .iter()
-            .filter(|column| folded.get(&column.name) != installed_cells.get(&column.name))
-            .map(|column| column.name.clone())
-            .collect::<BTreeSet<_>>();
-        let deletion_differs = folded_deleted != installed.is_deleted();
-        if (differing.is_empty() || folded.is_empty()) && !deletion_differs {
-            return Ok(PublicationOutcome::settled(Vec::new()));
+        let mut merged = previous.record.to_values()?;
+        let incoming_values = incoming.record.to_values()?;
+        let mut changed = false;
+        let mut take = |merged: &mut Vec<Value>, index: usize| {
+            if merged[index] != incoming_values[index] {
+                merged[index] = incoming_values[index].clone();
+                changed = true;
+            }
+        };
+        if wins(DELETION_COLUMN_NAME) {
+            take(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
         }
-        let installed_at = self.version_made_at(&installed).await?;
-        let authored_at = self.version_made_at(&authored).await?;
-        let made_at = installed_at.max(authored_at).tick_after()?;
-        self.merge_tx_time(made_at);
-        let fold_tx_id = TxId::new(made_at, self.node_uuid);
-        if self.query_transaction(fold_tx_id).await?.is_some() {
-            return Ok(PublicationOutcome::settled(Vec::new()));
+        for (index, column) in table_schema.columns.iter().enumerate() {
+            if wins(&column.name) {
+                take(&mut merged, HistoryRowRecord::USER_CELLS + index);
+            }
         }
-        let schema = &self
-            .catalogue
-            .catalogue_schemas
-            .get(&self.catalogue.active_schema.schema)
-            .expect("current write schema exists")
-            .schema;
-        let branch = schema
-            .branch_selector_for_key(&table_schema, &branch_key)
-            .map_err(Error::InvalidBranchKey)?;
-        let mut fold_commit = MergeableCommit::new(&table, row_uuid, made_at.physical_ms())
-            .branch(branch)
-            .cells(folded)
-            .authored_columns(differing);
-        if deletion_differs {
-            fold_commit = fold_commit.deletion(if folded_deleted {
-                DeletionEvent::Deleted
-            } else {
-                DeletionEvent::Restored
-            });
+        if incoming_is_newest {
+            for index in [
+                HistoryRowRecord::FIELD_TX_TIME_IDX,
+                HistoryRowRecord::FIELD_TX_NODE_ID_IDX,
+                HistoryRowRecord::FIELD_UPDATED_BY_IDX,
+                HistoryRowRecord::FIELD_UPDATED_AT_IDX,
+                merged.len() - 1,
+            ] {
+                take(&mut merged, index);
+            }
         }
-        let publication = Box::pin(self.commit_mergeable_at(fold_commit, made_at)).await?;
-        let work = Box::pin(self.resident_commit_unit(publication.tx_id)).await?;
-        Ok(PublicationOutcome::published_then(Vec::new(), publication, work))
+        if !changed {
+            return Ok(None);
+        }
+        previous.with_record_values(merged).map(Some)
     }
-
 
     async fn query_global_winner_in_batch(
         &mut self,
