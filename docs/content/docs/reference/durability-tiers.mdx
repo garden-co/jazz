@@ -46,10 +46,16 @@ New applications should use the product read choices `"local-first"`,
 
 `"local-first-unless-empty"` never waits on a server it cannot reach. The first result is local,
 and immediate, when no server is configured, after `db.disconnect()`, while the connection is down
-or retrying, when the connection attempt fails, or when a first connection has not come up within
-five seconds. If the connection drops while an empty result is waiting, the empty result is
-delivered at that moment. After the first result, a subscription behaves exactly like
-`"local-first"`, and remote rows appear as they sync.
+or retrying, or when the connection attempt fails. While a connection attempt is in progress, an
+empty result waits at most until five seconds after that attempt started, however late the read
+begins. Once connected, it waits for the server's first answer without a time limit. If the
+connection drops while an empty result is waiting, the empty result is delivered at that moment.
+After the first result, a subscription behaves exactly like `"local-first"`, and remote rows
+appear as they sync.
+
+Queries with an `offset` are the exception. A partly synced local cache would apply the offset to
+the wrong rows, so under `"local-first-unless-empty"` an offset window reads the server's page
+whenever the server can answer, and the local page only when it cannot.
 
 Losing remote access does not erase cached data: local-first reads may still show it. An actual
 synced deletion, however, hides the row from local reads too.

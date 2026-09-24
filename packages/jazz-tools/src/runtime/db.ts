@@ -40,7 +40,7 @@ import {
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   isLocalFirstUnlessEmptyTier,
-  ReadTier,
+  type RuntimeReadTier,
   type BranchSelector,
   type BranchView,
   type OpenTransactionId,
@@ -84,7 +84,6 @@ import {
   type ConnectionManager,
   type DbForConnection,
 } from "./connection-manager/index.js";
-import { remoteLinkMayAnswer, type RemoteLinkState } from "./remote-link-state.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -238,51 +237,12 @@ export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
  * overlay by adding private fields to an options object.
  */
 /**
- * How long an empty `ReadTier.LocalFirstUnlessEmpty` opening waits for a
- * first connection that has neither come up nor failed yet.
+ * Readiness to await before a read. The core Db gates a
+ * local-first-unless-empty opening itself, so such a read needs only local
+ * readiness and never blocks on the server transport.
  */
-const CONNECTING_WAIT_MS = 5_000;
-/**
- * After the remote answered with rows, how long the local-first stream may
- * take to receive them before its current state is published anyway.
- */
-const LOCAL_CATCH_UP_MS = 1_000;
-
-/**
- * Call `onUnreachable` once the server can no longer answer a waiting
- * local-first-unless-empty read: immediately if it already cannot, when the
- * link drops or fails, or when a first connection stays pending for
- * {@link CONNECTING_WAIT_MS}. Stops watching when `signal` aborts.
- */
-function watchRemoteLink(
-  connection: Pick<ConnectionManager, "remoteLinkState" | "onRemoteLinkStateChange">,
-  signal: AbortSignal,
-  onUnreachable: () => void,
-): void {
-  let connectingTimer: ReturnType<typeof setTimeout> | null = null;
-  const clearConnectingTimer = () => {
-    if (connectingTimer !== null) clearTimeout(connectingTimer);
-    connectingTimer = null;
-  };
-  signal.addEventListener("abort", clearConnectingTimer, { once: true });
-  const observe = (state: RemoteLinkState) => {
-    if (signal.aborted) return;
-    if (!remoteLinkMayAnswer(state)) {
-      clearConnectingTimer();
-      onUnreachable();
-      return;
-    }
-    if (state === "connected") {
-      clearConnectingTimer();
-    } else if (connectingTimer === null) {
-      connectingTimer = setTimeout(() => {
-        connectingTimer = null;
-        if (!signal.aborted && connection.remoteLinkState() !== "connected") onUnreachable();
-      }, CONNECTING_WAIT_MS);
-    }
-  };
-  connection.onRemoteLinkStateChange(observe, signal);
-  observe(connection.remoteLinkState());
+function readinessTier(tier: RuntimeReadTier): DurabilityTier {
+  return tier === "local-first-unless-empty" ? "local" : tier;
 }
 
 function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
@@ -550,7 +510,7 @@ export interface ActiveQuerySubscriptionTrace {
   query: string;
   table: string;
   branches: string[];
-  tier: DurabilityTier;
+  tier: RuntimeReadTier;
   propagation: QueryPropagation;
   createdAt: string;
   stack?: string;
@@ -2591,11 +2551,12 @@ export class Db {
     options?: InternalDbQueryOptions,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const unlessEmpty = isLocalFirstUnlessEmptyTier(options?.tier);
     // A newly attached browser-worker follower learns the namespace-wide
-    // connection state during its init handshake. Established runtimes
-    // return null here.
-    const initialOfflineState = unlessEmpty ? this.connection.initialExplicitOfflineState() : null;
+    // connection state during its init handshake. The core read gate needs
+    // that state before it decides whether an empty result may wait.
+    const initialOfflineState = isLocalFirstUnlessEmptyTier(options?.tier)
+      ? this.connection.initialExplicitOfflineState()
+      : null;
     if (initialOfflineState) await initialOfflineState;
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
@@ -2603,34 +2564,22 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    if (unlessEmpty) queryOptions.tier = ReadTier.LocalFirst;
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
-    const read = async (readOptions: typeof queryOptions) => {
-      const effectiveTier = resolveEffectiveQueryExecutionOptions(
-        { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-        readOptions,
-      ).tier;
-      await this.ensureReady(effectiveTier);
-      return context || usesRelationTraversal
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(
+      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
+      queryOptions,
+    ).tier;
+    await this.ensureReady(readinessTier(effectiveTier));
+    const rows =
+      context || usesRelationTraversal
         ? await client.queryInternal(
             wasmQuery,
-            readOptions,
+            queryOptions,
             context?.readSession ?? context?.session,
           )
-        : await client.queryInternal(wasmQuery, readOptions);
-    };
-    let rows = await read(queryOptions);
-    if (unlessEmpty && rows.length === 0) {
-      // Empty local knowledge is the one case worth a round trip. The remote
-      // read keeps pending local writes (immediate), exactly like the local
-      // read it replaces.
-      rows =
-        (await this.readRemoteWhileReachable(() =>
-          read({ ...queryOptions, tier: ReadTier.Remote, localUpdates: "immediate" }),
-        )) ?? rows;
-    }
+        : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
     const outputRelationNames = Object.keys(outputIncludes);
@@ -2651,27 +2600,6 @@ export class Db {
           outputRelationNames,
         ) as T,
     );
-  }
-
-  /**
-   * Run a remote read for `ReadTier.LocalFirstUnlessEmpty`, but only while the
-   * server can still answer. Resolves `undefined` (keep the local result) when
-   * no server is configured, the Db is offline, the link drops or fails, the
-   * first connection does not come up within {@link CONNECTING_WAIT_MS}, or
-   * the remote read itself fails. It never waits on an unreachable server.
-   */
-  private readRemoteWhileReachable<R>(read: () => Promise<R>): Promise<R | undefined> {
-    const stop = new AbortController();
-    return new Promise<R | undefined>((resolve) => {
-      const settle = (value: R | undefined) => {
-        if (stop.signal.aborted) return;
-        stop.abort();
-        resolve(value);
-      };
-      watchRemoteLink(this.connection, stop.signal, () => settle(undefined));
-      if (stop.signal.aborted) return;
-      read().then(settle, () => settle(undefined));
-    });
   }
 
   /**
@@ -2795,8 +2723,6 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const unlessEmpty = isLocalFirstUnlessEmptyTier(options?.tier);
-    if (unlessEmpty) queryOptions.tier = ReadTier.LocalFirst;
     const context = this.getRuntimeOperationContext();
     type NativeSubscription = {
       id: number | null;
@@ -2880,110 +2806,18 @@ export class Db {
       activeSubscription = subscription;
       return subscription;
     };
-    const deliverNow = (delta: SubscriptionDelta<T>) => {
-      if (unsubscribed || terminalized || activeSubscription === null) return;
-      try {
-        onDelta(delta);
-      } catch (error) {
-        const subscription = activeSubscription;
-        if (subscription !== null) terminalizeSubscription(subscription, error);
-      }
-    };
-    // ReadTier.LocalFirstUnlessEmpty keeps one native local-first stream as
-    // the only data source. Only an empty opening is withheld, and only while
-    // the server can still answer: a strict remote probe reports when the
-    // first remote view exists. Its rows are never published; the local-first
-    // stream receives them through its own sync coverage.
-    type OpeningGate = {
-      stop: AbortController;
-      waiting: boolean;
-      probe: number | null;
-      catchUpTimer: ReturnType<typeof setTimeout> | null;
-    };
-    let openingGate: OpeningGate | null = unlessEmpty
-      ? { stop: new AbortController(), waiting: false, probe: null, catchUpTimer: null }
-      : null;
-    const closeOpeningGate = (): OpeningGate | null => {
-      const gate = openingGate;
-      if (gate === null) return null;
-      openingGate = null;
-      gate.stop.abort();
-      if (gate.catchUpTimer !== null) clearTimeout(gate.catchUpTimer);
-      if (gate.probe !== null) client.unsubscribe(gate.probe);
-      return gate;
-    };
-    const releaseOpening = () => {
-      if (closeOpeningGate()?.waiting) deliverNow(manager.openingDelta());
-    };
-    // Unsubscribe and terminal errors retire the probe with the subscription.
-    readyAbort.signal.addEventListener("abort", () => closeOpeningGate(), { once: true });
-    const startOpeningProbe = (gate: OpeningGate) => {
-      watchRemoteLink(this.connection, gate.stop.signal, releaseOpening);
-      if (openingGate !== gate) return;
-      void this.ensureReady("global", gate.stop.signal).then(() => {
-        if (openingGate !== gate || unsubscribed || terminalized) return;
-        let answered = false;
-        let probe: number;
-        try {
-          probe = client.subscribeInternal(
-            wasmQuery,
-            {
-              onUpdate: (probeDelta) => {
-                if (answered || openingGate !== gate) return;
-                answered = true;
-                if (probeDelta.added.length === 0) {
-                  releaseOpening();
-                } else {
-                  // The same rows are on their way into the local-first
-                  // stream, which releases the opening as soon as it holds
-                  // any row. Bound that hand-off rather than trusting it.
-                  gate.catchUpTimer = setTimeout(releaseOpening, LOCAL_CATCH_UP_MS);
-                }
-              },
-              // A failed remote answers nothing; fall back to local.
-              onError: () => {
-                if (openingGate === gate) releaseOpening();
-              },
-            },
-            { ...queryOptions, tier: ReadTier.Remote, localUpdates: "immediate" },
-            context?.readSession ?? context?.session ?? session,
-          );
-        } catch {
-          releaseOpening();
-          return;
-        }
-        if (openingGate === gate) gate.probe = probe;
-        else client.unsubscribe(probe);
-      }, releaseOpening);
-    };
     const deliver = (delta: SubscriptionDelta<T>) => {
       if (unsubscribed || terminalized || activeSubscription === null) return;
       if (!deliveryReady) {
         bufferedDeltas.push(delta);
         return;
       }
-      const gate = openingGate;
-      if (gate === null) {
-        deliverNow(delta);
-        return;
+      try {
+        onDelta(delta);
+      } catch (error) {
+        const subscription = activeSubscription;
+        if (subscription !== null) terminalizeSubscription(subscription, error);
       }
-      if ((delta.all?.length ?? 0) > 0) {
-        if (gate.waiting) {
-          releaseOpening();
-        } else {
-          closeOpeningGate();
-          deliverNow(delta);
-        }
-        return;
-      }
-      if (gate.waiting) return;
-      if (!remoteLinkMayAnswer(this.connection.remoteLinkState())) {
-        closeOpeningGate();
-        deliverNow(delta);
-        return;
-      }
-      gate.waiting = true;
-      startOpeningProbe(gate);
     };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       if (unsubscribed || terminalized || activeSubscription === null) return;
@@ -3112,13 +2946,18 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     if (
-      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
+      this.connection.shouldDeferSubscriptionStart(
+        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
+      )
     ) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
+      void this.ensureReady(
+        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
+        readyAbort.signal,
+      )
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;

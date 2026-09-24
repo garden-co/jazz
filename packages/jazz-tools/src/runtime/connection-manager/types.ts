@@ -70,6 +70,7 @@ export abstract class ConnectionManager {
   private client: JazzClient | null = null;
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
+  private remoteLinkHintBinding: AbortController | null = null;
 
   /** Browser managers set this during their asynchronous bootstrap. */
   protected foregroundNodeLease: ForegroundNodeLease | undefined;
@@ -113,6 +114,7 @@ export abstract class ConnectionManager {
 
     this.client = client;
     this.clientSchema = runtimeSchema;
+    this.bindRemoteLinkHint(client);
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
     return client;
   }
@@ -193,6 +195,25 @@ export abstract class ConnectionManager {
     this.onTransportLinkStateChange(check, signal);
   }
 
+  /**
+   * Keep the runtime's core read gate informed of {@link remoteLinkState}. The
+   * core decides whether an empty local-first-unless-empty opening may wait;
+   * this host only reports whether the server is being reached, reachable, or
+   * not.
+   */
+  private bindRemoteLinkHint(client: JazzClient): void {
+    this.remoteLinkHintBinding?.abort();
+    const runtime = client.getRuntime();
+    if (!runtime.setRemoteLinkHint) return;
+    const binding = new AbortController();
+    this.remoteLinkHintBinding = binding;
+    const report = (state: RemoteLinkState) => {
+      if (!binding.signal.aborted) runtime.setRemoteLinkHint?.(state);
+    };
+    this.onRemoteLinkStateChange(report, binding.signal);
+    report(this.remoteLinkState());
+  }
+
   protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
     this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
   }
@@ -236,6 +257,8 @@ export abstract class ConnectionManager {
   }
 
   protected clearClient(): void {
+    this.remoteLinkHintBinding?.abort();
+    this.remoteLinkHintBinding = null;
     this.client = null;
     this.clientSchema = null;
   }

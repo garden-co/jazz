@@ -161,6 +161,8 @@ export interface Runtime {
   remoteLinkState?(): RemoteLinkState;
   /** @internal Observe {@link Runtime.remoteLinkState} changes. */
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
+  /** @internal Report the host's view of the server link to the core read gate. */
+  setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -473,7 +475,7 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
 };
 
 export interface ResolvedQueryExecutionOptions {
-  tier: DurabilityTier;
+  tier: RuntimeReadTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
@@ -635,19 +637,20 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-/** @internal Lower product read choices to local or Core-confirmed reads. */
-export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
+/**
+ * @internal Tier names the runtime bindings accept for reads. The core Db owns
+ * the local-first-unless-empty opening gate, so that tier passes through.
+ */
+export type RuntimeReadTier = DurabilityTier | "local-first-unless-empty";
+
+/** @internal Lower product read choices to the runtime's read tiers. */
+export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
   if ((tier as string) === "edge") {
     throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
   }
   if (tier === "local-only") return "local";
-  // Db owns the local-first-unless-empty opening gate. Its native stream is
-  // an ordinary local-first read.
-  return tier === ReadTier.LocalFirst || isLocalFirstUnlessEmptyTier(tier)
-    ? "local"
-    : tier === ReadTier.Remote
-      ? "global"
-      : tier;
+  if (isLocalFirstUnlessEmptyTier(tier)) return "local-first-unless-empty";
+  return tier === ReadTier.LocalFirst ? "local" : tier === ReadTier.Remote ? "global" : tier;
 }
 
 function isBrowserRuntime(): boolean {

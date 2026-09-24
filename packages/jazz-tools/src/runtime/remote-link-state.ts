@@ -8,16 +8,11 @@
  * - `unavailable`: the application disconnected explicitly, the connection
  *   dropped and is retrying, or the attempt failed.
  *
- * This is an observation for read scheduling only. It never changes write
- * durability, and it never turns a strict `ReadTier.Remote` read into a local
- * one.
+ * Hosts report it to the core Db, which uses it only to decide whether an
+ * empty local-first-unless-empty opening may wait for the server. It never
+ * changes write durability or strict `ReadTier.Remote` reads.
  */
 export type RemoteLinkState = "none" | "connecting" | "connected" | "unavailable";
-
-/** True while waiting for a remote answer can still produce one. */
-export function remoteLinkMayAnswer(state: RemoteLinkState): boolean {
-  return state === "connecting" || state === "connected";
-}
 
 /**
  * Small listener set that publishes a derived state only when it changed.

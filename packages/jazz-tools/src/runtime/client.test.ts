@@ -615,13 +615,13 @@ describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
     expect(resolveReadTier("local-first")).toBe("local");
     expect(resolveReadTier("remote")).toBe("global");
-    // Db gates the empty opening itself; the native read is local-first.
-    expect(resolveReadTier("local-first-unless-empty")).toBe("local");
-    expect(resolveReadTier("remote-if-possible")).toBe("local");
+    // The core Db gates the empty opening; the deprecated alias shares it.
+    expect(resolveReadTier("local-first-unless-empty")).toBe("local-first-unless-empty");
+    expect(resolveReadTier("remote-if-possible")).toBe("local-first-unless-empty");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
     expect(resolveReadTier(ReadTier.Remote)).toBe("global");
-    expect(resolveReadTier(ReadTier.LocalFirstUnlessEmpty)).toBe("local");
-    expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("local");
+    expect(resolveReadTier(ReadTier.LocalFirstUnlessEmpty)).toBe("local-first-unless-empty");
+    expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("local-first-unless-empty");
   });
 
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
@@ -645,7 +645,7 @@ describe("public read tiers", () => {
     });
     for (const tier of [ReadTier.LocalFirstUnlessEmpty, ReadTier.RemoteIfPossible]) {
       expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
-        tier: "local",
+        tier: "local-first-unless-empty",
         localUpdates: "immediate",
       });
     }
@@ -654,8 +654,8 @@ describe("public read tiers", () => {
   it.each([
     [ReadTier.LocalFirst, "local", undefined],
     [ReadTier.Remote, "global", JSON.stringify({ local_updates: "deferred" })],
-    [ReadTier.LocalFirstUnlessEmpty, "local", undefined],
-    [ReadTier.RemoteIfPossible, "local", undefined],
+    [ReadTier.LocalFirstUnlessEmpty, "local-first-unless-empty", undefined],
+    [ReadTier.RemoteIfPossible, "local-first-unless-empty", undefined],
   ] as const)(
     "keeps public %s reads full and derives their own-write policy",
     async (tier, nativeTier, expectedOptionsJson) => {

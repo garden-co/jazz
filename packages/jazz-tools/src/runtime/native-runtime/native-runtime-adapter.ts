@@ -110,6 +110,14 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const NETWORK_RETRY_LIMIT = 10;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
+/** Runtime read tier whose empty opening the core Db may hold for the server. */
+const LOCAL_FIRST_UNLESS_EMPTY = "local-first-unless-empty";
+const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
+  none: "none",
+  connecting: "attempting",
+  connected: "live",
+  unavailable: "failed",
+};
 const NATIVE_LINK_POLL_MS = 250;
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
@@ -213,6 +221,8 @@ type NativeDb = {
   isNativeForegroundClosed?(): boolean;
   disconnectNativeUpstream?(): void;
   reconnectNativeUpstream?(): void;
+  /** Tell the core Db what the host knows about its path to the server. */
+  setRemoteLinkHint?(state: string): void;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -1121,6 +1131,17 @@ export class NativeRuntimeAdapter implements Runtime {
     // "idle" promise first would let queued work acquire the node before the
     // caller's operation runs or reserves its own asynchronous admission.
     return operation();
+  }
+
+  /**
+   * Forward the host's view of the server link to the core Db, which owns the
+   * local-first-unless-empty gate. Hosts whose link lives in Rust derive it
+   * there and expose no setter.
+   */
+  setRemoteLinkHint(state: RemoteLinkState): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setRemoteLinkHint(state);
+    if (this.closed) return;
+    this.db.setRemoteLinkHint?.(REMOTE_LINK_HINTS[state]);
   }
 
   /** Live reachability of this runtime's upstream server. */
@@ -2938,7 +2959,7 @@ export class NativeRuntimeAdapter implements Runtime {
     query: NativeQueryInput,
     session: RuntimeSession | null,
   ): void {
-    if (tier != null && tier !== "local") return;
+    if (tier != null && tier !== "local" && tier !== LOCAL_FIRST_UNLESS_EMPTY) return;
     if (!readPropagationIsFull(optionsJson)) return;
     if (this.nonDurableClient || !this.serverTransport) return;
 
@@ -4244,7 +4265,7 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "global"].includes(tier)) {
+  if (tier != null && !["local", "global", LOCAL_FIRST_UNLESS_EMPTY].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
