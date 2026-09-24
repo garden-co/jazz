@@ -137,6 +137,13 @@ where
         if ast.version != ShapeAst::VERSION {
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
         }
+        if let ShapeBody::Query(query) = &ast.body
+            && authorization::policy_uses_authorized_created_source(query)
+        {
+            return Err(Error::UnsupportedSyncMessage(
+                "authorized-created sources are supported only in INSERT policies",
+            ));
+        }
         let schema = if ast.schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {

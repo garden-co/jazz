@@ -168,6 +168,15 @@ pub enum PolicyExpr {
 
     /// Always false - denies all rows.
     False,
+
+    /// Include independently authorized root inserts from the same exclusive commit.
+    ///
+    /// Version 1 is restricted to positive, scalar correlated INSERT checks.
+    /// Ordinary EXISTS and nested unmarked sources remain accepted-only.
+    ExistsIncludingCreated {
+        table: String,
+        condition: Box<PolicyExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -269,6 +278,10 @@ enum PolicyExprSerde {
     },
     True {},
     False {},
+    ExistsIncludingCreated {
+        table: String,
+        condition: Box<PolicyExprSerde>,
+    },
 }
 
 impl From<PolicyExprSerde> for PolicyExpr {
@@ -301,6 +314,12 @@ impl From<PolicyExprSerde> for PolicyExpr {
                 table,
                 condition: Box::new((*condition).into()),
             },
+            PolicyExprSerde::ExistsIncludingCreated { table, condition } => {
+                PolicyExpr::ExistsIncludingCreated {
+                    table,
+                    condition: Box::new((*condition).into()),
+                }
+            }
             PolicyExprSerde::ExistsRel { rel } => PolicyExpr::ExistsRel { rel },
             PolicyExprSerde::Inherits {
                 operation,
@@ -365,6 +384,12 @@ impl From<PolicyExpr> for PolicyExprSerde {
                 table,
                 condition: Box::new((*condition).into()),
             },
+            PolicyExpr::ExistsIncludingCreated { table, condition } => {
+                PolicyExprSerde::ExistsIncludingCreated {
+                    table,
+                    condition: Box::new((*condition).into()),
+                }
+            }
             PolicyExpr::ExistsRel { rel } => PolicyExprSerde::ExistsRel { rel },
             PolicyExpr::Inherits {
                 operation,
@@ -402,6 +427,15 @@ impl From<PolicyExpr> for PolicyExprSerde {
 }
 
 impl PolicyExpr {
+    /// Require a correlated source row, including independently authorized inserts
+    /// from the same exclusive commit. Only supported in positive INSERT checks.
+    pub fn exists_including_created(table: impl Into<String>, condition: PolicyExpr) -> Self {
+        Self::ExistsIncludingCreated {
+            table: table.into(),
+            condition: Box::new(condition),
+        }
+    }
+
     /// Create a comparison expression: column = @session.path
     pub fn eq_session(column: impl Into<String>, session_path: Vec<String>) -> Self {
         PolicyExpr::Cmp {

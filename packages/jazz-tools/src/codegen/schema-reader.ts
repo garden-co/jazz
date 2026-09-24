@@ -189,8 +189,9 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         values: expr.values.map(clonePolicyLiteralValue),
       };
     case "Exists":
+    case "ExistsIncludingCreated":
       return {
-        type: "Exists",
+        type: expr.type,
         table: expr.table,
         condition: clonePolicyExpr(expr.condition),
       };
