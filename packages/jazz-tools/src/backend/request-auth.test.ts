@@ -587,7 +587,6 @@ describe("backend request auth", () => {
     ["[0:0:0:0:0:0:0:1]", "::1"],
     ["127.1", "127.0.0.1"],
     ["2130706433", "127.0.0.1"],
-    ["127.255.255.254", "127.255.255.254"],
   ])("verifies signing keys over HTTP at canonical loopback %s", async (hostname, listenHost) => {
     const secret = randomUUID();
     const path = `/jwks/${randomUUID()}`;
@@ -633,6 +632,38 @@ describe("backend request auth", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("verifies signed JWTs with HTTP JWKS at a non-primary loopback address", async () => {
+    const secret = randomUUID();
+    const config = {
+      appId: "app-with-loopback-range-jwks",
+      jwksUrl: `http://127.255.255.254/jwks/${randomUUID()}`,
+    };
+    // Non-primary loopback addresses are not bindable on every supported host.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const payload = { iss: "https://issuer.example", sub: "loopback-range-user" };
+    const requestFor = (token: string) => ({
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    await expect(
+      resolveRequestSession(requestFor(signHs256Jwt(payload, secret)), config),
+    ).resolves.toMatchObject({
+      issuer: "https://issuer.example",
+      user_id: "loopback-range-user",
+      authMode: "external",
+    });
+    await expect(
+      resolveRequestSession(requestFor(signHs256Jwt(payload, "different-secret")), config),
+    ).rejects.toThrow(/Invalid JWT/);
   });
 
   it("shares one cold JWKS fetch and rejects invalid JWTs without an immediate refresh", async () => {

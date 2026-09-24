@@ -16,6 +16,7 @@ import {
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
+import { managedEncryptionSchema } from "../typed-app.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
@@ -147,68 +148,113 @@ export interface CanonicalMigrationBundle {
   toSchema: WasmSchema;
 }
 
-export function assertMigrationMatchesCanonicalBundle(
-  migration: DefinedMigration,
+export function resolveCanonicalMigrationForward(
+  migration: DefinedMigration | undefined,
   canonical: CanonicalMigrationBundle,
-): void {
-  const fromWitness = resolveMigrationDefinitionWasmSchema(migration.from);
-  const toWitness = resolveMigrationDefinitionWasmSchema(migration.to);
-  const endpoints = [
-    {
-      label: "from",
-      embeddedHash: migration.fromHash,
-      canonicalHash: canonical.fromHash,
-      witness: fromWitness,
-      schema: canonical.fromSchema,
-    },
-    {
-      label: "to",
-      embeddedHash: migration.toHash,
-      canonicalHash: canonical.toHash,
-      witness: toWitness,
-      schema: canonical.toSchema,
-    },
-  ] as const;
+): PublishedTableLens[] {
+  const requested = migration?.forward ?? [];
+  if (migration) {
+    const fromWitness = resolveMigrationDefinitionWasmSchema(migration.from);
+    const toWitness = resolveMigrationDefinitionWasmSchema(migration.to);
+    const endpoints = [
+      {
+        label: "from",
+        embeddedHash: migration.fromHash,
+        canonicalHash: canonical.fromHash,
+        witness: fromWitness,
+        schema: canonical.fromSchema,
+      },
+      {
+        label: "to",
+        embeddedHash: migration.toHash,
+        canonicalHash: canonical.toHash,
+        witness: toWitness,
+        schema: canonical.toSchema,
+      },
+    ] as const;
 
-  for (const endpoint of endpoints) {
-    if (endpoint.embeddedHash !== undefined) {
-      const embeddedHash = normalizeSchemaHashInput(
-        endpoint.embeddedHash,
-        `migration embedded ${endpoint.label}Hash`,
-      );
-      if (!endpoint.canonicalHash.startsWith(embeddedHash)) {
-        throw new Error(
-          `Migration embedded ${endpoint.label}Hash ${embeddedHash} does not match canonical ${endpoint.label}Hash ${endpoint.canonicalHash}.`,
+    for (const endpoint of endpoints) {
+      if (endpoint.embeddedHash !== undefined) {
+        const embeddedHash = normalizeSchemaHashInput(
+          endpoint.embeddedHash,
+          `migration embedded ${endpoint.label}Hash`,
         );
+        if (!endpoint.canonicalHash.startsWith(embeddedHash)) {
+          throw new Error(
+            `Migration embedded ${endpoint.label}Hash ${embeddedHash} does not match canonical ${endpoint.label}Hash ${endpoint.canonicalHash}.`,
+          );
+        }
+      }
+
+      for (const [tableName, witnessTable] of Object.entries(endpoint.witness)) {
+        if (!tableSchemasEqual(witnessTable, endpoint.schema[tableName])) {
+          throw new Error(
+            `Migration ${endpoint.label} schema witness for table ${tableName} does not match canonical schema ${shortSchemaHash(endpoint.canonicalHash)}.`,
+          );
+        }
       }
     }
 
-    for (const [tableName, witnessTable] of Object.entries(endpoint.witness)) {
-      if (!tableSchemasEqual(witnessTable, endpoint.schema[tableName])) {
+    for (const lens of requested) {
+      const sourceTable = lens.renamedFrom ?? lens.table;
+      if (lens.added && Object.hasOwn(canonical.fromSchema, sourceTable)) {
         throw new Error(
-          `Migration ${endpoint.label} schema witness for table ${tableName} does not match canonical schema ${shortSchemaHash(endpoint.canonicalHash)}.`,
+          `Migration added table ${sourceTable} already exists in the canonical source schema.`,
         );
+      }
+      if (!lens.added && !Object.hasOwn(fromWitness, sourceTable)) {
+        throw new Error(
+          `Migration from schema witness is missing transformed table ${sourceTable}.`,
+        );
+      }
+      if (!lens.removed && !Object.hasOwn(toWitness, lens.table)) {
+        throw new Error(`Migration to schema witness is missing transformed table ${lens.table}.`);
       }
     }
   }
 
+  const forward = serializeForwardLenses(requested);
+  const managedAdditions = new Set(
+    Object.keys(managedEncryptionSchema).filter(
+      (table) =>
+        !Object.hasOwn(canonical.fromSchema, table) && Object.hasOwn(canonical.toSchema, table),
+    ),
+  );
+  // Implicit administration tables cannot stand in for a missing user migration.
   if (
-    migration.forward.length === 0 &&
+    requested.length === 0 &&
+    schemaTransitionRequiresRowTransform(
+      canonical.fromSchema,
+      Object.fromEntries(
+        Object.entries(canonical.toSchema).filter(([table]) => !managedAdditions.has(table)),
+      ),
+    )
+  ) {
+    throw new MissingMigrationError(canonical.fromHash, canonical.toHash);
+  }
+  for (const table of managedAdditions) {
+    const explicit = requested.filter((lens) => lens.table === table);
+    if (explicit.length > 0) {
+      if (
+        explicit.length !== 1 ||
+        !explicit[0]!.added ||
+        explicit[0]!.removed ||
+        explicit[0]!.renamedFrom ||
+        explicit[0]!.operations.length > 0
+      ) {
+        throw new Error(`Migration lens conflicts with managed table addition ${table}.`);
+      }
+      continue;
+    }
+    forward.push({ table, added: true, operations: [] });
+  }
+  if (
+    forward.length === 0 &&
     schemaTransitionRequiresRowTransform(canonical.fromSchema, canonical.toSchema)
   ) {
     throw new MissingMigrationError(canonical.fromHash, canonical.toHash);
   }
-  serializeForwardLenses(migration.forward);
-
-  for (const lens of migration.forward) {
-    const sourceTable = lens.renamedFrom ?? lens.table;
-    if (!lens.added && !Object.hasOwn(fromWitness, sourceTable)) {
-      throw new Error(`Migration from schema witness is missing transformed table ${sourceTable}.`);
-    }
-    if (!lens.removed && !Object.hasOwn(toWitness, lens.table)) {
-      throw new Error(`Migration to schema witness is missing transformed table ${lens.table}.`);
-    }
-  }
+  return forward;
 }
 
 export function resolveKnownSchemaHash(
@@ -482,19 +528,12 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   const fromSchema = options.fromHash ? await loadSchema(serverOptions, fromHash) : fromWitness!;
   const toSchema = options.toHash ? await loadSchema(serverOptions, toHash) : toWitness!;
 
-  if (migration) {
-    assertMigrationMatchesCanonicalBundle(migration, {
-      fromHash,
-      toHash,
-      fromSchema,
-      toSchema,
-    });
-  }
-
-  const forward = serializeForwardLenses(migration?.forward ?? []);
-  if (forward.length === 0 && schemaTransitionRequiresRowTransform(fromSchema, toSchema)) {
-    throw new MissingMigrationError(fromHash, toHash);
-  }
+  const forward = resolveCanonicalMigrationForward(migration, {
+    fromHash,
+    toHash,
+    fromSchema,
+    toSchema,
+  });
 
   const published = await publishStoredMigration(serverOptions.serverUrl, {
     appId: serverOptions.appId,
@@ -553,20 +592,12 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     }
     if (!connected) {
       const fromSchema = await loadSchema(options, previousHead.schemaHash);
-      if (options.migration) {
-        assertMigrationMatchesCanonicalBundle(options.migration, {
-          fromHash: previousHead.schemaHash,
-          toHash: targetHash,
-          fromSchema,
-          toSchema: wasmSchema,
-        });
-      }
-      if (
-        (!options.migration || options.migration.forward.length === 0) &&
-        schemaTransitionRequiresRowTransform(fromSchema, wasmSchema)
-      ) {
-        throw new MissingMigrationError(previousHead.schemaHash, targetHash);
-      }
+      resolveCanonicalMigrationForward(options.migration, {
+        fromHash: previousHead.schemaHash,
+        toHash: targetHash,
+        fromSchema,
+        toSchema: wasmSchema,
+      });
     }
   }
 
