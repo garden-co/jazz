@@ -97,11 +97,18 @@ it.each(["partial", "full"] as const)(
     const after = { ...before, messages: encrypted };
     const oldApp = s.defineApp(before);
     const newApp = s.defineApp(after);
-    const migration = s.defineMigration({
-      from: witness === "partial" ? { projects } : before,
-      to: after,
-      createTables: { messages: true },
-    });
+    const migration =
+      witness === "partial"
+        ? s.defineMigration({
+            from: { projects },
+            to: { projects, messages: encrypted },
+            createTables: { messages: true },
+          })
+        : s.defineMigration({
+            from: before,
+            to: after,
+            createTables: { messages: true },
+          });
     const permissions = (app: typeof newApp) =>
       definePermissions(app, ({ policy, session }) => {
         policy.projects.allowRead.always();
@@ -309,6 +316,7 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
 it("rejects retargeting encrypted rows to an unrelated scope alongside table renames", () => {
   const scope = s.table({ title: s.string() }, {});
   expect(() =>
+    // @ts-expect-error Deliberately invalid scope retarget must also reject at runtime.
     s.defineMigration({
       from: {
         projects: scope,

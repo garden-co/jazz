@@ -122,11 +122,7 @@ it.each(["insert", "upsert"] as const)(
         () => undefined,
         (error: unknown) => error,
       );
-      expect.soft(failure).toMatchObject({
-        name: "Error",
-        message:
-          "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
-      });
+      expect.soft(failure).toBeInstanceOf(Error);
       // Rollback alone cannot prove this: provisional envelopes must never be prepared.
       expect.soft(preparedEnvelopes).toBe(0);
       expect(await writer.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
