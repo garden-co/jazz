@@ -323,3 +323,161 @@ mod parked_on_chunk {
         assert_eq!(docs, [(vec![Value::U64(5)], 1)], "routed sink");
     }
 }
+
+/// Overlapping routed ticks (#3306). Write 1 parks on a chunk fetch in its
+/// first frame while later writes queue behind it at the same graph nodes.
+/// When write 1 resumes, its route-barrier frame must not release first-frame
+/// nodes a second time: that would pop a later write from the head of the
+/// temporal ordering queue (a debug assertion, and silent reordering in
+/// release builds).
+mod overlapping_writes_parked_on_chunk {
+    use super::*;
+    use bytes::Bytes;
+    use groove::chunks::{ChunkRequest, TestChunkProvider};
+    use groove::db::PredicateExpr;
+    use groove::large_values::{LargeValueKind, prepare};
+    use groove::storage::MemoryStorage;
+    use std::rc::Rc;
+
+    fn schema() -> DatabaseSchema {
+        DatabaseSchema::new([TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("project_id", ColumnType::U64),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+    }
+
+    #[test]
+    fn overlapping_writes_deliver_in_order_when_the_first_parks_on_a_chunk() {
+        let logical = "parked body ".repeat(40_000);
+        let prepared = prepare(LargeValueKind::String, logical.as_bytes()).unwrap();
+        let chunks = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (provider, control) = TestChunkProvider::controlled(chunks);
+        let schema = schema();
+        let families = schema
+            .column_families()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut db = block_on(Database::new(
+            schema,
+            MemoryStorage::new(&family_refs).unwrap(),
+        ))
+        .unwrap();
+        db.set_chunk_provider(Rc::new(provider));
+
+        // Flat routed sink (no collector): the body filter reads the large
+        // value, so the routed terminal's frame parks on the chunk fetch.
+        let bindings = GraphBuilder::binding_source(
+            "project_route",
+            RecordDescriptor::new([("project_id", ColumnType::U64)]),
+        );
+        let docs = GraphBuilder::join(
+            bindings,
+            GraphBuilder::table("docs"),
+            ["project_id"],
+            ["project_id"],
+        )
+        .project_fields([
+            ProjectField::renamed("right.id", "id"),
+            ProjectField::renamed("right.body", "body"),
+            ProjectField::renamed("left.project_id", "__route_project_id"),
+        ])
+        .filter(PredicateExpr::eq("body", Value::String(logical.clone())))
+        .project_fields([
+            ProjectField::renamed("id", "id"),
+            ProjectField::renamed("__route_project_id", "__route_project_id"),
+        ]);
+        let shape = block_on(db.prepare(
+            vec![RoutedMultisinkTerminal::new(
+                "docs",
+                docs,
+                ["__route_project_id"],
+                ["id"],
+            )],
+            "project_route",
+            RecordDescriptor::new([("project_id", ColumnType::U64)]),
+        ))
+        .unwrap();
+        let sub = block_on(db.bind_shape(shape.id(), &[Value::U64(20)])).unwrap();
+        block_on(db.drive_progress()).unwrap();
+        while sub.try_recv().is_ok() {}
+
+        // Start three overlapping writes while the chunk provider is paused.
+        // Each apply returns with its evaluation queued; none has published.
+        control.pause();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut received = Vec::new();
+        for id in [1u64, 2, 3] {
+            let mut write = db.open_batch();
+            write.insert(
+                "docs",
+                vec![
+                    Value::U64(id),
+                    Value::U64(20),
+                    Value::Large(Box::new(prepared.value_ref.clone())),
+                ],
+            );
+            let mut apply = Box::pin(db.apply_batch(write));
+            let mut polls = 0;
+            let applied = loop {
+                match Pin::new(&mut apply).poll(&mut cx) {
+                    Poll::Ready(result) => break result.unwrap(),
+                    Poll::Pending => {
+                        polls += 1;
+                        assert!(polls < 10_000, "write {id} apply never returned");
+                    }
+                }
+            };
+            drop(apply);
+            while let Ok(deltas) = sub.try_recv() {
+                received.push(deltas);
+            }
+            let persisted = block_on(applied.persist());
+            db.finish_persistence(persisted).unwrap();
+        }
+
+        // Resume: write 1 finishes its first frame, then activates its route
+        // barriers while writes 2 and 3 wait behind it.
+        control.resume();
+        for _ in 0..10 {
+            block_on(db.drive_progress()).unwrap();
+            while let Ok(deltas) = sub.try_recv() {
+                received.push(deltas);
+            }
+        }
+
+        let docs = received
+            .iter()
+            .filter_map(|deltas| deltas.get("docs"))
+            .flat_map(|deltas| deltas.to_values().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            docs,
+            [
+                (vec![Value::U64(1)], 1),
+                (vec![Value::U64(2)], 1),
+                (vec![Value::U64(3)], 1),
+            ],
+            "each write's routed row arrives once, in write order"
+        );
+    }
+}

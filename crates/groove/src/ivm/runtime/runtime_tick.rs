@@ -341,6 +341,10 @@ struct EvaluationWorkQueue {
     runnable: VecDeque<NodeId>,
     completed_events: Vec<NodeId>,
     temporal_waiting: Vec<usize>,
+    /// Nodes whose completion an earlier frame of this evaluation already
+    /// published (#3306). Temporal successors are released at most once per
+    /// evaluation, so re-completing one of these emits no second event.
+    released_by_earlier_frame: HashSet<NodeId>,
 }
 
 impl EvaluationWorkQueue {
@@ -379,6 +383,7 @@ impl EvaluationWorkQueue {
             request_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
             completed_events: Vec::new(),
+            released_by_earlier_frame: HashSet::default(),
         };
         // Contract physical tasks, not graph identity. A globally shared or
         // explicitly retained intermediate remains independently executable.
@@ -562,9 +567,11 @@ impl EvaluationWorkQueue {
         if let Some(members) = self.pipelines.get(&node) {
             for member in members.iter().copied() {
                 self.entries[self.layout.slots[&member]] = EvaluationEntry::Complete;
-                self.completed_events.push(member);
+                if !self.released_by_earlier_frame.contains(&member) {
+                    self.completed_events.push(member);
+                }
             }
-        } else {
+        } else if !self.released_by_earlier_frame.contains(&node) {
             self.completed_events.push(node);
         }
         self.entries[slot] = EvaluationEntry::Complete;
@@ -725,6 +732,59 @@ impl EvaluationWorkQueue {
     fn drain_completed_events(&mut self) -> Vec<NodeId> {
         std::mem::take(&mut self.completed_events)
     }
+
+    /// Before an evaluation first registers as a temporal waiter, nothing it
+    /// completed has been released to anyone. Its incomplete nodes are about
+    /// to be registered, so each must emit its completion exactly once, even
+    /// one an earlier frame already evaluated.
+    fn discard_unregistered_completions(&mut self) {
+        self.completed_events.clear();
+        self.released_by_earlier_frame.clear();
+    }
+
+    /// Nodes this frame has completed (or abandoned).
+    fn complete_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.entries.iter().enumerate().filter_map(|(slot, entry)| {
+            (*entry == EvaluationEntry::Complete).then_some(self.layout.nodes[slot])
+        })
+    }
+
+    /// Seed a later frame of the same evaluation with the earlier frame's
+    /// completed nodes (#3306). `carried` tasks stay complete without being
+    /// scheduled again or re-emitting completion; their dependents see them
+    /// as satisfied inputs. Every node in `released` is suppressed from
+    /// emitting a completion event should this frame evaluate it again.
+    fn carry_earlier_frame(&mut self, carried: &HashSet<NodeId>, released: HashSet<NodeId>) {
+        let tails = (0..self.entries.len())
+            .filter(|&slot| {
+                self.task_slots[slot] == slot
+                    && match self.pipelines.get(&self.layout.nodes[slot]) {
+                        Some(members) => members.iter().all(|member| carried.contains(member)),
+                        None => carried.contains(&self.layout.nodes[slot]),
+                    }
+            })
+            .collect::<Vec<_>>();
+        // Mark every carried task complete before releasing dependents, so a
+        // carried dependent is never made runnable by a carried input.
+        for &slot in &tails {
+            if let Some(members) = self.pipelines.get(&self.layout.nodes[slot]) {
+                for member in members.iter() {
+                    self.entries[self.layout.slots[member]] = EvaluationEntry::Complete;
+                }
+            }
+            self.entries[slot] = EvaluationEntry::Complete;
+        }
+        let (entries, slots) = (&self.entries, &self.layout.slots);
+        self.runnable
+            .retain(|node| entries[slots[node]] != EvaluationEntry::Complete);
+        for &slot in &tails {
+            for index in 0..self.layout.dependents(slot).len() {
+                let dependent = self.layout.dependents(slot)[index];
+                self.slot_dependency_ready(dependent);
+            }
+        }
+        self.released_by_earlier_frame = released;
+    }
 }
 
 impl<'a> IncrementalEvaluation<'a> {
@@ -776,6 +836,19 @@ impl<'a> IncrementalEvaluation<'a> {
         roots.dedup();
         let mut queue =
             EvaluationWorkQueue::discover_frame(&runtime.graph, &runtime.node_meta, roots, false)?;
+        // The first frame's completions were (or, via the carried events
+        // below, will be) released to temporal successors exactly once. A
+        // park before this frame lets a later evaluation take the head of
+        // those nodes' ordering queues, so this frame must neither schedule
+        // them again nor release them a second time (#3306). Only nodes the
+        // barriers reach are re-evaluated.
+        let released = self.work_queue.complete_nodes().collect::<HashSet<_>>();
+        let carried = released
+            .iter()
+            .copied()
+            .filter(|node| !closure.contains(node))
+            .collect::<HashSet<_>>();
+        queue.carry_earlier_frame(&carried, released);
         queue.completed_events = self.work_queue.drain_completed_events();
         self.eval_memo.set_layout(Arc::clone(&queue.layout));
         self.work_queue = queue;
@@ -2096,7 +2169,7 @@ impl IvmRuntime {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
-                evaluation.work_queue.drain_completed_events();
+                evaluation.work_queue.discard_unregistered_completions();
                 evaluation.install_input_frontiers(self);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
