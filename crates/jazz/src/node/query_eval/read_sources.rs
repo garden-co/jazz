@@ -4243,8 +4243,8 @@ where
                 // Preserve bounded current ID reads. The policy-point guard
                 // from #2187 applies to future deletion delivery, not an
                 // initial snapshot whose owner releases it before any writes.
-                // Do not inherit snapshot-only secondary-index intersections
-                // or source limits: both consumers use live index graphs below.
+                // Select initial paths below from the executing binding; the
+                // generic cache must not retain binding-specific prefixes.
                 let tier = request
                     .reads
                     .primary
@@ -4263,6 +4263,31 @@ where
         );
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
+            let root = root_source_id(&query.table);
+            // A conjunctive root equality applies to every result even when
+            // includes or an existential join add relational nodes to the
+            // normalized program. The generic selector declines the whole
+            // program in that case; select only this root occurrence here.
+            // Policy alternatives and relation unions can reuse the same
+            // source identity for arms with different predicates.
+            if query.flat_join.is_none()
+                && query.policy_branches.is_empty()
+                && query.reachable.is_empty()
+                && query.inherits.is_empty()
+                && query.array_subqueries.is_empty()
+                && query.aggregate.is_none()
+                && query.relation.is_none()
+            {
+                if !paths.contains_key(&root) {
+                    let table = self.table_in_schema(&query.table, shape.schema_version())?;
+                    let equalities = root_literal_equalities(query, binding)?;
+                    if let Some(path @ CurrentAccessPath::Index { .. }) =
+                        select_current_access_path(&table, &equalities)
+                    {
+                        paths.insert(root.clone(), path);
+                    }
+                }
+            }
             if query.joins.len() == 1
                 && query.flat_join.is_none()
                 && query.policy_branches.is_empty()
@@ -4277,16 +4302,20 @@ where
                     && join.source_lookup.is_none()
                     && join.correlated_filters.is_empty()
                     && join.nested_joins.is_empty()
-                    && let Some(Value::Uuid(row_id)) =
-                        root_literal_equalities(query, binding)?.get("id")
                 {
-                    // The root equality fixes the only row id that can satisfy
-                    // this existential junction join. Narrow this occurrence
-                    // before the ordinary filter, deletion, and policy graphs
-                    // evaluate it; retained subscriptions keep their live path.
+                    // An exact root id fixes the junction's foreign key. Without
+                    // one, a conjunctive junction filter can still narrow this
+                    // occurrence before the ordinary join, deletion, and policy
+                    // graphs evaluate it. Keep the root-id probe when available
+                    // rather than intersecting it with a potentially broad tag
+                    // index; retained subscriptions keep their live path.
                     let join_table = self.table_in_schema(&join.table, shape.schema_version())?;
-                    let equalities =
-                        BTreeMap::from([(join.on_column.clone(), Value::Uuid(*row_id))]);
+                    let equalities = match root_literal_equalities(query, binding)?.get("id") {
+                        Some(Value::Uuid(row_id)) => {
+                            BTreeMap::from([(join.on_column.clone(), Value::Uuid(*row_id))])
+                        }
+                        _ => literal_equalities_for_filters(&join.filters, binding)?,
+                    };
                     if let Some(path @ CurrentAccessPath::Index { .. }) =
                         select_current_access_path(&join_table, &equalities)
                     {
