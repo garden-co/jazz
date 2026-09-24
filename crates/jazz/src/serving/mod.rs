@@ -236,6 +236,9 @@ struct InMemoryServerShellMetrics {
     tick_subscription_wakes: u64,
     tick_write_wakes: u64,
     last_tick: ShellTickStats,
+    /// Fallbacks of sessions closed without a resume cursor. Live sessions and
+    /// parked resume cursors still own theirs.
+    retired_full_diff_fallbacks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -733,6 +736,16 @@ impl ShellPeerConnection {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
             Self::Durable(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
+        }
+    }
+
+    fn full_diff_fallbacks(&self) -> u64 {
+        match self {
+            Self::Memory(connection) | Self::Durable(connection) => {
+                crate::db::block_on(connection.lock())
+                    .full_diff_fallbacks()
+                    .total()
+            }
         }
     }
 
@@ -1247,6 +1260,7 @@ impl InMemoryServerShell {
     /// Close a subscriber session without preserving a resume cursor.
     pub fn close_session(&mut self, session: ServerSession) -> ShellResult<()> {
         let state = self.take_session(session)?;
+        self.metrics.retired_full_diff_fallbacks += state.connection.full_diff_fallbacks();
         self.db.detach_connection(&state.connection);
         self.note_session_closed();
         Ok(())
@@ -1286,6 +1300,21 @@ impl InMemoryServerShell {
         }
     }
 
+    fn subscription_full_diff_fallbacks(&self) -> u64 {
+        let live: u64 = self
+            .sessions
+            .iter()
+            .flatten()
+            .map(|state| state.connection.full_diff_fallbacks())
+            .sum();
+        let parked: u64 = self
+            .resume_cursors
+            .values()
+            .map(|(_, cursor)| cursor.full_diff_fallbacks().total())
+            .sum();
+        self.metrics.retired_full_diff_fallbacks + live + parked
+    }
+
     /// Return live operational counters for the in-memory shell.
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -1306,7 +1335,7 @@ impl InMemoryServerShell {
             last_tick_subscription_wakes: u64::from(self.metrics.last_tick.subscription_wakes),
             last_tick_write_wakes: u64::from(self.metrics.last_tick.write_wakes),
             protocol_version_mismatches: 0,
-            subscription_full_diff_fallbacks: 0,
+            subscription_full_diff_fallbacks: self.subscription_full_diff_fallbacks(),
             storage_migrations_applied: 0,
         }
     }

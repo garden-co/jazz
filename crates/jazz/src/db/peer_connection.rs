@@ -833,6 +833,14 @@ pub struct ResumeCursor {
 }
 
 impl ResumeCursor {
+    /// Full-diff fallbacks carried by the parked subscriber peer.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
+        self.peer
+            .maintained_subscription_view_metrics()
+            .full_diff_fallbacks
+    }
+
     /// Resume attaches the saved peer to a new physical transport. Preserve
     /// the server-authenticated scope binding while replacing its old
     /// per-attachment admission capability.
@@ -1069,6 +1077,7 @@ where
         // scheduling a fresh group. Otherwise its PeerState cursor and
         // Groove subscription remain live under the old policy snapshot.
         for stale_subscription in stale_maintained_subscriptions {
+            peer.note_claim_refresh_full_diff(stale_subscription);
             let mut node = self.node.borrow_mut();
             node.apply_unsubscribe(stale_subscription);
             peer.forget_subscription_with_node(&mut node, stale_subscription);
@@ -1467,6 +1476,20 @@ where
     /// sent by this connection.
     pub fn last_resume_bytes(&self) -> Option<usize> {
         self.last_resume_bytes
+    }
+
+    /// Full-diff fallbacks of this connection's served maintained views.
+    /// Upstream links serve no subscriptions and report zero.
+    pub fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
+        match &self.link {
+            ConnectionLink::Subscriber(state) => {
+                state
+                    .peer
+                    .maintained_subscription_view_metrics()
+                    .full_diff_fallbacks
+            }
+            ConnectionLink::Upstream(_) => Default::default(),
+        }
     }
 
     /// Host-only capability; does not alter write or publication trust.
