@@ -949,7 +949,7 @@ where
         };
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
-        for write in open_tx.writes {
+        for (write, has_content) in coalesce_exclusive_writes(open_tx.writes) {
             let snapshot_content = self
                 .snapshot_winner(
                     write.schema_version,
@@ -959,7 +959,7 @@ where
                 )
                 .await;
             let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-            let PendingCells::Replace(mut cells) = write.cells else {
+            let PendingCells::Replace(mut cells) = write.cells.clone() else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
                 ));
@@ -986,6 +986,15 @@ where
                     ));
                 }
             }
+            // A delete or restore without replacement content writes the
+            // snapshot's row image with its new deletion state.
+            if !has_content {
+                cells = inherited.clone();
+            }
+            // Content replacements carry the snapshot row's deletion state.
+            let deletion = write
+                .deletion
+                .or_else(|| snapshot_content.as_ref().and_then(VersionRow::deletion));
             for (column, value) in &mut cells {
                 let semantic_kind = table_schema
                     .columns
@@ -1016,7 +1025,7 @@ where
                 made_by,
                 provenance_at.physical_ms(),
                 &cells,
-                write.deletion,
+                deletion,
             )?);
         }
         let tx = Transaction {
@@ -1755,4 +1764,38 @@ pub(super) struct SnapshotRow {
     read_version: Option<TxId>,
     deleted: bool,
     provenance: Option<(VersionRow, VersionRow)>,
+}
+
+/// One row has one image per transaction: merge a row's staged content
+/// replacement with its staged delete/restore event, in staging order.
+/// Returns each merged write with whether it carries replacement content.
+fn coalesce_exclusive_writes(writes: Vec<PendingWrite>) -> Vec<(PendingWrite, bool)> {
+    let mut merged: Vec<(PendingWrite, bool)> = Vec::with_capacity(writes.len());
+    for write in writes {
+        let has_content = write.deletion.is_none();
+        let existing = merged.iter_mut().find(|(candidate, _)| {
+            candidate.table == write.table
+                && candidate.row_uuid == write.row_uuid
+                && candidate.schema_version == write.schema_version
+                && candidate.branch == write.branch
+        });
+        match existing {
+            Some((candidate, candidate_has_content)) => {
+                // Content staged after a delete resurrects the row.
+                let resurrects = has_content && candidate.deletion == Some(DeletionEvent::Deleted);
+                if has_content {
+                    candidate.cells = write.cells;
+                    *candidate_has_content = true;
+                }
+                candidate.deletion = if resurrects {
+                    Some(DeletionEvent::Restored)
+                } else {
+                    write.deletion.or(candidate.deletion)
+                };
+                candidate.now_ms = write.now_ms.or(candidate.now_ms);
+            }
+            None => merged.push((write, has_content)),
+        }
+    }
+    merged
 }

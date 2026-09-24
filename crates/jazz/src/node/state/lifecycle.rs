@@ -357,10 +357,7 @@ where
         for table in [
             "jazz_transactions",
             "jazz_rejected_transactions",
-            "jazz_pending_edges",
-            "jazz_merge_heads",
             "jazz_global_changes",
-            "jazz_deletion_history",
         ] {
             if !meta_database
                 .primary_key_scan_raw(table, &[])

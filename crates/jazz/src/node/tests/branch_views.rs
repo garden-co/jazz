@@ -1340,7 +1340,9 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         "locally settled content and deletion use the canonical branch prefix in ahead-current"
     );
 
-    for branch_key in [&key, &sibling_key] {
+    // The deleted branch row has two pending images (content and deletion),
+    // both carrying its title; the sibling branch has one.
+    for (branch_key, expected) in [(&key, 2), (&sibling_key, 1)] {
         assert_eq!(
             rocks
                 .database
@@ -1351,7 +1353,7 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
                 )
                 .unwrap()
                 .len(),
-            1,
+            expected,
             "same RowUuid/title rows must remain in distinct canonical branch index prefixes"
         );
     }

@@ -94,6 +94,50 @@ where
         ))
     }
 
+    /// Read raw row images of one branch through the physical winner
+    /// projection. Deletion markers need only system fields, so they must not
+    /// pass through the read schema's enum lens: an old schema cannot name a
+    /// newer case, but it can still observe that the row was deleted.
+    pub(super) fn physical_current_marker_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        branch_key: &BranchKey,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source_scan(
+            binding.storage_table,
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
+            branch_scan(branch_key, None),
+        ))
+    }
+
     pub(super) fn physical_current_source_graph_with_projection_target(
         &self,
         schema_version: SchemaVersionId,

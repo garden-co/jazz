@@ -644,13 +644,11 @@ impl HistoryEntry {
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
-        if self.is_register_record() {
-            return None;
-        }
-        let user_cells = self
-            .version
-            .descriptor()
-            .field_index("updated_at")
+        // User cells follow the row image's `_deletion` cell.
+        let descriptor = self.version.descriptor();
+        let user_cells = descriptor
+            .field_index("_deletion")
+            .or_else(|| descriptor.field_index("updated_at"))
             .map_or(HistoryRowRecord::USER_CELLS, |idx| idx + 1);
         self.version
             .borrowed()
@@ -671,14 +669,7 @@ impl HistoryEntry {
 
     /// Deletion-register event, if this is a deletion layer version.
     pub fn deletion(&self) -> Option<DeletionEvent> {
-        if !self.is_register_record() {
-            return None;
-        }
-        let field = self
-            .version
-            .descriptor()
-            .field_index("_deletion")
-            .expect("register history has deletion field");
+        let field = self.version.descriptor().field_index("_deletion")?;
         deletion_from_value(
             self.version
                 .borrowed()
@@ -705,10 +696,6 @@ impl HistoryEntry {
     /// Whether this version is globally current on this node.
     pub fn is_globally_current(&self) -> bool {
         self.is_globally_current
-    }
-
-    fn is_register_record(&self) -> bool {
-        self.version.descriptor().field_index("_deletion").is_some()
     }
 }
 
@@ -959,20 +946,6 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct RegisterRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: u64,
-        2 => tx_node_id: u64,
-        3 => schema_version: u64,
-        4 => created_by: RowAuthor,
-        5 => created_at: u64,
-        6 => updated_by: RowAuthor,
-        7 => updated_at: u64,
-        8 => _deletion: Value,
-    }
-}
-
-groove::define_record! {
     struct RejectedTransactionRowRecord {
         0 => time: u64,
         1 => node_id: u64,
@@ -990,8 +963,7 @@ groove::define_record! {
         0 => tx_time: u64,
         1 => tx_node_id: u64,
         2 => row_uuid: RowUuid,
-        3 => layer: Vec<u8>,
-        4 => _deletion: Option<Value>,
+        3 => _deletion: Option<Value>,
         .. user_cells,
     }
 }

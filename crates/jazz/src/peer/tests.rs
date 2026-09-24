@@ -2404,16 +2404,16 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     assert_view_update_rows(
         &mut expected_snapshots,
         update.clone(),
-        vec![("todos", row_uuid, restored_content_tx)],
+        vec![("todos", row_uuid, restore_tx)],
         vec![],
     );
     assert!(
         version_bundles.iter().any(|bundle| {
-            bundle.tx.tx_id == restored_content_tx
+            bundle.tx.tx_id == restore_tx
                 && bundle.versions.iter().any(|version| {
                     version.table() == "todos"
                         && version.row_uuid() == row_uuid
-                        && version.deletion().is_none()
+                        && version.deletion() == Some(DeletionEvent::Restored)
                         && wire_version_cells(version, core.table("todos").unwrap())
                             == title_cells("restored")
                 })
@@ -2443,7 +2443,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         Some(BTreeSet::from([(
             "todos".to_owned().into(),
             row_uuid,
-            restored_content_tx
+            restore_tx
         )]))
     );
 }
@@ -2497,7 +2497,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     assert_view_update_rows(
         &mut expected_snapshots,
         update.clone(),
-        vec![("todos", row_uuid, restored_content_tx)],
+        vec![("todos", row_uuid, restore_tx)],
         vec![],
     );
     assert!(version_bundles.iter().any(|bundle| {
@@ -2522,7 +2522,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
         Some(BTreeSet::from([(
             "todos".to_owned().into(),
             row_uuid,
-            restored_content_tx
+            restore_tx
         )]))
     );
 }
@@ -2574,16 +2574,14 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
         vec![("todos", row_uuid, restore_tx)],
         vec![],
     );
+    // Content and restoration in one transaction are one row image.
     assert!(version_bundles.iter().any(|bundle| {
         bundle.tx.tx_id == restore_tx
-            && bundle
-                .versions
-                .iter()
-                .any(|version| version.deletion() == Some(DeletionEvent::Restored))
-            && bundle
-                .versions
-                .iter()
-                .any(|version| version.deletion().is_none())
+            && bundle.versions.iter().any(|version| {
+                version.deletion() == Some(DeletionEvent::Restored)
+                    && wire_version_cells(version, core.table("todos").unwrap())
+                        == title_cells("restored")
+            })
     }));
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
@@ -3704,8 +3702,8 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert!(metrics.footprint.structured_app_rows_bytes > 0);
 
     // The storage-backed path never needs to read a newer content winner to
-    // retract a deleted row. A restore re-enters through its exact original
-    // content transaction and is shipped from immutable storage.
+    // retract a deleted row. A restore is a complete row image, so the row
+    // re-enters through the restoring transaction and ships from storage.
     let deleted_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x51), 1_003).deletion(DeletionEvent::Deleted),
@@ -3727,7 +3725,7 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert_view_update_rows(
         &mut expected_snapshots,
         peer.query_update(&mut core, &shape, &binding).unwrap(),
-        vec![("todos", row(0x51), restored_tx)],
+        vec![("todos", row(0x51), re_restored_tx)],
         vec![],
     );
 }
@@ -5580,7 +5578,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     assert_view_update_rows(
         &mut expected_snapshots,
         restored.clone(),
-        vec![("todos", row, content_tx)],
+        vec![("todos", row, restore_tx)],
         vec![],
     );
     let version_bundles = version_bundles_for_update(&restored);

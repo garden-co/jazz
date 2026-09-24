@@ -4298,6 +4298,7 @@ pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, 
 
 pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, Error> {
     match value {
+        Value::Nullable(Some(inner)) => deletion_event_from_value(*inner),
         Value::EnumTag(0) => Ok(DeletionEvent::Deleted),
         Value::EnumTag(1) => Ok(DeletionEvent::Restored),
         _ => Err(Error::InvalidStoredValue("unknown deletion event")),

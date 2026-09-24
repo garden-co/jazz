@@ -827,17 +827,9 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
         panic!("expected exclusive commit unit");
     };
-    assert_eq!(versions.len(), 2);
-    let content = versions
-        .iter()
-        .find(|version| version.deletion().is_none())
-        .unwrap();
-    let restore = versions
-        .iter()
-        .find(|version| version.deletion() == Some(DeletionEvent::Restored))
-        .unwrap();
-    // Linear history: exclusive writes carry no ancestry; authority CAS checks
-    // each written register against the transaction's base snapshot.
+    // The replacement and the restore are one row image of the row.
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].deletion(), Some(DeletionEvent::Restored));
     let _ = (content_parent, deletion_parent);
 
     let [fate] = core

@@ -791,11 +791,17 @@ where
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_winner_tx_id_in_branch_selector(
-            table,
-            branch,
-            row_uuid,)
-        .await
+        // A deleted image is not visible content.
+        let Some(version) = self
+            .local_winner_in_branch_selector(table, branch, row_uuid)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if version.is_deleted() {
+            return Ok(None);
+        }
+        self.version_tx_id(&version).map(Some)
     }
 
     /// Return the local winner of a branch-local row while it is deleted.
@@ -815,19 +821,6 @@ where
             return Ok(None);
         }
         self.version_tx_id(&version).map(Some)
-    }
-
-    async fn local_winner_tx_id_in_branch_selector(
-        &mut self,
-        table: &str,
-        branch: &BranchSelector,
-        row_uuid: RowUuid,
-    ) -> Result<Option<TxId>, Error> {
-        self.local_winner_in_branch_selector(table, branch, row_uuid)
-            .await?
-            .as_ref()
-            .map(|version| self.version_tx_id(version))
-            .transpose()
     }
 
     async fn local_winner_in_branch_selector(
@@ -886,7 +879,7 @@ where
         Ok(self
             .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
             .await?
-            .map(|(_, (time, node), _)| TxId::new(time, node)))
+            .and_then(|(_, (time, node), deleted)| (!deleted).then(|| TxId::new(time, node))))
     }
 
     pub(crate) async fn local_deletion_winner_tx_id(
@@ -1393,8 +1386,16 @@ fn coalesce_same_row_commits(
             .clone()
             .unwrap_or_else(|| commit.cells.keys().cloned().collect());
         base.authored_columns = Some(base_authored.union(&next_authored).cloned().collect());
+        // Content written after a delete in the same transaction resurrects
+        // the row: the later write of the row wins.
+        let resurrects =
+            commit.deletion.is_none() && base.deletion == Some(DeletionEvent::Deleted);
         base.cells.extend(commit.cells);
-        base.deletion = commit.deletion.or(base.deletion);
+        base.deletion = if resurrects {
+            Some(DeletionEvent::Restored)
+        } else {
+            commit.deletion.or(base.deletion)
+        };
         base.now_ms = base.now_ms.max(commit.now_ms);
         base.known_fresh_row &= commit.known_fresh_row;
         base.prepared_large_columns

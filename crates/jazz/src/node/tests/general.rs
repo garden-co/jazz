@@ -1903,11 +1903,6 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
     let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
     assert!(!stored_parent.view_scoped_cardinality);
     assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
-    assert!(reader
-        .database
-        .primary_key_scan_raw("jazz_pending_edges", &[])
-        .unwrap()
-        .is_empty());
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }
 /// Keeps the active query claim scope opaque and deterministic, and restores

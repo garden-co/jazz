@@ -1812,10 +1812,9 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
     let shared_row = row(0x4d);
     let (node_dir, mut writer) = open_node_with_schema(node(0x41), schema.clone());
 
-    // One wire commit deliberately carries content and deletion records with
-    // the same row identity and transaction identity. The raw keys therefore
-    // coincide within a layer; only the physical table and layer distinguish
-    // all four pending projections.
+    // One commit carries content and deletion for the same row identity in two
+    // tables. Each table's content and deletion coalesce into one row image;
+    // only the physical table distinguishes the two pending projections.
     let replay_tx = writer
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", shared_row, 10).cells(title_cells("todo")),
@@ -1858,7 +1857,7 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
         .resolve()
         .unwrap();
     for table_id in [todos_id, notes_id] {
-        assert_eq!(ahead_current_row_count(&mut reader, if table_id == todos_id { "todos" } else { "notes" }), 2);
+        assert_eq!(ahead_current_row_count(&mut reader, if table_id == todos_id { "todos" } else { "notes" }), 1);
     }
 
     let distinct_tx = reader
@@ -1866,8 +1865,8 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
             MergeableCommit::new("todos", shared_row, 20).cells(title_cells("distinct key")),
         )
         .unwrap();
-    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 3);
-    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 2);
+    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 2);
+    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 1);
 
     reader
         .apply_sync_message_settled(SyncMessage::FateUpdate {
@@ -1877,8 +1876,8 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
             durability: None,
         })
         .unwrap();
-    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 2);
-    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 2);
+    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 1);
+    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 1);
 }
 
 #[test]
@@ -2177,12 +2176,17 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
             && !entry.is_locally_current()
             && !entry.is_globally_current()
     }));
+    // Deletion is a cell of the row image: later writes carry the restore
+    // forward, so the restore itself is no longer the current image.
     assert!(history.iter().any(|entry| {
         entry.tx_id() == restored
             && entry.layer() == MergeAspect::Deletion
             && entry.deletion() == Some(DeletionEvent::Restored)
-            && entry.is_locally_current()
-            && entry.is_globally_current()
+            && !entry.is_locally_current()
+            && !entry.is_globally_current()
+    }));
+    assert!(history.iter().any(|entry| {
+        entry.is_globally_current() && entry.deletion() == Some(DeletionEvent::Restored)
     }));
     assert!(history.iter().any(|entry| {
         entry.tx_id() == exclusive

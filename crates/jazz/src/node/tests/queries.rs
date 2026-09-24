@@ -1270,13 +1270,10 @@ fn history_argmax_current_rows(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let table = node.table("todos").unwrap().clone();
     let versions = node.query_table_versions("todos").unwrap();
-    let mut content = BTreeMap::<RowUuid, &VersionRow>::new();
-    let mut registers = BTreeMap::<RowUuid, &VersionRow>::new();
+    // Deletion is a cell of the row image: the newest image decides both the
+    // cells and whether the row is visible.
+    let mut winners = BTreeMap::<RowUuid, &VersionRow>::new();
     for version in &versions {
-        let winners = match version.layer() {
-            VersionLayer::Content => &mut content,
-            VersionLayer::Deletion => &mut registers,
-        };
         if winners.get(&version.row_uuid()).is_none_or(|current| {
             (version.tx_time(), version.tx_node_alias())
                 > (current.tx_time(), current.tx_node_alias())
@@ -1284,14 +1281,10 @@ fn history_argmax_current_rows(
             winners.insert(version.row_uuid(), version);
         }
     }
-    content
+    winners
         .into_iter()
         .filter_map(|(row_uuid, version)| {
-            let deleted = registers
-                .get(&row_uuid)
-                .and_then(|register| register.deletion())
-                == Some(DeletionEvent::Deleted);
-            if deleted {
+            if version.is_deleted() {
                 return None;
             }
             let cells = table
