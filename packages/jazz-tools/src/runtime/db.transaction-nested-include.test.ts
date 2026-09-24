@@ -59,3 +59,46 @@ it.each(["inline", "large"])(
   },
   60_000,
 );
+
+it.each(["local", "remote", "global"] as const)(
+  "reads a reverse include of a JSON child inside an exclusive transaction (%s)",
+  async (tier) => {
+    const app = s.defineApp({
+      parent: s.table({ name: s.string() }, { childViaParent: s.reverse("child", "parent") }),
+      child: s.table(
+        { parentId: s.uuid(), name: s.string(), metadata: s.json() },
+        { parent: s.rel("parent", "parentId") },
+      ),
+    });
+    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let db: Awaited<ReturnType<typeof createDb>> | undefined;
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: app,
+        permissions: definePermissions(app, ({ policy }) => {
+          policy.parent.allowRead.always();
+          policy.parent.allowInsert.always();
+          policy.child.allowRead.always();
+          policy.child.allowInsert.always();
+        }),
+      });
+      db = await createDb(await localAccountConfig(server.appId, server.url));
+      const parent = await db.insert(app.parent, { name: "Parent" }).wait({ tier: "global" });
+      const child = await db
+        .insert(app.child, { parentId: parent.id, name: "Child", metadata: { value: 1 } })
+        .wait({ tier: "global" });
+      const query = app.parent.where({ id: parent.id }).include({ childViaParent: app.child });
+      const expected = { ...parent, childViaParent: [child] };
+      expect(await db.one(query, { tier: "global" })).toEqual(expected);
+      const write = await db.exclusiveTransaction((tx) => tx.one(query, { tier }));
+      expect(await write.wait()).toEqual(expected);
+    } finally {
+      await db?.shutdown();
+      await server.stop();
+    }
+  },
+  60_000,
+);

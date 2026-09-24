@@ -70,6 +70,6 @@ jobs:
           cd target/inspector-prebuilt
           node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
           npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
-            --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}" \
+            --token="${VERCEL_TOKEN}" \
             --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
             --meta "releaseSourceSha=${ARTIFACT_SHA}"

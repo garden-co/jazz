@@ -73,7 +73,7 @@ that recipient never authored a write. The transaction must be introduced before
 its fate applies. Bare supporting-row references do not register such observers,
 and Pending transactions are pinned against cache eviction. If a view is parked
 because another row body is missing, fates for its included carriers wait for
-that view or its non-authoritative carrier caching. No additional body fetch or
+that view or its retained transaction identity. No additional body fetch or
 permission capability is inferred solely from a fate.
 
 ### Two independent layers
