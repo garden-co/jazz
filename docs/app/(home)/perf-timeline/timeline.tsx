@@ -902,8 +902,8 @@ export function Dashboard() {
                 <div className="data-stamp">
                   {data.runCount} runs returned by CodSpeed · {data.excludedRuns}{" "}
                   past-PR/other-branch runs excluded · {data.excludedResults} non-wallclock or
-                  invalid results excluded · Retrieved {date(data.fetchedAt)} · Cached up to 5 min
-                  (stale responses up to 15 min)
+                  invalid results excluded · Retrieved {date(data.fetchedAt)} · Cached up to 30 min
+                  (stale responses up to a day)
                 </div>
               </section>
             )}
