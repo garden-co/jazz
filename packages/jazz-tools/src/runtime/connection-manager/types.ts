@@ -177,7 +177,10 @@ export abstract class ConnectionManager {
 
   /** The runtime transport's own view, once a server is configured and not explicitly offline. */
   protected transportLinkState(): RemoteLinkState {
-    return this.getCurrentClient()?.getRuntime().remoteLinkState?.() ?? "connecting";
+    const state = this.getCurrentClient()?.getRuntime().remoteLinkState?.() ?? "connecting";
+    // A configured server whose transport has not been requested yet is about
+    // to be connected by this manager, not absent.
+    return state === "none" ? "connecting" : state;
   }
 
   /** Observe {@link remoteLinkState} changes, including explicit disconnects. */

@@ -95,6 +95,15 @@ export declare class NapiDb {
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
   setNonDurableClient(): void
+  /**
+   * Report what the host knows about the path to the authoritative server
+   * (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
+   * `"connecting" | "connected" | "unavailable"` are accepted as aliases).
+   * Drives only `local-first-unless-empty` reads. The core timestamps each
+   * `"attempting"` report as the start of a new attempt; until this is
+   * first called, reachability is derived from this runtime's own upstream.
+   */
+  setRemoteLinkHint(state: string): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   /** Return the originating node clock before a host releases its memory runtime. */
