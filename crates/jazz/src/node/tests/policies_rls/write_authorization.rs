@@ -330,7 +330,6 @@ fn authority_read_for_write_check_is_mergeable_only() {
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 11)
                 .made_by(user(0xa5))
-                .parents(vec![base])
                 .cells(BTreeMap::from([(
                     "title".to_owned(),
                     Value::String("after".to_owned()),
@@ -402,7 +401,6 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, updated_at_ms)
                 .made_by(author)
-                .parents(vec![insert])
                 .cells(title_cells("updated")),
         )
         .unwrap();

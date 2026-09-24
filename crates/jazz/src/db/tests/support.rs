@@ -2087,9 +2087,6 @@ impl CoreDb {
             .made_by(made_by)
             .permission_subject(self.author)
             .cells(cells);
-        if let Some(parent) = parent {
-            commit = commit.parents(vec![parent]);
-        }
         let published = block_on(node.borrow_mut().commit_mergeable(commit))?;
         let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
         let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;

@@ -823,7 +823,7 @@ fn commit_and_oracle(
     commit: MergeableCommit,
 ) -> TxId {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let published = node.commit_mergeable(commit).unwrap();
@@ -843,7 +843,7 @@ fn commit_global_and_oracle(
     commit: MergeableCommit,
 ) -> (TxId, GlobalTime) {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
@@ -1653,7 +1653,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 };
                 commits_started += 1;
                 let row_uuid = commit.row_uuid;
-                let parents = commit.parents.clone();
+                let parents: Vec<TxId> = Vec::new();
                 let cells = commit.cells.clone();
                 let deletion = commit.deletion;
                 let (published, message) = if use_writer_a {
@@ -1853,7 +1853,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit =
                     MergeableCommit::new("todos", parent_row, 1_300 + rng.choose(12) as u64)
-                        .parents(vec![parent_ref])
                         .made_by(made_by)
                         .cells(owner_cells_with_author(
                             owner,

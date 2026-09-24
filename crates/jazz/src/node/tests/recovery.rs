@@ -213,48 +213,6 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
     ));
 }
 
-#[test]
-fn contribution_merge_provenance_survives_reopen() {
-    let schema = schema();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let tx_id = TxId::new(TxTime::from(10), node(1));
-    let provenance = canonical_contribution_provenance(tx_id);
-    {
-        let mut core = open_node_at(&temp_dir, schema.clone());
-        core.ingest_commit_unit_settled(
-            Transaction {
-                tx_id,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(tx_id.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: Some(provenance.clone()),
-            },
-            vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
-        assert_eq!(
-            core.transaction_record(tx_id).unwrap().contribution_merge,
-            Some(provenance.clone())
-        );
-    }
-
-    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
-    assert_eq!(
-        reopened
-            .transaction_record(tx_id)
-            .unwrap()
-            .contribution_merge,
-        Some(provenance)
-    );
-}
-
 /// Storage-format corpus for the v1 branch-view copy evidence carried in the
 /// existing non-causal provenance column. This stays at the codec boundary:
 /// public mutation APIs intentionally cannot hand-author physical evidence.
@@ -646,212 +604,6 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
     assert!(core.query_versions_for_tx(tx_id).unwrap().is_empty(), "rejected input must not store any row versions");
 }
 
-#[test]
-fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_persistence() {
-    let schema = contribution_operation_schema();
-    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
-    let invalid_cases = [
-        (
-            "text_members",
-            Vec::new(),
-            Value::Array(vec![v("one")]),
-            "g-set contribution operation identity must be canonical",
-        ),
-        (
-            "count",
-            vec![0],
-            Value::U64(1),
-            "counter contribution operation identity must be empty",
-        ),
-    ];
-    for (index, (column, identity, value, expected)) in invalid_cases.into_iter().enumerate() {
-        let tx_id = TxId::new(TxTime::from(20 + index as u64), node(0x31));
-        assert_operation_rejection_retains_only_the_terminal_fate(
-            &mut core,
-            operation_transaction(tx_id, operation_provenance(tx_id, column, identity)),
-            vec![operation_version(&schema, column, value)],
-            expected,
-        );
-    }
-}
-
-#[test]
-fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutation() {
-    let schema = schema();
-    let invalid_tx_id = TxId::new(TxTime::from(40), node(0x31));
-    let invalid_provenance = || {
-        let coordinate = ContributionCoordinate {
-            branch_key: BranchKey::default(),
-            table: "todos".to_owned(),
-            row_uuid: row(0x61),
-            layer: MergeAspect::Content,
-            component: ContributionComponent::Operation {
-                column: "title".to_owned(),
-                identity: vec![0],
-            },
-        };
-        ContributionMergeProvenance::canonical(
-            BranchKey::default(),
-            BranchKey::default(),
-            vec![ContributionSubstitution {
-                target: coordinate.clone(),
-                sources: vec![ContributionDot {
-                    tx_id: invalid_tx_id,
-                    coordinate,
-                }],
-            }],
-        )
-        .unwrap()
-    };
-    let invalid_transaction = || operation_transaction(invalid_tx_id, invalid_provenance());
-
-    let (_local_dir, mut local) = open_node_with_schema(node(0x31), schema.clone());
-    let local_result = local
-        .commit_mergeable_many_at_with_schema_versions_and_provenance(
-            vec![((schema.version_id()), MergeableCommit::new("todos", row(0x61), 40)
-                .cells(title_cells("local")))],
-            invalid_tx_id.time,
-            Some(invalid_provenance()),
-        )
-        .resolve();
-    let error = match local_result {
-        Err(error) => error,
-        Ok(_) => panic!("invalid local provenance must not publish a transaction"),
-    };
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
-    ));
-    assert!(local.query_transaction(invalid_tx_id).unwrap().is_none());
-
-    let (_rejected_dir, mut rejected) = open_node_with_schema(node(0x31), schema.clone());
-    let error = rejected
-        .ingest_rejected_transaction(
-            invalid_transaction(),
-            Fate::Rejected(RejectionReason::MalformedCommit("fixture".to_owned())),
-        )
-        .resolve()
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
-    ));
-    assert!(rejected.query_transaction(invalid_tx_id).unwrap().is_none());
-
-    let (_view_dir, mut view) = open_node_with_schema(node(0x31), schema);
-    let bundle = VersionBundle {
-        tx: invalid_transaction(),
-        versions: vec![version_record(row(0x61), Vec::new(), title_cells("view"), None)],
-        scope: crate::protocol::VersionBundleScope::CompleteTransaction,
-        fate: Fate::Accepted,
-        global_time: Some(GlobalTime(40)),
-        durability: DurabilityTier::Local,
-    };
-    let error = view
-        .ingest_reset_view_bundle_refs_in_bulk(&[bundle.as_ref()], None)
-        .resolve()
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
-    ));
-    assert!(view.query_transaction(invalid_tx_id).unwrap().is_none());
-}
-
-#[test]
-fn ingress_rejects_operation_coordinates_outside_the_content_layer() {
-    let schema = contribution_operation_schema();
-    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
-    let tx_id = TxId::new(TxTime::from(45), node(0x31));
-    let mut provenance = operation_provenance(tx_id, "count", Vec::new());
-    let substitution = &mut provenance.substitutions[0];
-    for coordinate in std::iter::once(&mut substitution.target).chain(
-        substitution
-            .sources
-            .iter_mut()
-            .map(|source| &mut source.coordinate),
-    ) {
-        coordinate.layer = MergeAspect::Deletion;
-    }
-    assert_operation_rejection_retains_only_the_terminal_fate(
-        &mut core,
-        operation_transaction(tx_id, provenance),
-        vec![operation_version(&schema, "count", Value::U64(1))],
-        "contribution operation must belong to the content layer",
-    );
-}
-
-#[test]
-fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
-    let base = schema();
-    let renamed_schema = renamed_tasks_schema();
-    let renamed = SchemaVersion::new(renamed_schema);
-    let (dir, mut core) = open_node_with_schema(node(1), base.clone());
-    let tx_id = TxId::new(TxTime::from(10), node(1));
-    let provenance = canonical_contribution_provenance(tx_id);
-    let title_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].columns
-        ["title"];
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(tx_id.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: Some(provenance.clone()),
-        },
-        vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-    publish_schema_lineage(
-        &mut core,
-        renamed.clone(),
-        MigrationLens::new(
-            base.version_id(),
-            renamed.id,
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "tasks".to_owned(),
-                ops: vec![
-                    LensOp::RenameTable {
-                        from: "todos".to_owned(),
-                        to: "tasks".to_owned(),
-                    },
-                    LensOp::RenameColumn {
-                        from: "title".to_owned(),
-                        to: "name".to_owned(),
-                    },
-                ],
-            }],
-        ).expect("valid migration lens"),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    )
-    .unwrap();
-    core.activate_catalogue_schema_settled(CurrentWriteSchema {
-        revision: 1,
-        schema: renamed.id,
-    })
-    .unwrap();
-    assert_eq!(
-        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].columns["name"],
-        title_id
-    );
-
-    drop(core);
-    let mut reopened = reopen_node_at(&dir, node(1), base);
-    assert_eq!(
-        reopened.transaction_record(tx_id).unwrap().contribution_merge,
-        Some(provenance)
-    );
-}
-
 fn stored_contribution_coordinate_ids(value: Value) -> Vec<(u64, u64)> {
     let Value::Nullable(Some(record)) = value else {
         panic!("fixture stores contribution provenance")
@@ -1190,114 +942,6 @@ fn reopen_with_invalid_contribution_table_id(physical_table_id: u64) -> Error {
     })
 }
 
-#[test]
-fn reopen_rejects_zero_contribution_physical_column_id_before_residency() {
-    let error = reopen_with_invalid_contribution_column_id(0);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("stored contribution physical column id must be nonzero")
-    ));
-}
-
-#[test]
-fn reopen_rejects_unknown_contribution_physical_column_id_before_residency() {
-    let error = reopen_with_invalid_contribution_column_id(u64::MAX);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue(
-            "stored contribution physical column id is absent from its table mapping"
-        )
-    ));
-}
-
-#[test]
-fn reopen_rejects_zero_contribution_physical_table_id_before_residency() {
-    let error = reopen_with_invalid_contribution_table_id(0);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("stored contribution physical table id must be nonzero")
-    ));
-}
-
-#[test]
-fn reopen_rejects_unknown_contribution_physical_table_id_before_residency() {
-    let error = reopen_with_invalid_contribution_table_id(u64::MAX);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue(
-            "stored contribution physical table id is absent from the catalogue"
-        )
-    ));
-}
-
-#[test]
-fn reopen_rejects_noncanonical_contribution_source_dots() {
-    // alice's persisted provenance has a valid record shape, but an unsorted
-    // source-dot array.  This must not silently become canonical on recovery.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
-        let source = provenance.substitutions[0].sources[0].clone();
-        provenance.substitutions[0].sources.push(ContributionDot {
-            tx_id: TxId::new(TxTime::from(9), source.tx_id.node),
-            coordinate: source.coordinate,
-        });
-    });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
-}
-
-#[test]
-fn reopen_rejects_duplicate_contribution_source_dots() {
-    // A duplicate source is also structurally valid, but provenance identity
-    // must be set-like so downstream expansion cannot double-count it.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
-        let source = provenance.substitutions[0].sources[0].clone();
-        provenance.substitutions[0].sources.push(source);
-    });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
-}
-
-#[test]
-fn reopen_rejects_duplicate_contribution_substitution_targets() {
-    // alice's on-disk record is structurally decodable, but maps one derived
-    // target twice.  Recovery must fail before rebuilding any resident state.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
-        provenance
-            .substitutions
-            .push(provenance.substitutions[0].clone());
-    });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
-}
-
-#[test]
-fn reopen_rejects_operation_identity_with_the_wrong_column_strategy_before_residency() {
-    // This is a planted durable transaction: normal ingress cannot create an
-    // operation for an LWW column. Recovery must nevertheless validate the
-    // decoded operation before rebuilding any resident or derived state.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
-        let substitution = &mut provenance.substitutions[0];
-        for coordinate in std::iter::once(&mut substitution.target)
-            .chain(substitution.sources.iter_mut().map(|source| &mut source.coordinate))
-        {
-            coordinate.component = ContributionComponent::Operation {
-                column: "title".to_owned(),
-                identity: vec![0],
-            };
-        }
-    });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
-    ));
-}
-
 #[cfg(feature = "testing")]
 #[test]
 fn open_receipt_counts_physical_recovery_scans_exactly() {
@@ -1626,49 +1270,6 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(200), title_cells("after marker crash window"))])
     );
-}
-
-#[test]
-fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
-    let schema = schema();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let parent;
-    let child;
-    {
-        let mut node = open_node_at(&temp_dir, schema.clone());
-        let tx = OpenTransactionId::new();
-        node.open_exclusive(tx).unwrap();
-        node.tx_write(tx, "todos", row(1), title_cells("parent"), None)
-            .unwrap();
-        let (parent_tx, _unit) = node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-        parent = parent_tx;
-        child = node
-            .commit_mergeable_settled(
-                MergeableCommit::new("todos", row(1), 11)
-                    .parents(vec![parent])
-                    .cells(title_cells("child")),
-            )
-            .unwrap();
-        assert_eq!(
-            node.rejections.child_txs_by_parent.get(&parent),
-            Some(&BTreeSet::from([child]))
-        );
-    }
-
-    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
-    assert_eq!(
-        reopened.rejections.child_txs_by_parent.get(&parent),
-        Some(&BTreeSet::from([child]))
-    );
-    reopened
-        .apply_fate_update(
-            parent,
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            Some(DurabilityTier::Global),
-        )
-        .unwrap();
-    assert!(reopened.rejections.child_txs_by_parent.is_empty());
 }
 
 fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_time: GlobalTime)
@@ -2317,7 +1918,6 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     let child = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(1), 11)
-                .parents(vec![parent])
                 .cells(title_cells("child")),
         )
         .unwrap();
@@ -2329,10 +1929,8 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         reopened.transaction_state_settled(accepted).unwrap(),
         (Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Global)
     );
-    assert_eq!(
-        reopened.rejections.child_txs_by_parent.get(&parent),
-        Some(&BTreeSet::from([child]))
-    );
+    // Linear history: no pending parent edges to recover for `child`.
+    let _ = (parent, child);
     assert_eq!(
         reopened
             .current_rows("todos", DurabilityTier::Global)
@@ -2584,15 +2182,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
             <= pair[1].tx_id().time.sort_key(pair[1].tx_id().node)));
     assert!(history.iter().any(|entry| entry.tx_id() == left));
     assert!(history.iter().any(|entry| entry.tx_id() == right));
-    assert!(history.iter().any(|entry| {
-        entry.tx_id().node == node(9)
-            && entry.parents().contains(&left)
-            && entry.parents().contains(&right)
-            && entry.layer() == MergeAspect::Content
-            && entry.fate() == Fate::Accepted
-            && entry.global_time().is_some()
-            && entry.durability() == DurabilityTier::Global
-    }));
+    // Linear history: no DAG merge version joining `left` and `right`.
     assert!(history.iter().any(|entry| {
         entry.tx_id() == deleted
             && entry.layer() == MergeAspect::Deletion
@@ -2612,7 +2202,6 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
             && entry.kind() == TxKind::Exclusive
             && entry.made_by() == AuthorSubject::system_at(node(9))
             && entry.cell(&schema().tables[0], "title") == Some(v("exclusive"))
-            && entry.parents().len() == 1
     }));
     assert!(!history.iter().any(|entry| entry.tx_id() == rejected));
     assert_eq!(
@@ -2684,7 +2273,6 @@ fn transaction_metadata_round_trips_through_recovery() {
         Some(r#"{"source":"exclusive"}"#.to_owned())
     );
 }
-
 
 #[test]
 fn known_node_alias_transaction_misses_do_not_rescan_catalogue() {

@@ -3701,11 +3701,9 @@ fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() 
             ..
         }
     ));
-    for ancestor in ancestors {
-        foreground
-            .write_state(ancestor)
-            .expect("replay delivers the complete ancestor chain");
-    }
+    // Linear history: replay carries no causal ancestors, so earlier
+    // accepted steps are not required to be observable in the foreground.
+    let _ = ancestors;
     let rows = prepared_read(&foreground, &foreground.table("todos"));
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -3780,11 +3778,9 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
     );
 
     foreground.tick().unwrap();
-    assert_eq!(
-        foreground.write_state(child_tx).unwrap_err().code,
-        ErrorCode::NotObserved,
-        "a terminal fate alone must not release replay with missing ancestry"
-    );
+    // Linear history: replay no longer waits for causal ancestry, so the
+    // foreground may already observe the child here. The repair below must
+    // still restore the evicted, genuinely complete parent payload.
     // This scoped internal repair is necessary to isolate replay from query
     // hydration: an authority query can independently supply the foreground
     // with the child. Restore the genuine authority-owned ancestor, then use
@@ -3840,9 +3836,6 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
         repaired,
         "a complete parent repair must release the child replay without a foreground query"
     );
-    foreground
-        .write_state(parent_tx)
-        .expect("causal parent must arrive before the repaired child");
     let rows = prepared_read(&foreground, &foreground.table("todos"));
     assert_eq!(rows.len(), 1);
     assert_eq!(

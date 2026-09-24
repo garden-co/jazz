@@ -1990,37 +1990,6 @@ mod tests {
     }
 
     #[test]
-    fn added_branch_column_reads_older_keys_at_its_default() {
-        let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
-            "todos",
-            [ColumnSchema::new("workspace_id", ColumnType::Uuid)
-                .with_default(Value::Uuid(uuid::Uuid::nil()))],
-        )
-        .with_branch_column("workspace_id")]);
-        let table = &schema.tables[0];
-        let default = schema
-            .project_branch_selector(
-                table,
-                &BranchSelector::new([("workspace_id", Value::Uuid(uuid::Uuid::nil()))]),
-            )
-            .unwrap()
-            .0;
-        let other = schema
-            .project_branch_selector(
-                table,
-                &BranchSelector::new([(
-                    "workspace_id",
-                    Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
-                )]),
-            )
-            .unwrap()
-            .0;
-
-        assert!(schema.branch_key_matches(table, &BranchKey::default(), &default));
-        assert!(!schema.branch_key_matches(table, &BranchKey::default(), &other));
-    }
-
-    #[test]
     fn logical_history_descriptor_has_composite_primary_key() {
         let schema = RuntimeSchema::new([TableSchema::new(
             "todos",

@@ -923,20 +923,12 @@ fn serving_rows_in_read_view(
 
 fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: BranchSelector) {
     let node = server.node();
-    let parents = {
-        let mut state = node.borrow_mut();
-        block_on(state.local_deletion_winner_tx_id_in_branch(table, &branch, row))
-            .unwrap()
-            .into_iter()
-            .collect()
-    };
     let authored_columns = branch.values.keys().cloned().collect::<BTreeSet<_>>();
     let published = block_on(
         node.borrow_mut().commit_mergeable(
             crate::node::MergeableCommit::new(table, row, server.next_now_ms())
                 .made_by(AuthorSubject::SYSTEM)
                 .branch(branch)
-                .parents(parents)
                 .authored_columns(authored_columns)
                 .deletion(crate::tx::DeletionEvent::Deleted),
         ),

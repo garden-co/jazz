@@ -1151,7 +1151,6 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 11)
-            .parents(vec![base])
             .cells(title_cells("child")),
     );
     assert_current_rows_match_oracle(&mut node, &oracle);
@@ -1167,7 +1166,6 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 13)
-            .parents(vec![child])
             .cells(BTreeMap::from([(
                 "title".to_owned(),
                 "delete-concurrent update".to_owned(),
@@ -1197,15 +1195,6 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             let action = (rng >> 48) % 9;
             let deletion = matches!(action, 0..=3);
             let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-            if let Some(parent) =
-                parents.get(&row_uuid).and_then(
-                    |(content, deletion_parent)| {
-                        if deletion { *deletion_parent } else { *content }
-                    },
-                )
-            {
-                commit = commit.parents(vec![parent]);
-            }
             commit = match action {
                 0 | 1 => commit.deletion(DeletionEvent::Deleted),
                 2 | 3 => commit.deletion(DeletionEvent::Restored),
@@ -3579,7 +3568,7 @@ fn cached_subscription_programs_preserve_identity_claims_and_query_inputs() {
 
 #[test]
 fn compiled_subscription_cache_excludes_branch_read_views() {
-    let schema = merge_head_branch_schema();
+    let schema = branch_commit_unit_schema();
     let (_dir, mut core) = open_history_complete_node_with_schema(node(0xd5), schema);
     for index in [1, 2] {
         core.commit_mergeable_settled(

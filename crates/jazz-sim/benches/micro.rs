@@ -132,7 +132,7 @@ fn run_domination(config: &Config) {
         let (dir, mut core) = open_node(node(210), schema());
         let _dir = dir;
         for idx in 0..heads {
-            let unit = commit_unit(node((idx + 1) as u8), row(1), idx as u64, Vec::new());
+            let unit = commit_unit(node((idx + 1) as u8), row(1), idx as u64);
             let fate = core_ingest(&mut core, &unit);
             assert_accepted(&fate);
         }
@@ -198,7 +198,7 @@ fn run_ingest_rate(config: &Config) {
     let mut hist = NsHist::new();
     let mut bytes = 0_u64;
     for idx in 0..config.iterations {
-        let unit = commit_unit(node(10), row(10_000 + idx), idx as u64, Vec::new());
+        let unit = commit_unit(node(10), row(10_000 + idx), idx as u64);
         bytes += commit_unit_bytes(&unit);
         let start = Instant::now();
         let fate = core_ingest(&mut core, &unit);
@@ -426,18 +426,12 @@ fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
     }
 }
 
-fn commit_unit(
-    node_uuid: NodeUuid,
-    row_uuid: RowUuid,
-    idx: u64,
-    parents: Vec<jazz::tx::TxId>,
-) -> SyncMessage {
+fn commit_unit(node_uuid: NodeUuid, row_uuid: RowUuid, idx: u64) -> SyncMessage {
     let (_dir, mut node_) = open_node(node_uuid, schema());
     commit_mergeable_unit_settled(
         &mut node_,
         MergeableCommit::new(TABLE, row_uuid, 1_000 + idx)
             .made_by(AuthorSubject::SYSTEM)
-            .parents(parents)
             .cells(cells(&format!("v-{idx}"))),
     )
     .expect("commit unit")

@@ -220,11 +220,7 @@ impl Fixture {
     }
 
     fn update_to_active(&mut self, (row_uuid, parent): (RowUuid, TxId)) {
-        self.commit(
-            MergeableCommit::new(TABLE, row_uuid, 1_000_000)
-                .parents(vec![parent])
-                .cells(cells(1, ACTIVE)),
-        );
+        self.commit(MergeableCommit::new(TABLE, row_uuid, 1_000_000).cells(cells(1, ACTIVE)));
     }
 
     fn commit(&mut self, commit: MergeableCommit) -> TxId {

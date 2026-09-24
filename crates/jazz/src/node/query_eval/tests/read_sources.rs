@@ -335,7 +335,6 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .commit_mergeable_settled(
             MergeableCommit::new("issues", row(11), 1_100)
                 .made_by(AuthorSubject::SYSTEM)
-                .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("second".to_owned())),
                     ("state".to_owned(), Value::String("closed".to_owned())),

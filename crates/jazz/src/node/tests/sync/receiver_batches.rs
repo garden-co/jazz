@@ -255,14 +255,6 @@ fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     reader.apply_sync_message_settled(update.clone()).unwrap();
-    assert!(reader.sync_metrics().receiver_history_table_probes > 0);
-    // Row 1's newer version needs a missing parent and follows per-bundle
-    // ingestion; only parentless row 2 enters the empty-table bulk proof.
-    assert_eq!(
-        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
-        1
-    );
-    assert!(reader.sync_metrics().receiver_per_bundle_ingests > 0);
     assert_currency_tables_match_storage(&mut reader, "todos");
     assert_eq!(
         public_rows(
@@ -275,10 +267,6 @@ fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
     let expected = reader.query_all_versions().unwrap();
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(reader.query_all_versions().unwrap(), expected);
-    assert_eq!(
-        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
-        1
-    );
 
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
@@ -309,11 +297,6 @@ fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
         1
     );
     reader.apply_sync_message_settled(update).unwrap();
-    assert!(reader.sync_metrics().receiver_history_table_probes > 0);
-    assert_eq!(
-        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
-        0
-    );
     assert_currency_tables_match_storage(&mut reader, "todos");
     assert_eq!(
         public_rows(
@@ -399,13 +382,6 @@ fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
             "reset did not reach a bounded persistence boundary"
         );
         drop(ingest);
-        if completed {
-            assert_eq!(reader.sync_metrics().receiver_history_table_probes, 1);
-            assert_eq!(
-                reader.sync_metrics().receiver_history_rebuild_rows_avoided,
-                1
-            );
-        }
         drop(reader);
         control.resume();
         let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
@@ -426,18 +402,6 @@ fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
         );
         if present != 0 {
             assert_eq!(reopened.query_all_versions().unwrap().len(), bundles.len());
-            reopened
-                .assert_merge_heads_match_history_for_test("todos", row(1))
-                .unwrap();
-            let heads = reopened
-                .database
-                .primary_key_scan_raw("jazz_merge_heads", &[])
-                .unwrap();
-            assert_eq!(heads.len(), 1);
-            assert_eq!(
-                merge_heads_from_value(heads[0].record().get_idx(3).unwrap()).unwrap(),
-                bundles.iter().map(|bundle| bundle.tx.tx_id).collect()
-            );
         }
         if completed {
             break;
@@ -633,497 +597,6 @@ fn accepted_view_scoped_child_for_parent(
             DurabilityTier::Global,
         )
         .unwrap();
-}
-
-#[test]
-fn pending_parent_time_proof_skips_newer_but_checks_equal_and_older_parents() {
-    // Internal seam: pin the absence proof's storage work and fallback before
-    // parent persistence; application rows alone cannot expose these scans.
-    let (_dir, mut reader) = open_node_with_uuid(node(0xc1));
-    let parent = TxId::new(TxTime::from(70), node(0xc2));
-    let mut batch = reader.database.open_batch();
-    reader.database.reset_storage_read_metrics();
-    reader
-        .preflight_complete_parent_constraints(&mut batch, parent, &[])
-        .unwrap();
-    reader
-        .reject_mismatched_pending_children_for_parent(parent)
-        .unwrap();
-    assert_eq!(reader.database.storage_read_metrics().total.ranges, 0);
-    // Startup's Unknown state is fail-closed even if the physical table is empty.
-    reader.rejections.pending_parent_time_bound = PendingParentTimeBound::Unknown;
-    reader
-        .preflight_complete_parent_constraints(&mut batch, parent, &[])
-        .unwrap();
-    assert_eq!(reader.database.storage_read_metrics().total.ranges, 1);
-    drop(batch);
-    let mut reader = reader.reopen_in_place().unwrap();
-    // Use the real ingestion entry point: Accepted partial children are not in
-    // the Pending-only rejection graph, but must advance the time ceiling.
-    reader
-        .ingest_view_scoped_transaction_with_current_indexes(
-            reset_scope_tx(TxId::new(TxTime::from(80), node(0xc3)), 1),
-            vec![version_record(
-                row(1),
-                vec![parent],
-                title_cells("partial child"),
-                None,
-            )],
-            Fate::Accepted,
-            Some(GlobalTime(2)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    for (time, parent_node, should_scan) in [
-        (71, node(0xc2), false),
-        (70, node(0xc4), true),
-        (69, node(0xc2), true),
-    ] {
-        let probe = TxId::new(TxTime::from(time), parent_node);
-        let mut batch = reader.database.open_batch();
-        reader.database.reset_storage_read_metrics();
-        reader
-            .preflight_complete_parent_constraints(&mut batch, probe, &[])
-            .unwrap();
-        assert_eq!(
-            reader.database.storage_read_metrics().total.ranges,
-            usize::from(should_scan)
-        );
-    }
-    let mut batch = reader.database.open_batch();
-    let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
-    assert!(
-        matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == parent)
-    );
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn pending_parent_time_proof_includes_staged_constraints_and_recovers_after_drop() {
-    // Internal protocol constraint staging is necessary to observe an edge
-    // before commit and to prove that dropping it only makes the bound stale.
-    let (_dir, mut reader) = open_node_with_uuid(node(0xc5));
-    let parent = TxId::new(TxTime::from(70), node(0xc6));
-    let child = TxId::new(TxTime::from(80), node(0xc7));
-    accepted_view_scoped_child_for_parent(&mut reader, parent, child, row(1));
-    let coordinate = {
-        let rows = reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap();
-        pending_edge_coordinate_from_record(rows[0].record()).unwrap()
-    };
-    let future_parent = TxId::new(TxTime(u64::MAX), parent.node);
-    let mut batch = reader.database.open_batch();
-    reader
-        .stage_pending_parent_constraint(
-            &mut batch,
-            (reader.node_aliases[&child.node], child),
-            (reader.node_aliases[&parent.node], future_parent),
-            &coordinate,
-            false,
-        )
-        .unwrap();
-    let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
-    assert!(
-        matches!(reader.preflight_complete_parent_constraints(&mut batch, future_parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == future_parent)
-    );
-    drop(batch);
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1
-    );
-    let probe = TxId::new(TxTime::from(90), parent.node);
-    let mut batch = reader.database.open_batch();
-    reader.database.reset_storage_read_metrics();
-    reader
-        .preflight_complete_parent_constraints(&mut batch, probe, &[])
-        .unwrap();
-    assert_eq!(
-        reader.database.storage_read_metrics().total.ranges,
-        1,
-        "abandoned future edge leaves a safe conservative ceiling"
-    );
-    drop(batch);
-    let mut reader = reader.reopen_in_place().unwrap();
-    let mut batch = reader.database.open_batch();
-    reader.database.reset_storage_read_metrics();
-    reader
-        .preflight_complete_parent_constraints(&mut batch, probe, &[])
-        .unwrap();
-    assert_eq!(
-        reader.database.storage_read_metrics().total.ranges,
-        0,
-        "reopen recovers the exact durable ceiling"
-    );
-    let wrong = version_record(row(2), Vec::new(), title_cells("wrong after reopen"), None);
-    assert!(
-        matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == parent)
-    );
-}
-
-#[test]
-fn pending_parent_time_proof_tracks_locally_authored_update_constraints() {
-    // Author through the normal local commit API; the internal read counter
-    // proves that the shared staging helper also covers this second writer.
-    let (_dir, mut writer) = open_node_with_uuid(node(0xca));
-    let (parent, _) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(1), 10).cells(title_cells("before")),
-        )
-        .unwrap();
-    writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(1), 11)
-                .parents(vec![parent])
-                .cells(title_cells("after")),
-        )
-        .unwrap();
-    let mut batch = writer.database.open_batch();
-    writer.database.reset_storage_read_metrics();
-    writer
-        .preflight_complete_parent_constraints(&mut batch, parent, &[])
-        .unwrap();
-    // Child transaction lookup may do additional transaction-index reads;
-    // pending-edge storage belongs to the `other` destination bucket.
-    assert_eq!(writer.database.storage_read_metrics().other.ranges, 1);
-    assert!(
-        !writer
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn pending_parent_time_proof_preserves_poisoned_database_errors() {
-    use groove::storage::{TestStorage, TestStorageOperation};
-    let schema = schema();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let (storage, control) = TestStorage::controlled(&refs);
-    let mut reader =
-        NodeState::new_with_shared_test_catalogue(node(0xc8), schema, storage).unwrap();
-    control.fail_next(TestStorageOperation::WriteMany);
-    assert!(reader.ensure_node_alias(node(0xc9)).resolve().is_err());
-    let mut batch = reader.database.open_batch();
-    let parent = TxId::new(TxTime::from(100), node(0xc9));
-    assert!(matches!(
-        reader
-            .preflight_complete_parent_constraints(&mut batch, parent, &[])
-            .resolve(),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
-    ));
-    assert!(matches!(
-        reader
-            .reject_mismatched_pending_children_for_parent(parent)
-            .resolve(),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
-    ));
-}
-
-#[test]
-fn complete_parent_batch_scans_empty_constraints_once_at_scale() {
-    // Internal seam: application results cannot distinguish one empty storage
-    // scan from one scan per parent before persistence.
-    let (_dir, mut reader) = open_node_with_uuid(node(0xa1));
-    for count in [0, 1, 1024] {
-        let parents = (0..count)
-            .map(|index| (TxId::new(TxTime::from(100 + index), node(0xa2)), Vec::new()))
-            .collect::<Vec<_>>();
-        let mut batch = reader.database.open_batch();
-        reader.database.reset_storage_read_metrics();
-        reader
-            .preflight_complete_parent_batch(&mut batch, &parents)
-            .unwrap();
-        let reads = reader.database.storage_read_metrics();
-        assert_eq!(reads.total.ranges, usize::from(count != 0));
-        assert_eq!(reads.total.reads, 0);
-    }
-}
-
-#[test]
-fn complete_parent_batch_preserves_atomic_constraints_and_staged_deletes() {
-    // Internal seam: accepted partial-child constraints and uncommitted
-    // constraint deletes are protocol/storage state, not public query rows.
-    for mismatch in [false, true] {
-        let (_dir, mut reader) = open_node_with_uuid(node(0xa3));
-        let parents = [
-            TxId::new(TxTime::from(70), node(0xa4)),
-            TxId::new(TxTime::from(71), node(0xa4)),
-            TxId::new(TxTime::from(72), node(0xa4)),
-        ];
-        for (index, parent) in parents.iter().enumerate() {
-            accepted_view_scoped_child_for_parent(
-                &mut reader,
-                *parent,
-                TxId::new(TxTime::from(80 + index as u64), node(0xa5)),
-                row(0xb0 + index as u8),
-            );
-        }
-        let version =
-            |id| version_record(row(id), Vec::new(), title_cells("complete parent"), None);
-        let mut batch = reader.database.open_batch();
-        // An earlier operation in the same batch removed the third parent's
-        // constraint. Its deliberately wrong coordinate must not be checked.
-        let third_key = reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .into_iter()
-            .find(|raw| {
-                raw.record()
-                    .get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)
-                    .unwrap()
-                    == parents[2].time.0
-            })
-            .map(|raw| {
-                let record = raw.record();
-                pending_edge_primary_key(
-                    NodeAlias(
-                        record
-                            .get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)
-                            .unwrap(),
-                    ),
-                    TxId::new(TxTime::from(82), node(0xa5)),
-                    NodeAlias(
-                        record
-                            .get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)
-                            .unwrap(),
-                    ),
-                    parents[2],
-                    &pending_edge_coordinate_from_record(record).unwrap(),
-                )
-                .unwrap()
-            })
-            .unwrap();
-        batch.delete("jazz_pending_edges", third_key);
-        let complete = vec![
-            (parents[0], vec![version(0xb0)]),
-            // A duplicate sees no Accepted constraints after the first pass.
-            (parents[0], vec![version(0xee)]),
-            (
-                parents[1],
-                vec![version(if mismatch { 0xee } else { 0xb1 })],
-            ),
-            (parents[2], vec![version(0xee)]),
-        ];
-        let result = reader
-            .preflight_complete_parent_batch(&mut batch, &complete)
-            .resolve();
-        if mismatch {
-            assert!(
-                matches!(result, Err(Error::ConflictingCommitUnit(parent)) if parent == parents[1])
-            );
-            drop(batch);
-            assert_eq!(
-                reader
-                    .database
-                    .primary_key_scan_raw("jazz_pending_edges", &[])
-                    .unwrap()
-                    .len(),
-                3
-            );
-        } else {
-            result.unwrap();
-            // Staging is not publication: the old durable constraints remain.
-            assert_eq!(
-                reader
-                    .database
-                    .primary_key_scan_raw("jazz_pending_edges", &[])
-                    .unwrap()
-                    .len(),
-                3
-            );
-            assert!(
-                reader
-                    .database
-                    .primary_key_scan_raw_in_batch(&batch, "jazz_pending_edges", &[])
-                    .unwrap()
-                    .is_empty()
-            );
-            reader.database.commit_batch(batch).unwrap();
-            assert!(
-                reader
-                    .database
-                    .primary_key_scan_raw("jazz_pending_edges", &[])
-                    .unwrap()
-                    .is_empty()
-            );
-        }
-        for index in 0..3 {
-            assert_eq!(
-                reader
-                    .transaction_record(TxId::new(TxTime::from(80 + index), node(0xa5)))
-                    .unwrap()
-                    .fate,
-                Fate::Accepted
-            );
-        }
-    }
-}
-
-#[test]
-fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically() {
-    for (case, parent_row, succeeds) in [(0x90, row(0x91), true), (0x92, row(0x93), false)] {
-        let (_dir, mut reader) = open_node_with_uuid(node(case));
-        register_whole_table_receiver(&mut reader, "todos");
-        let parent = TxId::new(TxTime::from(70), node(case + 1));
-        let child = TxId::new(TxTime::from(80), node(case + 2));
-        let child_row = if succeeds { parent_row } else { row(0x94) };
-        accepted_view_scoped_child_for_parent(&mut reader, parent, child, child_row);
-        let subscription = reader.whole_table_subscription_key("todos").unwrap();
-        let parent_tx = Transaction {
-            tx_id: parent,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(parent.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        };
-        let update = complete_parent_receiver_update(
-            subscription,
-            parent_tx,
-            version_record(
-                parent_row,
-                Vec::new(),
-                title_cells("complete reset parent"),
-                None,
-            ),
-            true,
-        );
-
-        let result = reader.apply_view_updates_in_batch(vec![update]).resolve();
-        if succeeds {
-            result.unwrap();
-            assert!(reader.query_transaction(parent).unwrap().is_some());
-            let current = reader.current_rows("todos", DurabilityTier::Global).unwrap();
-            assert_eq!(current.len(), 1);
-            assert_eq!(
-                current[0].cell(&schema().tables[0], "title"),
-                Some(Value::String("accepted partial child".to_owned())),
-                "an older reset must ingest missing history without rewinding the cached child",
-            );
-            assert!(
-                reader
-                    .database
-                    .primary_key_scan_raw("jazz_pending_edges", &[])
-                    .unwrap()
-                    .is_empty()
-            );
-        } else {
-            assert!(matches!(
-                result,
-                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == parent
-            ));
-            assert!(
-                reader.query_transaction(parent).unwrap().is_none(),
-                "contradictory reset parent must not persist"
-            );
-            assert_eq!(
-                reader
-                    .database
-                    .primary_key_scan_raw("jazz_pending_edges", &[])
-                    .unwrap()
-                    .len(),
-                1,
-                "failed reset must retain the accepted-child constraint"
-            );
-            assert_eq!(
-                reader.transaction_record(child).unwrap().fate,
-                Fate::Accepted
-            );
-        }
-    }
-}
-
-#[test]
-fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
-    for (case, parent_row_matches) in [(0x95, true), (0x98, false)] {
-        let schema = schema();
-        let dir = tempfile::tempdir().unwrap();
-        let mut reader = open_node_at(&dir, schema.clone());
-        register_whole_table_receiver(&mut reader, "todos");
-        let parent = TxId::new(TxTime::from(70), node(case + 1));
-        let child_row = row(case + 2);
-        let child = reader
-            .commit_mergeable_settled(
-                MergeableCommit::new("todos", child_row, 80)
-                    .parents(vec![parent])
-                    .cells(title_cells("pending child")),
-            )
-            .unwrap();
-        let parent_row = if parent_row_matches {
-            child_row
-        } else {
-            row(case + 3)
-        };
-        let subscription = reader.whole_table_subscription_key("todos").unwrap();
-        reader
-            .apply_view_update(todos_receiver_reset(subscription))
-            .unwrap();
-        let update = complete_parent_receiver_update(
-            subscription,
-            Transaction {
-                tx_id: parent,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(parent.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            version_record(
-                parent_row,
-                Vec::new(),
-                title_cells("complete receiver parent"),
-                None,
-            ),
-            false,
-        );
-        reader.apply_view_updates_in_batch(vec![update]).unwrap();
-
-        let expected = if parent_row_matches {
-            Fate::Pending
-        } else {
-            Fate::Rejected(RejectionReason::CausalityViolation)
-        };
-        assert_eq!(reader.transaction_record(child).unwrap().fate, expected);
-        reader.database.close().unwrap();
-        drop(reader);
-        let mut reader = reopen_node_at(&dir, node(1), schema);
-        assert_eq!(reader.transaction_record(child).unwrap().fate, expected);
-        let edge_count = reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len();
-        assert_eq!(edge_count, usize::from(parent_row_matches));
-    }
 }
 
 #[test]
@@ -1757,16 +1230,25 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         (Fate::Accepted, Some(global_time), DurabilityTier::Global),
     );
 
-    assert!(matches!(
-        reader.apply_view_updates_in_batch(vec![update(
+    // Linear history (stage 2a): once the complete transaction is stored, a
+    // differing replay is not byte-compared; the stored row stays unchanged.
+    reader
+        .apply_view_updates_in_batch(vec![update(
             conflicting,
             Fate::Accepted,
             Some(global_time),
             durability,
         )])
-        .resolve(),
-        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
-    ));
+        .unwrap();
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>()[&row_uuid]["title"],
+        Value::String("visible title".to_owned())
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1886,13 +1368,10 @@ fn reset_accepts_identical_annotated_duplicates() {
             ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![replay]).resolve(),
             ResetConflictPath::Single => reader.apply_view_update(replay).resolve(),
         };
-        assert!(
-            matches!(
-                result,
-                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
-            ),
-            "expected conflicting replay, got {result:?}"
-        );
+        // Linear history (stage 2a): a known complete transaction is immutable
+        // and Core-sequenced, so a differing replay is not byte-compared; only
+        // its fate advances and the stored payload is left untouched.
+        assert!(result.is_ok(), "known complete replay only advances fate: {result:?}");
         let stored = reader.query_versions_for_tx(tx_id).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(
@@ -2136,10 +1615,16 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
             )],
         );
         let result = reader.apply_view_update(conflicting_update).resolve();
-        assert!(matches!(
-            result,
-            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
-        ));
+        if stored_complete {
+            // Linear history (stage 2a): a stored complete transaction is not
+            // byte-compared against a later replay; only its fate advances.
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+            ));
+        }
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.view_scoped_cardinality, !stored_complete);
         let versions = reader.query_versions_for_tx(tx_id).unwrap();
@@ -2982,8 +2467,6 @@ fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
 }
 
-
-
 #[test]
 fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
     use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
@@ -3091,4 +2574,23 @@ fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
     let VersionCarrier::Bundle(bundle) = &mut conflict else { unreachable!() };
     bundle.tx.user_metadata_json = Some("true".to_owned());
     assert!(matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
+}
+
+// Internal work-count receipt: transaction fate handling may read the full
+// unit once; exact row matching must not add another transaction-wide read.
+#[test]
+fn known_transaction_matching_probes_only_incoming_history_keys() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf1), schema);
+    let tx_id = writer.commit_mergeable_many_settled((0..32).map(|i| {
+        MergeableCommit::new("todos", row(i + 1), 10)
+            .cells(BTreeMap::from([("title".to_owned(), "same".to_owned())]))
+    }).collect()).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else { panic!("commit unit"); };
+    let state = writer.query_transaction(tx_id).unwrap().unwrap();
+    writer.query.tx_versions_cache.clear();
+    reset_query_versions_for_tx_call_count();
+    writer.ingest_known_transaction(tx, versions, state.fate.clone(), state.global_time, state.durability).unwrap();
+    assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
+    assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
 }

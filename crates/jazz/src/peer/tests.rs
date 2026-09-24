@@ -2383,7 +2383,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -2391,7 +2390,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -2471,7 +2469,6 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -2479,7 +2476,6 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -2552,10 +2548,8 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
     let restore_tx = core
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         ])
         .unwrap();
@@ -5707,7 +5701,6 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
     let unmatch_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
-                .parents(vec![match_tx])
                 .cells(title_cells("other")),
         )
         .unwrap();
@@ -5757,7 +5750,6 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let unmatch_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
-                .parents(vec![first_tx])
                 .cells(title_cells("other")),
         )
         .unwrap();
@@ -5765,7 +5757,6 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let second_match_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 12)
-                .parents(vec![unmatch_tx])
                 .cells(title_cells("match")),
         )
         .unwrap();
@@ -5858,7 +5849,6 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     let stock_v2 = core
         .commit_mergeable_settled(
             MergeableCommit::new("stock", stock_row, 12)
-                .parents(vec![stock_v1])
                 .cells(BTreeMap::from([("quantity".to_owned(), Value::U64(9))])),
         )
         .unwrap();

@@ -221,12 +221,10 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
         MergeableCommit::new("todos", restored, 105)
             .made_by(author)
             .permission_subject(author)
-            .parents(vec![intervening_content])
             .cells(mergeable_open_cells("restored", "restored-note")),
         MergeableCommit::new("todos", restored, 105)
             .made_by(author)
             .permission_subject(author)
-            .parents(vec![intervening_deletion])
             .deletion(DeletionEvent::Restored),
         MergeableCommit::new("todos", inserted_then_deleted, 201)
             .made_by(author)

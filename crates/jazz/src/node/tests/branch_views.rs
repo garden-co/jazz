@@ -38,94 +38,6 @@ fn branch_selector(byte: u8) -> BranchSelector {
 }
 
 #[test]
-fn known_history_parent_must_match_exact_branch_for_local_and_replicated_versions() {
-    let schema = branch_view_schema();
-    let (_dir, mut core) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x40; 16]), schema.clone());
-    let owner = AuthorSubject::for_test_bytes([0x41; 16]);
-    core.set_session_claims(
-        owner,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
-    );
-    let row_uuid = row(0x42);
-    let first_branch = branch_selector(0x43);
-    let second_branch = branch_selector(0x44);
-    let cells = |title| {
-        BTreeMap::from([
-            ("title".to_owned(), v(title)),
-            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-        ])
-    };
-    let parent = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 10)
-                .branch(first_branch.clone())
-                .cells(cells("parent")),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        core.commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 11)
-                .branch(second_branch.clone())
-                .parents(vec![parent])
-                .cells(cells("wrong local branch")),
-        ),
-        Err(Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        ))
-    ));
-
-    let table = &schema.tables[0];
-    let (second_key, branch_cells) = schema
-        .project_branch_selector(table, &second_branch)
-        .expect("canonical second branch");
-    let mut remote_cells = branch_cells;
-    remote_cells.extend(cells("wrong replicated branch"));
-    let remote = VersionRecord::from_cells(
-        table,
-        schema.version_id(),
-        row_uuid,
-        vec![parent],
-        owner,
-        12,
-        owner,
-        12,
-        &remote_cells,
-        None,
-    )
-    .unwrap()
-    .with_branch_key(second_key);
-    let error = core
-        .ingest_known_transaction(
-            Transaction {
-                tx_id: TxId::new(TxTime::from(12), node(0x45)),
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: owner,
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![remote],
-            Fate::Accepted,
-            None,
-            DurabilityTier::Global,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        )
-    ));
-}
-
-#[test]
 fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
@@ -955,7 +867,6 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
             .branch(head)
-            .parents(vec![head_delete])
             .deletion(DeletionEvent::Restored),
     )
     .unwrap();
@@ -1118,7 +1029,6 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
             .branch(base)
-            .parents(vec![base_tx])
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("later base")),
                 ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
@@ -1167,251 +1077,6 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
             || title
                 == Value::Nullable(Some(Box::new(Value::String("replacement head".to_owned())))),
         "the root terminal must carry replacement-head content"
-    );
-}
-
-#[test]
-fn version_parents_cannot_cross_branch_keys() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x51; 16]), schema);
-    let row_uuid = row(0x52);
-    let owner = AuthorSubject::for_test_bytes([0x53; 16]);
-    let parent = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 10)
-                .branch(branch_selector(0x54))
-                .cells(BTreeMap::from([
-                    ("title".to_owned(), v("base")),
-                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-                ])),
-        )
-        .unwrap();
-    let error = node
-        .commit_mergeable(
-            MergeableCommit::new("todos", row_uuid, 20)
-                .branch(branch_selector(0x55))
-                .parents(vec![parent])
-                .cells(BTreeMap::from([
-                    ("title".to_owned(), v("invalid")),
-                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-                ])),
-        )
-        .resolve()
-        .err()
-        .expect("cross-branch causal parent is rejected");
-    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
-}
-
-#[test]
-fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x56; 16]), schema);
-    let target = row(0x57);
-    let sibling = row(0x58);
-    let branch_a = branch_selector(0x59);
-    let branch_b = branch_selector(0x5a);
-    let owner = AuthorSubject::for_test_bytes([0x5b; 16]);
-    let cells = |title: &str| {
-        BTreeMap::from([
-            ("title".to_owned(), v(title)),
-            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-        ])
-    };
-
-    // A same-table multi-row transaction can legitimately contain a parent
-    // for the target and an unrelated sibling under another branch.
-    let valid_parent = node
-        .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", target, 10)
-                .branch(branch_a.clone())
-                .cells(cells("target base")),
-            MergeableCommit::new("todos", sibling, 11)
-                .branch(branch_b.clone())
-                .cells(cells("sibling other branch")),
-        ])
-        .unwrap();
-    let _valid_child = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", target, 20)
-                .branch(branch_a.clone())
-                .parents(vec![valid_parent])
-                .cells(cells("target child")),
-        )
-        .unwrap();
-
-    // Content and deletion history are independent. The first deletion starts
-    // its own chain; the restore then continues that deletion-register chain.
-    let deletion_parent = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", target, 30)
-                .branch(branch_a.clone())
-                .deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", target, 40)
-            .branch(branch_a.clone())
-            .parents(vec![deletion_parent])
-            .deletion(DeletionEvent::Restored),
-    )
-    .unwrap();
-
-    // This transaction contains the target only under branch B, plus a
-    // sibling deletion under branch A. A table-only lookup would see branch A
-    // and wrongly bless the foreign target parent.
-    let mut foreign_parent_commits = vec![
-        MergeableCommit::new("todos", target, 50)
-            .branch(branch_b)
-            .cells(cells("foreign target parent")),
-        MergeableCommit::new("todos", sibling, 51)
-            .branch(branch_a.clone())
-            .deletion(DeletionEvent::Deleted),
-    ];
-    // The wide same-table batch is the cache-hit and storage-fallback
-    // boundary: neither path may materialize these unrelated physical rows.
-    foreign_parent_commits.extend((0..128).map(|index| {
-        MergeableCommit::new("todos", row(0x80 + index), 52 + u64::from(index))
-            .branch(branch_a.clone())
-            .cells(cells("unrelated same-table sibling"))
-    }));
-    let foreign_parent = node
-        .commit_mergeable_many_settled(foreign_parent_commits)
-        .unwrap();
-    reset_parent_version_lookup_materialized_row_count();
-    let error = node
-        .commit_mergeable(
-            MergeableCommit::new("todos", target, 60)
-                .branch(branch_a.clone())
-                .parents(vec![foreign_parent])
-                .cells(cells("must reject foreign target parent")),
-        )
-        .resolve()
-        .err()
-        .expect("a sibling under the requested branch cannot validate a foreign target parent");
-    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
-    assert_eq!(
-        parent_version_lookup_materialized_row_count(),
-        1,
-        "a cache hit must materialize only the foreign target row, not same-table siblings"
-    );
-
-    // Force the storage scan path after the same wide transaction. Content
-    // history and shared deletion history must discard sibling rows before
-    // decoding/materializing them, while still rejecting the foreign target.
-    node.invalidate_tx_version_tables_cache(foreign_parent);
-    reset_parent_version_lookup_materialized_row_count();
-    let error = node
-        .commit_mergeable(
-            MergeableCommit::new("todos", target, 61)
-                .branch(branch_a)
-                .parents(vec![foreign_parent])
-                .cells(cells("must reject foreign target parent after cache eviction")),
-        )
-        .resolve()
-        .err()
-        .expect("a storage scan must reject the foreign target parent");
-    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
-    assert_eq!(
-        parent_version_lookup_materialized_row_count(),
-        1,
-        "a storage fallback must materialize only the foreign target row"
-    );
-}
-
-#[test]
-fn replicated_parent_validation_scopes_wide_transactions_to_the_physical_row() {
-    let schema = branch_view_schema();
-    let (_writer_dir, mut writer) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x62; 16]), schema.clone());
-    let (_child_writer_dir, mut child_writer) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x63; 16]), schema.clone());
-    let (_receiver_dir, mut receiver) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x64; 16]), schema);
-    let target = row(0x65);
-    let sibling = row(0x66);
-    let branch_a = branch_selector(0x67);
-    let branch_b = branch_selector(0x68);
-    let owner = AuthorSubject::for_test_bytes([0x69; 16]);
-    let cells = |title: &str| {
-        BTreeMap::from([
-            ("title".to_owned(), v(title)),
-            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-        ])
-    };
-
-    let mut parent_commits = vec![
-        MergeableCommit::new("todos", target, 10)
-            .branch(branch_b)
-            .cells(cells("foreign target parent")),
-        MergeableCommit::new("todos", sibling, 11)
-            .branch(branch_a.clone())
-            .deletion(DeletionEvent::Deleted),
-    ];
-    parent_commits.extend((0..128).map(|index| {
-        MergeableCommit::new("todos", row(0x80 + index), 12 + u64::from(index))
-            .branch(branch_a.clone())
-            .cells(cells("unrelated replicated sibling"))
-    }));
-    let parent = writer.commit_mergeable_many_settled(parent_commits).unwrap();
-    receiver
-        .apply_sync_message_settled(writer.commit_unit_for(parent).unwrap())
-        .unwrap();
-
-    let (_first_child, first_unit) = child_writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", target, 200)
-                .branch(branch_a.clone())
-                .parents(vec![parent])
-                .cells(cells("replicated child cache hit")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit {
-        tx: first_tx,
-        versions: first_versions,
-    } = first_unit
-    else {
-        panic!("commit unit expected");
-    };
-    reset_parent_version_lookup_materialized_row_count();
-    let first_error = receiver
-        .ingest_commit_unit_settled(first_tx, first_versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .err()
-        .expect("a remote target parent under another branch must be rejected");
-    assert!(matches!(first_error, Error::InvalidMergeableCommit(_)));
-    assert_eq!(
-        parent_version_lookup_materialized_row_count(),
-        1,
-        "replicated cache-hit validation must materialize only the target parent row"
-    );
-
-    receiver.invalidate_tx_version_tables_cache(parent);
-    let (_second_child, second_unit) = child_writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", target, 201)
-                .branch(branch_a)
-                .parents(vec![parent])
-                .cells(cells("replicated child storage fallback")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit {
-        tx: second_tx,
-        versions: second_versions,
-    } = second_unit
-    else {
-        panic!("commit unit expected");
-    };
-    reset_parent_version_lookup_materialized_row_count();
-    let second_error = receiver
-        .ingest_commit_unit_settled(second_tx, second_versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .err()
-        .expect("a storage fallback must reject the remote foreign target parent");
-    assert!(matches!(second_error, Error::InvalidMergeableCommit(_)));
-    assert_eq!(
-        parent_version_lookup_materialized_row_count(),
-        1,
-        "replicated storage validation must materialize only the target parent row"
     );
 }
 
@@ -1996,434 +1661,6 @@ fn remote_branch_write_does_not_invalidate_live_branch_view_plans() {
 }
 
 #[test]
-fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x64; 16]), schema.clone());
-    let row_uuid = row(0x65);
-    let source = branch_selector(0x66);
-    let target = branch_selector(0x67);
-    let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
-    let (source_key, _) = schema.project_branch_selector(table, &source).unwrap();
-    let (target_key, _) = schema.project_branch_selector(table, &target).unwrap();
-    let source_coordinate = ContributionCoordinate {
-        branch_key: source_key.clone(),
-        table: "todos".to_owned(),
-        row_uuid,
-        layer: MergeAspect::Content,
-        component: ContributionComponent::Column("title".to_owned()),
-    };
-    let target_coordinate = ContributionCoordinate {
-        branch_key: target_key.clone(),
-        table: "todos".to_owned(),
-        row_uuid,
-        layer: MergeAspect::Content,
-        component: ContributionComponent::Column("title".to_owned()),
-    };
-    let mut provenance = ContributionMergeProvenance::canonical(
-        source_key,
-        target_key.clone(),
-        vec![ContributionSubstitution {
-            target: target_coordinate,
-            sources: vec![ContributionDot {
-                tx_id: TxId::new(TxTime::from(5), NodeUuid::from_bytes([0x68; 16])),
-                coordinate: source_coordinate,
-            }],
-        }],
-    )
-    .unwrap();
-    let published = node
-        .commit_calculated_merge_many(
-            vec![MergeableCommit::new("todos", row_uuid, 10)
-                .branch(target)
-                .cells(BTreeMap::from([
-                    ("title".to_owned(), v("merged")),
-                    ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-                ]))],
-            provenance.clone(),
-        )
-        .unwrap();
-    let tx_id = node.persist_and_settle_transaction(published).unwrap();
-    // The common commit path adds the exact authored branch operation without
-    // changing the calculated source substitutions or adding other coordinates.
-    provenance.branch_write_intents = vec![crate::tx::BranchWriteIntent {
-        version: 1,
-        physical_table_id: node.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id,
-        authored_schema: schema.version_id(),
-        row_uuid,
-        head: target_key,
-        operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
-    }];
-    assert_eq!(
-        node.transaction_record(tx_id).unwrap().contribution_merge,
-        Some(provenance)
-    );
-}
-
-#[test]
-fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x69; 16]), schema);
-    let row_uuid = row(0x6a);
-    let a = branch_selector(0x6b);
-    let b = branch_selector(0x6c);
-    let c = branch_selector(0x6d);
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row_uuid, 10)
-            .branch(a.clone())
-            .cells(BTreeMap::from([
-                ("title".to_owned(), v("from a")),
-                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-            ])),
-    )
-    .unwrap();
-    let request = |source: BranchSelector, target: BranchSelector, now_ms| {
-        ContributionMergeRequest {
-            source,
-            target,
-            rows: vec![ContributionMergeRow {
-                table: "todos".to_owned(),
-                row_uuid,
-            }],
-            made_by: AuthorSubject::SYSTEM,
-            permission_subject: None,
-            now_ms,
-        }
-    };
-
-    assert!(
-        node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        node.visible_current_cells_in_branch("todos", &b, row_uuid)
-            .unwrap()
-            .unwrap()["title"],
-        v("from a")
-    );
-    assert!(
-        node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 30))
-            .unwrap()
-            .is_none(),
-        "observed provenance suppresses retry"
-    );
-    assert!(
-        node.merge_branch_contributions_settled(request(b, c.clone(), 40))
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        node.merge_branch_contributions_settled(request(c, a, 50))
-            .unwrap()
-            .is_none(),
-        "A -> B -> C -> A must not echo A's native dots home"
-    );
-}
-
-#[test]
-fn contribution_merge_carries_delete_and_restore_register_events() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x6e; 16]), schema);
-    let row_uuid = row(0x6f);
-    let source = branch_selector(0x70);
-    let target = branch_selector(0x71);
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row_uuid, 10)
-            .branch(source.clone())
-            .cells(BTreeMap::from([
-                ("title".to_owned(), v("row")),
-                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-            ])),
-    )
-    .unwrap();
-    let request = |now_ms| ContributionMergeRequest {
-        source: source.clone(),
-        target: target.clone(),
-        rows: vec![ContributionMergeRow {
-            table: "todos".to_owned(),
-            row_uuid,
-        }],
-        made_by: AuthorSubject::SYSTEM,
-        permission_subject: None,
-        now_ms,
-    };
-    node.merge_branch_contributions_settled(request(20)).unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row_uuid, 30)
-            .branch(source.clone())
-            .deletion(DeletionEvent::Deleted),
-    )
-    .unwrap();
-    node.merge_branch_contributions_settled(request(40)).unwrap();
-    assert!(
-        node.visible_current_cells_in_branch("todos", &target, row_uuid)
-            .unwrap()
-            .is_none()
-    );
-
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row_uuid, 50)
-            .branch(source.clone())
-            .deletion(DeletionEvent::Restored),
-    )
-    .unwrap();
-    node.merge_branch_contributions_settled(request(60)).unwrap();
-    assert_eq!(
-        node.visible_current_cells_in_branch("todos", &target, row_uuid)
-            .unwrap()
-            .unwrap()["title"],
-        v("row")
-    );
-}
-
-#[test]
-fn contribution_merge_receiver_needs_no_source_history() {
-    let schema = branch_view_schema();
-    let (_writer_dir, mut writer) = open_history_complete_node_with_schema(
-        NodeUuid::from_bytes([0x72; 16]),
-        schema.clone(),
-    );
-    let (_receiver_dir, mut receiver) = open_history_complete_node_with_schema(
-        NodeUuid::from_bytes([0x73; 16]),
-        schema,
-    );
-    let row_uuid = row(0x74);
-    let source = branch_selector(0x75);
-    let target = branch_selector(0x76);
-    writer
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 10)
-                .branch(source.clone())
-                .cells(BTreeMap::from([
-                    ("title".to_owned(), v("portable")),
-                    ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-                ])),
-        )
-        .unwrap();
-    let published = writer
-        .merge_branch_contributions(ContributionMergeRequest {
-            source,
-            target: target.clone(),
-            rows: vec![ContributionMergeRow {
-                table: "todos".to_owned(),
-                row_uuid,
-            }],
-            made_by: AuthorSubject::SYSTEM,
-            permission_subject: None,
-            now_ms: 20,
-        })
-        .unwrap()
-        .unwrap();
-    let merge = writer.persist_and_settle_transaction(published).unwrap();
-    let unit = writer.commit_unit_for(merge).unwrap();
-    receiver.apply_sync_message_settled(unit).unwrap();
-    assert_eq!(
-        receiver
-            .visible_current_cells_in_branch("todos", &target, row_uuid)
-            .unwrap()
-            .unwrap()["title"],
-        v("portable")
-    );
-}
-
-#[test]
-fn contribution_merge_denies_unreadable_source_before_minting() {
-    let schema = branch_view_schema();
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x77; 16]), schema);
-    let row_uuid = row(0x78);
-    let source = branch_selector(0x79);
-    let target = branch_selector(0x7a);
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row_uuid, 10)
-            .branch(source.clone())
-            .cells(BTreeMap::from([
-                ("title".to_owned(), v("private")),
-                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-            ])),
-    )
-    .unwrap();
-    let unauthorized = AuthorSubject::for_test_bytes([0x7b; 16]);
-    let error = node
-        .merge_branch_contributions(ContributionMergeRequest {
-            source,
-            target: target.clone(),
-            rows: vec![ContributionMergeRow {
-                table: "todos".to_owned(),
-                row_uuid,
-            }],
-            made_by: unauthorized,
-            permission_subject: Some(unauthorized),
-            now_ms: 20,
-        })
-        .resolve()
-        .err()
-        .expect("unreadable contribution source is rejected");
-    assert!(
-        matches!(error, Error::InvalidMergeableCommit(_)),
-        "unexpected contribution authorization error: {error:?}"
-    );
-    assert!(
-        node.visible_current_cells_in_branch("todos", &target, row_uuid)
-            .unwrap()
-            .is_none()
-    );
-    let next = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("users", row(0x7c), 20)
-                .cell("name", v("clock receipt")),
-        )
-        .unwrap();
-    assert_eq!(next.time, TxTime::from(20));
-}
-
-#[test]
-fn counter_contribution_merge_imports_only_novel_native_deltas() {
-    let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
-            "counts",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("count", ColumnType::U64),
-            ],
-        )
-        .with_branch_column("branch_id")
-        .with_column_merge_strategy("count", MergeStrategy::Counter)],
-    );
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x7e; 16]), schema);
-    let row_uuid = row(0x7f);
-    let a = branch_selector(0x80);
-    let b = branch_selector(0x81);
-    let c = branch_selector(0x82);
-    let first = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("counts", row_uuid, 10)
-                .branch(a.clone())
-                .cell("count", Value::U64(5)),
-        )
-        .unwrap();
-    let request = |source: BranchSelector, target: BranchSelector, now_ms| {
-        ContributionMergeRequest {
-            source,
-            target,
-            rows: vec![ContributionMergeRow {
-                table: "counts".to_owned(),
-                row_uuid,
-            }],
-            made_by: AuthorSubject::SYSTEM,
-            permission_subject: None,
-            now_ms,
-        }
-    };
-    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
-        .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("counts", row_uuid, 30)
-            .branch(a.clone())
-            .parents(vec![first])
-            .cell("count", Value::U64(8)),
-    )
-    .unwrap();
-    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 40))
-        .unwrap();
-    assert_eq!(
-        node.visible_current_cells_in_branch("counts", &b, row_uuid)
-            .unwrap()
-            .unwrap()["count"],
-        Value::U64(8)
-    );
-    node.merge_branch_contributions_settled(request(b, c.clone(), 50))
-        .unwrap();
-    assert!(
-        node.merge_branch_contributions_settled(request(c, a, 60))
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn gset_contribution_merge_tracks_elements_as_native_operations() {
-    let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
-            "sets",
-            [
-                ColumnSchema::new("branch_id", ColumnType::Uuid),
-                ColumnSchema::new("members", ColumnType::Array(Box::new(ColumnType::String))),
-            ],
-        )
-        .with_branch_column("branch_id")
-        .with_column_merge_strategy("members", MergeStrategy::GSet)],
-    );
-    let (_dir, mut node) =
-        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x84; 16]), schema);
-    let row_uuid = row(0x85);
-    let a = branch_selector(0x86);
-    let b = branch_selector(0x87);
-    let c = branch_selector(0x88);
-    let first = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("sets", row_uuid, 10)
-                .branch(a.clone())
-                .cell("members", Value::Array(vec![v("one")])),
-        )
-        .unwrap();
-    let request = |source: BranchSelector, target: BranchSelector, now_ms| {
-        ContributionMergeRequest {
-            source,
-            target,
-            rows: vec![ContributionMergeRow {
-                table: "sets".to_owned(),
-                row_uuid,
-            }],
-            made_by: AuthorSubject::SYSTEM,
-            permission_subject: None,
-            now_ms,
-        }
-    };
-    let first_merge = node
-        .merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
-        .unwrap()
-        .unwrap();
-    let provenance = node
-        .transaction_record(first_merge)
-        .unwrap()
-        .contribution_merge
-        .unwrap();
-    let ContributionComponent::Operation { column, identity } =
-        &provenance.substitutions[0].target.component
-    else {
-        panic!("g-set substitution target must carry an operation identity");
-    };
-    assert_eq!(column, "members");
-    let descriptor = records::RecordDescriptor::new([("element", records::ValueType::String)]);
-    assert_eq!(identity, &descriptor.create(&[v("one")]).unwrap());
-    node.commit_mergeable_settled(
-        MergeableCommit::new("sets", row_uuid, 30)
-            .branch(a.clone())
-            .parents(vec![first])
-            .cell("members", Value::Array(vec![v("two")])),
-    )
-    .unwrap();
-    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 40))
-        .unwrap();
-    assert_eq!(
-        node.visible_current_cells_in_branch("sets", &b, row_uuid)
-            .unwrap()
-            .unwrap()["members"],
-        Value::Array(vec![v("one"), v("two")])
-    );
-    node.merge_branch_contributions_settled(request(b, c.clone(), 50))
-        .unwrap();
-    assert!(
-        node.merge_branch_contributions_settled(request(c, a, 60))
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
 fn maintained_live_base_emits_a_delta_before_facade_refresh() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
@@ -2756,233 +1993,93 @@ fn branch_column_evolution_accepts_monotone_addition_with_default() {
         .expect("a branch column can be added monotonically with an immutable default");
 }
 
+// Branch commit-unit publication and branch-write authorization (moved from
+// the removed merge-head suite; merge-head assertions dropped with the DAG).
+fn branch_commit_unit_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .branch_by("branch_id"),
+        ),
+    )
+}
+
 #[test]
-fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
-    // Internal coverage is necessary to evict the transaction-version cache
-    // and count actual storage decodes around parent validation in isolation.
-    // Fixture creation still uses the ordinary public schema/commit builders.
-    for width in [1500_u128, 1] {
-        let schema = branch_view_schema();
-        let branch = branch_selector(0x71);
-        let branch_key = schema
-            .project_branch_view_selector(
-                schema
-                    .tables
-                    .iter()
-                    .find(|table| table.name == "todos")
-                    .unwrap(),
-                &branch,
-            )
-            .unwrap()
-            .0;
-        let (_dir, mut core) = open_history_complete_node_with_schema(
-            NodeUuid::from_bytes([0x72; 16]),
-            schema.clone(),
+fn immediate_branch_commit_unit_matches_durable_replay() {
+    // The wire envelope is the boundary under test: immediate publication must
+    // carry exactly the same generated intent as replay after a process restart.
+    let schema = branch_commit_unit_schema();
+    let (dir, mut writer) = open_node_with_schema(node(0xb3), schema.clone());
+    let (tx_id, immediate) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0xbc), 10)
+                .branch(branch_selector(0xa3))
+                .made_by(user(0xb4))
+                .cells(BTreeMap::from([("title".to_owned(), v("retained metadata"))])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = &immediate else {
+        panic!("expected commit unit");
+    };
+    assert_eq!(tx.made_by, user(0xb4));
+    assert_eq!(
+        tx.contribution_merge.as_ref()
+            .expect("immediate publication lost its generated branch-write intent")
+            .branch_write_intents.len(),
+        1,
+        "immediate publication must retain generated branch-write intent"
+    );
+    drop(writer);
+    let mut reopened = reopen_node_at(&dir, node(0xb3), schema);
+    assert_eq!(immediate, reopened.commit_unit_for(tx_id).unwrap());
+}
+
+#[test]
+fn concurrent_branch_inserts_do_not_bypass_read_or_update_policy() {
+    for (can_read, can_update) in [(true, true), (false, true), (true, false)] {
+        let policy = |allowed| if allowed { PublicPolicyExpr::True } else { PublicPolicyExpr::False };
+        let schema = build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(public_all_policies()
+                        .with_select(policy(can_read))
+                        .with_update(Some(policy(can_update)), PublicPolicyExpr::True)),
+            ),
         );
-        let owner = AuthorSubject::for_test_bytes([0x73; 16]);
-        let target = RowUuid(uuid::Uuid::from_u128(1));
-        let commits = (1..=width)
-            .map(|index| {
-                MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(index)), 10)
-                    .branch(branch.clone())
-                    .cells(BTreeMap::from([
-                        ("title".to_owned(), v("parent")),
-                        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-                    ]))
-            })
-            .collect();
-        let content_parent = core.commit_mergeable_many_settled(commits).unwrap();
-        let deletion_parent = core
-            .commit_mergeable_many_settled(
-                (1..=width)
-                    .map(|index| {
-                        MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(index)), 20)
-                            .branch(branch.clone())
-                            .deletion(DeletionEvent::Deleted)
-                    })
-                    .collect(),
-            )
-            .unwrap();
-        let physical_table_id = core
-            .physical_table_id_for_schema(schema.version_id(), "todos")
-            .unwrap();
-        for (parent, layer) in [
-            (content_parent, VersionLayer::Content),
-            (deletion_parent, VersionLayer::Deletion),
-        ] {
-            let coordinate = ParentCoordinate {
-                physical_table_id,
-                branch_key: branch_key.clone(),
-                row_uuid: target,
-                layer,
-            };
-            core.invalidate_tx_version_tables_cache(parent);
-            super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
-            super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
-            core.reset_storage_read_metrics();
-            assert_eq!(
-                core.validate_known_parent_coordinate(parent, &coordinate)
-                    .resolve()
-                    .unwrap(),
-                super::super::ingest::ParentCoordinateValidation::Exact
-            );
-            let reads = core.take_storage_read_metrics();
-            assert_eq!(
-                super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
-                1,
-                "one parent witness must decode one history row even for a {width}-row transaction"
-            );
-            assert_eq!(
-                super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get()),
-                1,
-                "the parent transaction must still cross the full payload audit before exact lookup"
-            );
-            assert_eq!(
-                reads.history_indexes.ranges, 0,
-                "exact parent lookup must not scan by_tx: {reads:?}"
-            );
-            assert!(
-                reads.total.reads <= 2,
-                "exact parent lookup should read transaction plus witness: {reads:?}"
-            );
-
-            let wrong_branch = ParentCoordinate {
-                branch_key: schema
-                    .project_branch_view_selector(
-                        schema
-                            .tables
-                            .iter()
-                            .find(|table| table.name == "todos")
-                            .unwrap(),
-                        &branch_selector(0x74),
-                    )
-                    .unwrap()
-                    .0,
-                ..coordinate.clone()
-            };
-            let wrong_row = ParentCoordinate {
-                row_uuid: RowUuid(uuid::Uuid::from_u128(width + 1)),
-                ..coordinate.clone()
-            };
-            let wrong_layer = ParentCoordinate {
-                layer: match layer {
-                    VersionLayer::Content => VersionLayer::Deletion,
-                    VersionLayer::Deletion => VersionLayer::Content,
-                },
-                ..coordinate.clone()
-            };
-            let wrong_table = ParentCoordinate {
-                physical_table_id: core
-                    .physical_table_id_for_schema(schema.version_id(), "users")
-                    .unwrap(),
-                ..coordinate.clone()
-            };
-            let malformed_branch = ParentCoordinate {
-                branch_key: BranchKey {
-                    values: vec![(
-                        "branch_id".to_owned(),
-                        crate::protocol::BranchColumnValue(vec![0xff]),
-                    )],
-                },
-                ..coordinate.clone()
-            };
-            for wrong in [
-                wrong_branch,
-                wrong_row,
-                wrong_layer,
-                wrong_table,
-                malformed_branch,
-            ] {
-                assert!(
-                    matches!(
-                        core.validate_known_parent_coordinate(parent, &wrong)
-                            .resolve(),
-                        Err(Error::InvalidMergeableCommit(_))
-                    ),
-                    "a known complete parent cannot resolve outside its exact coordinate"
-                );
-            }
-            assert_eq!(
-                core.validate_known_parent_coordinate(
-                    TxId::new(TxTime::from(99), parent.node),
-                    &coordinate
-                )
-                .resolve()
-                .unwrap(),
-                super::super::ingest::ParentCoordinateValidation::Inconclusive
-            );
+        let (_left_dir, mut left) = open_node_with_schema(node(0xb5), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xb6), schema.clone());
+        let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0xb7), schema);
+        let shared_row = row(0xbd);
+        let commit = |title| MergeableCommit::new("todos", shared_row, 10)
+            .branch(branch_selector(0xa4))
+            .made_by(user(0xb8))
+            .cells(BTreeMap::from([("title".to_owned(), v(title))]));
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(commit("left")).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(commit("right")).unwrap();
+        let first = core.apply_sync_message_settled(left_unit).unwrap();
+        assert!(first.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == left_tx
+        )), "first insert must be admitted without requiring prior read access: {first:?}");
+        let expected = if can_read && can_update {
+            Fate::Accepted
+        } else {
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        };
+        let second = core.apply_sync_message_settled(right_unit).unwrap();
+        assert!(second.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate, .. } if *tx_id == right_tx && *fate == expected
+        )), "read={can_read}, update={can_update}: {second:?}");
+        if expected == Fate::Accepted {
+            // Linear history: Core folds the later write over the current row;
+            // no DAG merge version with both writes as parents is minted.
+            assert!(!core.query_versions_for_tx(right_tx).unwrap().is_empty());
+        } else {
+            assert!(core.query_versions_for_tx(right_tx).unwrap().is_empty());
         }
     }
-}
-
-#[test]
-fn partial_parent_misses_do_not_materialize_retained_siblings() {
-    // Internal test: public results cannot reveal repeated sibling scans.
-    // Exercise real authored and view-scoped records, then meter both cold
-    // and resident lookup paths. Complete-parent rejection is covered above.
-    use super::super::ingest::ParentCoordinateValidation;
-    for width in [1_u128, 150] {
-        let (_writer_dir, mut writer) = open_node_with_uuid(node(0xa1));
-        let (_reader_dir, mut reader) = open_node_with_uuid(node(0xa2));
-        let parent = writer.commit_mergeable_many_settled(
-            (1..=width + 1).map(|i| {
-                MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(i)), 10)
-                    .cells(title_cells("parent"))
-            }).collect(),
-        ).unwrap();
-        let SyncMessage::CommitUnit { mut tx, mut versions } = writer.commit_unit_for(parent).unwrap() else {
-            panic!("commit unit");
-        };
-        versions.retain(|version| version.row_uuid() != RowUuid(uuid::Uuid::from_u128(width + 1)));
-        tx.n_total_writes = versions.len() as u32;
-        reader.ingest_view_scoped_transaction_with_current_indexes(
-            tx, versions, Fate::Pending, None, DurabilityTier::Local,
-        ).unwrap();
-        let present = ParentCoordinate {
-            physical_table_id: reader.physical_table_id_for_schema(reader.catalogue.local_schema_version_id, "todos").unwrap(),
-            branch_key: BranchKey::default(),
-            row_uuid: RowUuid(uuid::Uuid::from_u128(1)),
-            layer: VersionLayer::Content,
-        };
-        let retained = reader.query_versions_for_tx(parent).unwrap();
-        for resident in [false, true] {
-            reader.invalidate_tx_version_tables_cache(parent);
-            if resident { reader.cache_tx_versions(parent, retained.clone()); }
-            assert_eq!(reader.validate_known_parent_coordinate(parent, &present).resolve().unwrap(), ParentCoordinateValidation::Exact);
-            reader.reset_storage_read_metrics();
-            super::super::reset_query_versions_for_tx_call_count();
-            for i in width + 1..=width + 32 {
-                let missing = ParentCoordinate { row_uuid: RowUuid(uuid::Uuid::from_u128(i)), ..present.clone() };
-                assert_eq!(reader.validate_known_parent_coordinate(parent, &missing).resolve().unwrap(), ParentCoordinateValidation::Inconclusive);
-            }
-            assert_eq!(super::super::query_versions_for_tx_call_count(), 0, "missing partial parents must not load sibling bodies (width={width}, resident={resident})");
-            assert_eq!(reader.storage_read_metrics().history_indexes.reads, 0, "no by_tx index scans for partial misses");
-        }
-    }
-}
-
-#[test]
-fn completed_parents_without_waiting_children_do_not_reload_history() {
-    // Internal mechanism test: visible results cannot expose unnecessary
-    // transaction-wide history probes after a successful batch admission.
-    let (_dir, mut node) = open_node_with_uuid(node(0xb1));
-    let mut parents = BTreeSet::new();
-    for i in 1..=32 {
-        parents.insert(node.commit_mergeable_settled(
-            MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(i)), i as u64)
-                .cells(title_cells("parent without waiting children")),
-        ).unwrap());
-    }
-    let unrelated_child = node.commit_mergeable_settled(
-        MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(99)), 110)
-            .parents(vec![TxId::new(TxTime::from(100), NodeUuid(uuid::Uuid::from_u128(0xb2)))])
-            .cells(title_cells("unrelated waiting child")),
-    ).unwrap();
-    node.reset_storage_read_metrics();
-    super::super::reset_query_versions_for_tx_call_count();
-    node.settle_completed_parent_batch(&parents).resolve().unwrap();
-    assert_eq!(super::super::query_versions_for_tx_call_count(), 0,
-        "completed parents without constraints must not reload their history");
-    assert_eq!(node.storage_read_metrics().history_indexes.reads, 0);
-    assert_eq!(node.transaction_record(unrelated_child).unwrap().fate, Fate::Pending);
 }

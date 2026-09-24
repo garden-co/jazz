@@ -244,7 +244,6 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
             .commit_mergeable_unit(
                 MergeableCommit::new("people", user_row, 2_000)
                     .made_by(mallory)
-                    .parents(vec![insert_tx])
                     .cells(cells("mallory+renamed@example.com", alice)),
             )
             .await?;
@@ -287,7 +286,6 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
             .commit_mergeable_unit(
                 MergeableCommit::new("people", user_row, 2_000)
                     .made_by(alice)
-                    .parents(vec![insert_tx])
                     .cells(cells("alice+renamed@example.com", alice)),
             )
             .await?;

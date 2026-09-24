@@ -239,9 +239,6 @@ fn accept_owner_capture_row(
 ) -> TxId {
     let mut commit =
         MergeableCommit::new("todos", row_uuid, made_at).cells(owner_cells(owner, title));
-    if let Some(parent) = parents.get(&row_uuid).and_then(|(content, _)| *content) {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry(row_uuid).or_default().0 = Some(tx_id);
     tx_id
@@ -255,9 +252,6 @@ fn accept_capture_delete(
 ) {
     let mut commit =
         MergeableCommit::new("todos", row_uuid, made_at).deletion(DeletionEvent::Deleted);
-    if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry(row_uuid).or_default().1 = Some(tx_id);
 }
@@ -1065,12 +1059,6 @@ fn accept_recursive_row(
     made_at: u64,
 ) -> TxId {
     let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-    if let Some(parent) = parents
-        .get(&(table, row_uuid))
-        .and_then(|(content, _)| *content)
-    {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
     tx_id
@@ -1085,12 +1073,6 @@ fn delete_recursive_row(
 ) -> TxId {
     let mut commit =
         MergeableCommit::new(table, row_uuid, made_at).deletion(DeletionEvent::Deleted);
-    if let Some(parent) = parents
-        .get(&(table, row_uuid))
-        .and_then(|(_, deletion)| *deletion)
-    {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().1 = Some(tx_id);
     tx_id
@@ -1347,12 +1329,6 @@ fn seeded_maintained_subscription_view_multitable_capture(
                   made_at: u64,
                   cells: BTreeMap<String, Value>| {
         let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-        if let Some(parent) = parents
-            .get(&(table, row_uuid))
-            .and_then(|(content, _)| *content)
-        {
-            commit = commit.parents(vec![parent]);
-        }
         let tx_id = accept_global(core, commit);
         parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
         txs.insert((table, row_uuid), tx_id);

@@ -277,9 +277,6 @@ impl ColdSubscriptionBench {
         for idx in 0..=depth {
             let mut commit =
                 MergeableCommit::new(TABLE, row_uuid, 1_000 + idx as u64).cells(cells(idx));
-            if let Some(parent_tx_id) = parent {
-                commit = commit.parents(vec![parent_tx_id]);
-            }
             let (publication, unit) =
                 block_on(self.writer.commit_mergeable_unit(commit)).expect("mergeable commit");
             let tx_id = publication.tx_id();
