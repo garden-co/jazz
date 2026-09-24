@@ -1640,6 +1640,9 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
   return definition as unknown as Schema<TSchema>;
 }
 
+/** Internal package-owned tables shared by app compilation and catalogue publication. */
+export const managedEncryptionSchema = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
+
 /** Internal: keep app compilation and migration witnesses on the same managed tables. */
 export function withManagedEncryptionTables(definition: SchemaDefinition): SchemaDefinition {
   if (
@@ -1647,13 +1650,12 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
       (table) => table instanceof DefinedTable && table.encryption !== undefined,
     )
   ) {
-    const managed = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
-    for (const [name, table] of Object.entries(managed)) {
+    for (const [name, table] of Object.entries(managedEncryptionSchema)) {
       if (Object.hasOwn(definition, name) && definition[name] !== table) {
         throw new Error(`Cannot replace managed E2EE table "${name}"`);
       }
     }
-    definition = { ...managed, ...definition };
+    definition = { ...managedEncryptionSchema, ...definition };
   }
   return definition;
 }
