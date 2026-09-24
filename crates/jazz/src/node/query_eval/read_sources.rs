@@ -1620,9 +1620,9 @@ where
         // the authored enum occurrence above.
         let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
         let graph = if let Some(input_source) = covered_input_source {
-            // Online remote-if-possible composes the authority closure with the
-            // eligible local-current overlay before it enters the same
-            // maintained program. The input is shared, but overlay composition
+            // An online remote read with immediate local updates composes the
+            // authority closure with the eligible local-current overlay before
+            // it enters the same maintained program. The input is shared, but overlay composition
             // remains downstream of each occurrence's metadata projection.
             // Both sides can carry the same already-admitted version (the
             // local store retains received authority data), so select their

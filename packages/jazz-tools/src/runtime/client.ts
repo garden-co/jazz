@@ -362,20 +362,24 @@ export const ReadTier = {
    * unconfigured, and failed connections deliver the local result at once.
    */
   LocalFirstUnlessEmpty: "local-first-unless-empty",
-  /**
-   * @deprecated Use `ReadTier.LocalFirstUnlessEmpty`. The old
-   * `"remote-if-possible"` value is still accepted and now has exactly the
-   * `LocalFirstUnlessEmpty` behavior.
-   */
-  RemoteIfPossible: "remote-if-possible",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 
-/** @internal True for the local-first-unless-empty tier and its deprecated alias. */
+/** @internal True for the local-first-unless-empty tier. */
 export function isLocalFirstUnlessEmptyTier(
   tier: unknown,
-): tier is typeof ReadTier.LocalFirstUnlessEmpty | typeof ReadTier.RemoteIfPossible {
-  return tier === ReadTier.LocalFirstUnlessEmpty || tier === ReadTier.RemoteIfPossible;
+): tier is typeof ReadTier.LocalFirstUnlessEmpty {
+  return tier === ReadTier.LocalFirstUnlessEmpty;
+}
+
+const REMOVED_REMOTE_IF_POSSIBLE =
+  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirstUnlessEmpty, or ReadTier.Remote for server-confirmed reads.';
+
+function rejectRemovedReadTier(tier: unknown): void {
+  if (tier === "edge") {
+    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
+  }
+  if (tier === "remote-if-possible") throw new Error(REMOVED_REMOTE_IF_POSSIBLE);
 }
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
@@ -443,9 +447,7 @@ export function publicQueryExecutionOptions(
 ): QueryExecutionOptions | undefined {
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
-  if (candidate.tier === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
-  }
+  rejectRemovedReadTier(candidate.tier);
   const result: QueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
@@ -458,7 +460,6 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
     value === ReadTier.LocalFirst ||
     value === ReadTier.Remote ||
     value === ReadTier.LocalFirstUnlessEmpty ||
-    value === ReadTier.RemoteIfPossible ||
     value === "local" ||
     value === "global"
   );
@@ -645,9 +646,7 @@ export type RuntimeReadTier = DurabilityTier | "local-first-unless-empty";
 
 /** @internal Lower product read choices to the runtime's read tiers. */
 export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
-  if ((tier as string) === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
-  }
+  rejectRemovedReadTier(tier);
   if (tier === "local-only") return "local";
   if (isLocalFirstUnlessEmptyTier(tier)) return "local-first-unless-empty";
   return tier === ReadTier.LocalFirst ? "local" : tier === ReadTier.Remote ? "global" : tier;

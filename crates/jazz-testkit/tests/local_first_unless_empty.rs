@@ -171,22 +171,6 @@ async fn empty_local_result_waits_for_the_first_remote_view_while_connected() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[allow(deprecated)]
-async fn deprecated_remote_if_possible_alias_reads_like_local_first_unless_empty() {
-    assert_eq!(ReadTier::RemoteIfPossible, ReadTier::LocalFirstUnlessEmpty);
-    tokio::task::LocalSet::new()
-        .run_until(assert_empty_local_waits_for_remote_rows(
-            ReadTier::RemoteIfPossible,
-            [
-                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa521",
-                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa522",
-                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa523",
-            ],
-        ))
-        .await;
-}
-
 /// An empty remote view still releases the opening once it settles.
 #[tokio::test(flavor = "current_thread")]
 async fn empty_local_and_empty_remote_view_opens_once_the_remote_view_settles() {

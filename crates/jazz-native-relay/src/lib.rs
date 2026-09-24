@@ -6635,6 +6635,14 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
+        if key == "tier"
+            && matches!(
+                item.as_str(),
+                Some("remote-if-possible" | "RemoteIfPossible")
+            )
+        {
+            return Err(failure("the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads".to_owned()));
+        }
         if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
             return Err(failure(
                 "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
@@ -6643,16 +6651,10 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         if key == "tier"
             && matches!(
                 item.as_str(),
-                Some(
-                    "local-first-unless-empty"
-                        | "LocalFirstUnlessEmpty"
-                        | "remote-if-possible"
-                        | "RemoteIfPossible"
-                )
+                Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
             )
         {
-            // The core owns the local-first-unless-empty gate. The deprecated
-            // "remote-if-possible" names are aliases for the same behaviour.
+            // The core owns the local-first-unless-empty gate.
             value["tier"] = serde_json::Value::String("Local".to_owned());
             value["empty_opening"] = serde_json::Value::String("AwaitRemote".to_owned());
             continue;

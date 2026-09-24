@@ -3264,17 +3264,25 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
 fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
+    if let Some(message) = removed_read_tier(tier) {
+        return Err(JsValue::from_str(message));
+    }
     match tier {
         "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate. The deprecated
-        // "remote-if-possible" names are aliases for the same behaviour.
-        "local-first-unless-empty"
-        | "LocalFirstUnlessEmpty"
-        | "remote-if-possible"
-        | "RemoteIfPossible" => Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
+        }
         "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
         _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
     }
+}
+
+/// Error message for a read tier name that was removed, if `tier` is one.
+fn removed_read_tier(tier: &str) -> Option<&'static str> {
+    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
+        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -3980,12 +3988,10 @@ mod dynamic_schema_view_tests {
             read_tier_from_str("remote").expect("strict remote read tier"),
             (DurabilityTier::Global, EmptyOpening::Deliver)
         );
-        for name in [
-            "local-first-unless-empty",
-            "LocalFirstUnlessEmpty",
-            "remote-if-possible",
-            "RemoteIfPossible",
-        ] {
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(removed_read_tier(name).is_some(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
             assert_eq!(
                 read_tier_from_str(name).expect("local-first-unless-empty read tier"),
                 (DurabilityTier::Local, EmptyOpening::AwaitRemote),

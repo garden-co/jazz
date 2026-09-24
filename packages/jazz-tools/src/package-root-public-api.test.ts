@@ -21,8 +21,8 @@ const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
 const localFirstUnlessEmptyQueryExecutionOptions: QueryExecutionOptions = {
   tier: "local-first-unless-empty",
 };
-// Deprecated alias of local-first-unless-empty; still accepted.
-const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
+const removedRemoteIfPossibleTier: QueryExecutionOptions = {
+  // @ts-expect-error remote-if-possible was removed; use local-first-unless-empty.
   tier: "remote-if-possible",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
@@ -49,7 +49,7 @@ const internalLocalOnlyTier: QueryExecutionOptions = {
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
 void localFirstUnlessEmptyQueryExecutionOptions;
-void remoteIfPossibleQueryExecutionOptions;
+void removedRemoteIfPossibleTier;
 void removedQueryExecutionOptions;
 void removedLocalUpdatesOption;
 void removedPropagationOption;

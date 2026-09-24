@@ -312,7 +312,7 @@ answer may be published; it does not select another evaluator:
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- `local-first-unless-empty` (formerly `remote-if-possible`) evaluates exactly
+- `local-first-unless-empty` evaluates exactly
   like `local-first`; it differs only in publishing an empty first answer after
   the usage's first settled authority closure while a remote can answer, and in
   reading an `offset > 0` window as the strict remote view (ch. 13);

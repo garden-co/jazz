@@ -263,8 +263,8 @@ Bindings expose the separate, read-only `ReadTier` vocabulary:
 | `Remote`                | wait for the current authority scope; wait while offline                                                                             | excluded         | remote accepted inputs only              |
 | `LocalFirstUnlessEmpty` | as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve; `offset > 0` reads the remote window | immediate        | as `LocalFirst`, plus the opening gate   |
 
-`RemoteIfPossible` is a deprecated alias of `LocalFirstUnlessEmpty` (the Rust
-enum keeps the retired variant's serialized index and decodes its name). The
+`LocalFirstUnlessEmpty` keeps postcard index 2 in the Rust enum; the removed
+`RemoteIfPossible` name is rejected by every binding and by serde. The
 former bounded pending overlay over authority inputs remains a core
 `Global` + `LocalUpdates::Immediate` lowering, but no product tier selects it;
 broader expansion of that overlay is an open question in
@@ -386,8 +386,8 @@ reach the server. One-shot reads need no witness, because their remote phase
 is already a `Global` read through the owner.
 
 Binding read-tier strings: `local-first-unless-empty` /
-`LocalFirstUnlessEmpty` select this gate. The legacy `remote-if-possible` /
-`RemoteIfPossible` are aliases of the same choice. `remote` / `Remote` are
+`LocalFirstUnlessEmpty` select this gate. The removed `remote-if-possible` /
+`RemoteIfPossible` names are rejected with an error. `remote` / `Remote` are
 strict remote. Low-level `ReadOpts` and the legacy binding entrypoints still
 accept `DurabilityTier` unchanged during the migration.
 

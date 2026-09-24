@@ -4785,7 +4785,8 @@ struct SubscriptionState {
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
-    /// Online remote-if-possible overlays pending changes on scoped inputs.
+    /// An online remote read with immediate local updates overlays pending
+    /// changes on scoped inputs.
     pending_overlay: bool,
     remote_read_tier: Option<DurabilityTier>,
     /// Once this stream has an upstream, cached durable state needs a receipt

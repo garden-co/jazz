@@ -58,16 +58,10 @@ pub enum ReadTier {
     /// non-empty, or the upstream link is (or becomes) unavailable, whichever
     /// comes first; it never waits without a live link. After its opening the
     /// read behaves exactly like `LocalFirst`.
-    #[serde(alias = "RemoteIfPossible")]
     LocalFirstUnlessEmpty,
 }
 
 impl ReadTier {
-    /// Former name of [`ReadTier::LocalFirstUnlessEmpty`].
-    #[deprecated(note = "RemoteIfPossible was replaced; use ReadTier::LocalFirstUnlessEmpty")]
-    #[allow(non_upper_case_globals)]
-    pub const RemoteIfPossible: ReadTier = ReadTier::LocalFirstUnlessEmpty;
-
     /// Lower this product-level choice to the legacy facade durability tier.
     ///
     /// This is intentionally read-only. Writes and write settlement keep using
@@ -132,10 +126,11 @@ mod tests {
     }
 
     /// The serialized read-tier encoding is not observable through the
-    /// client API, so it is pinned here: the replacement keeps the retired
-    /// variant's postcard index and still decodes its textual name.
+    /// client API, so it is pinned here: `LocalFirstUnlessEmpty` keeps the
+    /// postcard index 2 of the removed `RemoteIfPossible` variant, whose
+    /// textual name is rejected.
     #[test]
-    fn local_first_unless_empty_keeps_the_retired_remote_if_possible_encoding() {
+    fn local_first_unless_empty_keeps_postcard_index_2_and_rejects_the_removed_name() {
         for (tier, bytes) in [
             (ReadTier::LocalFirst, vec![0]),
             (ReadTier::Remote, vec![1]),
@@ -144,17 +139,11 @@ mod tests {
             assert_eq!(postcard::to_allocvec(&tier).unwrap(), bytes);
             assert_eq!(postcard::from_bytes::<ReadTier>(&bytes).unwrap(), tier);
         }
-        assert_eq!(
-            serde_json::from_str::<ReadTier>("\"RemoteIfPossible\"").unwrap(),
-            ReadTier::LocalFirstUnlessEmpty
-        );
+        assert!(serde_json::from_str::<ReadTier>("\"RemoteIfPossible\"").is_err());
         assert_eq!(
             serde_json::to_string(&ReadTier::LocalFirstUnlessEmpty).unwrap(),
             "\"LocalFirstUnlessEmpty\""
         );
-        #[allow(deprecated)]
-        let alias = ReadTier::RemoteIfPossible;
-        assert_eq!(alias, ReadTier::LocalFirstUnlessEmpty);
         assert_eq!(
             ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
             DurabilityTier::Local

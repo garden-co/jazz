@@ -4331,12 +4331,13 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
     match tier {
         "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate. The deprecated
-        // "remote-if-possible" names are aliases for the same behaviour.
-        "local-first-unless-empty"
-        | "LocalFirstUnlessEmpty"
-        | "remote-if-possible"
-        | "RemoteIfPossible" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
+        }
+        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
+            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+        )),
         "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
         _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
     }
@@ -5274,12 +5275,10 @@ mod tests {
                 jazz::db::EmptyOpening::Deliver
             )
         );
-        for name in [
-            "local-first-unless-empty",
-            "LocalFirstUnlessEmpty",
-            "remote-if-possible",
-            "RemoteIfPossible",
-        ] {
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
             assert_eq!(
                 core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
                 (

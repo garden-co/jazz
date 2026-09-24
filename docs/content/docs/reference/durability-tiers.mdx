@@ -42,7 +42,6 @@ New applications should use the product read choices `"local-first"`,
   empty and the server is reachable (or its first connection is still being set up), the first
   result waits for the server's first answer. If local data exists, it is shown immediately and
   catches up with the server as it syncs.
-- `"remote-if-possible"` is a deprecated alias of `"local-first-unless-empty"`.
 
 `"local-first-unless-empty"` never waits on a server it cannot reach. The first result is local,
 and immediate, when no server is configured, after `db.disconnect()`, while the connection is down

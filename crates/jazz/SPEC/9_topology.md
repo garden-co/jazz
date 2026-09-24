@@ -179,8 +179,7 @@ subscriptions. An upstream removal changes future authoritative Global
 membership, but does not retroactively redact material already delivered to the
 scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
 `Propagation::LocalOnly` prevents asking upstream and does not change these
-Local semantics. `LocalFirstUnlessEmpty` (formerly `RemoteIfPossible`, now a
-deprecated alias) is a Local read throughout; only an empty opening may wait
+Local semantics. `LocalFirstUnlessEmpty` is a Local read throughout; only an empty opening may wait
 for the first authority view, only while the link is live or within the
 attempt window, and an `offset > 0` window reads the strict remote view
 (ch. 13). The gate lives in the core `Db`; it never runs a second concurrent
