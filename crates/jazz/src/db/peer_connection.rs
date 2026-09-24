@@ -833,6 +833,7 @@ pub struct ResumeCursor {
 
 impl ResumeCursor {
     /// Full-diff fallbacks carried by the parked subscriber peer.
+    #[cfg(feature = "runtime")]
     pub(crate) fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
         self.peer
             .maintained_subscription_view_metrics()
