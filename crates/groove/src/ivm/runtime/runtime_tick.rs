@@ -111,6 +111,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// No independent root remains after a scoped failure, so this tick must
     /// not publish its staged globals.
     discarded: bool,
+    /// Affected shared terminals whose route barriers await this tick's
+    /// deltas (#3288). Taken once the first frame completes.
+    routed_terminals: Vec<NodeId>,
 }
 
 #[derive(Clone)]
@@ -725,6 +728,60 @@ impl EvaluationWorkQueue {
 }
 
 impl<'a> IncrementalEvaluation<'a> {
+    /// Second frame of a routed tick (#3288): activate exactly the route
+    /// barriers the shared terminals' deltas reached, with their downstream
+    /// closure, as if activation had reached them directly.
+    fn activate_route_barriers(
+        &mut self,
+        runtime: &IvmRuntime,
+        touched: HashSet<NodeId>,
+    ) -> Result<(), IvmRuntimeError> {
+        let closure = runtime.graph.downstream_through_routes(touched);
+        let mut roots = self.work_queue.layout.roots.clone();
+        for node in &closure {
+            let mut meta = self
+                .node_meta
+                .get(node)
+                .or_else(|| runtime.node_meta.get(node))
+                .cloned()
+                .unwrap_or_default();
+            meta.input_generation = meta.input_generation.wrapping_add(1);
+            if meta
+                .retainers
+                .iter()
+                .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
+            {
+                roots.push(*node);
+            }
+            self.node_meta.insert(*node, meta);
+            for subscription in runtime
+                .subscriptions_by_output_node
+                .get(node)
+                .into_iter()
+                .flatten()
+            {
+                if self.affected_subscriptions.insert(*subscription) {
+                    self.metrics.subscriptions_considered += 1;
+                }
+                if let Some(state) = runtime.multisink_subscriptions.get(subscription) {
+                    for output in state.outputs.values().filter(|output| output.node == *node) {
+                        roots.extend(output.root_ordering_node);
+                    }
+                }
+            }
+        }
+        Arc::make_mut(&mut self.affected_nodes).extend(closure.iter().copied());
+        Arc::make_mut(&mut self.relevant_nodes).extend(closure.iter().copied());
+        roots.sort_unstable();
+        roots.dedup();
+        let mut queue =
+            EvaluationWorkQueue::discover_frame(&runtime.graph, &runtime.node_meta, roots, false)?;
+        queue.completed_events = self.work_queue.drain_completed_events();
+        self.eval_memo.set_layout(Arc::clone(&queue.layout));
+        self.work_queue = queue;
+        Ok(())
+    }
+
     fn poll_storage_flush(
         &mut self,
         indeterminate: &Rc<Cell<bool>>,
@@ -1028,6 +1085,17 @@ impl<'a> IncrementalEvaluation<'a> {
             self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
             drop(evaluator);
             return self.poll(runtime, cx);
+        }
+        if !self.routed_terminals.is_empty() && self.work_queue.roots_complete() {
+            let routed = std::mem::take(&mut self.routed_terminals);
+            let touched = touched_route_barriers(&mut evaluator, &runtime.graph, &routed, cx);
+            if !touched.is_empty() {
+                self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
+                drop(evaluator);
+                self.activate_route_barriers(runtime, touched)?;
+                return self.poll(runtime, cx);
+            }
         }
 
         let mut terminal_consumers = HashMap::<NodeId, usize>::default();
@@ -1458,7 +1526,7 @@ impl<'a> EvaluationSession<'a> {
         let key = BindingSourceKey::prepared(shape);
         *self.binding_frontiers.entry(key.clone()).or_default() += 1;
         let affected = graph
-            .affected_nodes(std::iter::empty(), std::iter::once(&key))
+            .affected_nodes_through_routes(std::iter::empty(), std::iter::once(&key))
             .intersection(&self.relevant_nodes)
             .copied()
             .collect::<HashSet<_>>();
@@ -2638,11 +2706,6 @@ impl IvmRuntime {
             &mut binding_frontiers,
             &mut node_meta,
         );
-        let metrics = TickMetrics {
-            tick: current_tick,
-            table_delta_records,
-            ..TickMetrics::default()
-        };
         let binding_snapshots = self.binding_snapshot_deltas();
         let affected_subscriptions = affected_nodes
             .iter()
@@ -2650,6 +2713,12 @@ impl IvmRuntime {
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
+        let metrics = TickMetrics {
+            tick: current_tick,
+            table_delta_records,
+            subscriptions_considered: affected_subscriptions.len(),
+            ..TickMetrics::default()
+        };
         // Structured collectors own their positional edits. Only plain outputs
         // consume the generic before/after maps. Union demand across consumers
         // because a TopBy node can be shared by both kinds of output. Preserve
@@ -2669,6 +2738,17 @@ impl IvmRuntime {
                 {
                     root_ordering_windows
                         .entry(ordering_node)
+                        .or_insert_with(RootOrderingWindows::default);
+                }
+            }
+        }
+        // A routed TopBy runs before its barriers are known to be touched, so
+        // it must collect positions for any bound output it may reach.
+        for terminal in &activation.routed {
+            if let Some(table) = self.graph.routes().table(*terminal) {
+                for node in &table.root_ordering_nodes {
+                    root_ordering_windows
+                        .entry(*node)
                         .or_insert_with(RootOrderingWindows::default);
                 }
             }
@@ -2737,6 +2817,7 @@ impl IvmRuntime {
             durable_writes,
             persist_flush: None,
             discarded: false,
+            routed_terminals: activation.routed.clone(),
         })
     }
 
@@ -3108,6 +3189,51 @@ fn terminal_delta_for_hydrated_output(
         has_public_collector,
         (!has_public_collector).then_some(fallback).flatten(),
     ))
+}
+
+/// Route barriers reached by this tick's shared-terminal deltas (#3288).
+/// Any terminal whose delta cannot be read or keyed conservatively touches
+/// all of its barriers, which is exactly the unrouted activation.
+fn touched_route_barriers(
+    evaluator: &mut TickEvaluator<'_>,
+    graph: &IvmGraph,
+    routed: &[NodeId],
+    cx: &mut Context<'_>,
+) -> HashSet<NodeId> {
+    let mut touched = HashSet::default();
+    for terminal in routed {
+        let Some(table) = graph.routes().table(*terminal) else {
+            continue;
+        };
+        let records = {
+            let mut future = evaluator.update_node(*terminal);
+            match Pin::new(&mut future).poll(cx) {
+                Poll::Ready(Ok(records)) => Some(records),
+                _ => None,
+            }
+        };
+        let records =
+            records.and_then(|records| evaluator.materialize_indirect_input(&records).ok());
+        let Some(records) = records else {
+            touched.extend(table.barriers());
+            continue;
+        };
+        for delta in &records.deltas {
+            let record = crate::records::BorrowedRecord::new(&delta.record, &records.descriptor);
+            match table.key_of_record(&record) {
+                Some(key) => {
+                    if let Some(barriers) = table.by_key.get(&key) {
+                        touched.extend(barriers.iter().copied());
+                    }
+                }
+                None => {
+                    touched.extend(table.barriers());
+                    break;
+                }
+            }
+        }
+    }
+    touched
 }
 
 fn bump_input_frontiers_staged(

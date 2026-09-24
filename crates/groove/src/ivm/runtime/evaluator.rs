@@ -1643,6 +1643,7 @@ impl TickEvaluator<'_> {
         result: RecordDeltas,
     ) -> Arc<RecordDeltas> {
         self.metrics.records_processed += result.deltas.len();
+        self.metrics.nodes_evaluated += 1;
         let result = Arc::new(result);
         let payload_bytes = record_deltas_encoded_bytes(&result);
         *self.memo_use_clock += 1;
