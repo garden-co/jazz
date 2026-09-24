@@ -1079,8 +1079,8 @@ pub mod ahead_current {
             );
             assert_eq!(
                 metrics.ahead_current_rows.ranges,
-                2,
-                "{:?} W1 must scan content and deletion ahead-current ranges: {metrics:?}",
+                1,
+                "{:?} W1 must scan one ahead-current range (deletion is a row cell): {metrics:?}",
                 DurabilityTier::Local,
             );
         }

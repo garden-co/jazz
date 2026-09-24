@@ -299,6 +299,37 @@ where
                 .await?
             {
                 Some(current) => current,
+                // An insert followed by a delete in one transaction is one
+                // row image carrying both its content and the deletion. It
+                // must pass the insert grant, then the delete grant against
+                // that same content.
+                None if !cells.is_empty() => {
+                    let Some(insert_policy) = table.write_policies.insert_check.clone() else {
+                        return Ok(false);
+                    };
+                    if !self
+                        .write_policy_query_allows_candidate_with_provenance_for_schema(
+                            policy_schema_version,
+                            &table,
+                            &insert_policy,
+                            version.row_uuid(),
+                            &cells,
+                            author,
+                            true,
+                            version_provenance(version),
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                    current_row_from_cells_with_explicit_provenance(
+                        &table,
+                        version.row_uuid(),
+                        &cells,
+                        version_provenance(version),
+                        None,
+                    )?
+                }
                 None => return Ok(false),
             };
             let current_cells = table
