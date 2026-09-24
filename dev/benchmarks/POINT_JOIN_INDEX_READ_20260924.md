@@ -12,6 +12,13 @@ Retained subscriptions keep their existing live source path.
 
 ## Matched public-API receipt
 
+> **Provenance note (restack).** The numbers, parent SHA, and binary hashes
+> in this receipt all come from Tobias's original #3319 stack, whose parent is
+> `387ff9c97` (PR #3317). PR #3336 restacks the same commit, `23ebb526`, onto
+> `main` via #3335, and was **not re-measured** there (nor after the review
+> follow-up that routes the point-join path through the shared access-path
+> guard). The parent and hashes below therefore do not describe this PR's base.
+
 The direct parent is `387ff9c97` (PR #3317). The only engine difference in
 the candidate is the point-join access path. Both binaries used the same
 formatted `s1_saas` receipt source and `perf` profile. Parent SHA-256:

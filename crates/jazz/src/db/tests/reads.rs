@@ -538,6 +538,291 @@ fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
     assert_eq!(read(&prepared), vec![row(1)]);
 }
 
+/// Opens a history-complete store with two issues and a set of settled
+/// `issue_tags` links for the point-join equivalence tests below. The junction
+/// carries a `scope` column so a test can install a read policy that hides some
+/// links; `nullable` stores the junction foreign key as a nullable column.
+fn open_point_join_db(
+    nullable: bool,
+    junction_select: PublicPolicyExpr,
+    links: &[(RowUuid, RowUuid, &str, &str)],
+) -> Db<RocksDbStorage> {
+    let grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let tags = PublicTableSchemaBuilder::new("issue_tags");
+    let tags = if nullable {
+        tags.nullable_fk_column("issue", "issues")
+    } else {
+        tags.fk_column("issue", "issues")
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(grants().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                tags.column("tag", PublicColumnType::Text)
+                    .column("scope", PublicColumnType::Text)
+                    .policies(grants().with_select(junction_select)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "one"), (row(2), "two")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for &(id, issue, tag, scope) in links {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            AuthorSubject::SYSTEM,
+            point_join_link_cells(nullable, issue, tag, scope),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn point_join_link_cells(nullable: bool, issue: RowUuid, tag: &str, scope: &str) -> RowCells {
+    let issue = if nullable {
+        Value::Nullable(Some(Box::new(Value::Uuid(issue.0))))
+    } else {
+        Value::Uuid(issue.0)
+    };
+    BTreeMap::from([
+        ("issue".to_owned(), issue),
+        ("tag".to_owned(), Value::String(tag.to_owned())),
+        ("scope".to_owned(), Value::String(scope.to_owned())),
+    ])
+}
+
+/// Reads the indexed point join for `issue` and the same join without the
+/// root id filter (which leaves the junction unindexed), then filters the
+/// control by id afterwards. Asserts both agree and returns the point join's
+/// rows together with the number of secondary-index probes it made.
+fn point_join_matches_unindexed_control(
+    db: &Db<RocksDbStorage>,
+    issue: RowUuid,
+    opts: &ReadOpts,
+    reader: AuthorSubject,
+    label: &str,
+) -> (Vec<RowUuid>, u64) {
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut rows =
+            row_ids(&block_on(db.all_for_identity(&prepared, opts.clone(), reader)).unwrap());
+        rows.sort();
+        rows
+    };
+    let join =
+        |query: Query| query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let indexed = read(join(
+        Query::from("issues").filter(eq(col("id"), lit(Value::Uuid(issue.0)))),
+    ));
+    let probes = db
+        .node
+        .node
+        .borrow()
+        .query_engine_read_metrics()
+        .source_index_probes;
+    let mut control = read(join(Query::from("issues")));
+    control.retain(|id| *id == issue);
+    assert_eq!(
+        indexed, control,
+        "{label}: indexed point join for {issue:?} diverges from the unindexed control"
+    );
+    (indexed, probes)
+}
+
+fn point_join_read_opts(tier: DurabilityTier, include_deleted: bool) -> ReadOpts {
+    ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted,
+        ..ReadOpts::default()
+    }
+}
+
+/// A read policy on the junction table itself must still hide links from an
+/// indexed point join: the index only narrows candidates, and the policy graph
+/// decides membership exactly as for the unindexed join.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links, some private -> bob point-joins each issue -> matches control
+#[test]
+fn point_join_honours_junction_read_policy_like_unindexed_control() {
+    let db = open_point_join_db(
+        false,
+        PublicPolicyExpr::eq_literal("scope", PublicValue::Text("public".to_owned())),
+        &[
+            (row(20), row(1), "wanted", "public"),
+            (row(21), row(1), "wanted", "private"),
+            (row(22), row(1), "other", "public"),
+            (row(23), row(2), "wanted", "private"),
+            (row(24), row(2), "other", "public"),
+        ],
+    );
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        let opts = point_join_read_opts(tier, false);
+        let label = format!("junction policy {tier:?}");
+        let (visible, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, bob, &label);
+        assert_eq!(visible, vec![row(1)], "{label}: only the public link joins");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (hidden, _) = point_join_matches_unindexed_control(&db, row(2), &opts, bob, &label);
+        assert!(
+            hidden.is_empty(),
+            "{label}: issue 2's only wanted link is private"
+        );
+        let (missing, _) = point_join_matches_unindexed_control(&db, row(9), &opts, bob, &label);
+        assert!(missing.is_empty(), "{label}: no such issue");
+    }
+}
+
+/// Local-tier point joins over settled links agree with the unindexed control,
+/// for both a required and a nullable junction foreign key.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links -> read each issue at Local tier -> matches control
+#[test]
+fn point_join_at_local_tier_matches_unindexed_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let opts = point_join_read_opts(DurabilityTier::Local, false);
+        let label = format!("local nullable={nullable}");
+        let reader = AuthorSubject::SYSTEM;
+        let (one, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+        assert_eq!(one, vec![row(1), row(1)], "{label}: two wanted links");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (two, _) = point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+        assert_eq!(two, vec![row(2)], "{label}");
+    }
+}
+
+/// Unsettled link writes (an insert, a move to another issue, and a delete)
+/// must be reflected by a Local point join and ignored by a Global one, exactly
+/// as the unindexed join reflects them, and agree again once they settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the index-path assertion needs the internal source metric; row correctness
+/// is checked through the public Db read API.
+/// system: seed -> pending insert/move/delete -> read Global/Local -> settle -> read
+#[test]
+fn point_join_tracks_unsettled_link_insert_move_and_delete_like_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let reader = AuthorSubject::SYSTEM;
+        let inserted = block_on(db.insert(
+            "issue_tags",
+            point_join_link_cells(nullable, row(2), "wanted", "public"),
+            crate::db::InsertOptions {
+                row_id: Some(row(30)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let issue = if nullable {
+            Value::Nullable(Some(Box::new(Value::Uuid(row(2).0))))
+        } else {
+            Value::Uuid(row(2).0)
+        };
+        let moved = block_on(db.update(
+            "issue_tags",
+            row(20),
+            BTreeMap::from([("issue".to_owned(), issue)]),
+            Default::default(),
+        ))
+        .unwrap();
+        let deleted = block_on(db.delete("issue_tags", row(24), Default::default())).unwrap();
+
+        // Settled state only: the pending writes are invisible at Global.
+        // Local: row 20 moved away and row 24 is deleted; issue 2 gains both
+        // the moved link and the inserted one.
+        for (tier, one, two) in [
+            (DurabilityTier::Global, vec![row(1), row(1)], vec![row(2)]),
+            (DurabilityTier::Local, vec![], vec![row(2), row(2), row(2)]),
+        ] {
+            let label = format!("unsettled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, probes) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert_eq!(rows, one, "{label}: issue 1");
+            assert!(probes >= 1, "{label}: the junction index should be probed");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, two, "{label}: issue 2");
+            // Deleted-row visibility follows the same control either way.
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+
+        for tx in [
+            inserted.mergeable_tx_id(),
+            moved.mergeable_tx_id(),
+            deleted.mergeable_tx_id(),
+        ] {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+        for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+            let label = format!("settled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert!(rows.is_empty(), "{label}: issue 1 lost both wanted links");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, vec![row(2), row(2), row(2)], "{label}: issue 2");
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+    }
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();
