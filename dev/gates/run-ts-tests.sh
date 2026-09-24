@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # The test-ts runner has 16 CPUs. Turbo gets at most two test tasks, while the
-# browser lane runs the Jazz Tools and inspector suites in parallel. Jazz Tools
-# caps Vitest at four file workers so Chromium retains scheduling headroom; all
-# suites reuse the artifact build completed before this script starts.
+# browser lane admits at most two packages instead of starting every browser
+# suite together. Jazz Tools caps Node Vitest at two file workers: each file
+# can run several clients plus a native server. Reuse the already-built artifacts.
 set -u
 
 # macOS exposes its temporary directory through the `/var` symlink. Tests that
@@ -52,7 +52,8 @@ fi
 # Browser-only receipts keep their topology out of that target and run through
 # `test:browser` below, where their Vitest projects own the Jazz server commands.
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}
-browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"}
+# Finish every selected browser package even when an earlier dependency fails.
+browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --recursive --no-bail --workspace-concurrency=2 --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
 log_monitor_pid=""
