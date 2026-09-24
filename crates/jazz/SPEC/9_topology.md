@@ -31,8 +31,8 @@ durability. Sharding and distributed query execution are outside this change.
 
 Local-first reads use retained data and local edits. Remote reads require a
 fresh Core-confirmed supporting set; local-first-unless-empty is local-first
-but may hold an empty opening for the first remote view while a live link can
-supply it (ch. 13). No intermediate
+but may hold an empty opening for the first remote view while a remote can
+answer (ch. 13). No intermediate
 server can substitute a locally computed result for Core confirmation.
 
 Core supplies query supporting rows and handles extra-local-row reconciliation:
@@ -181,8 +181,10 @@ scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
 `Propagation::LocalOnly` prevents asking upstream and does not change these
 Local semantics. `LocalFirstUnlessEmpty` (formerly `RemoteIfPossible`, now a
 deprecated alias) is a Local read throughout; only an empty opening may wait
-for the first authority view, and only while the upstream link is live or
-first connecting (ch. 13). It never runs a second concurrent public query path.
+for the first authority view, only while the link is live or within the
+attempt window, and an `offset > 0` window reads the strict remote view
+(ch. 13). The gate lives in the core `Db`; it never runs a second concurrent
+probe query.
 
 Every worker-to-foreground read, subscription, and row-version repair uses an
 explicit client-local serving context. Client-local lowering is its own

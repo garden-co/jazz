@@ -3058,6 +3058,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
+mod empty_opening;
+pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3149,6 +3152,10 @@ pub struct ReadOpts {
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
+    /// What to do with an empty, unsettled opening. Host read-option state
+    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    #[serde(default)]
+    pub empty_opening: EmptyOpening,
 }
 
 impl Default for ReadOpts {
@@ -3159,6 +3166,7 @@ impl Default for ReadOpts {
             propagation: Propagation::Full,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
+            empty_opening: EmptyOpening::Deliver,
         }
     }
 }
@@ -4815,6 +4823,8 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
+    /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
+    opening_gate: Option<OpeningGate>,
 }
 
 struct SubscriptionPublicationSnapshot {
@@ -4927,6 +4937,15 @@ impl SubscriptionSender {
             || !materialized
             || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
+            // A strict remote window withholds its unsettled opening here;
+            // remember it so a link loss can still release that opening.
+            if publishable
+                && materialized
+                && !publication.opened
+                && let Some(gate) = publication.opening_gate.as_mut()
+            {
+                gate.withheld = true;
+            }
             if publication.opened
                 && publication.deferred.is_none()
                 && self.requested_tier >= DurabilityTier::Global
@@ -4944,6 +4963,18 @@ impl SubscriptionSender {
             // reset when the maintained result becomes materialized again.
             publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
+        }
+        if publication.opening_gate.is_some() {
+            // Local-first unless empty: withhold the opening while it is still
+            // empty and unsettled. The first settled or non-empty result
+            // releases the gate and opens with a canonical reset below.
+            if !publication.opened && !settled && snapshot.root_count == 0 {
+                if let Some(gate) = publication.opening_gate.as_mut() {
+                    gate.withheld = true;
+                }
+                return Ok(false);
+            }
+            publication.opening_gate = None;
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
             let current = SubscriptionPublicationSnapshot::capture(snapshot, index)?;
@@ -4981,11 +5012,40 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        if matches!(&event, SubscriptionEvent::Closed)
+        let terminal = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
-                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission))
-        {
-            self.publication.borrow_mut().deferred = None;
+                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
+        if terminal {
+            let mut publication = self.publication.borrow_mut();
+            publication.deferred = None;
+            // A rejection releases a withheld local-first opening: the
+            // caller sees the (empty) local result, then the rejection.
+            if let Some(gate) = publication.opening_gate.take()
+                && gate.withheld
+                && gate.route == OpeningRoute::LocalFirst
+                && !publication.opened
+                && publication.unresolved.is_empty()
+            {
+                publication.opened = true;
+                drop(publication);
+                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
+                    reset: true,
+                    publishable: true,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    settled: false,
+                    tier: self.requested_tier,
+                });
+            }
+        } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
+            // Receipt-only transitions bypass `publish`; before a gated
+            // stream has opened there is no published view to transition.
+            let publication = self.publication.borrow();
+            if publication.opening_gate.is_some() && !publication.opened {
+                return Ok(());
+            }
         }
         self.sender.unbounded_send(event)
     }

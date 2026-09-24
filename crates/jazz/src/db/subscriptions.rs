@@ -950,6 +950,7 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
+        let (opts, opening_gate) = self.resolve_empty_opening(prepared, opts, authorization_mode);
         let requested_read_tier = effective_read_tier(&opts);
         let read_tier = requested_read_tier;
         let pending_overlay = allow_pending_overlay
@@ -1168,7 +1169,10 @@ where
         let (sender, receiver) = unbounded();
         let sender = SubscriptionSender {
             sender,
-            publication: Rc::new(RefCell::new(SubscriptionPublication::default())),
+            publication: Rc::new(RefCell::new(SubscriptionPublication {
+                opening_gate,
+                ..SubscriptionPublication::default()
+            })),
             requested_tier: read_tier,
         };
         let mut root_occurrence_ids = snapshot_index
@@ -1270,6 +1274,9 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        if opening_gate.is_some() {
+            self.register_opening_gate(&state);
+        }
         // The guard covers fallible opening after the local maintained view
         // exists. On success, replace it with one command carrying local and
         // upstream cleanup so Drop never touches the async node mutex.

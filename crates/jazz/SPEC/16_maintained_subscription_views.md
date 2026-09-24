@@ -91,7 +91,7 @@ body-dedup cursors are process-local. Reopen does not recover any authority
 scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
 local-first-unless-empty is local-first and waits for that snapshot only to
-replace an empty opening while the link is live. Retaining native bytes does not prove remote membership.
+replace an empty opening while a remote can answer (ch. 13). Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -314,7 +314,8 @@ answer may be published; it does not select another evaluator:
   It waits while offline;
 - `local-first-unless-empty` (formerly `remote-if-possible`) evaluates exactly
   like `local-first`; it differs only in publishing an empty first answer after
-  the usage's first settled authority closure while the link is live (ch. 13);
+  the usage's first settled authority closure while a remote can answer, and in
+  reading an `offset > 0` window as the strict remote view (ch. 13);
 - a core `Global` read with immediate local updates (no longer a product tier)
   evaluates the exact authority inputs with pending edits/deletes applied to
   those inputs, plus eligible pending new inserts. An edit alone does not
@@ -810,8 +811,9 @@ a fallback. A narrower remote query requires its own coverage receipt.
 A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
-16–17. Use `remote` for authority-relative pagination; `local-first-unless-empty`
-paginates locally like `local-first`.
+16–17. Use `remote` for authority-relative pagination. `local-first-unless-empty`
+reads an `offset > 0` window as the strict remote view while a remote can
+answer, and otherwise paginates locally like `local-first` (ch. 13).
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.
 
