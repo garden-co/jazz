@@ -67,6 +67,8 @@ use crate::tools::{
 
 type CoreClientDb = CoreDb<CoreStorage>;
 type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
+/// Resolves once the upstream link that was live when it was created is lost.
+type UpstreamLoss = Pin<Box<dyn Future<Output = ()>>>;
 
 // Credit windows bound protocol ingress; charge tiny frames as one physical slot
 // too, so a peer cannot turn the byte limit into an unbounded allocation count.
@@ -1260,6 +1262,7 @@ impl ClientDb {
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
+        withhold_empty_opening: bool,
     ) -> Result<()> {
         self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(
@@ -1270,8 +1273,13 @@ impl ClientDb {
             tx,
             cancellation,
             scope,
+            withhold_empty_opening,
         )
         .await
+    }
+
+    fn live_upstream_loss(&self) -> Option<UpstreamLoss> {
+        ClientDbInner::live_upstream_loss(&self.inner)
     }
 
     fn insert(
@@ -1756,6 +1764,49 @@ impl ClientDbInner {
         self.db
             .as_ref()
             .is_some_and(|db| db.detach_connection(&connection))
+    }
+
+    /// Whether an upstream link is attached and serviceable right now.
+    ///
+    /// `upstream` is installed only after native admission succeeds and is
+    /// removed on every transport terminal, recovery start, explicit
+    /// disconnect, and shutdown; each of those transitions notifies
+    /// `upstream_state_notify`. A recovery that is still reconnecting is not
+    /// live.
+    fn has_live_upstream(&self) -> bool {
+        matches!(self.shutdown_state, ShutdownState::Open)
+            && self.tick_driver_error.is_none()
+            && self.upstream.is_some()
+    }
+
+    /// A future that resolves once the currently live upstream link is lost,
+    /// or `None` when no link is live now.
+    ///
+    /// This is the release signal for `LocalFirstUnlessEmpty`: a reader may
+    /// wait for a remote view only while a link that could deliver it exists.
+    fn live_upstream_loss(inner: &Rc<RefCell<Self>>) -> Option<UpstreamLoss> {
+        let notify = {
+            let inner_state = inner.borrow();
+            if !inner_state.has_live_upstream() {
+                return None;
+            }
+            Arc::clone(&inner_state.upstream_state_notify)
+        };
+        let inner = Rc::downgrade(inner);
+        Some(Box::pin(async move {
+            loop {
+                let changed = Arc::clone(&notify).notified_owned();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if !inner
+                    .upgrade()
+                    .is_some_and(|inner| inner.borrow().has_live_upstream())
+                {
+                    return;
+                }
+                changed.await;
+            }
+        }))
     }
 
     fn ensure_tick_driver_running(&self) -> Result<()> {
@@ -2309,6 +2360,7 @@ impl ClientDbInner {
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
+        withhold_empty_opening: bool,
     ) -> Result<()> {
         let table = query.table.clone();
         // Register before cloning the backend or awaiting core admission. A
@@ -2333,16 +2385,45 @@ impl ClientDbInner {
             stream = db.subscribe(&prepared, opts) => stream
                 .map_err(|error| JazzError::Query(error.to_string()))?,
         };
+        // `LocalFirstUnlessEmpty` opening gate. While `opening_gate` holds a
+        // live-link loss future, empty unsettled local deltas are withheld:
+        // the core stream's `settled` bit flips only once the authority's
+        // view receipt for this usage has been applied, so the first settled
+        // delta carries the first remote view. The gate opens on that delta,
+        // on any non-empty local result, on a rejection, or when the link is
+        // lost (releasing the withheld empty local opening). It is never
+        // armed without a live link, so it cannot wait on an absent remote.
+        let mut opening_gate = if withhold_empty_opening {
+            Self::live_upstream_loss(inner)
+        } else {
+            None
+        };
         tokio::task::spawn_local(async move {
             let _completion = completion;
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
+            let mut withheld_opening = false;
+            let empty_local_opening = || OrderedRowDelta {
+                added: Vec::new(),
+                removed: Vec::new(),
+                updated: Vec::new(),
+                pending: true,
+            };
             loop {
                 let Some(event) = (tokio::select! {
                     biased;
                     _ = &mut cancellation => None,
                     _ = &mut shutdown_cancellation => None,
                     event = stream.next_event() => event,
+                    _ = futures::future::OptionFuture::from(opening_gate.as_mut()),
+                        if opening_gate.is_some() =>
+                    {
+                        opening_gate = None;
+                        if std::mem::take(&mut withheld_opening) {
+                            let _ = tx.send(SubscriptionStreamItem::Delta(empty_local_opening()));
+                        }
+                        continue;
+                    }
                 }) else {
                     break;
                 };
@@ -2522,6 +2603,17 @@ impl ClientDbInner {
                         };
                         let mut delta = delta;
                         delta.pending = !settled;
+                        if opening_gate.is_some() {
+                            // Withholding is only valid while the facade's
+                            // published view stays empty, so later deltas
+                            // remain relative to what the caller has seen.
+                            if !settled && current_rows.is_empty() {
+                                withheld_opening = true;
+                                continue;
+                            }
+                            opening_gate = None;
+                            withheld_opening = false;
+                        }
                         let _ = tx.send(SubscriptionStreamItem::Delta(delta));
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {
@@ -2562,6 +2654,9 @@ impl ClientDbInner {
                                 transition,
                             },
                         };
+                        if opening_gate.take().is_some() && std::mem::take(&mut withheld_opening) {
+                            let _ = tx.send(SubscriptionStreamItem::Delta(empty_local_opening()));
+                        }
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
                     }
                     CoreSubscriptionEvent::Closed => break,
@@ -3404,7 +3499,7 @@ impl JazzClient {
         let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
         opts.local_updates = match tier {
             ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+            ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
         };
         opts
     }
@@ -3901,16 +3996,22 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
-    /// facade because it has no public explicit-disconnect state; host bindings
-    /// can lower it to local only after their caller explicitly disconnects.
+    /// `LocalFirstUnlessEmpty` subscribes local-first. Only when its local
+    /// opening is empty while an upstream link is live does the stream
+    /// withhold that opening, until the first remote view settles, the local
+    /// result becomes non-empty, or the link is lost. It then behaves exactly
+    /// like `LocalFirst`.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
         tier: ReadTier,
     ) -> Result<SubscriptionStream> {
-        self.subscribe_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-            .await
+        self.subscribe_with_opening_gate(
+            query,
+            Self::core_read_opts_for_read_tier(tier),
+            tier == ReadTier::LocalFirstUnlessEmpty,
+        )
+        .await
     }
 
     /// Subscribe to a query with explicit core read options.
@@ -3919,18 +4020,60 @@ impl JazzClient {
         query: Query,
         opts: CoreReadOpts,
     ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opening_gate(query, opts, false).await
+    }
+
+    async fn subscribe_with_opening_gate(
+        &self,
+        query: Query,
+        opts: CoreReadOpts,
+        withhold_empty_opening: bool,
+    ) -> Result<SubscriptionStream> {
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
         let (cancellation, cancellation_rx) = oneshot::channel();
         self.db
-            .subscribe(query, opts, tx, cancellation_rx, self.read_scope()?)
+            .subscribe(
+                query,
+                opts,
+                tx,
+                cancellation_rx,
+                self.read_scope()?,
+                withhold_empty_opening,
+            )
             .await?;
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
     /// One-shot query with read tier.
+    ///
+    /// `LocalFirstUnlessEmpty` returns a non-empty local-first result as is.
+    /// An empty one is replaced by the strict remote result only while an
+    /// upstream link is live; if the link is absent or lost before the remote
+    /// view settles, the empty local result is returned instead.
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
-        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-            .await
+        let opts = Self::core_read_opts_for_read_tier(tier);
+        if tier != ReadTier::LocalFirstUnlessEmpty {
+            return self.query_with_opts(query, opts).await;
+        }
+        let local = self.query_with_opts(query.clone(), opts).await?;
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if !local.is_empty() || in_transaction {
+            return Ok(local);
+        }
+        let Some(upstream_loss) = self.db.live_upstream_loss() else {
+            return Ok(local);
+        };
+        tokio::select! {
+            biased;
+            remote = self.query_with_opts(
+                query,
+                Self::core_read_opts_for_read_tier(ReadTier::Remote),
+            ) => remote,
+            _ = upstream_loss => Ok(local),
+        }
     }
 
     /// Execute a query providing all read options.
@@ -4840,9 +4983,9 @@ mod tests {
             DurabilityTier::GlobalServer
         );
         assert_eq!(
-            ReadTier::RemoteIfPossible.legacy_durability_tier(),
-            DurabilityTier::GlobalServer,
-            "the native facade has no explicit offline boundary"
+            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
+            DurabilityTier::Local,
+            "the empty-opening gate is applied by the reader, not the tier"
         );
         assert_eq!(
             JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
@@ -4853,7 +4996,7 @@ mod tests {
             CoreLocalUpdates::Deferred
         );
         assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).local_updates,
             CoreLocalUpdates::Immediate
         );
         assert_eq!(

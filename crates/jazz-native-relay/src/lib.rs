@@ -6561,6 +6561,9 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
+            // Legacy "remote-if-possible" names keep their strict remote
+            // lowering; hosts lower `ReadTier::LocalFirstUnlessEmpty` to
+            // "local-first" or "remote" before calling native.
             ("tier", Some("remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible")) => {
                 Some("Global")
             }

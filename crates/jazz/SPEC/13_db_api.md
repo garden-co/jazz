@@ -257,22 +257,21 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`         | binding behavior                                                                | own local writes                     | core lowering                                                              |
-| ------------------ | ------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| `LocalFirst`       | evaluate cached local knowledge, online or offline                              | immediate                            | local current state plus pending changes                                   |
-| `Remote`           | wait for the current authority scope; wait while offline                        | excluded                             | remote accepted inputs only                                                |
-| `RemoteIfPossible` | online: authority inputs plus bounded pending overlay; offline: local knowledge | immediate within the selected inputs | remote scope with pending edits/deletes and new inserts, or local fallback |
+| `ReadTier`              | binding behavior                                                                               | own local writes | core lowering                            |
+| ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------- |
+| `LocalFirst`            | evaluate cached local knowledge, online or offline                                             | immediate        | local current state plus pending changes |
+| `Remote`                | wait for the current authority scope; wait while offline                                       | excluded         | remote accepted inputs only              |
+| `LocalFirstUnlessEmpty` | as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve | immediate        | as `LocalFirst`, plus the opening gate   |
 
-The online bounded overlay applies edits/deletes to authority-scoped rows and
-admits eligible pending new inserts through the same query. An edit does not
-itself admit an existing out-of-scope row, nor does a relationship expand into
-cached dependencies. Existing data newly relevant because of a pending edit
-may wait for the authority's next scope update. Broader expansion is an open
-question in [#2501](https://github.com/garden-co/jazz/issues/2501).
+`RemoteIfPossible` is a deprecated alias of `LocalFirstUnlessEmpty` (the Rust
+enum keeps the retired variant's serialized index and decodes its name). The
+former bounded pending overlay over authority inputs remains a core
+`Global` + `LocalUpdates::Immediate` lowering, but no product tier selects it;
+broader expansion of that overlay is an open question in
+[#2501](https://github.com/garden-co/jazz/issues/2501).
 
 Remote scope withdrawal is not a deletion or a persistent client permission
-filter. LocalFirst may still show downloaded rows; RemoteIfPossible may show
-them again on offline fallback. An actual authorized deletion version updates
+filter. LocalFirst and LocalFirstUnlessEmpty may still show downloaded rows. An actual authorized deletion version updates
 local knowledge and must suppress ordinary local reads too. Clients do not
 reevaluate read permissions. See ch. 16 §16.1.1 for source and deletion rules.
 
@@ -297,15 +296,25 @@ Only a worker-minted attachment for the exact account/storage scope admits these
 commands; callers cannot supply an alternate author, claims, or backend
 attribution. A write wait must name a transaction created by that attachment.
 
-`RemoteIfPossible` does **not** infer offline state from a timeout, connection
-error, slow response, or an ordinary transport reconnect. A one-shot read
-chooses once. A subscription follows definite connectivity transitions in both
-directions: offline uses local knowledge; online requires fresh remote scope
-with the bounded pending overlay. It never creates a second query engine or
-replays a historical remote failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
-`DurabilityTier` unchanged during the migration. The native Rust facade has no
-public explicit-offline toggle, so its `RemoteIfPossible` always uses the remote
-initial gate while retaining the immediate own-write policy.
+`LocalFirstUnlessEmpty` delivers a non-empty local opening immediately. It
+withholds an empty one only while a remote could supply matching data: an
+upstream is configured and its link is live, or its first connection attempt
+is still in progress. The opening is then released by the first remote view
+(the first result `Remote` would deliver), by the local result becoming
+non-empty, or by the link becoming unavailable, whichever comes first; with no
+server, offline, a failed link, or a reconnect in progress it opens
+immediately, so it never waits on an absent remote. After the opening it is
+exactly a `LocalFirst` read. A one-shot read returns the non-empty local result,
+or else the strict remote result, falling back to the empty local result if the
+link is or becomes unavailable. The native Rust facade gates the local-first
+stream itself: its upstream coverage is registered at `Global`, so the stream's
+`settled` bit first flips with the authority receipt. Its link is live exactly
+while an admitted upstream connection is attached; the initial connection is
+admitted before the client is returned. Bindings lower the choice to
+`local-first` or `remote` before calling native; the legacy
+`remote-if-possible` ABI strings keep strict remote lowering. Low-level
+`ReadOpts` and the legacy binding entrypoints still accept `DurabilityTier`
+unchanged during the migration.
 
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without

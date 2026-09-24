@@ -4308,9 +4308,10 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
     match tier {
         "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
-        // NAPI has no explicit-offline state of its own. The TypeScript
-        // connection manager resolves RemoteIfPossible before the ABI call;
-        // direct NAPI callers therefore retain strict remote behavior.
+        // The legacy "remote-if-possible" names keep their strict remote
+        // lowering for direct ABI callers. The TypeScript layer lowers
+        // `ReadTier::LocalFirstUnlessEmpty` to "local-first" or "remote"
+        // itself and never sends these names.
         "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
             Ok(CoreDurabilityTier::Global)
         }

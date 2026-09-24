@@ -3246,9 +3246,10 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
     match tier {
         "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
-        // The host connection manager applies the explicit-offline decision
-        // before invoking this ABI. A direct WASM caller therefore gets the
-        // strict remote behavior for RemoteIfPossible.
+        // The legacy "remote-if-possible" names keep their strict remote
+        // lowering for direct ABI callers. The host lowers
+        // `ReadTier::LocalFirstUnlessEmpty` to "local-first" or "remote"
+        // itself and never sends these names.
         "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
             Ok(DurabilityTier::Global)
         }

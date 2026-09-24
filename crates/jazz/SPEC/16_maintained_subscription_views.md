@@ -90,8 +90,8 @@ Subscription membership, source-closure generations, live settlement and
 body-dedup cursors are process-local. Reopen does not recover any authority
 scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
-remote-if-possible does the same online and uses local knowledge only after
-explicit disconnect. Retaining native bytes does not prove remote membership.
+local-first-unless-empty is local-first and waits for that snapshot only to
+replace an empty opening while the link is live. Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -312,16 +312,16 @@ answer may be published; it does not select another evaluator:
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- online `remote-if-possible` evaluates the exact authority inputs with pending
-  edits/deletes applied to those inputs, plus eligible pending new inserts.
-  An edit alone does not admit an existing out-of-scope row. Relationships use
-  only these inputs, without expanding into cached dependency rows. Inserts
-  participate in the ordinary query, including its joins, filters and windows;
-- offline `remote-if-possible` evaluates local knowledge plus pending changes,
-  like `local-first`. It may therefore show cached rows excluded by the last
-  remote closure. Returning online replaces that fallback with fresh authority
-  inputs and the bounded pending overlay. Do not reuse a detached receipt as
-  fresh authority coverage;
+- `local-first-unless-empty` (formerly `remote-if-possible`) evaluates exactly
+  like `local-first`; it differs only in publishing an empty first answer after
+  the usage's first settled authority closure while the link is live (ch. 13);
+- a core `Global` read with immediate local updates (no longer a product tier)
+  evaluates the exact authority inputs with pending edits/deletes applied to
+  those inputs, plus eligible pending new inserts. An edit alone does not
+  admit an existing out-of-scope row. Relationships use only these inputs,
+  without expanding into cached dependency rows. Inserts participate in the
+  ordinary query, including its joins, filters and windows. Do not reuse a
+  detached receipt as fresh authority coverage;
 - a local-only internal execution suppresses upstream registration but still
   uses the same lowered graph over its local source.
 
@@ -376,12 +376,13 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence in a remote-scoped result. The client does not
   re-evaluate the hidden policy, and the authority sends no presentation-level
-  remove. Local-first may still show the cached row; offline fallback may show
-  it again after an online remote-if-possible result excluded it.
+  remove. Local-first and local-first-unless-empty may still show the cached
+  row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
-  from local-first knowledge. Online remote-if-possible instead uses C plus B
-  (if B matches using available query inputs); remote uses only C.
+  from local-first knowledge. A `Global` read with immediate local updates
+  instead uses C plus B (if B matches using available query inputs); remote
+  uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
   predecessor's result or terminal sequence. It verifies a fresh exact closure,
   installs it, and lets the local graph publish the corresponding reset.
@@ -809,8 +810,8 @@ a fallback. A narrower remote query requires its own coverage receipt.
 A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
-16–17. Use `remote` for authority-relative pagination, or `remote-if-possible`
-for authority-relative pagination online and literal local fallback offline.
+16–17. Use `remote` for authority-relative pagination; `local-first-unless-empty`
+paginates locally like `local-first`.
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.
 
@@ -949,7 +950,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand online remote-if-possible inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the `Global` + immediate-local-updates inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.
