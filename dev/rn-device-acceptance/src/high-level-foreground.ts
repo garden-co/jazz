@@ -4,7 +4,11 @@ import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
-import { measureTypingComposer, type TypingComposerMetrics } from "./typing-composer.ts";
+import {
+  composerEcho,
+  measureTypingComposer,
+  type TypingComposerMetrics,
+} from "./typing-composer.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }, {}),
@@ -182,26 +186,22 @@ export async function proveTypingComposer(
   let unsubscribe = () => {},
     failed = false;
   try {
-    let composerId: string | undefined;
-    const observed: string[] = [];
-    unsubscribe = client.db.subscribe(app.todos, (todos) => {
-      const composer = todos.find((todo) => todo.id === composerId);
-      if (composer && observed.at(-1) !== composer.title) observed.push(composer.title);
-    });
+    const echo = composerEcho();
+    unsubscribe = client.db.subscribe(app.todos, (todos) => echo.onSnapshot(todos));
     return await measureTypingComposer({
       async open() {
         const { value } = client.db.insert(app.todos, { title: "" });
-        composerId = value.id;
-        if (!(await waitForPublication(() => observed.length > 0))) {
+        echo.follow(value.id);
+        if (!(await waitForPublication(() => echo.observed.length > 0))) {
           throw new Error("typing composer row never reached its subscription");
         }
-        observed.length = 0;
+        echo.observed.length = 0;
         return value.id;
       },
       type(id, text) {
         client.db.update(app.todos, id, { title: text });
       },
-      observedTexts: () => observed,
+      observedTexts: () => echo.observed,
       now: () => performance.now(),
       yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
       stage: (phase) => markFailure(`typing-composer-${phase}-failed`),

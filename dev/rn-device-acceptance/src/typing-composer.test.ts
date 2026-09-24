@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   analyzeComposerEcho,
+  composerEcho,
   measureTypingComposer,
   percentile,
   receiptMetrics,
@@ -93,4 +94,24 @@ test("fails the receipt when a character reappears", async () => {
     ),
     /reappeared=1/,
   );
+});
+
+// Android device acceptance (#3273): the public insert drains ready
+// subscription batches before it returns, so the frame that first contains
+// the composer row can arrive before the caller knows the row's id. No later
+// frame follows until the row changes.
+test("a composer row delivered before its insert returns is still observed", () => {
+  const echo = composerEcho();
+  echo.onSnapshot([{ id: "seed", title: "seed" }]);
+  echo.onSnapshot([
+    { id: "seed", title: "seed" },
+    { id: "composer", title: "" },
+  ]);
+  echo.follow("composer");
+  assert.deepEqual(echo.observed, [""]);
+  echo.onSnapshot([
+    { id: "seed", title: "seed" },
+    { id: "composer", title: "h" },
+  ]);
+  assert.deepEqual(echo.observed, ["", "h"]);
 });

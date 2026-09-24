@@ -77,6 +77,41 @@ export interface ComposerDriver {
   stage?(phase: "keystroke" | "burst" | "order"): void;
 }
 
+export interface ComposerEcho {
+  /** Subscription callback: the latest full snapshot of the watched table. */
+  onSnapshot(rows: readonly { id: string; title: string }[]): void;
+  /** Start following the composer row once its insert has returned its id. */
+  follow(id: string): void;
+  readonly observed: string[];
+}
+
+/**
+ * Record the composer row's text as the subscription reports it. A public
+ * insert pumps ready subscription batches before it returns, so the snapshot
+ * that first contains the row may precede `follow`; keep the latest snapshot
+ * and re-check it once the id is known.
+ */
+export function composerEcho(): ComposerEcho {
+  let composerId: string | undefined;
+  let latest: readonly { id: string; title: string }[] = [];
+  const observed: string[] = [];
+  const record = () => {
+    const composer = latest.find((row) => row.id === composerId);
+    if (composer && observed.at(-1) !== composer.title) observed.push(composer.title);
+  };
+  return {
+    onSnapshot(rows) {
+      latest = rows;
+      record();
+    },
+    follow(id) {
+      composerId = id;
+      record();
+    },
+    observed,
+  };
+}
+
 const ECHO_DEADLINE_MS = 10_000;
 
 async function waitForEcho(driver: ComposerDriver, text: string): Promise<number | null> {
