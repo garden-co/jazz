@@ -83,3 +83,16 @@ s.defineMigration({
     posts: s.table({ owner: s.uuid() }, { writer: s.rel("users", "owner") }),
   },
 });
+
+// Permission helpers use the same declared names in either direction.
+s.definePermissions(app, ({ policy, allowedTo }) => {
+  policy.posts.allowRead.where(allowedTo.read("author"));
+  policy.users.allowRead.where(allowedTo.read("authored"));
+  policy.users.allowDelete.where(allowedTo.deleteReferencing(policy.posts, "author"));
+  // @ts-expect-error Stored UUID column is not a relationship name.
+  allowedTo.update("authorId");
+  // @ts-expect-error No convention-derived reverse name.
+  allowedTo.read("postsViaAuthor");
+  // @ts-expect-error Names must be declared somewhere in the app.
+  allowedTo.insert("missing");
+});

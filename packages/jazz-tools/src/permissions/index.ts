@@ -6,6 +6,7 @@ import type {
   PolicyValue,
   TablePolicies,
 } from "../schema.js";
+import type { TableMetaOf } from "../typed-app.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
@@ -43,6 +44,15 @@ type QueryBuilderFor<TApp extends AppLike, K extends TableKey<TApp>> = Extract<
 >;
 type RowFor<QB> = QB extends { _rowType: infer R } ? R : never;
 type WhereFor<QB> = QB extends { where(input: infer W): unknown } ? W : never;
+
+type RelationNamesFor<QB> = [TableMetaOf<QB>] extends [never]
+  ? string
+  : TableMetaOf<QB> extends { relations: infer Relations }
+    ? Extract<keyof Relations, string>
+    : string;
+type AppRelationNames<TApp extends AppLike> = {
+  [K in TableKey<TApp>]: RelationNamesFor<QueryBuilderFor<TApp, K>>;
+}[TableKey<TApp>];
 
 type PolicyAction = "read" | "insert" | "update" | "delete";
 
@@ -157,6 +167,14 @@ interface ExistsRelationCondition extends PermissionExpressionInput {
   readonly relation: PermissionRelation;
 }
 
+interface AllowedRelationCondition extends PermissionExpressionInput {
+  readonly __jazzPermissionKind: "allowed-relation";
+  readonly operation: "Select" | "Insert" | "Update" | "Delete";
+  readonly relation: string;
+  readonly sourceTable?: string;
+  readonly maxDepth?: number;
+}
+
 interface CompoundCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "compound";
   readonly op: "And" | "Or";
@@ -170,6 +188,7 @@ interface CompoundConditionInput extends PermissionExpressionInput {
 }
 
 type Condition =
+  | AllowedRelationCondition
   | PermissionExpression
   | CompoundCondition
   | ExistsCondition
@@ -334,7 +353,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.kind === "union") {
       throw new Error("hopTo(...) does not support union(...) relations in MVP.");
     }
-    const relationName = relation.trim();
+    const relationName = relation;
     if (!relationName) {
       throw new Error("hopTo(...) requires a non-empty relation name.");
     }
@@ -767,29 +786,29 @@ export type SessionContext = {
   where: SessionRefValue & ((input: Record<string, unknown>) => PermissionExpressionInput);
 };
 
-export interface AllowedToContext {
-  read(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
-  insert(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
-  update(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
-  delete(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
+export interface AllowedToContext<RelationName extends string = string> {
+  read(relation: RelationName, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  insert(relation: RelationName, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  update(relation: RelationName, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  delete(relation: RelationName, options?: RecursiveDepthOptions): PermissionExpressionInput;
   readReferencing(
     sourceTable: RelationJoinTarget,
-    fkColumn: string,
+    relation: RelationName,
     options?: RecursiveDepthOptions,
   ): PermissionExpressionInput;
   insertReferencing(
     sourceTable: RelationJoinTarget,
-    fkColumn: string,
+    relation: RelationName,
     options?: RecursiveDepthOptions,
   ): PermissionExpressionInput;
   updateReferencing(
     sourceTable: RelationJoinTarget,
-    fkColumn: string,
+    relation: RelationName,
     options?: RecursiveDepthOptions,
   ): PermissionExpressionInput;
   deleteReferencing(
     sourceTable: RelationJoinTarget,
-    fkColumn: string,
+    relation: RelationName,
     options?: RecursiveDepthOptions,
   ): PermissionExpressionInput;
 }
@@ -842,7 +861,7 @@ export type PolicyContext<TApp extends AppLike> = {
   /** Explicit escape hatch for manually-authored policy IR. */
   raw: typeof rawPermissionExpression;
   isCreator: PermissionExpressionInput;
-  allowedTo: AllowedToContext;
+  allowedTo: AllowedToContext<AppRelationNames<TApp>>;
   session: SessionContext;
 };
 
@@ -2046,51 +2065,32 @@ export function createSessionContext(): SessionContext {
 function createAllowedToContext(): AllowedToContext {
   const inheritsExpr = (
     operation: "Select" | "Insert" | "Update" | "Delete",
-    fkColumn: string,
+    relation: string,
     options?: RecursiveDepthOptions,
-  ): PermissionExpression => {
+    sourceTable?: string,
+  ): AllowedRelationCondition => {
+    if (typeof relation !== "string" || !relation.length) {
+      throw new Error("allowedTo requires a non-empty declared relationship name.");
+    }
     const maxDepth = options?.maxDepth;
-    if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
-        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a non-negative integer.`);
-      }
+    if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
+      throw new Error(`allowedTo.*("${relation}") maxDepth must be a non-negative integer.`);
     }
-    const expr: PolicyExpr = {
-      type: "Inherits",
+    return brandPermissionExpression({
+      __jazzPermissionKind: "allowed-relation",
       operation,
-      via_column: fkColumn,
-    };
-    if (maxDepth !== undefined) {
-      expr.max_depth = maxDepth;
-    }
-    return brandPermissionExpression(expr);
+      relation,
+      sourceTable,
+      maxDepth,
+    });
   };
-
   const inheritsReferencingExpr = (
     operation: "Select" | "Insert" | "Update" | "Delete",
     sourceTable: RelationJoinTarget,
-    fkColumn: string,
+    relation: string,
     options?: RecursiveDepthOptions,
-  ): PermissionExpression => {
-    const maxDepth = options?.maxDepth;
-    if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
-        throw new Error(
-          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a non-negative integer.`,
-        );
-      }
-    }
-    const expr: PolicyExpr = {
-      type: "InheritsReferencing",
-      operation,
-      source_table: relationJoinTargetToTable(sourceTable),
-      via_column: fkColumn,
-    };
-    if (maxDepth !== undefined) {
-      expr.max_depth = maxDepth;
-    }
-    return brandPermissionExpression(expr);
-  };
+  ): AllowedRelationCondition =>
+    inheritsExpr(operation, relation, options, relationJoinTargetToTable(sourceTable));
 
   return {
     read(fkColumn, options) {
@@ -2156,7 +2156,7 @@ function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
     const result = input(createRowContext());
     return resolveWhereInput(result, hasTypeColumn);
   }
-  if (isPolicyExpr(input)) {
+  if (isPolicyExpr(input) || isAllowedRelationCondition(input)) {
     return input;
   }
   if (isSessionWhereCondition(input)) {
@@ -2726,6 +2726,38 @@ function compileCondition(
   if (!condition) {
     return undefined;
   }
+  if (isAllowedRelationCondition(condition)) {
+    const relation = resolveNamedRelation(
+      relationsByTable,
+      condition.sourceTable ?? table,
+      condition.relation,
+    );
+    if (
+      condition.sourceTable !== undefined &&
+      (relation.type !== "forward" || relation.toTable !== table)
+    ) {
+      throw new Error(
+        `allowedTo.*Referencing(policy.${condition.sourceTable}, "${condition.relation}") requires a declared forward relationship targeting "${table}".`,
+      );
+    }
+    const reverse = condition.sourceTable !== undefined || relation.type === "reverse";
+    if (reverse && condition.maxDepth !== undefined) {
+      throw new Error(
+        "allowedTo reverse relationships do not support maxDepth; omit it. Reverse inheritance cycles are rejected during schema validation.",
+      );
+    }
+    const expr: PolicyExpr = reverse
+      ? {
+          type: "InheritsReferencing",
+          operation: condition.operation,
+          source_table: condition.sourceTable ?? relation.toTable,
+          via_column: condition.sourceTable !== undefined ? relation.fromColumn : relation.toColumn,
+        }
+      : { type: "Inherits", operation: condition.operation, via_column: relation.fromColumn };
+    if (condition.maxDepth !== undefined) expr.max_depth = condition.maxDepth;
+    resolveAndAssertInheritsColumns(expr, table, fkReferencesByTable);
+    return expr;
+  }
   if (isPolicyExpr(condition)) {
     resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
@@ -2889,6 +2921,10 @@ function isBrandedPermissionExpression(
   input: unknown,
 ): input is PlainObject & PermissionExpressionInput {
   return isPlainObject(input) && Reflect.get(input, PERMISSION_EXPRESSION_BRAND) === true;
+}
+
+function isAllowedRelationCondition(input: unknown): input is AllowedRelationCondition {
+  return isBrandedPermissionExpression(input) && input.__jazzPermissionKind === "allowed-relation";
 }
 
 function isPolicyExpr(input: unknown): input is PermissionExpression {
