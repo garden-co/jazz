@@ -167,16 +167,25 @@ type RemovedColumnName<
   TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
 > = Exclude<SourceColumnName<TFrom, TTo, TRenameTables, TTable>, ColumnName<TTo, TTable>>;
 
-type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder> = readonly [
+type SourceReferenceFor<TReference, TRenameTables> =
+  TReference extends keyof RenameTables<TRenameTables>
+    ? RenameTables<TRenameTables>[TReference] extends RenameTableFromOp<infer TOldName>
+      ? TOldName
+      : TReference
+    : TReference;
+
+type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder, TRenameTables = undefined> = readonly [
   ColumnBuilderSqlType<TBuilder>,
   ColumnBuilderOptional<TBuilder>,
-  ColumnBuilderReferences<TBuilder>,
+  SourceReferenceFor<ColumnBuilderReferences<TBuilder>, TRenameTables>,
 ];
 
-type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedColumnBuilder> = [
-  BuilderIdentity<TLeft>,
-] extends [BuilderIdentity<TRight>]
-  ? [BuilderIdentity<TRight>] extends [BuilderIdentity<TLeft>]
+type BuildersEqual<
+  TLeft extends AnyTypedColumnBuilder,
+  TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
+> = [BuilderIdentity<TLeft>] extends [BuilderIdentity<TRight, TRenameTables>]
+  ? [BuilderIdentity<TRight, TRenameTables>] extends [BuilderIdentity<TLeft>]
     ? true
     : false
   : false;
@@ -184,8 +193,9 @@ type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedC
 type SharedBuildersCompatible<
   TLeft extends AnyTypedColumnBuilder,
   TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
 > =
-  BuildersEqual<TLeft, TRight> extends true
+  BuildersEqual<TLeft, TRight, TRenameTables> extends true
     ? true
     : ColumnBuilderReferences<TLeft> extends undefined
       ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
@@ -350,7 +360,8 @@ type ValidateAddedColumnOperation<
           ? TOldName extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
             ? BuildersEqual<
                 BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TOldName>,
-                BuilderForTargetColumn<TTo, TTable, TColumn>
+                BuilderForTargetColumn<TTo, TTable, TColumn>,
+                TRenameTables
               > extends true
               ? never
               : {
@@ -452,7 +463,8 @@ type UnsupportedSharedColumnChanges<
       SourceColumnName<TFrom, TTo, TRenameTables, TTable>
     >]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
-      BuilderForTargetColumn<TTo, TTable, TColumn>
+      BuilderForTargetColumn<TTo, TTable, TColumn>,
+      TRenameTables
     > extends true
       ? never
       : {
