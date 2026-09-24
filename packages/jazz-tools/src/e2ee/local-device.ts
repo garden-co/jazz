@@ -117,6 +117,24 @@ async function checked(
   }
 }
 
+/** Retained-only probing never generates or publishes a new device. */
+export async function retainedLocalDevice(
+  store: AccountStore,
+  scope: string,
+  envelope: KeyEnvelope,
+  signer: DeviceSigner,
+  assertOpen: () => void,
+): Promise<LocalDevice | undefined> {
+  assertOpen();
+  const existing = decodeLocalDeviceStore(await store.read()).devices.find(
+    (device) => device.scope === scope,
+  );
+  assertOpen();
+  return existing
+    ? checked(load(existing, envelope, signer), scope, envelope, signer, assertOpen)
+    : undefined;
+}
+
 /** Validate before persisting, persist before publishing. Host updates choose one winner. */
 export async function localDevice(
   store: AccountStore,
@@ -125,13 +143,8 @@ export async function localDevice(
   signer: DeviceSigner,
   assertOpen: () => void,
 ): Promise<LocalDevice> {
-  assertOpen();
-  const existing = decodeLocalDeviceStore(await store.read()).devices.find(
-    (device) => device.scope === scope,
-  );
-  assertOpen();
-  if (existing)
-    return checked(load(existing, envelope, signer), scope, envelope, signer, assertOpen);
+  const existing = await retainedLocalDevice(store, scope, envelope, signer, assertOpen);
+  if (existing) return existing;
   const pair = await envelope.createKeyPair();
   let signing: DeviceKeyPair | undefined;
   let candidate: StoredDevice | undefined;

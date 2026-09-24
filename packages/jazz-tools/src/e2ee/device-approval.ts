@@ -1,5 +1,10 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import {
+  observeE2eeHistory,
+  E2eeHistoryUnavailable,
+  type E2eeHistoryReader,
+} from "./history-reader.js";
 import { PersistedWriteRejectedError, type RowSettlement } from "../runtime/client.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { encodeCryptoContext } from "./context.js";
@@ -64,6 +69,7 @@ export class DeviceApproval {
   private readonly responding = new Set<string>();
   private backgroundError: unknown;
   private knownRevoked = false;
+  private stopResponder: (() => void) | undefined;
 
   /** A completed authority read proved this device revoked; never an access grant. */
   isKnownRevoked(): boolean {
@@ -80,19 +86,28 @@ export class DeviceApproval {
     private readonly tables: DeviceTables = app,
     private readonly device?: { id: string; load: () => Promise<LocalDevice> },
   ) {
-    // Recovery inspection has no device and must never start a handshake responder.
-    if (!device) return;
-    const stop = db.subscribe(
+    db.onShutdown(() => {
+      this.lifetime.abort();
+      this.stopResponder?.();
+    });
+  }
+
+  /** Enrolment, not retained-key construction, enables background writes. */
+  startResponder(): void {
+    const device = this.device;
+    if (!device || this.stopResponder || this.lifetime.signal.aborted) return;
+    this.stopResponder = this.db.subscribe(
       this.tables.__e2ee_device_challenges.where({ deviceId: device.id }),
       {
         onUpdate: (rows) => {
           for (const row of rows) {
             if (this.responding.has(row.id)) continue;
             this.responding.add(row.id);
-            this.respond(row.id).catch((error: unknown) => {
-              this.responding.delete(row.id);
-              this.backgroundError = error;
-            });
+            this.respond(row.id)
+              .catch((error: unknown) => {
+                this.backgroundError = error;
+              })
+              .finally(() => this.responding.delete(row.id));
           }
         },
         onError: (error) => {
@@ -101,9 +116,10 @@ export class DeviceApproval {
       },
       { tier: "edge" },
     );
-    db.onShutdown(() => {
-      this.lifetime.abort();
-      stop();
+    this.db.onE2eeReconnect(() => {
+      void this.deviceStates().catch((error: unknown) => {
+        this.backgroundError = error;
+      });
     });
   }
 
@@ -134,7 +150,7 @@ export class DeviceApproval {
     });
   }
 
-  private async readSnapshot(tx: E2eeTransactionScope) {
+  private async readSnapshot(tx: E2eeHistoryReader) {
     const [
       successors,
       identities,
@@ -172,7 +188,7 @@ export class DeviceApproval {
     ]);
     this.assertOpen();
     const identity = identities.rows[0];
-    if (!identity) throw new Error("Missing accepted E2EE account identity");
+    if (!identity) throw new E2eeHistoryUnavailable("Missing accepted E2EE account identity");
     return {
       publicHistory,
       identity,
@@ -194,8 +210,10 @@ export class DeviceApproval {
     };
   }
 
-  private async snapshot(transaction?: E2eeTransactionScope) {
+  private async snapshot(transaction?: E2eeHistoryReader) {
     if (transaction) return this.readSnapshot(transaction);
+    if (await this.db.e2eeIsExplicitlyOffline())
+      return observeE2eeHistory(this.db, (reader) => this.readSnapshot(reader));
     // ponytail: scan this account's history; index per-device history if it grows large.
     for (let attempt = 0; ; attempt++) {
       try {
@@ -302,7 +320,7 @@ export class DeviceApproval {
     return members;
   }
 
-  private async currentSnapshot(transaction?: E2eeTransactionScope): Promise<EpochSnapshot> {
+  private async currentSnapshot(transaction?: E2eeHistoryReader): Promise<EpochSnapshot> {
     const raw = await this.snapshot(transaction);
     const publicState = await replayAccountMembership(
       raw.publicHistory,
@@ -400,7 +418,7 @@ export class DeviceApproval {
       publicState.active.size !== privateMembers.size ||
       [...publicState.active].some((id) => !privateMembers.has(id))
     )
-      throw new Error("Incomplete E2EE public/private membership history");
+      throw new E2eeHistoryUnavailable("Incomplete E2EE public/private membership history");
     // Supplied transactions have not necessarily been accepted yet. Only the
     // standalone snapshot has completed its covered global wait. Revocation of
     // this device ID is permanent, so an older concurrent read cannot undo it.
@@ -671,13 +689,14 @@ export class DeviceApproval {
     }
   }
 
-  /** With a supplied transaction, the caller must await its global acceptance.
-   * This path only validates history; it never starts a nested handshake write.
+  /** Supplied readers never start a nested handshake write.
+   * Authority transactions require global acceptance; observations prove only retained history.
    */
-  async deviceStates(transaction?: E2eeTransactionScope) {
+  async deviceStates(transaction?: E2eeHistoryReader) {
     this.throwBackgroundError();
     const snapshot = await this.currentSnapshot(transaction);
-    for (const challenge of transaction ? [] : snapshot.challenges) {
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    for (const challenge of transaction || offline ? [] : snapshot.challenges) {
       if (
         challenge.deviceId === this.deviceId &&
         !this.responding.has(challenge.id) &&
@@ -711,6 +730,7 @@ export class DeviceApproval {
   }
 
   private async respond(challengeId: string): Promise<void> {
+    if (await this.db.e2eeIsExplicitlyOffline()) return;
     const snapshot = await this.currentSnapshot();
     const challenge = snapshot.challenges.find(
       (item) =>
@@ -742,6 +762,7 @@ export class DeviceApproval {
         this.proofContext(challenge, proof),
       );
       this.assertOpen();
+      if (await this.db.e2eeIsExplicitlyOffline()) return;
       try {
         await this.db
           .insert(

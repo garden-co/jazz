@@ -689,6 +689,25 @@ where
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
             if opts.include_deleted {
+                if matches!(
+                    opts.read_view.source,
+                    ReadViewSourceSpec::BranchView {
+                        base: None | Some(crate::protocol::BranchViewBase::Current(_)),
+                        ..
+                    }
+                ) {
+                    return node
+                        .query_rows_including_deleted_in_read_view_authorization_mode(
+                            &prepared.shape,
+                            &prepared.binding,
+                            tier,
+                            author,
+                            authorization_mode,
+                            &opts.read_view,
+                        )
+                        .await
+                        .map_err(Into::into);
+                }
                 return Err(Error::new(
                     ErrorCode::Query,
                     "branch views do not support include_deleted yet",

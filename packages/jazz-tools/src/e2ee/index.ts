@@ -18,3 +18,5 @@ export { spaceSchema } from "./spaces.js";
 export { withGroupTopologyPermissions } from "./group-topology.js";
 export { E2eeRecoveryError } from "./recovery-error.js";
 export type { E2eeRecoveryErrorCode } from "./recovery-error.js";
+export { E2eeDataError } from "./data-error.js";
+export type { E2eeDataErrorCode } from "./data-error.js";

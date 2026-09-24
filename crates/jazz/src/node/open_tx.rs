@@ -1293,6 +1293,9 @@ where
                         (_, Some(evidence)) => {
                             BranchWriteOperation::ViewUpdateCopy(evidence.clone())
                         }
+                        (PendingCells::Replace(_), None) if !write.parents.is_empty() => {
+                            BranchWriteOperation::ExactHeadUpdate
+                        }
                         (PendingCells::Patch(_), None) => BranchWriteOperation::ExactHeadUpdate,
                         (PendingCells::Replace(_), None) => BranchWriteOperation::ExactHeadInsert,
                     },

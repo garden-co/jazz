@@ -1,10 +1,12 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { encryptedSchemas } from "./encrypted-schema.js";
 import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
+import { E2eeDataError } from "./data-error.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { beginDbTransactionAfter, prepareDbTransaction } from "../runtime/db.js";
 import type { Db, TableProxy, Transaction, E2eeTransactionScope } from "../runtime/db.js";
@@ -12,7 +14,8 @@ import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
 import { encodeEnvelope } from "./envelope.js";
 import type { CryptoMechanism } from "./envelope.js";
-import { localDevice } from "./local-device.js";
+import { localDevice, retainedLocalDevice } from "./local-device.js";
+import { observeE2eeHistory, E2eeHistoryUnavailable } from "./history-reader.js";
 import { firstAccountEpoch } from "./first-epoch.js";
 import { DeviceApproval } from "./device-approval.js";
 import {
@@ -26,10 +29,10 @@ import type { GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
 import type { SpaceRecoveryPath } from "./space-lifecycle.js";
 import type { SpaceTables } from "./spaces.js";
-import type { JazzCrypto } from "./types.js";
+import type { JazzCrypto, CellCipher } from "./types.js";
 
 export type E2eeConfig = {
-  /** Explicit application including the lifecycle managed tables. */
+  /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
   app?: DeviceTables | { readonly wasmSchema: WasmSchema };
   /** Dedicated local key storage. Do not reuse the account-selection store value. */
   store: AccountStore;
@@ -46,12 +49,72 @@ export type DeviceInfo = Readonly<{
 }>;
 
 const contexts = new WeakMap<Db, E2ee>();
+const startupPreparers = new WeakMap<Db, () => Promise<void>>();
+
+/** @internal Encrypted application factories finish readiness before exposing the Db. */
+export async function prepareE2eeStartup(db: Db): Promise<void> {
+  const schema = configuredSchemas.get(db);
+  if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
+}
+const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
+
+/** @internal Common cell framing owns identity selection, not the crypto adapter. */
+export async function cellCryptoForDb(
+  db: Db,
+): Promise<{ cipher: CellCipher; application: string }> {
+  e2eeForDb(db);
+  return cellCrypto.get(db)!();
+}
+const configuredSchemas = new WeakMap<Db, WasmSchema>();
+/** @internal The configured application can bind a cold transaction's schema. */
+export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
+  return configuredSchemas.get(db);
+}
+const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
 >();
+
+/** @internal Cell operations borrow a verified key; never exported by the public API. */
+export async function withSpaceKeys<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory = false,
+): Promise<void> {
+  e2eeForDb(db);
+  let callbackFailure: { error: unknown } | undefined;
+  const operation: typeof use = async (...args) => {
+    try {
+      await use(...args);
+    } catch (error) {
+      callbackFailure = { error };
+      throw error;
+    }
+  };
+  const state = await currentSpaceKeys.get(db)!(scope, identifier, operation, includeHistory).catch(
+    (error: unknown) => {
+      // Key adapters can include secret material in their exceptions.
+      // The operation owns its own crypto diagnostics and ordinary runtime errors.
+      if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
+        throw error;
+      throw new E2eeDataError("key-unavailable");
+    },
+  );
+  if (state.state !== "ready") {
+    throw new E2eeDataError(
+      state.state === "refused"
+        ? "key-not-shared"
+        : state.state === "maintenance-required"
+          ? "maintenance-required"
+          : "key-unavailable",
+    );
+  }
+}
 
 /** @internal Cold recipient discovery precedes the immutable transaction snapshot. */
 export function beginInitialSpaceTransaction(
@@ -134,7 +197,8 @@ export class E2ee {
   private groupLifecycle: Groups | undefined;
   private spaceLifecycle: Spaces | undefined;
   private closed = false;
-  private preparation: Promise<void> | undefined;
+  private preparation: Promise<boolean> | undefined;
+  private locallyPrepared = false;
   private readonly scope: string;
   private readonly app: DeviceTables;
   readonly groups = {
@@ -398,8 +462,21 @@ export class E2ee {
   readonly devices = {
     list: async (): Promise<DeviceInfo[]> => {
       await this.prepare();
-      const { approved, verified, revoked } = await this.approval!.deviceStates();
-      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "edge" });
+      const requests = this.app.__e2ee_device_requests.where({
+        "$createdBy.account": this.account.id,
+      });
+      const {
+        state: { approved, verified, revoked },
+        rows,
+      } = (await this.db.e2eeIsExplicitlyOffline())
+        ? await observeE2eeHistory(this.db, async (reader) => ({
+            state: await this.approval!.deviceStates(reader),
+            rows: (await reader.allSettledForE2ee(requests)).rows,
+          }))
+        : {
+            state: await this.approval!.deviceStates(),
+            rows: await this.db.all(requests, { tier: "edge" }),
+          };
       this.assertOpen();
       return rows.map((row) => ({
         id: row.id,
@@ -441,7 +518,29 @@ export class E2ee {
       }
     }
     this.app = app as DeviceTables;
+    configuredSchemas.set(db, this.app.__e2ee_device_requests._schema);
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    startupPreparers.set(db, async () => {
+      if (await this.prepareRequest(true)) return;
+      await this.prepare();
+    });
+    db.onE2eeReconnect(() => {
+      this.preparation = undefined;
+    });
+    let cellCipher: Promise<CellCipher> | undefined;
+    cellCrypto.set(db, async () => {
+      this.assertOpen();
+      cellCipher ??= this.config.crypto?.cellCipher
+        ? Promise.resolve(this.config.crypto.cellCipher)
+        : import("./browser.js").then((module) => module.createBrowserCellCipher());
+      const cipher = await cellCipher;
+      this.assertOpen();
+      return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
+    });
+    currentSpaceKeys.set(db, async (scope, identifier, use, includeHistory) => {
+      await this.prepare();
+      return this.requireSpaces().withKeys(scope, identifier, use, includeHistory);
+    });
     initialSpacePrerequisites.set(db, async (recipientIds) => {
       await this.prepare();
       await this.requireSpaces().warmInitialRecipients(recipientIds);
@@ -462,6 +561,11 @@ export class E2ee {
 
   private async prepare(): Promise<void> {
     this.assertOpen();
+    if (await this.db.e2eeIsExplicitlyOffline()) {
+      if (!this.locallyPrepared && !(await this.prepareRequest(true)))
+        throw new E2eeHistoryUnavailable("Missing retained E2EE device readiness");
+      return;
+    }
     await (this.preparation ??= this.prepareRequest().catch((error) => {
       this.preparation = undefined;
       throw error;
@@ -469,7 +573,7 @@ export class E2ee {
     this.assertOpen();
   }
 
-  private async prepareRequest(): Promise<void> {
+  private async prepareRequest(retainedOnly = false): Promise<boolean> {
     const envelope =
       this.config.crypto?.keyEnvelope ??
       (await (await import("./browser.js")).createBrowserKeyEnvelope());
@@ -478,15 +582,20 @@ export class E2ee {
       this.config.crypto?.deviceSigner ??
       (await (await import("./browser.js")).createBrowserDeviceSigner());
     encodeEnvelope(signer.mechanism, new Uint8Array());
-    const device = await localDevice(this.config.store, this.scope, envelope, signer, () =>
-      this.assertOpen(),
+    const device = await (retainedOnly ? retainedLocalDevice : localDevice)(
+      this.config.store,
+      this.scope,
+      envelope,
+      signer,
+      () => this.assertOpen(),
     );
+    if (!device) return false;
     try {
       this.assertOpen();
       const requests = this.app.__e2ee_device_requests;
       // Once online preparation starts, complete it or reject so it can retry.
       // A later disconnect must not cache skipped enrolment as successful.
-      {
+      if (!retainedOnly) {
         const query = requests.where({ id: device.id });
         let row = await this.db.one(query, { tier: "edge" });
         if (!row) {
@@ -556,70 +665,97 @@ export class E2ee {
           this.app,
         );
       }
-      // Reconnection enrols once without adding another responder or key owner.
-      if (this.approval) return;
-      const retainedKey = device.privateKey.slice();
-      const retainedSigningKey = device.signing.privateKey.slice();
-      this.db.onShutdown(() => {
-        retainedKey.fill(0);
-        retainedSigningKey.fill(0);
-      });
-      const loadDevice = async () => ({
-        ...device,
-        privateKey: retainedKey.slice(),
-        signing: { ...device.signing, privateKey: retainedSigningKey.slice() },
-      });
-      this.approval = new DeviceApproval(
-        this.db,
-        this.account.id,
-        this.scope,
-        envelope,
-        signer,
-        () => this.assertOpen(),
-        this.app,
-        { id: device.id, load: loadDevice },
-      );
-      if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
-        this.groupLifecycle = new Groups(
+      // Reconnection enrols without adding another responder or key owner.
+      if (!this.approval) {
+        const retainedKey = device.privateKey.slice();
+        const retainedSigningKey = device.signing.privateKey.slice();
+        this.db.onShutdown(() => {
+          retainedKey.fill(0);
+          retainedSigningKey.fill(0);
+        });
+        const loadDevice = async () => ({
+          ...device,
+          privateKey: retainedKey.slice(),
+          signing: { ...device.signing, privateKey: retainedSigningKey.slice() },
+        });
+        this.approval = new DeviceApproval(
           this.db,
           this.account.id,
           this.scope,
-          this.app as DeviceTables & GroupTables,
           envelope,
           signer,
           () => this.assertOpen(),
-          (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
-          {
-            store: this.config.store,
-            isKnownRevoked: () => this.approval!.isKnownRevoked(),
-            load: loadDevice,
-            states: (transaction) => this.approval!.deviceStates(transaction),
-          },
+          this.app,
+          { id: device.id, load: loadDevice },
         );
+        if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
+          this.groupLifecycle = new Groups(
+            this.db,
+            this.account.id,
+            this.scope,
+            this.app as DeviceTables & GroupTables,
+            envelope,
+            signer,
+            () => this.assertOpen(),
+            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+            {
+              store: this.config.store,
+              isKnownRevoked: () => this.approval!.isKnownRevoked(),
+              load: loadDevice,
+              states: (transaction) => this.approval!.deviceStates(transaction),
+            },
+          );
+        }
+        if (
+          "__e2ee_spaces" in this.app &&
+          "__e2ee_space_grants" in this.app &&
+          "__e2ee_space_successors" in this.app &&
+          "__e2ee_space_deliveries" in this.app
+        ) {
+          this.spaceLifecycle = new Spaces(
+            this.db,
+            this.account.id,
+            this.app as DeviceTables & SpaceTables,
+            envelope,
+            signer,
+            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+            () => this.assertOpen(),
+            {
+              store: this.config.store,
+              isKnownRevoked: () => this.approval!.isKnownRevoked(),
+              load: loadDevice,
+              states: (transaction) => this.approval!.deviceStates(transaction),
+            },
+            this.groupLifecycle,
+          );
+        }
       }
-      if (
-        "__e2ee_spaces" in this.app &&
-        "__e2ee_space_grants" in this.app &&
-        "__e2ee_space_successors" in this.app &&
-        "__e2ee_space_deliveries" in this.app
-      ) {
-        this.spaceLifecycle = new Spaces(
-          this.db,
-          this.account.id,
-          this.app as DeviceTables & SpaceTables,
-          envelope,
-          signer,
-          (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
-          () => this.assertOpen(),
-          {
-            store: this.config.store,
-            isKnownRevoked: () => this.approval!.isKnownRevoked(),
-            load: loadDevice,
-            states: (transaction) => this.approval!.deviceStates(transaction),
-          },
-          this.groupLifecycle,
-        );
+      if (retainedOnly) {
+        try {
+          const state = await observeE2eeHistory(this.db, (reader) =>
+            this.approval!.deviceStates(reader),
+          );
+          const retained = state.publicHistory.keys.rows.find((row) => row.deviceId === device.id);
+          if (!retained) return false;
+          if (
+            retained.mechanism !== envelope.mechanism.id ||
+            retained.version !== envelope.mechanism.version ||
+            retained.signingMechanism !== signer.mechanism.id ||
+            retained.signingVersion !== signer.mechanism.version ||
+            !sameBytes(retained.publicKey, device.publicKey) ||
+            !sameBytes(retained.signingPublicKey, device.signing.publicKey)
+          )
+            throw new Error("E2EE accepted device keys do not match the locally retained key");
+          this.locallyPrepared = state.active.has(device.id) && state.verified.has(device.id);
+          return this.locallyPrepared;
+        } catch (error) {
+          if (error instanceof E2eeHistoryUnavailable) return false;
+          throw error;
+        }
       }
+      this.locallyPrepared = true;
+      this.approval.startResponder();
+      return true;
     } finally {
       device.privateKey.fill(0);
       device.signing.privateKey.fill(0);

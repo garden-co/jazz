@@ -1,5 +1,10 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import {
+  observeE2eeHistory,
+  E2eeHistoryUnavailable,
+  type E2eeHistoryReader,
+} from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { DeviceSigner } from "./types.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
@@ -21,6 +26,14 @@ export async function readAccountMembership(
   signer: DeviceSigner,
   tables: DeviceTables = app,
 ) {
+  if (await db.e2eeIsExplicitlyOffline())
+    return observeE2eeHistory(db, async (reader) =>
+      replayAccountMembership(
+        await readPublicMembershipHistory(reader, accountId, tables),
+        application,
+        signer,
+      ),
+    );
   await prefetchPublicMembershipHistory(db, accountId, tables);
   const read = await exclusiveE2eeTransaction(db, (tx) =>
     readPublicMembershipHistory(tx, accountId, tables),
@@ -72,9 +85,9 @@ export function historyBefore(
   };
 }
 
-/** Shared snapshot reader: callers must await the enclosing authority commit. */
+/** Shared accepted-history reader; authority transactions still require their global wait. */
 export async function readPublicMembershipHistory(
-  tx: E2eeTransactionScope,
+  tx: E2eeHistoryReader,
   accountId: string,
   tables: DeviceTables = app,
 ) {
@@ -159,7 +172,7 @@ async function replay(
     let valid = false;
     if (root.epochId === atRegistration.epochId && atRegistration.active.has(root.signerId)) {
       const key = prior.keys.rows.find((row) => row.deviceId === root.signerId);
-      if (!key) throw new Error("Missing accepted E2EE recovery signer keys");
+      if (!key) throw new E2eeHistoryUnavailable("Missing accepted E2EE recovery signer keys");
       if (
         key.signingMechanism !== signer.mechanism.id ||
         key.signingVersion !== signer.mechanism.version
@@ -184,7 +197,7 @@ async function replay(
     compare(rootPositions.get(a.id)!, rootPositions.get(b.id)!),
   );
   const root = roots[0];
-  if (!root) throw new Error("Missing accepted E2EE account root");
+  if (!root) throw new E2eeHistoryUnavailable("Missing accepted E2EE account root");
   if (roots.some((row) => row.ledgerVersion !== 1))
     throw new Error("E2EE account requires public ledger migration");
   if (roots.some((row) => row.deviceId !== root.deviceId || row.epochId !== root.epochId))
@@ -199,10 +212,10 @@ async function replay(
   const successorIds = new Set<string>();
   const visited = new Set([epochId]);
   const keyFor = (deviceId: string) => history.keys.rows.find((key) => key.deviceId === deviceId);
-  if (!keyFor(root.deviceId)) throw new Error("Missing accepted E2EE root keys");
+  if (!keyFor(root.deviceId)) throw new E2eeHistoryUnavailable("Missing accepted E2EE root keys");
   const verify = async (deviceId: string, bytes: Uint8Array, signature: Uint8Array) => {
     const key = keyFor(deviceId);
-    if (!key) throw new Error("Missing accepted E2EE signer keys");
+    if (!key) throw new E2eeHistoryUnavailable("Missing accepted E2EE signer keys");
     if (
       key.signingMechanism !== signer.mechanism.id ||
       key.signingVersion !== signer.mechanism.version
@@ -259,7 +272,8 @@ async function replay(
           continue;
       }
       if (await verify(approval.signerId, bytes, approval.signature)) {
-        if (!keyFor(approval.deviceId)) throw new Error("Missing accepted E2EE recipient keys");
+        if (!keyFor(approval.deviceId))
+          throw new E2eeHistoryUnavailable("Missing accepted E2EE recipient keys");
         active.add(approval.deviceId);
         approvalIds.add(approval.id);
       }

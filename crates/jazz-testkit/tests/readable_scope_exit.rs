@@ -486,6 +486,13 @@ async fn run_revoked_exit_shared_case(
         |log| has_added_id(&log[start..], task),
     )
     .await;
+    assert!(
+        local_rows(&alice, Query::from("tasks"))
+            .await
+            .iter()
+            .any(|(id, values)| *id == task && values.contains(&Value::Text("readmitted".into()))),
+        "readmission must expose the fresh readable content, not the stale cached row"
+    );
     alice.shutdown().await.unwrap();
     if let Some(reader) = shared_reader {
         reader.shutdown().await.unwrap();

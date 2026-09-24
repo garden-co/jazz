@@ -9,6 +9,7 @@
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import { stripColumnQualifier as stripQualifier } from "./query-column-name.js";
 import { toJsonText } from "./json-text.js";
@@ -68,7 +69,8 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   return col?.column_type;
 }
 
-function toTimestampMs(value: unknown): number {
+/** @internal Shared interpretation of serialised timestamp query literals. */
+export function toTimestampMs(value: unknown): number {
   if (value instanceof Date) {
     const ts = value.getTime();
     if (!Number.isFinite(ts)) {
@@ -322,14 +324,16 @@ function toArraySubqueries(
     const filters = spec.conditions.map((condition) =>
       conditionToRelPredicate(condition, schema, rel.toTable),
     );
-    const orderBy = spec.orderBy.map(([column, direction]) => [
-      stripQualifier(column),
-      direction === "desc" ? "Descending" : "Ascending",
-    ]);
+    const orderBy = toRuntimeOrderBy(spec.orderBy, schema, rel.toTable).map(
+      ({ column, direction }) => [column, direction === "Desc" ? "Descending" : "Ascending"],
+    );
     const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
       requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
+    const encryption = encryptedSchemas.get(schema)?.tables.get(rel.toTable);
+    if (encryption)
+      throw new Error("Unsupported encrypted query: nested results are not supported yet");
     const outputColumnName = schema[tableName]?.columns.some((column) => column.name === relName)
       ? hiddenIncludeColumnName(relName)
       : relName;
@@ -384,6 +388,11 @@ function conditionToRelPredicate(
   const columnType = getColumnType(schema, table, column);
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
+  }
+  if (encryptedSchemas.get(schema)?.tables.get(table)?.columns.includes(column)) {
+    throw new Error(
+      `Unsupported encrypted query: predicates on "${table}.${column}" are not available`,
+    );
   }
   if (columnType.type === "Row" && magicColumnType(column)) {
     if (cond.op !== "eq" && cond.op !== "ne") {
@@ -1001,6 +1010,15 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     schema,
     builder.table,
   );
+  const encryption = encryptedSchemas.get(schema)?.tables.get(builder.table);
+  if (
+    encryption &&
+    projectedColumns &&
+    projectedColumns.some(({ column }) => encryption.columns.includes(column)) &&
+    !projectedColumns.some(({ column }) => column === encryption.space)
+  ) {
+    projectedColumns.push({ kind: "full", column: encryption.space });
+  }
   const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
     requireIncludes: builder.requireIncludes,
   });
