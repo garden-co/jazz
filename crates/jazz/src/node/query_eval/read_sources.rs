@@ -4273,10 +4273,17 @@ where
                 && query.relation.is_none()
             {
                 if !paths.contains_key(&root) {
-                    let table = self.table_in_schema(&query.table, shape.schema_version())?;
                     let equalities = root_literal_equalities(query, binding)?;
-                    if let Some(path @ CurrentAccessPath::Index { .. }) =
-                        select_current_access_path(&table, &equalities)
+                    // Same admission guard as the ordinary selector and the
+                    // junction narrowing below.
+                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
+                        .guarded_current_access_path(
+                            &request.reads.primary,
+                            &root,
+                            &equalities,
+                            true,
+                            true,
+                        )?
                     {
                         paths.insert(root.clone(), path);
                     }
