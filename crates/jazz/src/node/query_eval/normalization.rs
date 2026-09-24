@@ -566,6 +566,19 @@ pub(super) fn select_composite_equality_access_path(
         };
         let first_value = equalities.get(first)?.clone();
         let second_value = equalities.get(second)?.clone();
+        // Preserve probes for other indexed equalities instead of widening a
+        // query that previously intersected three or more single indexes.
+        let intersections = table
+            .global_current_indexed_columns()
+            .into_iter()
+            .filter(|column| column != first && column != second)
+            .filter_map(|column| {
+                equalities.get(&column).cloned().map(|value| {
+                    let prefix = vec![physical_current_index_value(table, &column, value)];
+                    (column, prefix)
+                })
+            })
+            .collect();
         Some(CurrentAccessPath::Index {
             column: first.clone(),
             order_column: Some(second.clone()),
@@ -574,7 +587,7 @@ pub(super) fn select_composite_equality_access_path(
                 physical_current_index_value(table, first, first_value),
                 physical_current_index_value(table, second, second_value),
             ],
-            intersections: Vec::new(),
+            intersections,
             maintained: false,
             source_limit: None,
         })

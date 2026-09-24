@@ -20,12 +20,12 @@ separate. All four processes ran sequentially in A/B/B/A order on one machine.
 
 | Process      | q2 Global SELECT | Execution phase | Full current rows | Index entries |
 | ------------ | ---------------: | --------------: | ----------------: | ------------: |
-| Parent A1    |        30.875 ms |       23.642 ms |             4,503 |         4,493 |
-| Candidate B1 |        24.151 ms |       18.429 ms |             3,366 |         3,356 |
-| Candidate B2 |        23.762 ms |       18.793 ms |             3,366 |         3,356 |
-| Parent A2    |        30.801 ms |       23.721 ms |             4,503 |         4,493 |
+| Parent A1    |        30.801 ms |       23.721 ms |             4,503 |         4,493 |
+| Candidate B1 |        22.787 ms |       18.052 ms |             3,366 |         3,356 |
+| Candidate B2 |        22.729 ms |       17.649 ms |             3,366 |         3,356 |
+| Parent A2    |        30.808 ms |       23.591 ms |             4,503 |         4,493 |
 
-The direct-parent improvement is **1.28–1.30×** for this declared-index query.
+The direct-parent improvement is **1.35×** for this declared-index query.
 The extra index can add write and storage cost; this experiment did not
 isolate that cost. Without the declared composite index, this new path is not
 selected. The point join and `q1` filter/include query showed no established
@@ -35,7 +35,7 @@ The parent binary was built from `1f4bed700` plus the identical benchmark
 fixture flag, SHA-256
 `8afb8a66474eaf131173268329e1abaa8d2dd72f1a88599951cf69743149ebd5`.
 The candidate's optimized binary SHA-256 was
-`3170a4fec9a0cba54c7c547e04b23a4a6a33b3870b42c059e022b0e3201d5800`.
+`f3d564ac8226bdcb02d3ba32bda55f444197d39278e3146ce773f489a6ca16a2`.
 The exact command for each process was:
 
 ```sh

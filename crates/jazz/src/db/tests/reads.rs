@@ -709,6 +709,19 @@ fn first_result_join_uses_declared_composite_equality_index() {
         reads.global_current_rows.reads <= 55,
         "composite equality should avoid hydrating the other 30 group rows: {reads:?}"
     );
+
+    let changed = block_on(db.update(
+        "issues",
+        row(1),
+        BTreeMap::from([("state".to_owned(), Value::String("closed".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(changed.wait(DurabilityTier::Local)).unwrap();
+    assert!(
+        row_ids(&db.read(&prepared).unwrap()).is_empty(),
+        "a Local winner leaving the composite prefix must retract the result"
+    );
 }
 
 #[test]
