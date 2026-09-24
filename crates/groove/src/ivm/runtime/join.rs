@@ -244,7 +244,11 @@ impl VisibilityState {
             return;
         }
         let visible = Rc::make_mut(&mut self.visible);
-        for (key, present) in self.changes.drain() {
+        // This is a transaction journal, not a reusable table-sized buffer.
+        // drain() leaves hydration-sized capacity behind; the next evaluation
+        // then clones that empty allocation when snapshotting operator state.
+        // Consume it so a committed view has no journal allocation to clone.
+        for (key, present) in std::mem::take(&mut self.changes) {
             if present {
                 visible.insert(key);
             } else {
@@ -321,32 +325,21 @@ impl JoinLookup<'_> {
 }
 
 impl JoinState {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn evaluate(
+    pub(super) fn evaluate_prepared(
         &self,
         left: ArrangementTransition<'_>,
         right: ArrangementTransition<'_>,
-        left_descriptor: &RecordDescriptor,
-        right_descriptor: &RecordDescriptor,
-        output_descriptor: &RecordDescriptor,
-        output_mapping: &[(usize, usize)],
+        projection: &crate::records::PreparedRecordCopy,
         mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
         let mut output = JoinOutputBuffer {
             bytes: BytesMut::new(),
             deltas: Vec::new(),
-            variable_scratch: Vec::new(),
-        };
-        let context = JoinChangeContext {
-            left_descriptor,
-            right_descriptor,
-            output_descriptor,
-            output_mapping,
         };
         if mode == ArrangementUpdateMode::Replace {
             append_join_index_deltas(
                 &mut output,
-                &context,
+                projection,
                 left.current.buckets(),
                 &JoinLookup::Arrangement(right.current),
                 JoinProbeSide::LeftDelta,
@@ -355,7 +348,7 @@ impl JoinState {
         } else {
             append_join_index_deltas(
                 &mut output,
-                &context,
+                projection,
                 left.change_buckets(),
                 &JoinLookup::Arrangement(right.current),
                 JoinProbeSide::LeftDelta,
@@ -363,7 +356,7 @@ impl JoinState {
             )?;
             append_join_index_deltas(
                 &mut output,
-                &context,
+                projection,
                 right.change_buckets(),
                 &JoinLookup::Arrangement(left.current),
                 JoinProbeSide::RightDelta,
@@ -374,7 +367,7 @@ impl JoinState {
             if let Some(left_changes) = left.changes {
                 append_join_index_deltas(
                     &mut output,
-                    &context,
+                    projection,
                     right.change_buckets(),
                     &JoinLookup::Index(left_changes),
                     JoinProbeSide::RightDelta,
@@ -435,13 +428,11 @@ impl JoinState {
             rt,
             mode,
         )?;
-        self.evaluate(
+        let projection = crate::records::PreparedRecordCopy::new(&[*ld, *rd], *output, mapping)?;
+        self.evaluate_prepared(
             ArrangementTransition::at(left, lt),
             ArrangementTransition::at(right, rt),
-            ld,
-            rd,
-            output,
-            mapping,
+            &projection,
             mode,
         )
     }
@@ -921,14 +912,6 @@ fn advance_arrangement(
     Ok(())
 }
 
-/// Borrowed descriptors and key fields shared while emitting join deltas.
-struct JoinChangeContext<'a> {
-    left_descriptor: &'a RecordDescriptor,
-    right_descriptor: &'a RecordDescriptor,
-    output_descriptor: &'a RecordDescriptor,
-    output_mapping: &'a [(usize, usize)],
-}
-
 /// Builds the changed rows produced by a join.
 ///
 /// All encoded rows are kept next to each other in `bytes`. For example:
@@ -944,12 +927,11 @@ struct JoinChangeContext<'a> {
 struct JoinOutputBuffer {
     /// All encoded joined rows, stored one after another.
     bytes: BytesMut,
-    deltas: Vec<(Range<usize>, i64)>,
     /// Where each row is inside `bytes`, together with its weight.
     ///
     /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
     /// `+1`.”
-    variable_scratch: Vec<(usize, Range<usize>)>,
+    deltas: Vec<(Range<usize>, i64)>,
 }
 
 struct KeyedRecordDelta<'a> {
@@ -964,7 +946,7 @@ enum JoinProbeSide {
 
 fn append_join_index_deltas<'a>(
     output: &mut JoinOutputBuffer,
-    context: &JoinChangeContext<'_>,
+    projection: &crate::records::PreparedRecordCopy,
     changes: impl Iterator<Item = (&'a JoinKey, &'a JoinBucket)>,
     stored: &JoinLookup<'_>,
     side: JoinProbeSide,
@@ -984,13 +966,8 @@ fn append_join_index_deltas<'a>(
                     JoinProbeSide::LeftDelta => (changed_record.as_ref(), stored_record.as_ref()),
                     JoinProbeSide::RightDelta => (stored_record.as_ref(), changed_record.as_ref()),
                 };
-                let record = create_join_record_into(
-                    left_record,
-                    right_record,
-                    context,
-                    &mut output.bytes,
-                    &mut output.variable_scratch,
-                )?;
+                let record =
+                    projection.project_into(&[left_record, right_record], &mut output.bytes)?;
                 output.deltas.push((record, weight));
             }
         }
@@ -1239,25 +1216,6 @@ pub(super) fn create_join_record(
     )?)
 }
 
-fn create_join_record_into(
-    left_record: &[u8],
-    right_record: &[u8],
-    context: &JoinChangeContext<'_>,
-    output: &mut BytesMut,
-    variable_scratch: &mut Vec<(usize, Range<usize>)>,
-) -> Result<Range<usize>, IvmRuntimeError> {
-    context
-        .output_descriptor
-        .project_record_raw_into(
-            &[*context.left_descriptor, *context.right_descriptor],
-            &[left_record, right_record],
-            context.output_mapping,
-            output,
-            variable_scratch,
-        )
-        .map_err(IvmRuntimeError::RecordEncoding)
-}
-
 pub(super) fn join_output_mapping(
     left_descriptor: &RecordDescriptor,
     right_descriptor: &RecordDescriptor,
@@ -1286,6 +1244,38 @@ pub(super) fn join_output_mapping(
 
 #[cfg(test)]
 mod tests {
+    // Public delta tests cover the results; only a private test can distinguish
+    // an empty journal from an empty journal retaining hydration-sized buckets.
+    #[test]
+    fn committed_visibility_discards_journal_capacity_and_preserves_snapshots() {
+        let keys = (0..5_000u64)
+            .map(|value| super::JoinKey::from_slice(&value.to_le_bytes()))
+            .collect::<Vec<_>>();
+        let mut live = super::VisibilityState::default();
+        for key in &keys {
+            live.set(key.clone(), true);
+        }
+        live.commit();
+        assert_eq!(live.changes.capacity(), 0);
+        let original = live.clone();
+        assert_eq!(original.changes.capacity(), 0);
+        live.set(keys[0].clone(), false);
+        let staged = live.clone();
+        live.commit();
+        assert_eq!(live.changes.capacity(), 0);
+        assert!(original.contains(&keys[0]));
+        assert!(!staged.contains(&keys[0]));
+        assert!(!live.contains(&keys[0]));
+        for key in &keys[1..] {
+            assert!(live.contains(key));
+        }
+        live.set(keys[0].clone(), true);
+        live.commit();
+        assert!(live.contains(&keys[0]));
+        assert!(!staged.contains(&keys[0]));
+        assert_eq!(live.changes.capacity(), 0);
+    }
+
     use std::collections::BTreeMap;
 
     use super::*;

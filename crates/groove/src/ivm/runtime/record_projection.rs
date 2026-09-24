@@ -139,7 +139,8 @@ pub(super) fn project_descriptor(
                 ProjectExpr::Literal(value) => value
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
-                ProjectExpr::TypedLiteral { value_type, .. } => value_type.clone(),
+                ProjectExpr::TypedLiteral { value_type, .. }
+                | ProjectExpr::TemplateArgument { value_type, .. } => value_type.clone(),
                 ProjectExpr::Null(value_type) => value_type.clone(),
                 ProjectExpr::Nullable(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -617,6 +618,15 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
     let mut contains_collect = HashMap::default();
     for node in graph.postorder() {
         let children_contain_collect = match node {
+            GraphBuilder::TypedTemplate { inputs, .. } => contains(
+                inputs
+                    .iter()
+                    .map(|input| input.as_ref() as *const GraphBuilder),
+                &contains_collect,
+            ),
+            GraphBuilder::TemplateInput { input, .. } => input.as_ref().is_some_and(|input| {
+                contains([input.as_ref() as *const GraphBuilder], &contains_collect)
+            }),
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::StreamingChecksum { input, .. }
@@ -678,7 +688,9 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
         }
         contains_collect.insert(
             node as *const GraphBuilder as usize,
-            children_contain_collect || matches!(node, GraphBuilder::CollectBy { .. }),
+            children_contain_collect
+                || matches!(node, GraphBuilder::CollectBy { .. })
+                || matches!(node, GraphBuilder::TypedTemplate { program, .. } if program.terminal),
         );
     }
     Ok(())
@@ -699,7 +711,10 @@ pub(super) fn project_field_expr(
         | ProjectExpr::RecursiveEnumRemap { source, .. } => {
             *source = FieldRef::Resolved(resolve_field_ref(input, source)?);
         }
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {}
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => {}
     }
     Ok(expression)
 }
@@ -754,6 +769,7 @@ pub(super) fn project_field_value(
             .map_err(IvmRuntimeError::RecordEncoding)
     };
     Ok(match &expr.expression {
+        ProjectExpr::TemplateArgument { .. } => return Err(IvmRuntimeError::UnsupportedOperator),
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
             let mut value = resolved(source)?;
@@ -1089,6 +1105,9 @@ pub(super) fn raw_projection_fields(
         .enumerate()
         .map(|(output_idx, expr)| {
             Ok(match &expr.expression {
+                ProjectExpr::TemplateArgument { .. } => {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                }
                 ProjectExpr::Field(field) => {
                     let source_idx = resolve_field_ref(input_desc, field)?;
                     validate_copy(&input_desc.fields()[source_idx].value_type, output_idx)?;
@@ -1446,14 +1465,14 @@ pub(super) fn schema_index_input_fields(
         .primary_key
         .as_ref()
         .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
-    let catalogue = table.record_schema();
     let mut fields = Vec::new();
     for field in index
         .columns
         .iter()
         .chain(primary_key.columns.iter().map(|column| &column.column))
     {
-        if catalogue.field_index(field).is_none() {
+        // The catalogue descriptor has exactly one field per column name.
+        if !table.columns.iter().any(|column| column.name == *field) {
             return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
         }
         if !fields.contains(field) {

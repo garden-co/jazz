@@ -4,12 +4,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::*;
 
 fn resolved_record_value(
-    record: BorrowedRecord<'_>,
+    record: impl super::key_encoding::PredicateRecord,
     field: &str,
 ) -> Result<Value, IvmRuntimeError> {
-    let index = super::record_projection::resolve_field_name(&record.descriptor(), field)
-        .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
-    record.get_idx(index).map_err(Into::into)
+    record.value(field)
 }
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
@@ -500,8 +498,9 @@ impl PredicateExpr {
             .map(Some)
     }
 
-    pub(super) fn referenced_fields(&self, output: &mut BTreeSet<String>) {
+    pub(crate) fn referenced_fields(&self, output: &mut BTreeSet<String>) {
         match self {
+            Self::TemplateArgument { fields, .. } => output.extend(fields.iter().cloned()),
             Self::Eq { field, .. }
             | Self::Neq { field, .. }
             | Self::Contains { field, .. }
@@ -533,10 +532,11 @@ impl PredicateExpr {
 
     pub(super) fn matches(
         &self,
-        record: BorrowedRecord<'_>,
+        record: impl super::key_encoding::PredicateRecord,
         comparison: ValueComparison,
     ) -> Result<bool, IvmRuntimeError> {
         match self {
+            Self::TemplateArgument { .. } => Err(IvmRuntimeError::UnsupportedOperator),
             Self::Eq { field, value } => {
                 compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
             }
@@ -766,7 +766,7 @@ impl Hash for AutoDirectFamilyKey {
 /// Bounded structural fingerprint for auto-direct family lookup. Hash-map
 /// collisions are resolved by [`graph_builders_equal`], so this hash never
 /// carries semantic identity by itself.
-fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
+pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
     let mut hashes = HashMap::<*const GraphBuilder, u64>::default();
     macro_rules! child {
         ($child:expr) => {
@@ -783,6 +783,28 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
         let mut hasher = DefaultHasher::new();
         std::mem::discriminant(node).hash(&mut hasher);
         match node {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                scalars,
+            } => {
+                program.hash(&mut hasher);
+                predicates.hash(&mut hasher);
+                scalars.hash(&mut hasher);
+                for input in inputs {
+                    child!(input).hash(&mut hasher);
+                }
+            }
+            GraphBuilder::TemplateInput {
+                slot,
+                output,
+                input,
+            } => {
+                slot.hash(&mut hasher);
+                output.hash(&mut hasher);
+                input.as_ref().map(|input| child!(input)).hash(&mut hasher);
+            }
             GraphBuilder::Table {
                 table,
                 scan,
@@ -967,10 +989,58 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
 }
 
 /// Exact, nonrecursive equality check paired with the bounded family hash.
-fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
+pub(super) fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
+    graph_builders_equal_with(left, right, |_, _| None)
+}
+
+/// Structural equality with a caller hook consulted before each pair. A hook
+/// result of `Some` decides that pair without descending into its inputs.
+pub(crate) fn graph_builders_equal_with(
+    left: &GraphBuilder,
+    right: &GraphBuilder,
+    mut hook: impl FnMut(&GraphBuilder, &GraphBuilder) -> Option<bool>,
+) -> bool {
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
+        if let Some(equal) = hook(left, right) {
+            if !equal {
+                return false;
+            }
+            continue;
+        }
         match (left, right) {
+            (
+                GraphBuilder::TypedTemplate {
+                    program: a,
+                    inputs: b,
+                    predicates: c,
+                    scalars: d,
+                },
+                GraphBuilder::TypedTemplate {
+                    program: x,
+                    inputs: y,
+                    predicates: z,
+                    scalars: w,
+                },
+            ) if a == x && b.len() == y.len() && c == z && d == w => {
+                pending.extend(b.iter().zip(y).map(|(b, y)| (b.as_ref(), y.as_ref())))
+            }
+            (
+                GraphBuilder::TemplateInput {
+                    slot: a,
+                    output: b,
+                    input: c,
+                },
+                GraphBuilder::TemplateInput {
+                    slot: x,
+                    output: y,
+                    input: z,
+                },
+            ) if a == x && b == y => match (c, z) {
+                (Some(c), Some(z)) => pending.push((c, z)),
+                (None, None) => {}
+                _ => return false,
+            },
             (
                 GraphBuilder::Table {
                     table: a,
@@ -1310,7 +1380,7 @@ pub struct InputSourceDelta {
 }
 
 /// Result of lowering a graph-builder fragment into the deduplicated graph.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompiledNode {
     pub(super) output: RecordDescriptor,
     pub(super) node: NodeId,
@@ -1740,6 +1810,7 @@ fn lift_literal_filter_node(
                 let mut fields = fields
                     .iter()
                     .map(|field| match &field.expression {
+                        ProjectExpr::TemplateArgument { .. } => Ok(field.clone()),
                         ProjectExpr::RecordField { source, path } => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
@@ -2036,7 +2107,9 @@ fn lift_literal_filter_node(
                 value: lifted.value,
             }))
         }
-        GraphBuilder::CollectBy { .. } => Ok(None),
+        GraphBuilder::CollectBy { .. }
+        | GraphBuilder::TemplateInput { .. }
+        | GraphBuilder::TypedTemplate { .. } => Ok(None),
         GraphBuilder::Aggregate {
             input,
             group_cols,
@@ -2211,6 +2284,7 @@ fn project_fields_against_rewritten_input(
                 }
                 ProjectExpr::Literal(_)
                 | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::TemplateArgument { .. }
                 | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source =
@@ -2322,6 +2396,12 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             continue;
         }
         let output = match node {
+            GraphBuilder::TypedTemplate { program, .. } => {
+                program.output.field_index(binding_field).is_some()
+            }
+            GraphBuilder::TemplateInput { output, .. } => {
+                output.field_index(binding_field).is_some()
+            }
             GraphBuilder::BindingSource { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::InputSource { output, .. }
@@ -2510,6 +2590,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
+        | GraphBuilder::TemplateInput { .. }
+        | GraphBuilder::TypedTemplate { .. }
         | GraphBuilder::Recursive { .. }
         | GraphBuilder::ArgMaxBy { .. }
         | GraphBuilder::ArgMinBy { .. }
@@ -3989,12 +4071,39 @@ impl IvmRuntime {
             .ok_or(IvmRuntimeError::UnsupportedOperator)
     }
 
-    fn infer_builder_output_uncached(
+    pub(super) fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                ..
+            } => {
+                if predicates.len() != program.predicate_markers.len() {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                if inputs.len() != program.inputs.len() {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                for (input, output) in inputs.iter().zip(&program.inputs) {
+                    if self.infer_builder_output_cached(input, output_memo)? != *output {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                }
+                Ok(program.output)
+            }
+            GraphBuilder::TemplateInput { output, input, .. } => {
+                let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                let actual = self.infer_builder_output_cached(input, output_memo)?;
+                if actual != *output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(*output)
+            }
             GraphBuilder::Table {
                 table,
                 variant_projection,
@@ -4020,7 +4129,14 @@ impl IvmRuntime {
                 if table_schema.has_variants() {
                     return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
                 }
-                Ok(table_schema.record_schema())
+                // The runtime keeps this descriptor current with the schema
+                // (registration and registry evolution); building and
+                // interning it again for every inference is pure overhead.
+                Ok(self
+                    .table_descriptors
+                    .get(table)
+                    .copied()
+                    .unwrap_or_else(|| table_schema.record_schema()))
             }
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::InputSource { output, .. } => Ok(*output),
@@ -4099,7 +4215,7 @@ impl IvmRuntime {
             }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
-                project_descriptor(&input, fields)
+                Ok(self.projection_plan(input, fields)?.output)
             }
             GraphBuilder::StreamingChecksum {
                 input,

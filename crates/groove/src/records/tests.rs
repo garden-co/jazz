@@ -1798,6 +1798,82 @@ fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
     }
 }
 
+/// Byte-level coverage is intentionally internal: equal decoded query rows
+/// cannot pin the durable record framing or rejection of malformed offsets.
+#[test]
+fn prepared_multi_input_copy_preserves_record_bytes_and_rejects_bad_spans() {
+    let left = RecordDescriptor::new([("id", ValueType::U64), ("name", ValueType::String)]);
+    let right = RecordDescriptor::new([("name", ValueType::String), ("id", ValueType::U64)]);
+    let target = RecordDescriptor::new([
+        ("right_name", ValueType::String),
+        ("left_id", ValueType::U64),
+        ("left_name", ValueType::String),
+        ("right_id", ValueType::U64),
+    ]);
+    let mapping = [(1, 0), (0, 0), (0, 1), (1, 1)];
+    let plan = PreparedRecordCopy::new(&[left, right], target, &mapping).unwrap();
+    let l = left
+        .create(&[Value::U64(7), Value::String("a".into())])
+        .unwrap();
+    let r = right
+        .create(&[Value::String("bc".into()), Value::U64(9)])
+        .unwrap();
+    let expected = [
+        7, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 23, 0, 0, 0, 2, b'b', b'c', 2, b'a',
+    ];
+    let mut bytes = BytesMut::from(&b"prefix"[..]);
+    let range = plan.project_into(&[&l, &r], &mut bytes).unwrap();
+    assert_eq!(&bytes[range], &expected);
+    assert_eq!(&bytes[..6], b"prefix");
+    for name in ["", "a", "multibyte \u{1f3b7}", "a longer variable payload"] {
+        let l = left
+            .create(&[Value::U64(u64::MAX), Value::String(name.into())])
+            .unwrap();
+        for n in 0..=l.len() {
+            let old = target.project_record_raw(&[left, right], &[&l[..n], &r], &mapping);
+            let mut actual = BytesMut::new();
+            let new = plan.project_into(&[&l[..n], &r], &mut actual);
+            assert_eq!(old.is_ok(), new.is_ok(), "prefix {n}");
+            if let Ok(expected) = old {
+                assert_eq!(&actual[..], &expected);
+            }
+        }
+    }
+    let nested = RecordDescriptor::new([
+        ("a", ValueType::String),
+        ("b", ValueType::Nullable(Box::new(ValueType::String))),
+    ]);
+    let identity = PreparedRecordCopy::new(&[nested], nested, &[(0, 0), (0, 1)]).unwrap();
+    for nullable in [
+        Value::Nullable(None),
+        Value::Nullable(Some(Box::new(Value::String("tail".into())))),
+    ] {
+        let valid = nested
+            .create(&[Value::String("lead".into()), nullable])
+            .unwrap();
+        let mut output = BytesMut::new();
+        identity.project_into(&[&valid], &mut output).unwrap();
+        assert_eq!(&output[..], &valid);
+        for offset in [0, 3, 4, 6, 8, valid.len() as u32, u32::MAX] {
+            let mut raw = valid.clone();
+            raw[..4].copy_from_slice(&offset.to_le_bytes());
+            let old = nested.project_record_raw(&[nested], &[&raw], &[(0, 0), (0, 1)]);
+            let mut output = BytesMut::from(&b"prefix"[..]);
+            let new = identity.project_into(&[&raw], &mut output);
+            assert_eq!(old.is_ok(), new.is_ok(), "offset {offset}");
+            match old {
+                Ok(expected) => assert_eq!(&output[6..], &expected),
+                Err(_) => assert_eq!(&output[..], b"prefix"),
+            }
+        }
+    }
+    assert!(PreparedRecordCopy::new(&[left], target, &mapping).is_err());
+    assert!(
+        PreparedRecordCopy::new(&[left, right], target, &[(0, 0), (0, 0), (0, 1), (1, 1)]).is_err()
+    );
+    assert!(plan.project_into(&[&l], &mut BytesMut::new()).is_err());
+}
+
 #[test]
 fn record_projector_rejects_incomplete_duplicate_and_type_mismatched_mappings() {
     let source = RecordDescriptor::new([("id", ValueType::U64), ("name", ValueType::String)]);

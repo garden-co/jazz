@@ -127,7 +127,7 @@ pub(crate) trait SourceGraphPreparer {
 }
 
 /// Concrete source selected for one logical source request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedSource {
     /// Catalogue-owned IDs for logical columns in the selected read schema.
     pub(crate) stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
@@ -151,11 +151,20 @@ pub(crate) struct ResolvedSource {
     /// Current authorized deleted-row preimage for this same source
     /// occurrence. The deletion terminal semijoins its raw register witness
     /// against this graph, so a tombstone is never authorization by itself.
-    pub(crate) authorized_deletion_preimage: Option<GraphBuilder>,
+    pub(crate) authorized_deletion_preimage: Option<AuthorizedDeletionPreimage>,
+}
+
+/// The authorization proof for a deletion is route-scoped, not only row-scoped.
+/// Keep the route contract with its graph so reusable programs cannot borrow
+/// another binding's proof after projecting down to the deletion version key.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthorizedDeletionPreimage {
+    pub(crate) graph: GraphBuilder,
+    pub(crate) routing_fields: BTreeSet<String>,
 }
 
 /// Concrete content-version source selected by node-side source resolution.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ContentVersionSource {
     /// Graph emitting current content history rows with canonical storage fields.
     pub(crate) graph: GraphBuilder,
@@ -164,7 +173,7 @@ pub(crate) struct ContentVersionSource {
 }
 
 /// Concrete deletion-register source selected by node-side source resolution.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeletionRegisterSource {
     /// Graph emitting current deletion-register rows with canonical storage fields.
     pub(crate) graph: GraphBuilder,

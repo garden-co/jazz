@@ -34,7 +34,7 @@ impl ClosureLowering {
 
 pub(super) fn lower_closure_membership(
     root_graph: GraphBuilder,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -100,7 +100,7 @@ pub(super) fn reachable_contribution_membership_graph(
     contribution_source: &ResolvedSource,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
@@ -173,7 +173,7 @@ pub(super) fn reachable_step_witness_membership_graph(
     contribution: &ReachableContribution,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
@@ -236,7 +236,7 @@ pub(super) fn reachable_seed_membership_graph(
     contribution: &ReachableContribution,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Option<(SourceId, GraphBuilder)>> {
     let mut visited = BTreeSet::new();
@@ -311,7 +311,7 @@ pub(super) fn join_contribution_membership_graph(
     contribution_source: &ResolvedSource,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
@@ -374,7 +374,7 @@ pub(super) fn inherited_contribution_membership_graph(
     parent_source: &ResolvedSource,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
@@ -428,7 +428,7 @@ pub(super) fn flat_join_contribution_membership_graph(
     contribution_source: &ResolvedSource,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-    request: &QueryProgramRequest,
+    request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();

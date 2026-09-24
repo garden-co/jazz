@@ -42,6 +42,12 @@ impl Drop for EphemeralGraphInstall<'_> {
 }
 
 impl IvmRuntime {
+    /// Cache diagnostics count attempted work, not installed semantic state.
+    pub fn execution_layout_stats(&self) -> ExecutionLayoutStats {
+        let (builds, hits) = self.graph.execution_layout_counters();
+        ExecutionLayoutStats { builds, hits }
+    }
+
     pub fn retained_node_ids(&self) -> HashSet<NodeId> {
         let mut retained = HashSet::new();
         let roots = self

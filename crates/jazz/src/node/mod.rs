@@ -682,6 +682,10 @@ struct SchemaCatalogue {
     catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
     /// Resolved logical-to-physical identity mapping for every known schema.
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    /// Successfully registered raw-current projection metadata. Derived from
+    /// the catalogue and live registry, never persisted or shared across nodes.
+    physical_current_winner_projections:
+        BTreeMap<SchemaVersionId, BTreeMap<String, (String, Vec<String>)>>,
     /// Durable, not-yet-visible schema bundles awaiting ordered activation.
     staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
     /// Ordered bundle payloads waiting for an earlier sequence or active source.
@@ -915,6 +919,13 @@ where
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl<S: OrderedKvStorage> NodeState<S> {
+    pub(crate) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
+    }
+}
+
 #[cfg(test)]
 impl<S> NodeState<S>
 where
@@ -935,10 +946,6 @@ where
 
     pub(super) fn reset_query_program_compilations_for_test(&mut self) {
         self.query_program_compilations = 0;
-    }
-
-    pub(super) fn query_program_compilations_for_test(&self) -> usize {
-        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
@@ -1063,6 +1070,10 @@ struct QueryServing {
     /// Lowered cache-safe storage-backed query programs keyed by their complete
     /// request and access-path identity. Dynamic source graphs never enter it.
     compiled_query_program_cache: BTreeMap<String, Arc<query_engine::QueryProgram>>,
+    query_program_templates: query_engine::QueryProgramTemplateCache,
+    /// Bounded exact-context admission proofs with optional immutable compiler
+    /// output for a one-use handoff. No evaluator, rows or permission decisions.
+    supported_query_program_requests: VecDeque<query_eval::SupportedQueryProgram>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
     /// Temporary point-policy replacements required by one compiler turn. The

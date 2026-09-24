@@ -10,6 +10,9 @@ const BUCKETS: usize = 2;
 
 static MAP_BUFFER_CAPACITY: AtomicU64 = AtomicU64::new(0);
 static MAP_BUFFER_USED: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+static PIPELINE_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+static PIPELINE_STAGE_VISITS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 
 static MAP_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -21,6 +24,9 @@ static JOIN_OUTPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) };
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Snapshot {
+    pub pipeline_calls: [u64; BUCKETS],
+    pub pipeline_input_records: [u64; BUCKETS],
+    pub pipeline_stage_visits: [u64; BUCKETS],
     pub map_buffer_capacity: u64,
     pub map_buffer_used: u64,
     pub map_calls: [u64; BUCKETS],
@@ -41,6 +47,9 @@ pub fn reset() {
     MAP_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
     MAP_BUFFER_USED.store(0, Ordering::Relaxed);
     for counters in [
+        &PIPELINE_CALLS,
+        &PIPELINE_INPUT_RECORDS,
+        &PIPELINE_STAGE_VISITS,
         &MAP_CALLS,
         &MAP_INPUT_RECORDS,
         &MAP_OUTPUT_RECORDS,
@@ -60,6 +69,9 @@ pub fn snapshot() -> Snapshot {
         std::array::from_fn(|index| counters[index].load(Ordering::Relaxed))
     }
     Snapshot {
+        pipeline_calls: load(&PIPELINE_CALLS),
+        pipeline_input_records: load(&PIPELINE_INPUT_RECORDS),
+        pipeline_stage_visits: load(&PIPELINE_STAGE_VISITS),
         map_buffer_capacity: MAP_BUFFER_CAPACITY.load(Ordering::Relaxed),
         map_buffer_used: MAP_BUFFER_USED.load(Ordering::Relaxed),
         map_calls: load(&MAP_CALLS),
@@ -70,6 +82,14 @@ pub fn snapshot() -> Snapshot {
         join_right_records: load(&JOIN_RIGHT_RECORDS),
         join_output_records: load(&JOIN_OUTPUT_RECORDS),
     }
+}
+
+/// Disjoint from standalone map kernels: visits include fused filters and maps.
+pub fn record_pipeline(hydrate: bool, input_records: usize, stage_visits: u64) {
+    let index = bucket(hydrate);
+    PIPELINE_CALLS[index].fetch_add(1, Ordering::Relaxed);
+    PIPELINE_INPUT_RECORDS[index].fetch_add(input_records as u64, Ordering::Relaxed);
+    PIPELINE_STAGE_VISITS[index].fetch_add(stage_visits, Ordering::Relaxed);
 }
 
 pub fn record_map(hydrate: bool, input_records: usize, output_records: usize) {

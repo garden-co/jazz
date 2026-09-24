@@ -840,6 +840,7 @@ pub(super) fn durable_index_table_and_name(key: &[u8]) -> Option<(&str, &str)> {
     Some((table, index))
 }
 
+#[derive(Clone, Debug)]
 pub(super) enum PendingTableWrite {
     /// Insert and update share the same storage operation after validation.
     /// Delta computation decides whether an old record must be retracted first.
@@ -858,7 +859,7 @@ pub(super) enum PendingTableWrite {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum WriteMode {
     Insert,
     InsertFresh,

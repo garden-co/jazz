@@ -623,6 +623,9 @@ pub(crate) enum NormalizedValueRef {
     },
     /// Literal value encoded canonically.
     Literal(Vec<u8>),
+    /// Process-local compiler argument. Created only after source admission;
+    /// never a public normalized query, stored format or wire identity.
+    TemplateLiteral(u32),
 }
 
 /// First-class provenance fields exposed by public query surfaces.

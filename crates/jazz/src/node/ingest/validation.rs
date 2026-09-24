@@ -749,30 +749,10 @@ where
                     pending_parent_constraints.push((parent, parent_coordinate.clone()));
                 }
             }
-            let previous_current = self.query_local_layer_winner_in_branch(
-                &table_schema.name,
-                stored.branch_key(),
-                version.row_uuid(),
-                layer,
-            ).await?;
-            let previous_winner = if let Some(previous) = previous_current.as_ref() {
-                let previous_tx_id = self.version_tx_id(previous)?;
-                let previous_made_at = if previous_tx_id == tx.tx_id {
-                    tx.tx_id.time
-                } else {
-                    self.version_made_at(previous).await?
-                };
-                Some((previous, previous_tx_id, previous_made_at))
-            } else {
-                None
-            };
-            let new_is_current =
-                version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, previous_winner);
-            debug_assert!(
-                new_is_current || previous_current.is_some(),
-                "clock condition violated: local winner after insert must be the previous winner or inserted version"
-            );
-            let _ = (new_is_current, previous_current);
+            // History admission does not select the local winner. Local
+            // current state is maintained from the history/write-ahead delta;
+            // only the explicit global-current update below needs a winner
+            // lookup here. Do not load/decode local history just to discard it.
             if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
                 content_versions.push(stored.clone());
             }
