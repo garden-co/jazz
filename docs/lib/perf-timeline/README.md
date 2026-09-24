@@ -64,10 +64,13 @@ receipt table exposes exact seconds for keyboard and assistive-technology users.
 ## Sources and caching
 
 `lib/source.ts` uses ordinary unauthenticated GraphQL at
-`https://gql.codspeed.io/`, fetching `repository.runs` with walltime distributions
-and `commit.branch.pullRequest` metadata. The API currently returns available
-repository history without pagination arguments; the UI reports the actual
-returned count, not a claim of exhaustive retention. This public web API is not
+`https://gql.codspeed.io/`. It first lists `repository.runs` with
+`commit.branch.pullRequest` metadata but no results, then fetches walltime
+distributions via `repository.run(id:)` only for runs the timeline can admit
+(main, open PRs, exact tags and registered backfills), 15 runs per request (the
+API's alias limit). Asking for every run's results at once exceeded CodSpeed's
+gateway timeout at ~400 runs. `runs` takes no pagination arguments; the UI
+reports the actual returned count, not a claim of exhaustive retention. This public web API is not
 a pinned SDK contract: API errors fail visibly rather than returning demo data.
 See also `../../../dev/benchmarks/CODSPEED_GQL.md` for profile access.
 
