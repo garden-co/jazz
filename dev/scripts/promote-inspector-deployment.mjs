@@ -25,6 +25,7 @@ export async function promoteInspectorDeployment({
   const team = new URLSearchParams({ teamId: env.VERCEL_ORG_ID });
   const projectPath = `/v9/projects/${encodeURIComponent(env.VERCEL_PROJECT_ID)}`;
   async function request(path, method = "GET") {
+    if (Date.now() >= deadline) throw new Error("Timed out verifying inspector promotion.");
     const response = await fetchImpl(`${base}${path}?${team}`, {
       method,
       headers: {
@@ -80,12 +81,73 @@ export async function promoteInspectorDeployment({
     log("Inspector promotion dry run verified deployment and project; no changes requested.");
     return;
   }
-  if (
-    project.targets?.production?.id === deployment.id &&
-    project.lastAliasRequest?.toDeploymentId === deployment.id &&
-    project.lastAliasRequest?.jobStatus === "succeeded"
-  ) {
-    log("Inspector deployment is already the production target.");
+  // Public project responses can omit lastAliasRequest. Verify the observable
+  // target state and each verified production domain instead of requiring it.
+  // API contracts: https://vercel.com/docs/rest-api/projects/retrieve-project-domains-by-project-by-id-or-name
+  // and https://vercel.com/docs/rest-api/aliases/get-an-alias
+  async function productionIsVerified(current, { beforePromotion = false } = {}) {
+    const target = current.targets?.production;
+    const alias = current.lastAliasRequest;
+    if (
+      alias?.toDeploymentId === deployment.id &&
+      ["failed", "skipped"].includes(alias.jobStatus)
+    ) {
+      // A prior failed attempt must not prevent an explicit retry.
+      if (beforePromotion) return false;
+      throw new Error(`Inspector promotion ${alias.jobStatus}.`);
+    }
+    if (
+      current.id !== project.id ||
+      current.accountId !== project.accountId ||
+      target?.id !== deployment.id ||
+      target.readyState !== "READY" ||
+      target.readySubstate !== "PROMOTED" ||
+      target.aliasError ||
+      !(
+        target.aliasAssigned === true ||
+        (typeof target.aliasAssigned === "number" && target.aliasAssigned > 0)
+      ) ||
+      (alias?.toDeploymentId === deployment.id && alias.jobStatus !== "succeeded")
+    )
+      return false;
+    const domains = await request(`${projectPath}/domains`);
+    // Fail closed on pagination: don't claim verification from a partial list.
+    if (!Array.isArray(domains.domains) || domains.pagination?.next != null) {
+      throw new Error("Inspector production domain list is malformed or incomplete.");
+    }
+    const productionDomains = domains.domains.filter(
+      (domain) =>
+        domain.verified === true &&
+        !domain.gitBranch &&
+        !domain.customEnvironmentId &&
+        !domain.redirect,
+    );
+    if (productionDomains.length === 0)
+      throw new Error("Inspector has no verified production domains.");
+    for (const domain of productionDomains) {
+      if (domain.projectId !== project.id || typeof domain.name !== "string" || !domain.name) {
+        throw new Error("Inspector production domain identity mismatch.");
+      }
+      const assigned = await request(`/v4/aliases/${encodeURIComponent(domain.name)}`);
+      if (
+        assigned.projectId !== project.id ||
+        assigned.alias !== domain.name ||
+        assigned.deploymentId !== deployment.id ||
+        assigned.redirect
+      )
+        return false;
+    }
+    // Domains may take time to move, and the target may change while checking.
+    const confirmed = await request(projectPath);
+    return (
+      !confirmed.rollingRelease &&
+      confirmed.id === project.id &&
+      confirmed.accountId === project.accountId &&
+      confirmed.targets?.production?.id === deployment.id
+    );
+  }
+  if (await productionIsVerified(project, { beforePromotion: true })) {
+    log("Inspector deployment is already the verified production target.");
     return;
   }
   await request(
@@ -96,20 +158,9 @@ export async function promoteInspectorDeployment({
     const current = await request(projectPath);
     if (current.rollingRelease)
       throw new Error("Inspector promotion does not support rolling releases.");
-    if (
-      current.targets?.production?.id === deployment.id &&
-      current.lastAliasRequest?.toDeploymentId === deployment.id &&
-      current.lastAliasRequest?.jobStatus === "succeeded"
-    ) {
-      log("Inspector production target verified after promotion.");
+    if (await productionIsVerified(current)) {
+      log("Inspector production target and domain aliases verified after promotion.");
       return;
-    }
-    const alias = current.lastAliasRequest;
-    if (
-      alias?.toDeploymentId === deployment.id &&
-      ["failed", "skipped"].includes(alias.jobStatus)
-    ) {
-      throw new Error(`Inspector promotion ${alias.jobStatus}.`);
     }
     if (attempt + 1 < attempts) await sleep(Math.min(delayMs, Math.max(0, deadline - Date.now())));
   }
