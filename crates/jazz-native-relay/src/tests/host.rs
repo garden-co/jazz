@@ -820,3 +820,106 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
     assert_eq!(fixture.rows(foreground).len(), 2);
     assert_eq!(read(), before, "the pinned snapshot does not advance");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
+    let issuer = TestJwtIssuer::start().await;
+    let edge = JazzServer::builder()
+        .with_schema(schema().public_schema().clone())
+        .with_jwks_url(issuer.endpoint())
+        .start()
+        .await
+        .expect("start test server");
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let bearer = TestJwtIssuer::jwt_for_user("native-tick-diagnostic");
+    let capability = fixture
+        .begin_account_session(
+            &edge.base_url(),
+            &edge.app_id().to_string(),
+            &bearer,
+            storage.path(),
+        )
+        .await;
+    let foreground = fixture.open(&capability);
+
+    let mut diagnostic = u32::MAX;
+    assert_eq!(
+        unsafe {
+            jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                fixture.lease,
+                foreground,
+                &mut diagnostic,
+            )
+        },
+        JazzNativeRelayStatus::Ok,
+    );
+    assert_eq!(diagnostic, 0, "successful ticks have no diagnostic");
+
+    let (connected, terminal_error) = unsafe {
+        let host = &*fixture.host;
+        let host = host.inner.lock().unwrap();
+        let scope = host.foregrounds.get(&foreground).unwrap().scope.clone();
+        let worker = host.private_scope_workers.get(&scope).unwrap();
+        (
+            Arc::clone(&worker.connected),
+            Arc::clone(&worker.terminal_error),
+        )
+    };
+    jazz_testkit::wait_for(
+        Duration::from_secs(5),
+        "native tick test worker connected",
+        || {
+            let connected = Arc::clone(&connected);
+            async move {
+                connected
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    .then_some(())
+            }
+        },
+    )
+    .await;
+
+    let sentinel = "UPSTREAM_SECRET_SENTINEL_do_not_expose";
+    *terminal_error.lock().unwrap() = Some(sentinel.to_owned());
+
+    diagnostic = u32::MAX;
+    assert_eq!(
+        unsafe {
+            jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                fixture.lease,
+                foreground,
+                &mut diagnostic,
+            )
+        },
+        JazzNativeRelayStatus::LifecycleFailure,
+    );
+    assert_eq!(
+        diagnostic, 1,
+        "a retained terminal error gets the fixed upstream-terminal code"
+    );
+    assert_eq!(
+        terminal_error.lock().unwrap().as_deref(),
+        Some(sentinel),
+        "diagnostic reporting does not consume the retained terminal cause"
+    );
+
+    diagnostic = u32::MAX;
+    assert_eq!(
+        unsafe {
+            jazz_native_relay_host_lease_tick_attached_foreground_v2(
+                fixture.lease,
+                u64::MAX,
+                &mut diagnostic,
+            )
+        },
+        JazzNativeRelayStatus::InvalidHandle,
+    );
+    assert_eq!(diagnostic, 0, "invalid handles have no diagnostic");
+
+    fixture.revoke(&capability);
+    assert_eq!(
+        edge.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+}
