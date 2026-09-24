@@ -10,7 +10,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::query::{OrderDirection, Query, all_of, claim, col, eq, param, provider_claim_key};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -26,11 +26,21 @@ fn schema() -> JazzSchema {
                     .column("updated_at", ColumnType::Timestamp)
                     .policies(allow_all_policies()),
             )
+            .table(
+                TableSchemaBuilder::new("owned_documents")
+                    .column("team", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .build(),
     )
 }
 
 fn open_db() -> Db<TestStorage> {
+    open_db_as(AuthorSubject::SYSTEM)
+}
+
+fn open_db_as(author: AuthorSubject) -> Db<TestStorage> {
     let schema = schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -43,7 +53,7 @@ fn open_db() -> Db<TestStorage> {
             TestStorage::new(&column_family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
-                author: AuthorSubject::SYSTEM,
+                author,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x7100)),
@@ -362,10 +372,22 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
 /// is compared against a one-shot read of the same binding after each step.
 #[test]
 fn local_bindings_of_one_shape_match_one_shot_reads_under_churn() {
+    churn_differential(open_db());
+}
+
+/// The same differential for an ordinary (non-System) author, whose reads
+/// carry a session rather than bypassing policy entirely.
+#[test]
+fn local_author_bindings_of_one_shape_match_one_shot_reads_under_churn() {
+    churn_differential(open_db_as(AuthorSubject::for_test_uuid(uuid::uuid!(
+        "71000000-0000-0000-0000-0000000000b2"
+    ))));
+}
+
+fn churn_differential(db: Db<TestStorage>) {
     const TEAMS: u64 = 5;
     const STEPS: u64 = 160;
 
-    let db = open_db();
     let team = |index: u64| row(1_000 + index % TEAMS);
     let unbounded = Query::from("documents").filter(eq(col("team"), param("team")));
     let top = Query::from("documents")
@@ -490,4 +512,128 @@ fn local_bindings_of_one_shape_match_one_shot_reads_under_churn() {
     }
     drop(live);
     block_on(db.close()).expect("close churn fixture");
+}
+
+fn team_binding(db: &Db<TestStorage>, query: &Query, team: RowUuid) -> PreparedQuery {
+    db.prepare_query_bound(
+        query,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]),
+    )
+    .expect("prepare team binding")
+}
+
+/// Internal work-bound check: exact results are covered by the churn
+/// differential below, but only runtime stats can show whether bindings share
+/// one prepared binding source or each inline their own graph. Local-tier
+/// bindings of one shape share the source's arrangements, so adding bindings
+/// adds no arrangement; an inlined binding would add one per binding.
+#[test]
+fn local_bindings_of_one_shape_share_one_prepared_source() {
+    let db = open_db();
+    for seed in 0..8 {
+        insert_document(&db, row(seed), row(1_000 + seed % 4), seed);
+    }
+    let query = Query::from("documents")
+        .filter(eq(col("team"), param("team")))
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(2);
+    let subscribe = |team: u64| {
+        let prepared = team_binding(&db, &query, row(1_000 + team));
+        let mut stream =
+            block_on(db.subscribe(&prepared, local_read_opts())).expect("subscribe team binding");
+        let rows = take_initial_reset("team", &mut stream);
+        assert_eq!(rows.len(), 2, "team {team} initial window");
+        stream
+    };
+
+    let first = subscribe(0);
+    let one = db.runtime_stats_for_test();
+    let rest = (1..4).map(subscribe).collect::<Vec<_>>();
+    let four = db.runtime_stats_for_test();
+    assert_eq!(four.active_subscriptions, one.active_subscriptions + 3);
+    assert_eq!(four.active_shape_params, one.active_shape_params + 3);
+    assert_eq!(
+        four.arrangement_count, one.arrangement_count,
+        "later bindings of one Local-tier shape must reuse its prepared source"
+    );
+    drop((first, rest));
+    block_on(db.close()).expect("close sharing fixture");
+}
+
+/// A claim the query itself reads is bound from the reader's session on the
+/// shared Local-tier path, like an ordinary parameter:
+///
+/// ```text
+/// owned_documents ──> team = $team AND owner = claims.owner ──> per team
+/// ```
+///
+/// Each team binding sees only the reader's own documents, both initially and
+/// as matching and non-matching rows arrive.
+#[test]
+fn local_bindings_bind_query_claims_from_the_readers_session() {
+    let reader = AuthorSubject::for_test_uuid(uuid::uuid!("71000000-0000-0000-0000-0000000000a1"));
+    let db = open_db_as(reader);
+    db.set_identity_claims(
+        reader,
+        BTreeMap::from([(
+            provider_claim_key("owner"),
+            Value::String("alice".to_owned()),
+        )]),
+    );
+    let insert = |document: u64, team: u64, owner: &str| {
+        block_on(db.insert(
+            "owned_documents",
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(row(1_000 + team).0)),
+                ("owner".to_owned(), Value::String(owner.to_owned())),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(document)),
+                ..Default::default()
+            },
+        ))
+        .expect("insert owned document");
+    };
+    insert(1, 0, "alice");
+    insert(2, 0, "bob");
+    insert(3, 1, "alice");
+    insert(4, 1, "bob");
+
+    let query = Query::from("owned_documents").filter(all_of([
+        eq(col("team"), param("team")),
+        // `session.claims["owner"]`, as the public schema DSL lowers it.
+        eq(col("owner"), claim(provider_claim_key("owner"))),
+    ]));
+    let mut live = (0..2)
+        .map(|team| {
+            let label = format!("team {team}");
+            let prepared = team_binding(&db, &query, row(1_000 + team));
+            let mut stream = block_on(db.subscribe(&prepared, local_read_opts()))
+                .expect("subscribe claim-filtered binding");
+            let rows = take_initial_reset(&label, &mut stream);
+            (label, prepared, stream, rows)
+        })
+        .collect::<Vec<_>>();
+    let check = |live: &mut Vec<(String, PreparedQuery, SubscriptionStream, BTreeSet<RowUuid>)>,
+                 expected: [&[u64]; 2]| {
+        for ((label, prepared, stream, rows), expected) in live.iter_mut().zip(expected) {
+            apply_pending_events(label, stream, rows);
+            let expected = expected.iter().copied().map(row).collect::<BTreeSet<_>>();
+            let one_shot = block_on(db.all(prepared, local_read_opts()))
+                .expect("one-shot claim-filtered read")
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(one_shot, expected, "{label} one-shot read");
+            assert_eq!(*rows, expected, "{label} maintained subscription");
+        }
+    };
+    check(&mut live, [&[1], &[3]]);
+
+    insert(5, 0, "alice");
+    insert(6, 1, "bob");
+    check(&mut live, [&[1, 5], &[3]]);
+
+    drop(live);
+    block_on(db.close()).expect("close claim fixture");
 }

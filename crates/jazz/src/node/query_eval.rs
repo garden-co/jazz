@@ -1374,8 +1374,10 @@ where
         // System reads bypass policy evaluation and have no session from
         // which a prepared claim can be bound. A policy-derived claim slot
         // must therefore never survive into their shared descriptor.
-        // Client-local reads likewise evaluate no read policy.
-        if matches!(policy, PolicyContext::System) || client_local {
+        // Client-local reads evaluate no read policy, so they collect no
+        // policy-dependency claims above, but a claim the query itself reads
+        // stays a binding slot and is bound from the reader's session.
+        if matches!(policy, PolicyContext::System) {
             binding_claim_params.clear();
         }
         let source_shape = use_prepared_binding_source
@@ -1395,15 +1397,6 @@ where
             self.active_session_claim_scope_key(identity)
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
-        });
-        // Client-local and trusted-serving plans never share a binding source:
-        // their graphs differ in policy and source authority.
-        let source_shape = source_shape.map(|source_shape| {
-            if client_local {
-                format!("{source_shape}:client-local")
-            } else {
-                source_shape
-            }
         });
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
@@ -1452,8 +1445,8 @@ where
                     read_view,
                     &input_shape,
                 );
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
+        let mut program_binding = self
+            .program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
                 binding,
                 source_shape,
@@ -1461,7 +1454,15 @@ where
                 binding_claim_params,
                 &policy,
                 prepared_claim_binding_mode,
-            )?,
+            )?;
+        // Client-local and trusted-serving plans never share a binding source:
+        // their graphs differ in policy and source authority. Namespace the
+        // final name, since System authority re-derives it above.
+        if client_local && let Some(source_shape) = program_binding.source_shape.as_mut() {
+            source_shape.push_str(":client-local");
+        }
+        let input = RowSetProgramInput {
+            binding: program_binding,
             shape: input_shape,
         };
         let mut output_request = current_query_output_request(output, shape.query())?;
