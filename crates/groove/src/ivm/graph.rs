@@ -1842,7 +1842,7 @@ impl IvmGraph {
         self.nodes.get(&id)
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
         self.activations.clear();
         self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
