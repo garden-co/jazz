@@ -1303,11 +1303,17 @@ where
         };
         let lowered_shape;
         let lowered_binding;
-        // Prepared binding sources are a serving-side optimization. Client
-        // local execution must lower concrete bindings into its locally
-        // available (already upstream-scoped at Global) data, rather
-        // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
+        // Global-tier client-local receivers must lower concrete bindings
+        // into their upstream-scoped settled views rather than evaluate a
+        // server-maintained binding graph. A Local-tier maintained client
+        // subscription has no settled view and reads unfiltered local data, so
+        // its bindings can share one prepared shape, like serving bindings do.
+        let client_local = authorization_mode == QueryAuthorizationMode::ClientLocal;
+        let client_local_prepared = client_local
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && matches!(output, CurrentQueryProgramOutput::MaintainedView);
+        let use_prepared_binding_source = (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1350,7 +1356,7 @@ where
             &input_shape,
         );
         let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
-        if use_prepared_binding_source {
+        if use_prepared_binding_source && !client_local {
             let policy_schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1368,7 +1374,8 @@ where
         // System reads bypass policy evaluation and have no session from
         // which a prepared claim can be bound. A policy-derived claim slot
         // must therefore never survive into their shared descriptor.
-        if matches!(policy, PolicyContext::System) {
+        // Client-local reads likewise evaluate no read policy.
+        if matches!(policy, PolicyContext::System) || client_local {
             binding_claim_params.clear();
         }
         let source_shape = use_prepared_binding_source
@@ -1388,6 +1395,15 @@ where
             self.active_session_claim_scope_key(identity)
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
+        });
+        // Client-local and trusted-serving plans never share a binding source:
+        // their graphs differ in policy and source authority.
+        let source_shape = source_shape.map(|source_shape| {
+            if client_local {
+                format!("{source_shape}:client-local")
+            } else {
+                source_shape
+            }
         });
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
