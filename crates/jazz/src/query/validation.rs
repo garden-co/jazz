@@ -1587,8 +1587,9 @@ fn validate_comparable_operands(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<ColumnType, QueryError> {
     // An empty array literal has no element type of its own. Permit it only
-    // when it is directly paired with a schema-resolved array column; do not
-    // let an inferred parameter type or the literal fallback widen this case.
+    // when directly paired with a schema-resolved array column; unwrap outer
+    // nullability for the type check but return the original column type.
+    // Do not let an inferred parameter type or the literal fallback widen this case.
     let empty_array_column = match (&*left, &*right) {
         (Operand::Literal(Value::Array(values)), Operand::Column(column))
         | (Operand::Column(column), Operand::Literal(Value::Array(values)))
@@ -1600,7 +1601,12 @@ fn validate_comparable_operands(
     };
     if let Some(column) = empty_array_column {
         let column_type = planner_column_type(table, column)?;
-        if matches!(column_type, ColumnType::Array(_)) {
+        let is_array_column = match column_type {
+            ColumnType::Array(_) => true,
+            ColumnType::Nullable(inner) => matches!(inner.as_ref(), ColumnType::Array(_)),
+            _ => false,
+        };
+        if is_array_column {
             return Ok(column_type.clone());
         }
     }

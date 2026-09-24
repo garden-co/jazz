@@ -225,12 +225,12 @@ broader literal-vs-column coercion needs an explicit spec decision before
 implementation.
 
 For equality comparisons (`eq`/`ne`), an empty array literal may be compared
-directly with a column whose type resolves in the current table schema to
-`Array<T>`, in either operand order. This is a validation-only exception for
-the untyped empty literal: it does not apply through an inferred parameter, and
-it does not rewrite either operand or its canonical bytes. Nonempty literals
-must satisfy the ordinary element-type compatibility rules above. Ordered
-comparisons remain invalid for arrays.
+directly with a column whose schema-resolved type is `Array<T>` after removing
+its outer nullability wrapper, if present, in either operand order. This is a
+validation-only exception for the untyped empty literal: it does not apply
+through an inferred parameter, and it does not rewrite either operand or its
+canonical bytes. Nonempty literals must satisfy the ordinary element-type
+compatibility rules above. Ordered comparisons remain invalid for arrays.
 
 `in` is whole-value membership and `contains` is single-element membership;
 neither is an array subset/superset operator. A scalar `in` candidate for an
