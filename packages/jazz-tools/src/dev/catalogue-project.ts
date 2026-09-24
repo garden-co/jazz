@@ -44,7 +44,7 @@ import {
 import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import {
-  assertMigrationMatchesCanonicalBundle,
+  resolveCanonicalMigrationForward,
   computeSchemaHash,
   deploy as deployCatalogue,
   MissingMigrationError,
@@ -1846,7 +1846,7 @@ async function resolveProjectDeployMigrationChain(
         loadCanonicalSchema(fromHash),
         loadCanonicalSchema(toHash),
       ]);
-      assertMigrationMatchesCanonicalBundle(migration, {
+      resolveCanonicalMigrationForward(migration, {
         fromHash,
         toHash,
         fromSchema,

@@ -1189,13 +1189,6 @@ export function defineMigration<
     fromDefinition,
     toDefinition,
   );
-  const sourceTables = withManagedEncryptionTables(fromDefinition);
-  for (const table of Object.keys(withManagedEncryptionTables(toDefinition))) {
-    // Adding the first encrypted table also creates its package-owned control tables.
-    if (!Object.hasOwn(toDefinition, table) && !Object.hasOwn(sourceTables, table)) {
-      forward.push({ table, added: true, operations: [] });
-    }
-  }
 
   return {
     from: config.from,
