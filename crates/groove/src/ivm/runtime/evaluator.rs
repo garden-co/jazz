@@ -680,22 +680,106 @@ pub(super) fn validate_arg_by_primary_key_indices(
 /// Single-tick evaluator over a deduplicated graph.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RootOrderingWindows {
-    /// Positions keyed by output field 0, for outputs with no proven identity.
-    pub(super) before: BTreeMap<Vec<u8>, usize>,
-    pub(super) after: BTreeMap<Vec<u8>, usize>,
-    /// Each touched group's before/after window records (#3290). Identity
-    /// positions are built only for the groups an output's own deltas reach,
-    /// so a subscriber never replays another route's window, and a group no
-    /// output reaches costs only this record-handle copy.
-    pub(super) groups: BTreeMap<Vec<u8>, GroupWindow>,
-    pub(super) descriptor: Option<RecordDescriptor>,
-    pub(super) identity: Vec<usize>,
+    /// Every touched group's before/after window records, in evaluation
+    /// order. Position maps are built only when an output applies them.
+    entries: Vec<(Vec<u8>, GroupWindow)>,
+    descriptor: Option<RecordDescriptor>,
+    identity: Vec<usize>,
+    /// Field-0 positions across all groups, for outputs without a proven
+    /// identity: built once, first position wins, as before.
+    field_zero: std::cell::OnceCell<RootPositions>,
+    /// Group-relative identity positions (#3290), built once per group an
+    /// output's own deltas reach, so no subscriber replays another route's
+    /// window and unreached groups cost only a record-handle copy.
+    identity_groups: std::cell::RefCell<HashMap<Vec<u8>, std::rc::Rc<RootPositions>>>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct GroupWindow {
-    pub(super) before: Vec<WindowedRecord>,
-    pub(super) after: Vec<WindowedRecord>,
+struct GroupWindow {
+    before: Vec<WindowedRecord>,
+    after: Vec<WindowedRecord>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RootPositions {
+    before: BTreeMap<Vec<u8>, usize>,
+    after: BTreeMap<Vec<u8>, usize>,
+}
+
+impl RootOrderingWindows {
+    pub(super) fn record(
+        &mut self,
+        descriptor: RecordDescriptor,
+        top_by: &TopByOp,
+        group: &[u8],
+        before: &[WindowedRecord],
+        after: &[WindowedRecord],
+    ) {
+        if self.descriptor.is_none() {
+            self.descriptor = Some(descriptor);
+            self.identity = top_by_identity_fields(top_by);
+        }
+        self.entries.push((
+            group.to_vec(),
+            GroupWindow {
+                before: before.to_vec(),
+                after: after.to_vec(),
+            },
+        ));
+    }
+
+    fn positions<'a>(
+        &self,
+        entries: impl Iterator<Item = &'a GroupWindow>,
+        key_fields: &[usize],
+    ) -> Result<RootPositions, IvmRuntimeError> {
+        let mut positions = RootPositions::default();
+        let Some(descriptor) = self.descriptor else {
+            return Ok(positions);
+        };
+        for window in entries {
+            extend_root_window_positions(
+                descriptor,
+                &window.before,
+                key_fields,
+                &mut positions.before,
+            )?;
+            extend_root_window_positions(
+                descriptor,
+                &window.after,
+                key_fields,
+                &mut positions.after,
+            )?;
+        }
+        Ok(positions)
+    }
+
+    fn field_zero(&self) -> Result<&RootPositions, IvmRuntimeError> {
+        if let Some(positions) = self.field_zero.get() {
+            return Ok(positions);
+        }
+        let positions = self.positions(self.entries.iter().map(|(_, window)| window), &[0])?;
+        Ok(self.field_zero.get_or_init(|| positions))
+    }
+
+    fn identity_group(&self, group: &[u8]) -> Result<std::rc::Rc<RootPositions>, IvmRuntimeError> {
+        if let Some(positions) = self.identity_groups.borrow().get(group) {
+            return Ok(std::rc::Rc::clone(positions));
+        }
+        let positions = std::rc::Rc::new(
+            self.positions(
+                self.entries
+                    .iter()
+                    .filter(|(candidate, _)| candidate == group)
+                    .map(|(_, window)| window),
+                &self.identity,
+            )?,
+        );
+        self.identity_groups
+            .borrow_mut()
+            .insert(group.to_vec(), std::rc::Rc::clone(&positions));
+        Ok(positions)
+    }
 }
 
 /// Ephemeral lookup inputs, not a cached proof of producer readiness. A miss
@@ -1212,31 +1296,26 @@ impl TickEvaluator<'_> {
             return Ok(());
         };
         let Some(groups) = identity_groups else {
+            let positions = windows.field_zero()?;
             apply_root_ordering_operations(
-                &windows.before,
-                &windows.after,
+                &positions.before,
+                &positions.after,
                 root_descriptor,
                 terminal,
             );
             return Ok(());
         };
-        let Some(descriptor) = windows.descriptor else {
-            return Ok(());
-        };
         for group in groups {
-            let Some(window) = windows.groups.get(group) else {
+            let positions = windows.identity_group(group)?;
+            if positions.before.is_empty() && positions.after.is_empty() {
                 continue;
-            };
-            let mut before = BTreeMap::new();
-            let mut after = BTreeMap::new();
-            extend_root_window_positions(
-                descriptor,
-                &window.before,
-                &windows.identity,
-                &mut before,
-            )?;
-            extend_root_window_positions(descriptor, &window.after, &windows.identity, &mut after)?;
-            apply_group_root_ordering_operations(&before, &after, root_descriptor, terminal);
+            }
+            apply_group_root_ordering_operations(
+                &positions.before,
+                &positions.after,
+                root_descriptor,
+                terminal,
+            );
         }
         Ok(())
     }
@@ -2460,19 +2539,7 @@ impl TickEvaluator<'_> {
                 top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
             let position_records = before.len().saturating_add(after.len());
             if let Some(windows) = self.root_ordering_windows.get_mut(&node) {
-                extend_root_window_positions(output_desc, &before, &[0], &mut windows.before)?;
-                extend_root_window_positions(output_desc, &after, &[0], &mut windows.after)?;
-                if windows.descriptor.is_none() {
-                    windows.descriptor = Some(output_desc);
-                    windows.identity = top_by_identity_fields(top_by);
-                }
-                windows.groups.insert(
-                    group_prefix.clone(),
-                    GroupWindow {
-                        before: before.clone(),
-                        after: after.clone(),
-                    },
-                );
+                windows.record(output_desc, top_by, group_prefix, &before, &after);
                 self.metrics.root_ordering_position_records += position_records;
             } else {
                 self.metrics.root_ordering_position_records_skipped += position_records;
