@@ -50,7 +50,10 @@ pub(super) fn extend_root_window_positions(
 /// value changes keeps its identity, so it is an update plus a move. Without
 /// tie fields nothing identifies a row within its group (two rows may share
 /// every order value), so the whole record is its key: an order change is
-/// then a remove plus an insert. `width` is the TopBy output's field count.
+/// then a remove plus an insert. Keys are encoded with
+/// [`encoded_identity_key_part`], which keys every column type, including
+/// arrays, enums and unloaded large values (#3309). `width` is the TopBy
+/// output's field count.
 pub(super) fn top_by_identity_fields(top_by: &TopByOp, width: usize) -> Vec<usize> {
     let order_len = top_by.order_fields.len();
     let tie = &top_by.sort_field_indices[order_len.min(top_by.sort_field_indices.len())..];
@@ -73,29 +76,34 @@ pub(super) fn top_by_identity_fields(top_by: &TopByOp, width: usize) -> Vec<usiz
 pub(super) struct RootIdentity {
     pub(super) fields: Vec<usize>,
     pub(super) group_len: usize,
-    /// The nodes between the TopBy and the output, TopBy side first, when
-    /// any of them is a filter: window rows it drops are not output roots, so
-    /// they must be dropped before window positions are taken. Empty when
-    /// every window row reaches the output.
-    pub(super) filter_chain: Vec<NodeId>,
+    /// The nodes between the TopBy and the output, TopBy side first.
+    pub(super) chain: Vec<NodeId>,
+    /// Whether `chain` holds a filter that can drop some rows of a group
+    /// but not others: window rows it drops are not output roots, so they
+    /// must be dropped before window positions are taken.
+    pub(super) filtered: bool,
+    /// Whether some TopBy identity field is not copied into the output, so
+    /// `fields` are the group fields plus every other output field and a
+    /// window row is keyed by its projection through `chain`.
+    pub(super) projected: bool,
 }
 
 /// Terminal key fields of a plain output ordered by `ordering` (#3290).
 ///
-/// When the output reaches its TopBy only through filters and field-copying
-/// projections, its roots are keyed by the TopBy identity mapped into the
-/// output, so every window slot is a distinct root. Otherwise (a join,
-/// aggregate or computed field in between, or a filter reading a stored
-/// scalar that cannot be evaluated on a window row) there is no proven
-/// identity and the output keeps field 0, whose uniqueness is the producer's
-/// contract.
+/// When the output reaches its TopBy only through filters and projections,
+/// its roots are keyed by the TopBy identity mapped into the output, so every
+/// window slot is a distinct root. A projection that drops an identity field
+/// keys the roots by the group fields plus every output field instead: rows
+/// it makes identical are indistinguishable to the consumer anyway. Otherwise
+/// (a join, aggregate or other operator in between, or a projection dropping
+/// a group field) there is no proven identity and the output keeps field 0,
+/// whose uniqueness is the producer's contract.
 pub(super) fn root_identity_fields(
     graph: &IvmGraph,
     output: NodeId,
     ordering: NodeId,
 ) -> Result<Option<RootIdentity>, IvmRuntimeError> {
     let mut chain = Vec::new();
-    let mut filtered = false;
     let mut node = output;
     while node != ordering {
         let current = graph
@@ -105,28 +113,7 @@ pub(super) fn root_identity_fields(
             return Ok(None);
         };
         match &current.descriptor.operator {
-            OpType::MapProject(_) => {}
-            OpType::Filter(filter) => {
-                let input_output = graph
-                    .node(*input)
-                    .ok_or(IvmRuntimeError::GraphNodeNotFound(*input))?
-                    .descriptor
-                    .output
-                    .records();
-                let mut referenced = BTreeSet::new();
-                filter.predicate.referenced_fields(&mut referenced);
-                let evaluable = referenced.iter().all(|field| {
-                    resolve_field_name(&input_output, field).is_some_and(|index| {
-                        !input_output.fields()[index]
-                            .value_type
-                            .may_contain_stored_scalar()
-                    })
-                });
-                if !evaluable {
-                    return Ok(None);
-                }
-                filtered = true;
-            }
+            OpType::MapProject(_) | OpType::Filter(_) => {}
             _ => return Ok(None),
         }
         chain.push(node);
@@ -139,10 +126,108 @@ pub(super) fn root_identity_fields(
     let OpType::TopBy(top_by) = &top_by.descriptor.operator else {
         return Ok(None);
     };
-    let mut fields = top_by_identity_fields(top_by, width);
-    let group_len = top_by.group_field_indices.len();
     chain.reverse();
-    for &id in &chain {
+    let filtered = chain_filters_within_groups(graph, &chain, top_by, width)?;
+    let group_len = top_by.group_field_indices.len();
+    let identity = top_by_identity_fields(top_by, width);
+    if let Some(fields) = map_through_projections(graph, &chain, identity)? {
+        return Ok(Some(RootIdentity {
+            fields,
+            group_len,
+            chain,
+            filtered,
+            projected: false,
+        }));
+    }
+    let Some(mut fields) =
+        map_through_projections(graph, &chain, top_by.group_field_indices.clone())?
+    else {
+        return Ok(None);
+    };
+    let output_width = graph
+        .node(output)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(output))?
+        .descriptor
+        .output
+        .records()
+        .fields()
+        .len();
+    for index in 0..output_width {
+        if !fields.contains(&index) {
+            fields.push(index);
+        }
+    }
+    Ok(Some(RootIdentity {
+        fields,
+        group_len,
+        chain,
+        filtered,
+        projected: true,
+    }))
+}
+
+/// Whether a filter in `chain` can drop some rows of a group but keep others.
+/// A filter reading only TopBy group fields (a route filter, for one) keeps or
+/// drops a whole group; an output only orders the groups its own deltas
+/// reach, so such a filter needs no per-row evaluation.
+fn chain_filters_within_groups(
+    graph: &IvmGraph,
+    chain: &[NodeId],
+    top_by: &TopByOp,
+    width: usize,
+) -> Result<bool, IvmRuntimeError> {
+    // For each field of the current record, the TopBy field it copies.
+    let mut sources: Vec<Option<usize>> = (0..width).map(Some).collect();
+    for &id in chain {
+        let current = graph
+            .node(id)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
+        let input = current.descriptor.inputs[0];
+        let input_output = graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor
+            .output
+            .records();
+        match &current.descriptor.operator {
+            OpType::Filter(filter) => {
+                let mut referenced = BTreeSet::new();
+                filter.predicate.referenced_fields(&mut referenced);
+                let within_group = referenced.iter().all(|field| {
+                    resolve_field_name(&input_output, field)
+                        .and_then(|index| sources.get(index).copied().flatten())
+                        .is_some_and(|source| top_by.group_field_indices.contains(&source))
+                });
+                if !within_group {
+                    return Ok(true);
+                }
+            }
+            OpType::MapProject(project) => {
+                sources = project
+                    .expressions
+                    .iter()
+                    .map(|expression| match &expression.expression {
+                        ProjectExpr::Field(source) => resolve_field_ref(&input_output, source)
+                            .ok()
+                            .and_then(|index| sources.get(index).copied().flatten()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        }
+    }
+    Ok(false)
+}
+
+/// Positions of TopBy output `fields` in the output of `chain`, or `None` when
+/// a projection does not copy one of them.
+fn map_through_projections(
+    graph: &IvmGraph,
+    chain: &[NodeId],
+    mut fields: Vec<usize>,
+) -> Result<Option<Vec<usize>>, IvmRuntimeError> {
+    for &id in chain {
         let current = graph
             .node(id)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
@@ -172,22 +257,30 @@ pub(super) fn root_identity_fields(
         }
         fields = mapped;
     }
-    let filter_chain = if filtered { chain } else { Vec::new() };
-    Ok(Some(RootIdentity {
-        fields,
-        group_len,
-        filter_chain,
-    }))
+    Ok(Some(fields))
 }
 
-/// Whether a TopBy window record survives `chain` (see
-/// [`RootIdentity::filter_chain`]) and so is a root of the output.
+/// Whether a TopBy window record reaches the output through
+/// [`RootIdentity::chain`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowReach {
+    Yes,
+    No,
+    /// A filter reads a field that holds an indirect large value in this
+    /// record; it cannot be evaluated without loading the value.
+    Unknown,
+}
+
+/// Runs a TopBy window record through `chain`. Each filter is evaluated on
+/// the record itself unless one of the fields it reads holds an indirect
+/// value in this particular record; a later filter can still rule the record
+/// out.
 pub(super) fn window_record_reaches_output(
     graph: &IvmGraph,
     chain: &[NodeId],
     descriptor: RecordDescriptor,
     record: &Bytes,
-) -> Result<bool, IvmRuntimeError> {
+) -> Result<WindowReach, IvmRuntimeError> {
     let mut current = RecordDeltas {
         descriptor,
         deltas: vec![RecordDelta {
@@ -195,20 +288,35 @@ pub(super) fn window_record_reaches_output(
             weight: 1,
         }],
     };
+    let mut unknown = false;
     for &id in chain {
         let node = graph
             .node(id)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
+        let Some(delta) = current.deltas.first() else {
+            return Ok(WindowReach::No);
+        };
         match &node.descriptor.operator {
             OpType::Filter(filter) => {
-                let Some(delta) = current.deltas.first() else {
-                    return Ok(false);
-                };
-                if !filter
+                let mut referenced = BTreeSet::new();
+                filter.predicate.referenced_fields(&mut referenced);
+                let indices = referenced
+                    .iter()
+                    .map(|field| {
+                        resolve_field_name(&current.descriptor, field)
+                            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if current
+                    .descriptor
+                    .fields_contain_indirect_values(delta.raw(), indices)?
+                {
+                    unknown = true;
+                } else if !filter
                     .predicate
                     .matches(delta.borrowed(&current.descriptor), filter.comparison)?
                 {
-                    return Ok(false);
+                    return Ok(WindowReach::No);
                 }
             }
             OpType::MapProject(project) => {
@@ -223,7 +331,53 @@ pub(super) fn window_record_reaches_output(
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
         }
     }
-    Ok(!current.deltas.is_empty())
+    Ok(if current.deltas.is_empty() {
+        WindowReach::No
+    } else if unknown {
+        WindowReach::Unknown
+    } else {
+        WindowReach::Yes
+    })
+}
+
+/// A TopBy window record carried through the projections of `chain` (filters
+/// are skipped), with its descriptor; `None` when a projection omits it.
+pub(super) fn project_window_record(
+    graph: &IvmGraph,
+    chain: &[NodeId],
+    descriptor: RecordDescriptor,
+    record: &[u8],
+) -> Result<Option<(RecordDescriptor, Bytes)>, IvmRuntimeError> {
+    let mut current = RecordDeltas {
+        descriptor,
+        deltas: vec![RecordDelta {
+            record: Bytes::copy_from_slice(record),
+            weight: 1,
+        }],
+    };
+    for &id in chain {
+        let node = graph
+            .node(id)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(id))?;
+        match &node.descriptor.operator {
+            OpType::Filter(_) => {}
+            OpType::MapProject(project) => {
+                current = NodeState::update_map_project(
+                    project,
+                    node.descriptor.output.records(),
+                    &current,
+                    None,
+                    false,
+                )?;
+            }
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        }
+    }
+    Ok(current
+        .deltas
+        .into_iter()
+        .next()
+        .map(|delta| (current.descriptor, delta.record)))
 }
 
 /// Encodes a window record's terminal root key.
@@ -250,25 +404,28 @@ pub(super) fn apply_group_window_ordering(
 ) -> Result<(), IvmRuntimeError> {
     fn root<'a>(
         record: &'a [u8],
-        other: &[WindowedRecord],
+        other: &rustc_hash::FxHashSet<&[u8]>,
         key_of: &RootKeyOf<'_>,
     ) -> Result<WindowRoot<'a>, IvmRuntimeError> {
-        if other
-            .iter()
-            .any(|(candidate, _)| candidate.as_ref() == record)
-        {
+        if other.contains(record) {
             Ok(WindowRoot::Unchanged(record))
         } else {
             key_of(record).map(WindowRoot::Keyed)
         }
     }
+    // Byte-identical rows are found by hash, not by comparing every pair of
+    // window rows.
+    fn records(window: &[WindowedRecord]) -> rustc_hash::FxHashSet<&[u8]> {
+        window.iter().map(|(record, _)| record.as_ref()).collect()
+    }
+    let (before_records, after_records) = (records(before), records(after));
     let mut current = before
         .iter()
-        .map(|(record, _)| root(record, after, key_of))
+        .map(|(record, _)| root(record, &after_records, key_of))
         .collect::<Result<Vec<_>, _>>()?;
     let desired = after
         .iter()
-        .map(|(record, _)| root(record, before, key_of))
+        .map(|(record, _)| root(record, &before_records, key_of))
         .collect::<Result<Vec<_>, _>>()?;
     // Only changed rows can carry an edit; they are exactly the keyed roots.
     let group_keys = current

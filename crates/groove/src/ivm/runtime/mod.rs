@@ -79,7 +79,7 @@ pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };
 use terminal::{
-    order_terminal_snapshot, terminal_deltas_from_record_deltas, terminal_deltas_keyed_by,
+    order_terminal_snapshot, terminal_deltas_from_record_deltas, terminal_deltas_keyed_by_identity,
 };
 
 const DEFAULT_SINK: &str = "__default";

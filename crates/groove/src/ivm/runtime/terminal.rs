@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
-use super::{IvmRuntimeError, RecordDeltas, encoded_record_key_part};
+use super::{IvmRuntimeError, RecordDeltas, encoded_identity_key_part, encoded_record_key_part};
 
 /// Terminal child occurrence key v1: the first copy retains its typed row key;
 /// subsequent copies append 0xff and a nonzero u64 big-endian repeat ordinal.
@@ -78,18 +78,44 @@ pub enum TerminalEdit {
 pub(super) fn terminal_deltas_from_record_deltas(
     deltas: &RecordDeltas,
 ) -> Result<TerminalDeltas, IvmRuntimeError> {
-    terminal_deltas_keyed_by(deltas, &[0])
+    let keys = deltas
+        .deltas
+        .iter()
+        .map(|delta| encoded_record_key_part(deltas.descriptor, delta.raw(), &[0]))
+        .collect::<Result<Vec<_>, _>>()?;
+    terminal_deltas_with_keys(deltas, keys)
 }
 
-/// Terminal edits whose root keys are the encoded `key_fields`.
-pub(super) fn terminal_deltas_keyed_by(
+/// Terminal edits of a TopBy output whose root keys are the identity
+/// `key_fields` (see [`encoded_identity_key_part`]) of `physical`, the same
+/// deltas before indirect values were materialized for publication. Keys are
+/// taken from the physical form so that they match the keys of the TopBy's
+/// window records, which keep indirect values unloaded.
+pub(super) fn terminal_deltas_keyed_by_identity(
     deltas: &RecordDeltas,
+    physical: &RecordDeltas,
     key_fields: &[usize],
+) -> Result<TerminalDeltas, IvmRuntimeError> {
+    // Materialization maps delta for delta; a mismatch would pair keys with
+    // the wrong records.
+    if physical.deltas.len() != deltas.deltas.len() {
+        return Err(IvmRuntimeError::GraphOutputMismatch);
+    }
+    let keys = physical
+        .deltas
+        .iter()
+        .map(|delta| encoded_identity_key_part(physical.descriptor, delta.raw(), key_fields))
+        .collect::<Result<Vec<_>, _>>()?;
+    terminal_deltas_with_keys(deltas, keys)
+}
+
+fn terminal_deltas_with_keys(
+    deltas: &RecordDeltas,
+    keys: Vec<Vec<u8>>,
 ) -> Result<TerminalDeltas, IvmRuntimeError> {
     let mut before = BTreeMap::<Vec<u8>, OwnedRecord>::new();
     let mut after = BTreeMap::<Vec<u8>, OwnedRecord>::new();
-    for delta in &deltas.deltas {
-        let key = encoded_record_key_part(deltas.descriptor, delta.raw(), key_fields)?;
+    for (delta, key) in deltas.deltas.iter().zip(keys) {
         let record = OwnedRecord::new(delta.raw().to_vec(), deltas.descriptor);
         if delta.weight < 0 {
             before.insert(key, record);

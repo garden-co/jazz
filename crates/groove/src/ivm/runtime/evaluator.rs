@@ -688,6 +688,9 @@ pub(super) struct RootOrderingWindows {
     /// Field-0 positions across all groups, for outputs without a proven
     /// identity: built once, first position wins, as before.
     field_zero: std::cell::OnceCell<RootPositions>,
+    /// Each group's first and last entry, so an output reaching a few groups
+    /// does not scan every touched group's windows. Reset by `record`.
+    group_entries: std::cell::OnceCell<HashMap<Vec<u8>, (usize, usize)>>,
 }
 
 /// A group's before and after window records.
@@ -718,6 +721,7 @@ impl RootOrderingWindows {
             self.descriptor = Some(descriptor);
             self.identity = top_by_identity_fields(top_by, descriptor.fields().len());
         }
+        self.group_entries.take();
         self.entries.push((
             group.to_vec(),
             GroupWindow {
@@ -763,14 +767,18 @@ impl RootOrderingWindows {
 
     /// A group's window across this tick: its first before and last after.
     fn group_window(&self, group: &[u8]) -> Option<WindowPair<'_>> {
-        let mut entries = self
-            .entries
-            .iter()
-            .filter(|(candidate, _)| candidate == group)
-            .map(|(_, window)| window);
-        let first = entries.next()?;
-        let last = entries.next_back().unwrap_or(first);
-        Some((&first.before, &last.after))
+        let index = self.group_entries.get_or_init(|| {
+            let mut index = HashMap::<Vec<u8>, (usize, usize)>::default();
+            for (position, (group, _)) in self.entries.iter().enumerate() {
+                index
+                    .entry(group.clone())
+                    .and_modify(|(_, last)| *last = position)
+                    .or_insert((position, position));
+            }
+            index
+        });
+        let &(first, last) = index.get(group)?;
+        Some((&self.entries[first].1.before, &self.entries[last].1.after))
     }
 }
 
@@ -1281,14 +1289,13 @@ impl TickEvaluator<'_> {
         &self,
         ordering_node: NodeId,
         root_descriptor: RecordDescriptor,
-        identity_groups: Option<&BTreeSet<Vec<u8>>>,
-        filter_chain: &[NodeId],
+        identity: Option<(&RootIdentity, &BTreeSet<Vec<u8>>)>,
         terminal: &mut TerminalDeltas,
     ) -> Result<(), IvmRuntimeError> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
             return Ok(());
         };
-        let Some(groups) = identity_groups else {
+        let Some((identity, groups)) = identity else {
             let positions = windows.field_zero()?;
             apply_root_ordering_operations(
                 &positions.before,
@@ -1301,28 +1308,78 @@ impl TickEvaluator<'_> {
         let Some(descriptor) = windows.descriptor else {
             return Ok(());
         };
-        let key_of = |record: &[u8]| encoded_record_key_part(descriptor, record, &windows.identity);
+        let key_of = |record: &[u8]| {
+            if !identity.projected {
+                return encoded_identity_key_part(descriptor, record, &windows.identity);
+            }
+            match project_window_record(self.graph, &identity.chain, descriptor, record)? {
+                Some((output, projected)) => {
+                    encoded_identity_key_part(output, &projected, &identity.fields)
+                }
+                // Never an output root; `reaching` below drops it.
+                None => Ok(Vec::new()),
+            }
+        };
+        if !identity.filtered && !identity.projected {
+            for group in groups {
+                if let Some((before, after)) = windows.group_window(group) {
+                    apply_group_window_ordering(before, after, &key_of, root_descriptor, terminal)?;
+                }
+            }
+            return Ok(());
+        }
+        // What this tick's output edits say about each root key: present
+        // before (removed or updated) and present after (inserted or updated).
+        let mut evidence = HashMap::<Vec<u8>, (bool, bool)>::default();
+        for operation in &terminal.operations {
+            let seen = evidence.entry(operation.root_key.clone()).or_default();
+            match &operation.edit {
+                TerminalEdit::Insert { .. } if operation.path.is_empty() => seen.1 = true,
+                TerminalEdit::Remove { .. } if operation.path.is_empty() => seen.0 = true,
+                _ => *seen = (true, true),
+            }
+        }
+        // Indices are positions among the output's roots, so window rows the
+        // chain drops take no position. A row whose filter reads an unloaded
+        // large value is placed by this tick's edits of its key; with none, an
+        // unchanged row keeps its slot and a changed one is not a root (it
+        // would otherwise have an edit).
+        let reaching = |window: &[WindowedRecord], other: &[WindowedRecord], after: bool| {
+            let mut kept = Vec::with_capacity(window.len());
+            for entry in window {
+                let reaches = match window_record_reaches_output(
+                    self.graph,
+                    &identity.chain,
+                    descriptor,
+                    &entry.0,
+                )? {
+                    WindowReach::Yes => true,
+                    WindowReach::No => false,
+                    WindowReach::Unknown => match evidence.get(&key_of(&entry.0)?) {
+                        Some((before, now)) => {
+                            if after {
+                                *now
+                            } else {
+                                *before
+                            }
+                        }
+                        None => other.iter().any(|(record, _)| record == &entry.0),
+                    },
+                };
+                if reaches {
+                    kept.push(entry.clone());
+                }
+            }
+            Ok::<_, IvmRuntimeError>(kept)
+        };
         for group in groups {
             let Some((before, after)) = windows.group_window(group) else {
                 continue;
             };
-            if filter_chain.is_empty() {
-                apply_group_window_ordering(before, after, &key_of, root_descriptor, terminal)?;
-                continue;
-            }
-            // Indices are positions among the output's roots, so window rows
-            // a filter after the TopBy drops take no position.
-            let reaching = |window: &[WindowedRecord]| {
-                let mut kept = Vec::with_capacity(window.len());
-                for entry in window {
-                    if window_record_reaches_output(self.graph, filter_chain, descriptor, &entry.0)?
-                    {
-                        kept.push(entry.clone());
-                    }
-                }
-                Ok::<_, IvmRuntimeError>(kept)
-            };
-            let (before, after) = (reaching(before)?, reaching(after)?);
+            let (before, after) = (
+                reaching(before, after, false)?,
+                reaching(after, before, true)?,
+            );
             apply_group_window_ordering(&before, &after, &key_of, root_descriptor, terminal)?;
         }
         Ok(())
@@ -1826,8 +1883,27 @@ impl TickEvaluator<'_> {
         } else {
             let mut referenced = BTreeSet::new();
             filter.predicate.referenced_fields(&mut referenced);
-            let input = self.materialize_indirect_fields(input, &referenced)?;
-            NodeState::update_filter(filter, output_desc, &input)
+            let materialized = self.materialize_indirect_fields(input, &referenced)?;
+            if Arc::ptr_eq(&materialized, input) {
+                return NodeState::update_filter(filter, output_desc, input);
+            }
+            // Materialization only serves the predicate. Emit the rows as they
+            // arrived, so downstream keys (TopBy root identity, #3309) see the
+            // same physical form as upstream state; publication loads indirect
+            // values for every output anyway.
+            let mut deltas = Vec::new();
+            for (delta, loaded) in input.deltas.iter().zip(&materialized.deltas) {
+                if filter
+                    .predicate
+                    .matches(loaded.borrowed(&materialized.descriptor), filter.comparison)?
+                {
+                    deltas.push(delta.clone());
+                }
+            }
+            Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            })
         }
     }
 

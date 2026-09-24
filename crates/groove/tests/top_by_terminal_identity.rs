@@ -373,14 +373,35 @@ mod randomized {
         NoTie,
         FilterAfter,
         ProjectAfter,
+        /// String equality on `extra` after a TopBy with tie fields.
+        StringFilterAfter,
+        /// The same filter after a TopBy without tie fields, whose
+        /// whole-record key includes the `tags` array column.
+        NoTieStringFilterAfter,
+        /// A projection dropping `extra` and `tags` after a TopBy without tie
+        /// fields: roots are keyed by every output field.
+        NoTieProjectAfter,
+    }
+
+    /// Every row carries a string and an array column derived from its id and
+    /// order value, so an update can flip whether the string filter keeps it.
+    fn extra(id: u64, created: u64) -> &'static str {
+        if (id + created).is_multiple_of(3) {
+            "drop"
+        } else {
+            "keep"
+        }
+    }
+
+    fn no_tie(v: Variant) -> bool {
+        matches!(
+            v,
+            Variant::NoTie | Variant::NoTieStringFilterAfter | Variant::NoTieProjectAfter
+        )
     }
 
     fn builder(v: Variant) -> GraphBuilder {
-        let ties: Vec<&str> = if v == Variant::NoTie {
-            vec![]
-        } else {
-            vec!["id"]
-        };
+        let ties: Vec<&str> = if no_tie(v) { vec![] } else { vec!["id"] };
         let top = GraphBuilder::top_by(
             GraphBuilder::table("posts"),
             ["user"],
@@ -391,7 +412,12 @@ mod randomized {
         );
         match v {
             Variant::FilterAfter => top.filter(PredicateExpr::gt("id", Value::U64(4))),
-            Variant::ProjectAfter => top.project(["created", "id", "user"]),
+            Variant::ProjectAfter | Variant::NoTieProjectAfter => {
+                top.project(["created", "id", "user"])
+            }
+            Variant::StringFilterAfter | Variant::NoTieStringFilterAfter => {
+                top.filter(PredicateExpr::eq("extra", Value::String("keep".into())))
+            }
             _ => top,
         }
     }
@@ -412,6 +438,12 @@ mod randomized {
                     .take(WINDOW)
                     .map(|(c, id)| (user, id, c))
                     .filter(|r| v != Variant::FilterAfter || r.1 > 4)
+                    .filter(|r| {
+                        !matches!(
+                            v,
+                            Variant::StringFilterAfter | Variant::NoTieStringFilterAfter
+                        ) || extra(r.1, r.2) == "keep"
+                    })
                     .collect();
                 (user, w)
             })
@@ -428,7 +460,7 @@ mod randomized {
 
     /// For NoTie the tie order is unspecified: compare created sequence + id set.
     fn check(v: Variant, got: &BTreeMap<u64, Vec<Row>>, want: &BTreeMap<u64, Vec<Row>>, ctx: &str) {
-        if v == Variant::NoTie {
+        if no_tie(v) {
             let norm = |m: &BTreeMap<u64, Vec<Row>>| {
                 m.iter()
                     .map(|(g, rows)| {
@@ -452,6 +484,8 @@ mod randomized {
                 ColumnSchema::new("user", ColumnType::U64),
                 ColumnSchema::new("id", ColumnType::U64),
                 ColumnSchema::new("created", ColumnType::U64),
+                ColumnSchema::new("extra", ColumnType::String),
+                ColumnSchema::new("tags", ColumnType::Array(Box::new(ColumnType::U64))),
             ],
         )
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
@@ -534,7 +568,13 @@ mod randomized {
         for op in ops {
             match op {
                 Op::Put(id, user, c, update) => {
-                    let values = vec![Value::U64(user), Value::U64(id), Value::U64(c)];
+                    let values = vec![
+                        Value::U64(user),
+                        Value::U64(id),
+                        Value::U64(c),
+                        Value::String(extra(id, c).into()),
+                        Value::Array(vec![Value::U64(id % 2), Value::U64(c)]),
+                    ];
                     if update {
                         batch.update("posts", values);
                     } else {
@@ -668,6 +708,24 @@ mod randomized {
         Variant::ProjectAfter,
         4
     );
+    probe!(
+        unbound_string_filter_after,
+        run_unbound,
+        Variant::StringFilterAfter,
+        1000
+    );
+    probe!(
+        unbound_notie_string_filter_after_ties,
+        run_unbound,
+        Variant::NoTieStringFilterAfter,
+        4
+    );
+    probe!(
+        unbound_notie_project_after_ties,
+        run_unbound,
+        Variant::NoTieProjectAfter,
+        4
+    );
     probe!(routed_tie_wide, run_routed, Variant::Tie, 1000);
     probe!(routed_tie_ties, run_routed, Variant::Tie, 4);
     probe!(routed_notie_ties, run_routed, Variant::NoTie, 4);
@@ -678,4 +736,472 @@ mod randomized {
         Variant::FilterAfter,
         4
     );
+    probe!(
+        routed_string_filter_after,
+        run_routed,
+        Variant::StringFilterAfter,
+        1000
+    );
+    probe!(
+        routed_notie_string_filter_after_ties,
+        run_routed,
+        Variant::NoTieStringFilterAfter,
+        4
+    );
+}
+
+/// Root keys for column types the runtime primary-key encoder cannot key
+/// (#3309 review). A TopBy without tie fields keys its roots by the whole
+/// record, so an Array, an Enum or a spilled large string must neither fail
+/// the write nor collapse rows. A filter or projection after the TopBy keeps
+/// one distinct root per visible row.
+mod whole_record_identity {
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
+
+    use groove::chunks::MemoryChunkStorage;
+    use groove::db::MultisinkSubscription;
+    use groove::db::{Database, GraphBuilder, PredicateExpr, PrimaryKeyValue};
+    use groove::ivm::runtime::{TerminalEdit, TerminalOperation};
+    use groove::ivm::{TopByLimit, TopByOrder};
+    use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind, StagedLargeValueId};
+    use groove::records::{
+        BorrowedRecord, EnumCase, EnumSchema, EnumValue, RecordDescriptor, Value, ValueType,
+    };
+    use groove::schema::{
+        ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    };
+    use groove::storage::MemoryStorage;
+
+    /// One group's visible roots in order: `(key, record values)`.
+    type Roots = Vec<(Vec<u8>, Vec<Value>)>;
+
+    async fn database(extra: ColumnType) -> Database {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "posts",
+            [
+                ColumnSchema::new("user", ColumnType::U64),
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("created", ColumnType::U64),
+                ColumnSchema::new("extra", extra),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+        let mut db = Database::new(schema, storage).await.unwrap();
+        db.set_chunk_storage(Rc::new(MemoryChunkStorage::new()));
+        db
+    }
+
+    fn top_by(ties: &[&str], limit: u64) -> GraphBuilder {
+        GraphBuilder::top_by(
+            GraphBuilder::table("posts"),
+            ["user"],
+            [TopByOrder::desc("created")],
+            ties.to_vec(),
+            0,
+            TopByLimit::Finite(limit),
+        )
+    }
+
+    enum Write {
+        Insert(Vec<Value>),
+        Update(Vec<Value>),
+        Delete(u64),
+    }
+
+    async fn commit(db: &mut Database, writes: Vec<Write>, large: &[StagedLargeValueId]) {
+        let mut batch = db.open_batch();
+        for write in writes {
+            match write {
+                Write::Insert(values) => batch.insert("posts", values),
+                Write::Update(values) => batch.update("posts", values),
+                Write::Delete(id) => batch.delete("posts", PrimaryKeyValue::U64(id)),
+            }
+        }
+        for id in large {
+            batch.accept_large_value(*id);
+        }
+        let applied = db
+            .apply_batch(batch)
+            .await
+            .expect("the write must not fail on the TopBy root key");
+        let persistence = applied.persist().await;
+        db.finish_persistence(persistence).unwrap();
+    }
+
+    fn row(id: u64, created: u64, extra: Value) -> Vec<Value> {
+        vec![Value::U64(0), Value::U64(id), Value::U64(created), extra]
+    }
+
+    /// Apply edits in order, as a consumer would, refusing a second insert of
+    /// a visible key and any edit of an unknown key.
+    fn apply(roots: &mut Roots, operations: &[TerminalOperation]) {
+        for operation in operations {
+            assert!(operation.path.is_empty());
+            let decode = |bytes: &[u8]| {
+                BorrowedRecord::new(bytes, &operation.root_descriptor)
+                    .to_values()
+                    .unwrap()
+            };
+            let find = |roots: &Roots, key: &[u8]| {
+                roots
+                    .iter()
+                    .position(|(candidate, _)| candidate == key)
+                    .unwrap_or_else(|| panic!("key {key:?} is not visible: {operations:?}"))
+            };
+            match &operation.edit {
+                TerminalEdit::Insert { key, index, value } => {
+                    assert!(
+                        roots.iter().all(|(candidate, _)| candidate != key),
+                        "insert of an already visible key {key:?}: {operations:?}"
+                    );
+                    roots.insert((*index).min(roots.len()), (key.clone(), decode(value)));
+                }
+                TerminalEdit::Remove { key } => {
+                    let index = find(roots, key);
+                    roots.remove(index);
+                }
+                TerminalEdit::Move { key, index } => {
+                    let from = find(roots, key);
+                    let root = roots.remove(from);
+                    roots.insert((*index).min(roots.len()), root);
+                }
+                TerminalEdit::Update { key, value } => {
+                    let index = find(roots, key);
+                    roots[index].1 = decode(value);
+                }
+            }
+        }
+    }
+
+    fn drain(subscription: &MultisinkSubscription, roots: &mut Roots) {
+        while let Ok(tick) = subscription.try_recv() {
+            if let Some(terminal) = tick.terminal_sinks.get("feed") {
+                apply(roots, &terminal.operations);
+            }
+        }
+    }
+
+    fn ids(roots: &Roots) -> Vec<u64> {
+        roots
+            .iter()
+            .map(|(_, values)| match values[1] {
+                Value::U64(id) => id,
+                ref other => panic!("unexpected id {other:?}"),
+            })
+            .collect()
+    }
+
+    fn distinct_keys(roots: &Roots) -> usize {
+        roots
+            .iter()
+            .map(|(key, _)| key)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// A window of three over four rows with distinct extras; two rows share
+    /// `created`, so only the whole record tells them apart. Then a demotion,
+    /// a promotion and a delete, checking the exact visible window each time.
+    async fn no_tie_window_over(mut db: Database, extras: [Value; 4]) {
+        let subscription = db.subscribe([("feed", top_by(&[], 3))]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        let [a, b, c, d] = extras;
+        commit(
+            &mut db,
+            vec![
+                Write::Insert(row(1, 50, a.clone())),
+                Write::Insert(row(2, 50, b.clone())),
+                Write::Insert(row(3, 40, c.clone())),
+                Write::Insert(row(4, 10, d.clone())),
+            ],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(distinct_keys(&roots), 3, "{roots:?}");
+        let mut opening = ids(&roots);
+        opening[..2].sort();
+        assert_eq!(opening, vec![1, 2, 3]);
+        assert_eq!(roots[2].1[3], c, "the extra column is published intact");
+
+        // Demote row 1 below row 4: row 4 enters the window.
+        commit(&mut db, vec![Write::Update(row(1, 5, a.clone()))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![2, 3, 4]);
+        assert_eq!(distinct_keys(&roots), 3);
+
+        // Promote row 1 to the top, then delete row 2.
+        commit(&mut db, vec![Write::Update(row(1, 90, a.clone()))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![1, 2, 3]);
+        commit(&mut db, vec![Write::Delete(2)], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![1, 3, 4]);
+        assert_eq!(roots[0].1[3], a);
+        assert_eq!(roots[2].1[3], d);
+    }
+
+    #[futures_test::test]
+    async fn no_tie_top_by_keys_rows_with_an_array_column() {
+        let extra = ColumnType::Array(Box::new(ColumnType::U64));
+        let extras = [
+            Value::Array(vec![Value::U64(1)]),
+            Value::Array(vec![Value::U64(2), Value::U64(3)]),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::U64(4)]),
+        ];
+        no_tie_window_over(database(extra).await, extras).await;
+    }
+
+    #[futures_test::test]
+    async fn no_tie_top_by_keys_rows_with_an_enum_column() {
+        let note = RecordDescriptor::new([("text", ValueType::String)]);
+        let flag = RecordDescriptor::new([("on", ValueType::Bool)]);
+        let schema = EnumSchema::new(
+            "mark",
+            [EnumCase::new("note", note), EnumCase::new("flag", flag)],
+        )
+        .unwrap();
+        let extra = ColumnType::Enum(Box::new(schema));
+        let note_of = |text: &str| {
+            Value::Enum(EnumValue::create(0, note, &[Value::String(text.into())]).unwrap())
+        };
+        let flag_of =
+            |on: bool| Value::Enum(EnumValue::create(1, flag, &[Value::Bool(on)]).unwrap());
+        let extras = [note_of("a"), note_of("b"), flag_of(true), flag_of(false)];
+        no_tie_window_over(database(extra).await, extras).await;
+    }
+
+    #[futures_test::test]
+    async fn no_tie_top_by_keys_rows_with_a_spilled_string_column() {
+        let db = database(ColumnType::String).await;
+        let mut extras = Vec::new();
+        let mut staged = Vec::new();
+        for fill in [b'a', b'b', b'c', b'd'] {
+            let text = String::from_utf8(vec![fill; INLINE_VALUE_MAX_BYTES + 1]).unwrap();
+            let large = db
+                .prepare_and_stage_large_value(LargeValueKind::String, text.as_bytes())
+                .await
+                .unwrap();
+            staged.push(large.id);
+            extras.push((text, Value::Large(Box::new(large.value_ref))));
+        }
+        // Rows are written with the indirect reference; the consumer sees the
+        // materialized string.
+        let written: [Value; 4] = std::array::from_fn(|i| extras[i].1.clone());
+        let mut db = db;
+        let subscription = db.subscribe([("feed", top_by(&[], 3))]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        commit(
+            &mut db,
+            (0..4)
+                .map(|i| {
+                    let created = [50, 50, 40, 10][i];
+                    Write::Insert(row(i as u64 + 1, created, written[i].clone()))
+                })
+                .collect(),
+            &staged,
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(distinct_keys(&roots), 3, "{} roots", roots.len());
+        let mut opening = ids(&roots);
+        opening[..2].sort();
+        assert_eq!(opening, vec![1, 2, 3]);
+        assert_eq!(roots[2].1[3], Value::String(extras[2].0.clone()));
+
+        // Demote row 1 (same large value): row 4 enters.
+        commit(
+            &mut db,
+            vec![Write::Update(row(1, 5, written[0].clone()))],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![2, 3, 4]);
+        commit(&mut db, vec![Write::Delete(3)], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![2, 4, 1]);
+        assert_eq!(distinct_keys(&roots), 3);
+        assert_eq!(roots[2].1[3], Value::String(extras[0].0.clone()));
+    }
+
+    /// A string equality filter after a TopBy with tie fields: every visible
+    /// row is its own root, and indices count only rows the filter keeps.
+    #[futures_test::test]
+    async fn string_filter_after_top_by_keeps_one_root_per_visible_row() {
+        let mut db = database(ColumnType::String).await;
+        let feed =
+            top_by(&["id"], 4).filter(PredicateExpr::eq("extra", Value::String("keep".into())));
+        let subscription = db.subscribe([("feed", feed)]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        let keep = || Value::String("keep".into());
+        commit(
+            &mut db,
+            vec![
+                Write::Insert(row(1, 10, keep())),
+                Write::Insert(row(2, 20, Value::String("drop".into()))),
+                Write::Insert(row(3, 30, keep())),
+                Write::Insert(row(4, 40, keep())),
+            ],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 3, 1]);
+        assert_eq!(distinct_keys(&roots), 3, "three visible rows, three roots");
+
+        // Promote row 1 above the dropped row 2 and row 3: it moves to index 1.
+        commit(&mut db, vec![Write::Update(row(1, 35, keep()))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 1, 3]);
+        // Row 2 starts passing the filter and enters between rows 1 and 3.
+        commit(&mut db, vec![Write::Update(row(2, 32, keep()))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 1, 2, 3]);
+        assert_eq!(distinct_keys(&roots), 4);
+    }
+
+    /// The same filter over a TopBy without tie fields, whose whole-record
+    /// key includes the filtered string column.
+    #[futures_test::test]
+    async fn string_filter_after_no_tie_top_by_keeps_one_root_per_visible_row() {
+        let mut db = database(ColumnType::String).await;
+        let feed = top_by(&[], 4).filter(PredicateExpr::eq("extra", Value::String("keep".into())));
+        let subscription = db.subscribe([("feed", feed)]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        let keep = || Value::String("keep".into());
+        commit(
+            &mut db,
+            vec![
+                Write::Insert(row(1, 10, keep())),
+                Write::Insert(row(2, 20, Value::String("drop".into()))),
+                Write::Insert(row(3, 30, keep())),
+                Write::Insert(row(4, 40, keep())),
+            ],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 3, 1]);
+        assert_eq!(distinct_keys(&roots), 3);
+        commit(&mut db, vec![Write::Update(row(1, 35, keep()))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 1, 3]);
+        assert_eq!(distinct_keys(&roots), 3);
+    }
+
+    /// A compound filter reading a spilled string column after a TopBy
+    /// without tie fields. The filter cannot be evaluated on a window row
+    /// without loading the value, so those rows are placed by the output's own
+    /// edits; the whole-record key of a spilled row is taken from the same
+    /// unloaded form on both sides.
+    #[futures_test::test]
+    async fn filter_on_a_spilled_string_after_no_tie_top_by_keys_every_visible_row() {
+        let mut db = database(ColumnType::String).await;
+        let mut staged = Vec::new();
+        let mut large = Vec::new();
+        for fill in [b'x', b'y', b'z'] {
+            let text = String::from_utf8(vec![fill; INLINE_VALUE_MAX_BYTES + 1]).unwrap();
+            let value = db
+                .prepare_and_stage_large_value(LargeValueKind::String, text.as_bytes())
+                .await
+                .unwrap();
+            staged.push(value.id);
+            large.push((text, Value::Large(Box::new(value.value_ref))));
+        }
+        let feed = top_by(&[], 5).filter(PredicateExpr::Or(vec![
+            PredicateExpr::eq("extra", Value::String("keep".into())),
+            PredicateExpr::gt("created", Value::U64(100)),
+        ]));
+        let subscription = db.subscribe([("feed", feed)]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        let text = |s: &str| Value::String(s.into());
+        commit(
+            &mut db,
+            vec![
+                Write::Insert(row(1, 10, text("keep"))),
+                Write::Insert(row(2, 120, large[0].1.clone())),
+                Write::Insert(row(3, 30, text("drop"))),
+                Write::Insert(row(4, 140, large[1].1.clone())),
+                // Spilled and not newer than 100: in the window, filtered out.
+                Write::Insert(row(5, 50, large[2].1.clone())),
+            ],
+            &staged,
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 2, 1]);
+        assert_eq!(distinct_keys(&roots), 3);
+        assert_eq!(roots[0].1[3], Value::String(large[1].0.clone()));
+
+        commit(&mut db, vec![Write::Update(row(1, 130, text("keep")))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 1, 2]);
+
+        // The hidden spilled row passes the filter once it is newer than 100.
+        commit(
+            &mut db,
+            vec![Write::Update(row(5, 125, large[2].1.clone()))],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 1, 5, 2]);
+        assert_eq!(distinct_keys(&roots), 4);
+
+        // A spilled row moves: it is edited by the key its first edit used.
+        commit(
+            &mut db,
+            vec![Write::Update(row(2, 135, large[0].1.clone()))],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![4, 2, 1, 5]);
+        commit(&mut db, vec![Write::Delete(4)], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![2, 1, 5]);
+    }
+
+    /// A projection that drops an order field of a TopBy without tie fields:
+    /// the roots are keyed by every output field, not by field 0.
+    #[futures_test::test]
+    async fn projection_dropping_the_order_field_keys_roots_by_all_output_fields() {
+        let mut db = database(ColumnType::String).await;
+        let feed = top_by(&[], 3).project(["user", "id"]);
+        let subscription = db.subscribe([("feed", feed)]).unwrap();
+        let mut roots = Roots::new();
+        drain(&subscription, &mut roots);
+        let text = |s: &str| Value::String(s.into());
+        commit(
+            &mut db,
+            vec![
+                Write::Insert(row(1, 10, text("a"))),
+                Write::Insert(row(2, 20, text("b"))),
+                Write::Insert(row(3, 30, text("c"))),
+                Write::Insert(row(4, 5, text("d"))),
+            ],
+            &[],
+        )
+        .await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![3, 2, 1]);
+        assert_eq!(distinct_keys(&roots), 3, "{roots:?}");
+        // Reorder within the window, then push row 3 out of it.
+        commit(&mut db, vec![Write::Update(row(1, 40, text("a")))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![1, 3, 2]);
+        commit(&mut db, vec![Write::Update(row(3, 1, text("c")))], &[]).await;
+        drain(&subscription, &mut roots);
+        assert_eq!(ids(&roots), vec![1, 2, 4]);
+        assert_eq!(distinct_keys(&roots), 3);
+    }
 }
