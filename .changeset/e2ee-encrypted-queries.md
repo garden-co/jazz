@@ -17,3 +17,11 @@ Indexed whole-enum matches now work in subscriptions as well as ordinary reads;
 partial enum matches remain unsupported. Encrypted equality queries accept the
 same UUID scope spellings as ordinary queries, including uppercase and compact
 forms, while tracking key changes and revoked access under the canonical scope.
+
+Align encrypted subscription data-readiness checks with the existing bounded
+integration-test allowance, retaining exact results and the shorter revocation
+error checks. These fixture changes do not optimise production query latency or
+resolve the separately tracked heap-exhaustion mechanism.
+Multi-step permission and space-revocation fixtures use the same two-minute
+correctness budget as their peers. Malformed membership proposals are checked
+for rejection and absence from accepted membership, not backend error wording.
