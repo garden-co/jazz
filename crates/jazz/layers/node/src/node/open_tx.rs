@@ -9,6 +9,63 @@ use super::query_eval::{ExclusiveSourceReads, NarrowedSourceRead};
 use super::*;
 use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
+/// A private staging receipt owned by one capability or pending write. Clones
+/// used by commit preparation share the same terminal ownership decision.
+#[doc(hidden)]
+pub struct StagedTransactionCell {
+    pub staged: groove::large_values::StagedLargeValue,
+    pub(crate) value: Value,
+    published: std::cell::Cell<bool>,
+    cleanup: Box<dyn Fn(groove::large_values::StagedLargeValueId)>,
+}
+
+impl StagedTransactionCell {
+    #[doc(hidden)]
+    pub fn new(
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+        cleanup: Box<dyn Fn(groove::large_values::StagedLargeValueId)>,
+    ) -> Self {
+        let value = Value::Large(Box::new(staged.value_ref.clone()));
+        Self {
+            staged,
+            value: if nullable {
+                Value::Nullable(Some(Box::new(value)))
+            } else {
+                value
+            },
+            published: std::cell::Cell::new(false),
+            cleanup,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn transfer_to_history(&self) {
+        self.published.set(true);
+    }
+}
+
+impl std::fmt::Debug for StagedTransactionCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedTransactionCell")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for StagedTransactionCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.staged == other.staged
+    }
+}
+
+impl Drop for StagedTransactionCell {
+    fn drop(&mut self) {
+        if !self.published.get() {
+            (self.cleanup)(self.staged.id);
+        }
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -121,6 +178,57 @@ where
                 permission_subject,
             } => permission_subject.unwrap_or(made_by),
         })
+    }
+
+    #[doc(hidden)]
+    pub fn check_staged_transaction_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+        subject: AuthorSubject,
+    ) -> Result<(), Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Exclusive {
+                made_by,
+                permission_subject,
+            } if made_by == author && permission_subject == subject => Ok(()),
+            _ => Err(Error::OpenTransactionIdentityMismatch),
+        }
+    }
+
+    /// Accept a core-minted receipt, not a caller-supplied large descriptor.
+    #[doc(hidden)]
+    pub async fn tx_write_staged_cell(
+        &mut self,
+        id: OpenTransactionId,
+        schema: SchemaVersionId,
+        table: &str,
+        row: RowUuid,
+        column: String,
+        stage: std::rc::Rc<StagedTransactionCell>,
+        mut cells: BTreeMap<String, Value>,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        cells.insert(column.clone(), stage.value.clone());
+        self.tx_write_in_schema_at_ms(id, schema, table, row, cells, None, now_ms)
+            .await?;
+        // No suspension after pending-write installation: cancellation cannot
+        // leave a descriptor without its capability, even for stream-only rows.
+        let tx = self.open_tx_mut(id)?;
+        let write = tx
+            .writes
+            .iter_mut()
+            .find(|write| {
+                write.schema_version == schema
+                    && write.table == table
+                    && write.row_uuid == row
+                    && write.deletion.is_none()
+            })
+            .ok_or(Error::InvalidMergeableCommit(
+                "staged upload has no owner write",
+            ))?;
+        write.staged_cells.insert(column, stage);
+        Ok(())
     }
 
     /// Return the permission subject bound to an open exclusive transaction.
@@ -690,6 +798,7 @@ where
             schema_version: write_schema_version,
             branch: BranchSelector::default(),
             cells: PendingCells::Replace(cells),
+            staged_cells: BTreeMap::new(),
             deletion,
             parents: parent.into_iter().collect(),
             now_ms,
@@ -719,6 +828,13 @@ where
                 std::mem::take(&mut pending.staged_large_cells),
                 &mut open_tx.superseded_large_values,
             );
+            let PendingCells::Replace(cells) = &pending.cells else {
+                unreachable!()
+            };
+            pending.staged_cells = std::mem::take(&mut existing.staged_cells)
+                .into_iter()
+                .filter(|(column, stage)| cells.get(column) == Some(&stage.value))
+                .collect();
             *existing = pending;
             existing.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
         } else {
@@ -860,6 +976,7 @@ where
                 schema_version: write_schema_version,
                 branch,
                 cells: PendingCells::Replace(cells),
+                staged_cells: BTreeMap::new(),
                 deletion,
                 parents,
                 now_ms,
@@ -986,6 +1103,7 @@ where
                 schema_version: write_schema_version,
                 branch,
                 cells: PendingCells::Patch(patch),
+                staged_cells: BTreeMap::new(),
                 deletion: None,
                 parents: Vec::new(),
                 now_ms,
@@ -1172,6 +1290,7 @@ where
         Ok(!open_tx.superseded_large_values.is_empty()
             || open_tx.writes.iter().any(|write| {
                 !write.staged_large_cells.is_empty()
+                    || !write.staged_cells.is_empty()
                     || write
                         .staged_cells()
                         .values()
@@ -1295,6 +1414,15 @@ where
             None => TxId::new(self.mint_tx_time(now_ms)?, self.node_uuid),
         };
         let provenance_snapshot = open_tx.base_snapshot.clone();
+        let staged_owners = open_tx
+            .writes
+            .iter()
+            .flat_map(|write| write.staged_cells.values().cloned())
+            .collect::<Vec<_>>();
+        self.ensure_large_value_stages_current(
+            &staged_owners.iter().map(|stage| stage.staged.id).collect(),
+        )
+        .await?;
         let mut versions = Vec::with_capacity(open_tx.writes.len());
         let mut claimed_large_values = BTreeSet::new();
         let mut superseded_large_values = open_tx.superseded_large_values;
@@ -1333,6 +1461,12 @@ where
                 if !value_contains_indirect_descriptor(value)
                     || inherited.get(column) == Some(value)
                 {
+                    continue;
+                }
+                if let Some(stage) = write.staged_cells.get(column)
+                    && &stage.value == value
+                {
+                    claimed_large_values.insert(stage.staged.id);
                     continue;
                 }
                 match write.staged_large_cells.get(column) {
@@ -1425,6 +1559,12 @@ where
                 self.authored_commit_durability,
             )
             .await?;
+        // Publication has installed ordinary row/version retention, protected
+        // by the publication lease until local durability. An eventual
+        // authority denial moves that retention to rejected retry storage.
+        for stage in staged_owners {
+            stage.transfer_to_history();
+        }
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
@@ -2484,6 +2624,8 @@ pub(super) struct PendingWrite {
     pub(super) branch: BranchSelector,
     /// Replacement cells or an update patch resolved when the transaction commits.
     cells: PendingCells,
+    /// Core-minted upload capabilities still owned by this pending write.
+    staged_cells: BTreeMap<String, std::rc::Rc<StagedTransactionCell>>,
     /// Deletion-register event, if any.
     pub(super) deletion: Option<DeletionEvent>,
     /// Parent vector carried by the staged write.

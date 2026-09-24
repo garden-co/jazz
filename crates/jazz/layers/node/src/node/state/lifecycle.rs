@@ -1402,6 +1402,12 @@ where
         true
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn staged_large_value_count_for_test(&self) -> Result<usize, Error> {
+        Ok(self.database.staged_large_values().await?.len())
+    }
+
     pub(super) async fn ensure_large_value_stages_current(
         &self,
         ids: &BTreeSet<groove::large_values::StagedLargeValueId>,

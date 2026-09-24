@@ -1180,7 +1180,7 @@ where
     ///
     /// Mutation staging must preserve existing large-value locators; public
     /// transaction reads hydrate those values separately above.
-    async fn transaction_read_raw(
+    pub(super) async fn transaction_read_raw(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1498,7 +1498,7 @@ where
     /// Resolve an exclusive mutation target through the identity fixed when
     /// the transaction opened, then record the corresponding snapshot row or
     /// absence read used by optimistic conflict validation.
-    async fn exclusive_transaction_target_for_write(
+    pub(super) async fn exclusive_transaction_target_for_write(
         &self,
         tx_id: OpenTransactionId,
         table: &str,

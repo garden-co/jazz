@@ -236,8 +236,8 @@ accounting; specifically the fixed-width suffix of each `completed-upload/` or
 embedded upload or receipt ID. Recovery, staging preflight, retry lookup, and
 acceptance/eviction cleanup fail closed before mutation on any disagreement.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
-different descriptor. A failed/rejected mutation publishes neither the row
-version nor root reachability.
+different descriptor. A failed or rejected mutation publishes no accepted
+owner-row version.
 
 Groove persists timestamped retainer claims keyed by the completed descriptor.
 After ordinary Jazz write authorization, the same Groove physical-record batch
@@ -247,9 +247,50 @@ descriptor-keyed concurrent upload may reuse already-local exact nodes after
 its own pending record is bound to that descriptor. Upload-attempt identity is
 neither canonical row state nor publication authority, and it cannot authorize
 a different descriptor.
-A rejected transaction consumes nothing, and its unclaimed retainer expires by
-ordinary TTL maintenance. Acceptance is never a separate transaction before or
-after row publication.
+A receiver that rejects publication consumes no unclaimed retainer; those claims
+expire through ordinary TTL maintenance. An originating node that already
+committed locally instead retains the descriptor and bytes through normal
+history and, on authority rejection, the rejected-version retry store
+(`INV-TX-9`). Authority rejection MUST NOT evict its only retainer.
+Acceptance is never a separate transaction before or after row publication.
+
+### Stage-only host uploads
+
+`Db::stage_streaming_value_upload` completes the same bounded Groove preparation
+as standalone streaming finish, but returns an opaque single-use capability and
+publishes no row. Existing standalone finish retains its ordinary mutation
+semantics. Staging binds the originating runtime and schema, fixed mutation,
+table, row, column, other cells, and resolved trusted author/permission identity.
+It does not grant write permission or expose a locator through the host binding.
+
+`attach_staged_streaming_value` transfers this capability into an already-open
+exclusive root-view transaction. Explicit branch targets and branchBy tables
+are unsupported at this seam. The transaction must have the identical trusted
+identity; foreign-runtime, foreign-schema, mergeable, and repeated attachment
+attempts fail closed. Each attempt consumes the capability. Pending writes own
+their staged cells explicitly: an arbitrary caller `Value::Large` cannot acquire
+the private provenance required for publication.
+
+Unattached capability drop, explicit abort, rollback, and overwrite release
+pre-publication receipts through the owner's cleanup queue. Commit preparation
+checks that receipts remain present. Local publication transfers ownership to
+ordinary durable version retention; later denial cannot invoke stage cleanup
+against the published descriptor. Other writes and exclusive read dependencies
+are part of the same owner-row commit, with no database transaction held while
+the host produces bytes.
+
+Retries must preserve the original exclusive evidence, never convert the upload
+to a mergeable write or refresh away stale dependencies. The existing durable
+exclusive restart limitation remains: reconstructed transactions lacking their
+read evidence fail closed at authority admission (§3.7, issue #3228). Reopening
+does not erase rejected payload bytes; they remain until normal explicit
+acknowledgement/discard. This addition does not define a new durable evidence or
+Groove encoding.
+
+Behavioural receipts are `staged_streaming_attaches_atomically_and_only_once`,
+`staged_streaming_rejects_foreign_runtime_identity_and_mergeable_transaction`,
+`staged_streaming_rollback_drop_and_overwrite_release_claims`, and
+`staged_streaming_rejection_retains_payload_across_reopen_and_retry`.
 
 Sync is intentionally asymmetric. Upload is root-first push-before-row: the
 writer starts with the complete large-value descriptor, then sends only the

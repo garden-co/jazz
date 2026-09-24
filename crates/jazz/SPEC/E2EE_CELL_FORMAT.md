@@ -30,6 +30,13 @@ a fixed BYOC envelope, literal record headers and the accepted epoch UUID; it
 does not call the private cell encoder. This qualifies common framing, not the
 cryptographic strength of the deliberately non-cryptographic fixture adapter.
 
+Logical BYTEA columns additionally accept the versioned
+[`jazz.e2ee.stream-record`](E2EE_LARGE_VALUE_FORMAT.md#encrypted-bytea-stream-record-version-1)
+encoding. Central row decoding dispatches by the outer mechanism and retains
+this legacy cell encoding unchanged. Streaming records use a distinct
+authenticated policy and raw byte plaintext, and whole-value reads return
+only after the adapter verifies final authentication and EOF.
+
 ## Authenticated context
 
 The CellCipher receives two fields framed by the existing u32be-length
