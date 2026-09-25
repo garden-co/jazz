@@ -100,6 +100,12 @@ where
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
     }
 
+    /// Core-shell capability: see `Node::declare_upload_root`.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn declare_upload_root(&self) {
+        self.node.declare_upload_root();
+    }
+
     /// Core-shell capability; partial caches and relays must leave it disabled.
     #[cfg(feature = "runtime")]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {

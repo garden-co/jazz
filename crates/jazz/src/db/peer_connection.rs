@@ -5336,11 +5336,14 @@ where
                                     tx_id,
                                 );
                             }
-                            // An authority that settled this upload terminally
-                            // (the same predicate an upstream fate must meet
-                            // to release an outbox entry) has nobody left to
-                            // ask. Queueing it would retain the unit forever.
-                            let settled_here = local_upload.as_ref().is_some_and(|(tx_id, _)| {
+                            // A declared root with no upstream that settled this
+                            // upload terminally (the same predicate an upstream
+                            // fate must meet to release an outbox entry) has
+                            // nobody left to ask. Queueing it would retain the
+                            // unit forever. Any node with an upstream must still
+                            // relay, even though its own ingest says Global.
+                            let settled_here = outbox.borrow().settles_uploads_locally()
+                                && local_upload.as_ref().is_some_and(|(tx_id, _)| {
                                 responses
                                     .iter()
                                     .any(|response| fate_update_settles_upload(response, *tx_id))
@@ -7405,15 +7408,6 @@ where
     Ok(())
 }
 
-/// Deliver terminal/local fate updates in FIFO order without letting a bounded
-/// byte transport turn an already-produced settlement into a dropped message.
-///
-/// The wire adapter retains at most the one logical message it has already
-/// accepted. If that backlog is full, this queue keeps the *unaccepted* fate
-/// at its semantic producer boundary and the scheduler retries after the
-/// binding wakes for transport capacity. We remove only after `send` accepts
-/// the logical message, so a retry neither duplicates a sent fate nor loses a
-/// later fate behind it.
 /// Whether `message` is a terminal fate for `tx_id` that no upstream can
 /// revise: a rejection, or a Global-durable acceptance carrying its global
 /// time. Only such a fate retires an upload-outbox entry.
@@ -7436,6 +7430,15 @@ fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
     }
 }
 
+/// Deliver terminal/local fate updates in FIFO order without letting a bounded
+/// byte transport turn an already-produced settlement into a dropped message.
+///
+/// The wire adapter retains at most the one logical message it has already
+/// accepted. If that backlog is full, this queue keeps the *unaccepted* fate
+/// at its semantic producer boundary and the scheduler retries after the
+/// binding wakes for transport capacity. We remove only after `send` accepts
+/// the logical message, so a retry neither duplicates a sent fate nor loses a
+/// later fate behind it.
 fn flush_downstream_fates<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,

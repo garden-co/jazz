@@ -2834,9 +2834,29 @@ pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
+    /// Declared by a server shell that owns final authority for its writes.
+    declared_root: bool,
+    /// Sticky: set once any upstream attaches, including after the fact.
+    upstream_attached: bool,
 }
 
 impl UploadOutbox {
+    /// Whether a subscriber upload this node settled terminally has nobody
+    /// above it to forward to. Only a declared root that has never attached
+    /// an upstream qualifies; anything else must queue and relay as usual.
+    pub(super) fn settles_uploads_locally(&self) -> bool {
+        self.declared_root && !self.upstream_attached
+    }
+
+    #[cfg(any(test, feature = "runtime"))]
+    pub(super) fn declare_root(&mut self) {
+        self.declared_root = true;
+    }
+
+    pub(super) fn mark_upstream_attached(&mut self) {
+        self.upstream_attached = true;
+    }
+
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;

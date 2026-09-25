@@ -910,6 +910,15 @@ where
             .contains(&tx_id)
     }
 
+    /// Declare this node the root authority for the uploads it accepts: once
+    /// its own ingest settles a subscriber upload terminally, there is no
+    /// upstream left to relay it to, so it is not retained in the outbox.
+    /// Attaching any upstream (before or after) revokes this for good.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(crate) fn declare_upload_root(&self) {
+        self.outbox.borrow_mut().declare_root();
+    }
+
     #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
@@ -2115,6 +2124,7 @@ where
         mut transport: Box<dyn Transport>,
     ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
         transport.set_trusted_encoder(true);
+        self.outbox.borrow_mut().mark_upstream_attached();
         loop {
             // Connection installation mutates runtime metadata synchronously, but
             // first needs a coherent view of storage-owning node state. Evaluation
