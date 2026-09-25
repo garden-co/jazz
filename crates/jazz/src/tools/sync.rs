@@ -16,7 +16,7 @@ pub enum DurabilityTier {
 enum DurabilityEncoding {
     Local,
     #[deprecated(
-        note = "the edge tier was removed in alpha.57; use GlobalServer. Decode-only for old peers"
+        note = "the edge tier was removed in alpha.57; decode-only so old peers' edge acks still decode, as Local. Never encode it"
     )]
     EdgeServer,
     GlobalServer,

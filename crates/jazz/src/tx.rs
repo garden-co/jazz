@@ -519,7 +519,7 @@ enum DurabilityEncoding {
     None,
     Local,
     #[deprecated(
-        note = "the edge tier was removed in alpha.57; use Global. Decode-only for old peers"
+        note = "the edge tier was removed in alpha.57; decode-only so old peers' edge acks still decode, as Local. Never encode it"
     )]
     Edge,
     Global,
