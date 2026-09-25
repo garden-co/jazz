@@ -1494,24 +1494,35 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
 
 test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
   const document = parse(codspeedWorkflow);
-  const job = document.jobs["route-subscription-walltime"];
-  assert.ok(job, "route subscription wall-time job must remain present");
+  const build = document.jobs["native-workloads-build"];
+  const measure = document.jobs["native-workloads-walltime"];
   assert.equal(
-    job.if,
+    build.if,
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
-  assert.equal(job["runs-on"], "codspeed-macro");
-  const commands = job.steps
-    .map((step) => step.run)
-    .filter(Boolean)
-    .join("\n");
-  assert.match(
-    commands,
-    /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/,
+  assert.deepEqual(measure.needs, "native-workloads-build");
+  assert.equal(measure["runs-on"], "codspeed-macro");
+  for (const job of [build, measure]) {
+    assert.ok(
+      job.strategy.matrix.workload.includes("route-subscription"),
+      "route subscription wall-time workload must remain present",
+    );
+  }
+  // Features are selected at `cargo codspeed build` time. `run` only executes
+  // that copied target; cargo-codspeed rejects Cargo feature flags there, which
+  // once left this receipt reporting no walltime benchmarks.
+  const args = (action) =>
+    spawnSync(
+      "node",
+      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, "route-subscription"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+  assert.equal(
+    args("build-args"),
+    "--package jazz --bench route_subscription_curve --features testing",
   );
-  const run = job.steps.find((step) => step.with?.run)?.with?.run;
-  assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
-  assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
+  assert.equal(args("run-args"), "--package jazz --bench route_subscription_curve");
+  assert.doesNotMatch(JSON.stringify(measure), /--features|JAZZ_ROUTE_CURVE_ROUTES/);
   assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
   assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
   assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);

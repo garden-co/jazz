@@ -1,15 +1,24 @@
 # CodSpeed native benchmark build handoff
 
-The three native workloads (todo, permissioned resources, policy-scoped
-documents) compile on Blacksmith ARM64 Ubuntu 22.04, then run on the existing
-`codspeed-macro` machines. Other suites are unchanged during this trial.
-Build latency, cache behavior and acceptance receipts are tracked in
+Every CodSpeed walltime workload compiles on Blacksmith ARM64 Ubuntu 22.04,
+then runs on the existing `codspeed-macro` machines. The eight workloads are
+the three native examples (todo, permissioned resources, policy-scoped
+documents), BigLabel ingest, W1 reads (memory and RocksDB), route
+subscription, the Groove IVM experiment and maintained selective hydration.
+`workloadSpecs` in `codspeed-artifact.mjs` is the one table of each workload's
+package, benches and build-time features; the workflow reads its `build-args`
+and `run-args` rather than repeating them. The x86_64 simulation job is
+unchanged. Build latency, cache behavior and acceptance receipts are tracked in
 [#3174](https://github.com/garden-co/jazz/issues/3174).
 
 ## Invariants
 
 - Rust 1.93.1, cargo-codspeed 5.0.1, the default `bench` profile, full CodSpeed
-  debug info, allocator features and benchmark commands remain unchanged.
+  debug info, per-workload features (the mimalloc allocator for the native
+  examples, `testing` for the two `jazz` benches) and benchmark commands remain
+  unchanged. The measurement job keeps each workload's former environment:
+  only the native examples set `RUST_MIN_STACK`, and each keeps the timeout its
+  former build-and-run job had.
   `--locked` forbids dependency resolution drift. No `target-cpu=native`,
   optimization downgrade, debug stripping or fixture change. Rust's
   `--remap-path-prefix=$PWD=/actions-runner/_work/jazz/jazz` maps source paths
@@ -33,20 +42,22 @@ Build latency, cache behavior and acceptance receipts are tracked in
   sealing outputs. Rust-cache retains registry, Git and installed-tool caches
   with target caching disabled. Explicit cache restore/save steps retain
   `target/release`, including workspace outputs. Their compatibility prefix
-  pins workload, OS/architecture, Ubuntu image, Rust/CodSpeed versions, allocator,
+  pins workload (and so its features), OS/architecture, Ubuntu image, Rust/CodSpeed versions,
   absolute debug-path contract, Cargo lockfile, toolchain file and Cargo config.
   Only the primary save key appends the source SHA; the restore prefix does not,
   so a new revision can restore and then save refreshed outputs. The pinned
   rust-cache action cannot express this with `key`, `shared-key` or `env-vars`:
   all affect its restore prefix too. Standard GitHub branch isolation still
   applies. Receipt bundles are excluded; caches never authorize measurement.
-- The JSON `jazz-codspeed-benchmark-artifact-v1` manifest binds the exact checkout
-  SHA, GitHub workflow run ID, compiler identity, workload/build contract and
-  SHA-256 of both executables. Consumer paths are fixed, not manifest-controlled.
+- The JSON `jazz-codspeed-benchmark-artifact-v2` manifest binds the exact checkout
+  SHA, GitHub workflow run ID, compiler identity, workload/build contract
+  (including package, benches and features) and SHA-256 of every bench
+  executable plus the CLI. v1 bundles, which held one `walltime` executable, are
+  rejected. Consumer paths are fixed, not manifest-controlled.
   The receiver rejects a different source/run/compiler/contract, missing or
   modified files, symlinks, incompatible platform or missing ELF dependencies.
   It restores executable permissions lost by artifact upload only after hashing.
-- The executable must contain both `.debug_info` and `.debug_line`. The checkout
+- Every bench executable must contain both `.debug_info` and `.debug_line`. The checkout
   supplies source files at the same SHA; Cargo intermediates are not needed for
   these embedded debug sections. This is not a split-debug-artifact protocol.
 - These are benchmark executables, **not** the native/WASM correctness artifact
@@ -58,15 +69,20 @@ A todo build seals `target/codspeed/walltime/jazz-example-todo-benchmark/walltim
 and the Cargo CodSpeed CLI. The consumer checks out the same workflow SHA,
 downloads only the named artifact from this workflow, verifies it and runs the
 original `cargo codspeed run` command. It never compiles a fallback executable.
+A W1 build seals both `reads_memory_walltime` and `reads_rocksdb_walltime`; a
+bundle missing either, or sealed for another workload, is rejected.
 
 Rerunning a producer replaces its bundle for the same source/run; a failed
 consumer can reuse a successful producer's bundle in a later attempt of the
 same run. A new source revision gets a different artifact name. A build failure
 prevents measurement; consumers must not fall back to the previous commit's
 binary. As initially configured, the consumer matrix waits for the whole build
-matrix, so the slowest producer gates all three consumers. Account for that
+matrix, so the slowest producer gates all eight consumers. Account for that
 barrier, artifact transfer, cache upload and Cargo metadata dependency fetching
-when comparing end-to-end latency, not just the compiler step.
+when comparing end-to-end latency, not just the compiler step. One workload's build failure
+skips no other workload's measurement: the consumer matrix runs unless the
+whole build was skipped or cancelled, and only the failed workload's download
+fails.
 
 `node --test dev/benchmarks/codspeed-artifact.test.mjs` checks handoff rejection
 and timing-shim argument preservation. Hosted acceptance additionally requires

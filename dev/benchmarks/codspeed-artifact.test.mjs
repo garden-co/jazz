@@ -7,10 +7,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   artifactPaths,
+  buildArgs,
   measurementWorkspace,
+  runArgs,
   seal,
   sourcePathFlags,
   verify,
+  workloads,
   verifyCodspeedVersion,
   verifyMeasurementWorkspace,
 } from "./codspeed-artifact.mjs";
@@ -27,7 +30,8 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
   const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-"));
   process.chdir(dir);
   try {
-    const { binary, bundle } = artifactPaths("todo");
+    const { binaries, bundle } = artifactPaths("todo");
+    const binary = binaries.walltime;
     await mkdir(path.dirname(binary), { recursive: true });
     await writeFile(binary, "benchmark fixture");
     await writeFile("cli", "CLI fixture");
@@ -36,12 +40,13 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
     await t.test("matching bundle and retry in the same run are accepted", async () => {
       const manifest = await reset();
       assert.deepEqual(await verify("todo", identity), manifest);
-      assert.equal(manifest.format, "jazz-codspeed-benchmark-artifact-v1");
+      assert.equal(manifest.format, "jazz-codspeed-benchmark-artifact-v2");
       assert.equal(manifest.contract.profile, "bench");
       assert.deepEqual(manifest.contract.sourcePaths, {
         kind: "measurement-workspace-absolute",
         root: measurementWorkspace,
       });
+      assert.equal(manifest.contract.features, "jazz-benchmark-guard/mimalloc");
       assert.equal(manifest.files.walltime.length, 64);
       assert.deepEqual(await verify("todo", identity), manifest);
     });
@@ -56,7 +61,7 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
       });
     }
     for (const [key, value] of [
-      ["format", "unknown-v2"],
+      ["format", "jazz-codspeed-benchmark-artifact-v1"],
       ["workload", "permissioned-resources"],
       ["contract", { profile: "dev" }],
     ]) {
@@ -90,12 +95,93 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
       await assert.rejects(verify("todo", identity), /regular file/);
     });
     await t.test("reject arbitrary workload paths", () => {
-      assert.throws(() => artifactPaths("../../escape"), /unknown workload/);
+      for (const name of ["../../escape", "constructor", "__proto__"]) {
+        assert.throws(() => artifactPaths(name), /unknown workload/);
+        assert.throws(() => buildArgs(name), /unknown workload/);
+      }
     });
   } finally {
     process.chdir(previous);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("multi-bench workloads seal and install every bench executable", async () => {
+  const previous = process.cwd();
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-multi-"));
+  process.chdir(dir);
+  try {
+    const { binaries, bundle } = artifactPaths("w1-reads");
+    assert.deepEqual(binaries, {
+      reads_memory_walltime:
+        "target/codspeed/walltime/jazz-example-benchmark-w1/reads_memory_walltime",
+      reads_rocksdb_walltime:
+        "target/codspeed/walltime/jazz-example-benchmark-w1/reads_rocksdb_walltime",
+    });
+    for (const binary of Object.values(binaries)) {
+      await mkdir(path.dirname(binary), { recursive: true });
+      await writeFile(binary, binary);
+    }
+    await writeFile("cli", "CLI fixture");
+    const manifest = await seal("w1-reads", identity, "cli");
+    assert.deepEqual(Object.keys(manifest.files).sort(), [
+      "cargo-codspeed",
+      "reads_memory_walltime",
+      "reads_rocksdb_walltime",
+    ]);
+    assert.equal(manifest.contract.features, null);
+    assert.deepEqual(await verify("w1-reads", identity), manifest);
+    // A bundle sealed for one workload never verifies as another.
+    await assert.rejects(verify("groove-ivm", identity));
+    await rm(path.join(bundle, "reads_rocksdb_walltime"));
+    await assert.rejects(verify("w1-reads", identity));
+  } finally {
+    process.chdir(previous);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("each workload builds and runs exactly what it measured on the macro runner", () => {
+  // The commands these workloads used when they compiled on codspeed-macro
+  // (and, for the native examples, on the ARM builder). Moving the build must
+  // not change a package, bench or feature.
+  const previous = {
+    todo: "--package jazz-example-todo-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
+    "permissioned-resources":
+      "--package jazz-example-permissioned-resources-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
+    "policy-scoped-documents":
+      "--package jazz-example-policy-scoped-documents-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
+    "big-label-ingest": "--package jazz-example-big-label-benchmark --bench ingest_walltime",
+    "w1-reads":
+      "--package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime",
+    "route-subscription": "--package jazz --bench route_subscription_curve --features testing",
+    "groove-ivm": "--package groove --bench pull_vs_snapshot --bench steady_state",
+    "selective-hydration": "--package jazz --bench selective_global_hydration --features testing",
+  };
+  assert.deepEqual(workloads, Object.keys(previous));
+  for (const [workload, args] of Object.entries(previous)) {
+    assert.equal(buildArgs(workload).join(" "), args);
+    assert.equal(runArgs(workload).join(" "), args.replace(/ --features \S+$/, ""));
+    const cli = (action) =>
+      execFileSync(
+        "node",
+        [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, workload],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+    assert.equal(cli("build-args"), buildArgs(workload).join(" "));
+    assert.equal(cli("run-args"), runArgs(workload).join(" "));
+  }
+  assert.throws(() =>
+    execFileSync(
+      "node",
+      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), "build-args", "nope"],
+      {
+        stdio: "pipe",
+      },
+    ),
+  );
 });
 
 test("source remapping uses the exact measurement root and rejects checkout drift", () => {
@@ -184,18 +270,49 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
       'RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"\n          export RUSTFLAGS',
     ),
   );
-  assert.match(
-    build,
-    /cargo codspeed build -m walltime --package jazz-example-\$\{\{ matrix.workload \}\}-benchmark --bench walltime --features jazz-benchmark-guard\/mimalloc --locked/,
+  assert.ok(
+    build.includes(
+      'args="$(node dev/benchmarks/codspeed-artifact.mjs build-args ${{ matrix.workload }})"\n' +
+        '          read -ra args <<<"$args"\n' +
+        '          /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked',
+    ),
   );
   assert.match(run, /runs-on: codspeed-macro\n/);
+  // One failed build must not skip the other workloads' measurements.
+  assert.ok(
+    run.includes("if: ${{ !cancelled() && needs.native-workloads-build.result != 'skipped' }}\n"),
+  );
   assert.doesNotMatch(run, /cargo (install|build|codspeed build)/);
-  assert.match(run, /codspeed-artifact.mjs install/);
+  assert.match(run, /codspeed-artifact.mjs install \$\{\{ matrix.workload \}\}/);
+  assert.ok(
+    run.includes(
+      'args="$(node dev/benchmarks/codspeed-artifact.mjs run-args ${{ matrix.workload }})"\n' +
+        '          echo "run-args=$args" >> "$GITHUB_OUTPUT"',
+    ),
+  );
   assert.match(
     run,
-    /cargo codspeed run -m walltime --package jazz-example-\$\{\{ matrix.workload \}\}-benchmark --bench walltime/,
+    /run: cargo codspeed run -m walltime \$\{\{ steps.install.outputs.run-args \}\}\n/,
   );
-  assert.match(run, /RUST_MIN_STACK: 4194304/);
+  // Both matrices cover every workload the artifact script knows, in order.
+  const matrix = (job) =>
+    job
+      .match(/        workload:\n          \[\n([^\]]+)\]/)[1]
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  assert.deepEqual(matrix(build), workloads);
+  assert.deepEqual(matrix(run), workloads);
+  // Only the native examples raise the thread stack while measuring.
+  assert.match(run, /RUST_MIN_STACK: \$\{\{ matrix.min_stack \}\}/);
+  const raised = [...run.matchAll(/- workload: (\S+)\n\s+min_stack: 4194304/g)].map((m) => m[1]);
+  assert.deepEqual(raised, ["todo", "permissioned-resources", "policy-scoped-documents"]);
+  // No other job compiles on the measurement runner.
+  for (const job of workflow.split(/\n  (?=[a-z-]+:\n)/)) {
+    if (/runs-on: codspeed-macro/.test(job)) {
+      assert.doesNotMatch(job, /cargo (install|build)|cargo codspeed build/, job.split("\n")[0]);
+    }
+  }
 });
 
 test("compiler cache restores across revisions while isolating compatible workloads", async () => {
@@ -230,7 +347,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   ]) {
     assert.ok(!oldKey.startsWith(render(prefix, change)), "incompatible cache must not restore");
   }
-  assert.match(prefix, /ubuntu2204-rust1\.93\.1-codspeed5\.0\.1-mimalloc-absolute-remap/);
+  assert.match(prefix, /ubuntu2204-rust1\.93\.1-codspeed5\.0\.1-per-workload-absolute-remap/);
   assert.match(cache, /path: target\/release/);
   assert.match(workflow, /key: \$\{\{ steps.native-build-cache.outputs.cache-primary-key \}\}/);
   assert.doesNotMatch(workflow, /JAZZ_BENCHMARK_SOURCE/);
