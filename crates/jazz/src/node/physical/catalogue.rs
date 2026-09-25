@@ -560,6 +560,10 @@ pub(super) fn physical_ahead_current_table_name(table_id: PhysicalTableId) -> St
     format!("jazz_physical_{}_ahead_current", table_id.0)
 }
 
+pub(super) fn physical_ahead_shadow_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_ahead_shadow", table_id.0)
+}
+
 pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_rejected_versions", table_id.0)
 }

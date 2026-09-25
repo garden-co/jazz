@@ -32,6 +32,7 @@ where
                             physical_history_table_name(table_id),
                             physical_global_current_table_name(table_id),
                             physical_ahead_current_table_name(table_id),
+                            physical_ahead_shadow_table_name(table_id),
                             physical_rejected_versions_table_name(table_id),
                         ]
                         .iter()
@@ -63,6 +64,7 @@ where
         Ok(match class {
             PhysicalCurrentClass::Global => physical_global_current_table_name(table_id),
             PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(table_id),
+            PhysicalCurrentClass::AheadShadow => physical_ahead_shadow_table_name(table_id),
         })
     }
 
@@ -455,6 +457,7 @@ where
             let storage_tables = [
                 physical_global_current_table_name(target_mapping.table_id),
                 physical_ahead_current_table_name(target_mapping.table_id),
+                physical_ahead_shadow_table_name(target_mapping.table_id),
             ];
             for storage_table in &storage_tables {
                 let logical_output =
@@ -604,6 +607,7 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
+            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
             let logical_output = target_table.global_current_storage_table().record_schema();
@@ -707,6 +711,7 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
+            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;

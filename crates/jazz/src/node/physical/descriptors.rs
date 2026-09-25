@@ -905,6 +905,18 @@ pub(super) fn physical_version_storage_tables(
                     .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
+        // Same layout and indexes as global current: it holds copies of
+        // global rows, so an index scan over it addresses the same keys.
+        let mut physical_shadow = GrooveTableSchema::new_with_bound_registries(
+            physical_ahead_shadow_table_name(table_id),
+            current_columns(),
+        );
+        physical_shadow.primary_key = logical_global.primary_key.clone();
+        for index in &physical_global.indices {
+            if index.name != crate::schema::GLOBAL_CURRENT_BY_SEQ_INDEX {
+                physical_shadow = physical_shadow.with_index(index.clone());
+            }
+        }
         let rejected_template = template_table.rejected_versions_storage_table();
         let rejected_system_columns = rejected_template
             .columns
@@ -971,6 +983,8 @@ pub(super) fn physical_version_storage_tables(
             physical_global = physical_global.with_variant_payload(tag, global_payload);
             let ahead_payload = variant_payload_fields_for_names(&physical_ahead, &fields)?;
             physical_ahead = physical_ahead.with_variant_payload(tag, ahead_payload);
+            let shadow_payload = variant_payload_fields_for_names(&physical_shadow, &fields)?;
+            physical_shadow = physical_shadow.with_variant_payload(tag, shadow_payload);
         }
         for (tag, fields) in rejected_layouts_by_tag {
             let payload = variant_payload_fields_for_names(&rejected, &fields)?;
@@ -979,6 +993,7 @@ pub(super) fn physical_version_storage_tables(
         tables.push(physical);
         tables.push(physical_global);
         tables.push(physical_ahead);
+        tables.push(physical_shadow);
         tables.push(rejected);
     }
     Ok(tables)

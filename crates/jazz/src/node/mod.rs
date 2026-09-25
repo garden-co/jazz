@@ -574,6 +574,9 @@ pub struct NodeState<S> {
     /// needs ordering, so use the low-overhead deterministic hasher here.
     /// Overlay row key -> the pending transaction whose image it holds.
     ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
+    /// Rows whose overlay or synced image changed in the open batch; their
+    /// shadow copies are brought in line by `flush_ahead_shadows`.
+    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid)>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 

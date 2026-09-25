@@ -128,6 +128,7 @@ where
         } else {
             None
         };
+        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;

@@ -654,7 +654,9 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
         let (optional_rows, optional_metrics) =
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
-        assert_eq!(optional_metrics.source_index_probes, 1);
+        // A Local read also probes the overlay and its shadow of settled rows.
+        let probes = if tier == DurabilityTier::Local { 3 } else { 1 };
+        assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
         assert_eq!(required_rows, vec![matching_required]);
         let (null_rows, _) = query_rows_by_uuid(&mut core, explicit_null.clone(), tier);
@@ -742,11 +744,10 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_primary_key_scans, 0);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 1);
-    assert_eq!(
-        local_metrics.source_full_scans, 1,
-        "Local index reads must scan ahead candidates because a newer winner can change owner"
-    );
+    // Settled, overlay and shadow index probes; a newer pending winner that
+    // changed owner is shadowed without scanning the overlay.
+    assert_eq!(local_metrics.source_index_probes, 3);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -815,8 +816,8 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
         local.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([moved_in, duplicate])
     );
-    assert_eq!(metrics.source_index_probes, 1);
-    assert_eq!(metrics.source_full_scans, 1);
+    assert_eq!(metrics.source_index_probes, 3);
+    assert_eq!(metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -1056,8 +1057,8 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 2);
-    assert_eq!(local_metrics.source_full_scans, 1);
+    assert_eq!(local_metrics.source_index_probes, 6);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]

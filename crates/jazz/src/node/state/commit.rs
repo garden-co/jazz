@@ -471,6 +471,7 @@ where
             self.write_ahead_current_insert(&mut batch, overlay.as_ref().unwrap_or(&stored))?;
             stored_versions.push(stored);
         }
+        self.flush_ahead_shadows(&mut batch).await?;
         let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {

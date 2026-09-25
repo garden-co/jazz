@@ -2969,6 +2969,70 @@ where
                 global
             } else {
                 let global = global.project(physical_fields.clone());
+                // An unlimited index read stays index-bounded on the overlay
+                // too: overlay rows under the prefix join the result, and the
+                // shadow (synced copies of overlaid rows, same indexes) names
+                // the settled candidates they replace. A pending edit that
+                // moved a row out of the prefix still shadows its settled
+                // copy, because the shadow holds the settled image.
+                if let Some(CurrentAccessPath::Index {
+                    column,
+                    order_column,
+                    reverse,
+                    prefix,
+                    intersections,
+                    source_limit,
+                    maintained,
+                    candidate_filter: _,
+                }) = &access_path
+                    && (!exclude_deleted)
+                        .then_some(*source_limit)
+                        .flatten()
+                        .is_none()
+                {
+                    let scan = |this: &Self, class| {
+                        this.node.physical_current_source_for_index_scan_in(
+                            class,
+                            read_table,
+                            this.read_view.read_schema,
+                            column,
+                            order_column.as_deref(),
+                            *reverse,
+                            prefix,
+                            intersections,
+                            *maintained,
+                            None,
+                            None,
+                            &projection_target,
+                            raw_global_output.clone(),
+                        )
+                    };
+                    self.node.query_engine_read_metrics.source_index_probes +=
+                        2 * (1 + intersections.len() as u64);
+                    let ahead = scan(self, PhysicalCurrentClass::Ahead).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?;
+                    let shadow = scan(self, PhysicalCurrentClass::AheadShadow).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?;
+                    let ahead = self.exclude_settled_arm(request, ahead, true).await?;
+                    let ahead = ahead.project(physical_fields.clone());
+                    let content = GraphBuilder::union([
+                        ahead,
+                        GraphBuilder::anti_join(
+                            global,
+                            shadow.project(["row_uuid"]),
+                            ["row_uuid"],
+                            ["row_uuid"],
+                        ),
+                    ])
+                    .project(physical_fields)
+                    .project_fields(post_winner_fields);
+                    if !exclude_deleted {
+                        return Ok(content.project(fields));
+                    }
+                    return Ok(content.filter(not_deleted_predicate()));
+                }
                 let ahead = match &access_path {
                     Some(CurrentAccessPath::PrimaryKey(prefix)) => self
                         .node
@@ -4572,6 +4636,40 @@ where
         source_limit: Option<usize>,
         candidate_filter: Option<&CurrentIndexCandidateFilter>,
         projection_target: &str,
+        output: RecordDescriptor,
+    ) -> Result<GraphBuilder, Error> {
+        self.physical_current_source_for_index_scan_in(
+            PhysicalCurrentClass::Global,
+            table,
+            schema_version,
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            maintained,
+            source_limit,
+            candidate_filter,
+            projection_target,
+            output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn physical_current_source_for_index_scan_in(
+        &self,
+        class: PhysicalCurrentClass,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
+        prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
+        maintained: bool,
+        source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
+        projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
@@ -4589,7 +4687,8 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current index column mapping missing",
             ))?;
-        let storage_table = physical_global_current_table_name(mapping.table_id);
+        let storage_table =
+            self.physical_current_table_for_schema(schema_version, &table.name, class)?;
         // Root reads address the shared (empty) branch coordinate. Physical
         // current indexes include that coordinate first so identical user keys
         // from branch-local rows cannot alias the shared index domain.

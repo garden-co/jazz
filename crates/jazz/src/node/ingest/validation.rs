@@ -100,6 +100,7 @@ where
             None,
         )
         .await?;
+        self.flush_ahead_shadows(&mut batch).await?;
         let persistence = self.database.apply_batch(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
         self.pending_persistence.insert(tx_id);
@@ -174,6 +175,7 @@ where
         )
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
+        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
@@ -640,6 +642,7 @@ where
                 contribution_merge,
             )?,
         );
+        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;

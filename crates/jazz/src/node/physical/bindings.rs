@@ -645,6 +645,7 @@ pub(super) fn physical_current_storage_table(
     Ok(match class {
         PhysicalCurrentClass::Global => physical_global_current_table_name(mapping.table_id),
         PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(mapping.table_id),
+        PhysicalCurrentClass::AheadShadow => physical_ahead_shadow_table_name(mapping.table_id),
     })
 }
 
