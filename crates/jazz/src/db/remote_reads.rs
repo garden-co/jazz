@@ -1,16 +1,18 @@
-//! Bounded first-page reads routed to the selected serving authority.
+//! Flat one-shot reads routed to the selected serving authority.
 use super::peer_connection::{ConnectionLink, PeerConnection, transport_error};
 use super::*;
 use crate::protocol::{PolicyBindingKey, RemoteReadRequest, RemoteReadResponse};
 
 const MAX_PENDING: usize = 64;
 pub(super) const MAX_QUERY_BYTES: usize = 32 * 1024;
-pub(super) const MAX_RESULT_BYTES: usize = 1024 * 1024;
+const MAX_PAGE_RESULT_BYTES: usize = 1024 * 1024;
+const MAX_UNBOUNDED_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) type SharedRemoteReads = Rc<RefCell<RemoteReadRouter>>;
 
 pub(super) struct RemoteReadRoute {
     pub request: RemoteReadRequest,
+    pub max_result_bytes: usize,
     pub context: PolicyBindingKey,
     pub upstream: Option<AuthorityContext>,
     pub downstream: Option<(u64, PermissionAdviceRequestId)>,
@@ -104,8 +106,19 @@ impl RemoteReadRouter {
     }
 }
 
-pub(super) fn valid_request(request: &RemoteReadRequest) -> bool {
-    !request.query.is_empty() && request.query.len() <= MAX_QUERY_BYTES
+pub(super) fn valid_request(request: &RemoteReadRequest) -> Option<usize> {
+    if request.query.is_empty() || request.query.len() > MAX_QUERY_BYTES {
+        return None;
+    }
+    // Keep unsupported shapes on the wire: the serving Core replies None so
+    // the requester can fall back instead of waiting for a dropped request.
+    let unbounded = crate::wire::decode_postcard_exact::<Query>(&request.query)
+        .is_ok_and(|query| query.limit.is_none());
+    Some(if unbounded {
+        MAX_UNBOUNDED_RESULT_BYTES
+    } else {
+        MAX_PAGE_RESULT_BYTES
+    })
 }
 
 /// A serving Core owns both query evaluation and final row hydration. A relay
@@ -115,9 +128,10 @@ pub(super) async fn evaluate_remote_read<S: OrderedKvStorage>(
     request: &RemoteReadRequest,
     identity: AuthorSubject,
     claims: BTreeMap<String, Value>,
+    max_result_bytes: usize,
 ) -> Option<Vec<u8>> {
     let query: Query = crate::wire::decode_postcard_exact(&request.query).ok()?;
-    if !matches!(query.limit, Some(1..=1000))
+    if !matches!(query.limit, None | Some(1..=1000))
         || query.relation.is_some()
         || !query.array_subqueries.is_empty()
     {
@@ -149,7 +163,7 @@ pub(super) async fn evaluate_remote_read<S: OrderedKvStorage>(
         .ok()?;
     scoped.hydrate_current_rows(&mut rows).await.ok()?;
     let bytes = crate::binding_codec::encode_rows(&rows).ok()?;
-    (bytes.len() <= MAX_RESULT_BYTES).then_some(bytes)
+    (bytes.len() <= max_result_bytes).then_some(bytes)
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
@@ -167,10 +181,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
             schema,
             delegated_session: None,
         };
-        if valid_request(&request) && self.admitted_upstream_authority.borrow().is_some() {
+        if let Some(max_result_bytes) = valid_request(&request)
+            && self.admitted_upstream_authority.borrow().is_some()
+        {
             let claims = self.node.borrow().session_claims_for(identity);
             self.remote_reads.borrow_mut().admit(RemoteReadRoute {
                 request,
+                max_result_bytes,
                 context: PolicyBindingKey::from_canonical_parts(identity, claims),
                 upstream: None,
                 downstream: None,
@@ -365,19 +382,20 @@ pub(super) fn receive_remote_read(
     let Some(expected) = expected else {
         return;
     };
-    let valid_route = router
+    let max_result_bytes = router
         .borrow()
         .routes
         .get(&response.request_id)
-        .is_some_and(|route| {
+        .filter(|route| {
             eligible
                 && selected.is_some_and(|selected| selected.same_admitted_link(expected))
                 && route
                     .upstream
                     .is_some_and(|sent| sent.same_admitted_link(expected))
-        });
-    if valid_route {
-        let rows = response.rows.filter(|rows| rows.len() <= MAX_RESULT_BYTES);
+        })
+        .map(|route| route.max_result_bytes);
+    if let Some(max_result_bytes) = max_result_bytes {
+        let rows = response.rows.filter(|rows| rows.len() <= max_result_bytes);
         router.borrow_mut().finish(response.request_id, rows);
     }
 }

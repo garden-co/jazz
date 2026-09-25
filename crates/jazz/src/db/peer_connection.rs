@@ -4092,10 +4092,12 @@ where
                                 |context| context.negotiated_features
                                     & crate::wire::FEATURE_REMOTE_READ_RESULTS != 0,
                             );
-                            if !admitted || !remote_reads::valid_request(&request) {
+                            let max_result_bytes = remote_reads::valid_request(&request);
+                            if !admitted || max_result_bytes.is_none() {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let max_result_bytes = max_result_bytes.unwrap();
                             let Some((identity, claims)) = admitted_request_policy_binding(
                                 *ingest_context,
                                 peer,
@@ -4116,7 +4118,7 @@ where
                             };
                             if self.node.borrow().can_mint_current_row_receipts() {
                                 let rows = remote_reads::evaluate_remote_read(
-                                    &self.node, &request, identity, claims,
+                                    &self.node, &request, identity, claims, max_result_bytes,
                                 ).await;
                                 queue_direct_control(&mut self.pending_control_responses,
                                     SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
@@ -4131,6 +4133,7 @@ where
                                 forwarded.delegated_session = None;
                                 let route = remote_reads::RemoteReadRoute {
                                     request: forwarded,
+                                    max_result_bytes,
                                     context: crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims),
                                     upstream: None,
                                     downstream: Some((connection_epoch, request.request_id)),

@@ -353,8 +353,8 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
-        // A bounded Global first page can be served directly by the admitted
-        // authority. An immediate read only uses this route while it has no
+        // A flat Global one-shot read can be served by the admitted authority.
+        // An immediate read only uses this route while it has no
         // local write to compose; unavailable/old peers use ordinary coverage.
         if opts.result_only
             && require_coverage
@@ -365,7 +365,7 @@ where
             && opts.propagation == Propagation::Full
             && !opts.include_deleted
             && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
-            && matches!(decoded.limit, Some(1..=1000))
+            && matches!(decoded.limit, None | Some(1..=1000))
             && !is_relation
             && decoded.array_subqueries.is_empty()
             && (opts.local_updates == LocalUpdates::Deferred

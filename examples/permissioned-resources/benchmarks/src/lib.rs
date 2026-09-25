@@ -788,6 +788,12 @@ fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             ))
         })
         .collect::<Vec<_>>();
+    let encoded_result_bytes = expected.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
+    let largest_encoded_result_bytes = expected
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .max()
+        .unwrap_or(0);
     let mut completed = vec![None; reads.len()];
     let mut tick_us = [0_u128; 3];
     let mut read_poll_us = 0_u128;
@@ -870,6 +876,8 @@ fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             "topology": if direct_core { "core-client" } else { "core-device-local-relay-client" },
             "queries": queries.len(),
             "rows": completed.into_iter().map(|rows| rows.expect("completed read")).sum::<usize>(),
+            "encoded_result_bytes": encoded_result_bytes,
+            "largest_encoded_result_bytes": largest_encoded_result_bytes,
             "connect_ms": connect_ms,
             "read_ms": read_started.elapsed().as_millis(),
             "read_poll_us": read_poll_us,

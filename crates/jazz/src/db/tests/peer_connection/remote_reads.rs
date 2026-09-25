@@ -51,6 +51,104 @@ fn link(
     )
 }
 
+// The serialized result variant proves that an unbounded read used the
+// authority route; the public decoded rows alone cannot distinguish it from
+// the slower receiver coverage path.
+#[test]
+fn unbounded_global_read_proxies_authorized_rows_through_relay() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xab; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbb; 16]);
+    let core = open_core(0xcb, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let visible_a = row(0xdb);
+    let visible_b = row(0xdc);
+    core.insert_with_id("todos", visible_a, cells("first", false, alice))
+        .unwrap();
+    core.insert_with_id("todos", visible_b, cells("second", false, alice))
+        .unwrap();
+    core.insert_with_id("todos", row(0xdd), cells("hidden", false, bob))
+        .unwrap();
+
+    let query = Query::from("todos");
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let expected = {
+        let owner = core.node();
+        let mut owner = owner.borrow_mut();
+        let mut scoped = owner.scoped_active_session_claims(alice, test_provider_claims(alice));
+        let rows = block_on(scoped.query_rows_with_prepared_plan_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            alice,
+        ))
+        .unwrap();
+        assert_eq!(row_ids(&rows), vec![visible_a, visible_b]);
+        crate::binding_codec::encode_rows(&rows).unwrap()
+    };
+
+    let relay = open_db(0xeb, alice, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let client = open_db(0xfb, alice, &schema);
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
+    let (relay_up, core_down) = link(alice, 0xeb, 0xcb);
+    let _relay_up = block_on(relay.connect_upstream(relay_up));
+    let _core_down = core.accept_scope_isolated_relay_subscriber(
+        core_down,
+        alice,
+        test_provider_claims(alice),
+        1,
+    );
+    let (client_up, relay_down) = link(alice, 0xfb, 0xeb);
+    let _client_up = block_on(client.connect_upstream(client_up));
+    let _relay_down =
+        relay.accept_subscriber_with_claims(relay_down, alice, test_provider_claims(alice));
+    for _ in 0..6 {
+        client.tick().unwrap();
+        relay.tick().unwrap();
+        core.tick().unwrap();
+    }
+
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let mut read = Box::pin(client.all_serialized_query(
+        &bytes,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+        None,
+        None,
+        None,
+        true,
+        || false,
+        |attachment| client.detach_query(attachment),
+    ));
+    let mut context = Context::from_waker(Waker::noop());
+    let result = (0..32)
+        .find_map(|_| {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return Some(result.unwrap());
+            }
+            client.tick().unwrap();
+            relay.tick().unwrap();
+            core.tick().unwrap();
+            None
+        })
+        .expect("unbounded authority read settled");
+    let SerializedReadResult::EncodedRows(actual) = result else {
+        panic!("expected the authority result without receiver coverage");
+    };
+    assert_eq!(actual, expected);
+    assert_eq!(client.query_coverage_attachment_counts_for_test(), (0, 0));
+}
+
 #[test]
 fn bounded_global_read_returns_only_authorized_rows_without_receiver_coverage() {
     let schema = owner_read_schema();
