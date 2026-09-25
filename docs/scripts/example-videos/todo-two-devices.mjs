@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { composeSideBySide } from "./encode.mjs";
+import { composeWindows, stageFont } from "./encode.mjs";
 
 const exampleDir = fileURLToPath(
   new URL("../../../examples/todo-client-localfirst-react/", import.meta.url),
@@ -26,7 +26,7 @@ const port = Number(process.env.EXAMPLE_PORT ?? 5199);
 const size = { width: 600, height: 560 };
 const url = `http://127.0.0.1:${port}/`;
 // Glide time for the drawn cursor between targets.
-const glideMs = 550;
+const glideMs = 275;
 
 // Headless recordings have no visible pointer, so each device draws its own:
 // an arrow that glides to wherever Playwright moves the mouse, with a ripple
@@ -62,6 +62,19 @@ function installCursor({ color, glideMs }) {
   };
   if (document.readyState === "loading") addEventListener("DOMContentLoaded", mount);
   else mount();
+}
+
+// Render the app in the docs site's font, served to the page by a route.
+function installFont({ family }) {
+  const style = document.createElement("style");
+  style.textContent = [400, 700]
+    .map(
+      (w) =>
+        `@font-face{font-family:${family};font-weight:${w};src:url(/__video-font/${w}.woff2) format("woff2")}`,
+    )
+    .concat(`body,input,button{font-family:${family},system-ui,sans-serif}`)
+    .join("");
+  document.documentElement.append(style);
 }
 
 async function startExample() {
@@ -114,9 +127,19 @@ try {
   ]) {
     const context = await browser.newContext({
       viewport: size,
+      colorScheme: "dark",
       recordVideo: { dir: join(recordingDir, String(devices.length)), size },
     });
     await context.addInitScript(installCursor, { color, glideMs });
+    await context.addInitScript(installFont, { family: stageFont.family });
+    await context.route("**/__video-font/*.woff2", (route) =>
+      route.fulfill({
+        path: fileURLToPath(
+          stageFont.files[new URL(route.request().url()).pathname.match(/(\d+)\.woff2$/)[1]],
+        ),
+        contentType: "font/woff2",
+      }),
+    );
     const page = await context.newPage();
     devices.push({ label, context, page, startedAt: Date.now() });
     await page.goto(url);
@@ -181,9 +204,14 @@ try {
   await todo(b, "Buy oat milk").locator("input.toggle:checked").waitFor();
   await caption("…the server's permission policy rejects it", 2200);
 
-  await caption("Filters are live queries", 400);
+  await caption("Device A filters its list", 400);
   await type(a, a.getByLabel("Filter by title"), "room", 90);
-  await a.waitForTimeout(1400);
+  await a.waitForTimeout(900);
+  await caption("Device B adds a matching todo…", 400);
+  await add(b, "Tidy up the practice room");
+  await todo(a, "Tidy up the practice room").waitFor();
+  await caption("…and A's filtered view updates by itself: filters are live queries", 2400);
+  await click(a, a.getByLabel("Filter by title"));
   await a.getByLabel("Filter by title").fill("");
   await caption("Every change: local first, then synced", 1800);
   const end = Date.now();
@@ -196,8 +224,11 @@ try {
     recorded.push({ path: await video.path(), label: device.label, startedAt: device.startedAt });
   }
   await mkdir(outDir, { recursive: true });
-  const encoded = await composeSideBySide({
+  const encoded = await composeWindows({
+    browser,
     devices: recorded,
+    address: `localhost:${port}`,
+    workDir: recordingDir,
     captions,
     origin,
     end,
