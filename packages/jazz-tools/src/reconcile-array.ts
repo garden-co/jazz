@@ -29,10 +29,44 @@ export function applyDelta<T extends { id: string }>(
 
   const changes = normalizeRowDelta(delta.delta);
   const all = delta.all;
+  if (all !== undefined && exceedsStructuralSplices(target, changes)) {
+    // Each insert, removal or move is one splice, and a splice on a reactive
+    // array (Vue, Svelte) rewrites every later index, so many of them in one
+    // frame cost far more than one full reconcile.
+    reconcileArray(target, all);
+    return;
+  }
   applyRowChanges(target, changes, all === undefined);
   if (all !== undefined && !mergeChangedRowsFrom(target, all, changes)) {
     reconcileArray(target, all);
   }
+}
+
+/**
+ * Above this many splices in one frame, a full reconcile against `all` is
+ * cheaper on a reactive array than applying the splices one by one.
+ */
+const MAX_STRUCTURAL_SPLICES = 8;
+
+/**
+ * Whether the changes need more than {@link MAX_STRUCTURAL_SPLICES} splices.
+ * An update counts unless its row already sits at its index; checking only
+ * the hinted slot keeps this O(1) per change, so it may over-count moves.
+ */
+function exceedsStructuralSplices<T extends { id: string }>(
+  target: T[],
+  changes: RowDelta<T>[],
+): boolean {
+  if (changes.length <= MAX_STRUCTURAL_SPLICES) return false;
+  let splices = 0;
+  for (const change of changes) {
+    if (change.kind === RowChangeKind.Updated) {
+      const hinted = target[change.index];
+      if (hinted !== undefined && resultIdentity(hinted) === change.id) continue;
+    }
+    if (++splices > MAX_STRUCTURAL_SPLICES) return true;
+  }
+  return false;
 }
 
 /**
