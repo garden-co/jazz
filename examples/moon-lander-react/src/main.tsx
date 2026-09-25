@@ -1,8 +1,9 @@
+import { createAccountManager } from "jazz-tools";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { getOrCreatePlayerId } from "./game/player.js";
 
-function main() {
+async function main() {
   const params = new URLSearchParams(window.location.search);
 
   // URL search params override plugin-injected defaults (used by isolated
@@ -27,6 +28,15 @@ function main() {
     adminSecret ? "yes" : "no",
   );
 
+  if (!appId) throw new Error("Missing Jazz appId (VITE_JAZZ_APP_ID or ?appId=)");
+  if (!serverUrl) throw new Error("Missing Jazz serverUrl (VITE_JAZZ_SERVER_URL or ?serverUrl=)");
+
+  // A recovery secret pins this tab to a known local-first account; otherwise
+  // the session provider creates one and restores it on later visits.
+  const account = localFirstSecret
+    ? (await createAccountManager({ appId, serverUrl })).restoreLocalFirst(localFirstSecret)
+    : undefined;
+
   createRoot(document.getElementById("root")!).render(
     <App
       playerId={playerId}
@@ -37,11 +47,11 @@ function main() {
         appId,
         dbName,
         serverUrl,
-        ...(localFirstSecret ? { auth: { localFirstSecret } } : {}),
+        ...(account ? { account } : {}),
         ...(adminSecret ? { adminSecret } : {}),
       }}
     />,
   );
 }
 
-main();
+void main();
