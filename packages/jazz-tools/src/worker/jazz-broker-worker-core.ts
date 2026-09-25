@@ -1,3 +1,5 @@
+import { BrowserCatalogueCache } from "../runtime/catalogue-cache.js";
+import type { ReservedTxId } from "../runtime/provisional-initialization.js";
 import { createOpenTransactionId, type TxId } from "../runtime/client.js";
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
@@ -1135,6 +1137,19 @@ async function initialize(context: RuntimeContext): Promise<void> {
     const node = context.pageStore.replicaNode;
     const schema = encodeSchema(options.schema);
     const proof = options.selfSignedClientProof;
+    const cacheScope = options.catalogueCacheScope;
+    const cache = cacheScope ? new BrowserCatalogueCache() : undefined;
+    if (cacheScope) {
+      const owner = JSON.parse(physicalOwner.storageOwner);
+      if (
+        owner.appId !== cacheScope.appId ||
+        owner.env !== cacheScope.environment ||
+        owner.auth?.registry !== cacheScope.registryAuthority
+      )
+        throw new Error("Catalogue cache scope does not match admitted storage owner");
+    }
+    const cachedCatalogue =
+      cache && cacheScope ? ((await cache.load(cacheScope)) ?? undefined) : undefined;
     const config = openConfig(node, options.author, 1, false, options.initialSyncFlushEvery, proof);
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
@@ -1150,12 +1165,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.appId,
           proof.claimedAuthor,
           physicalOwner.storageOwner,
+          cachedCatalogue,
         )
       : await wasmModule.WasmDb.openBrowser(
           context.pageStore,
           schema,
           config,
           physicalOwner.storageOwner,
+          cachedCatalogue,
         );
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
@@ -1164,7 +1181,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      {
+        selfSignedClientProof: proof,
+        scopeIsolatedRelay: true,
+        ...(cache && cacheScope ? { catalogueCache: { cache, scope: cacheScope } } : {}),
+      },
     );
     context.runtime = runtime;
     unownedDb = null;
@@ -1693,6 +1714,40 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         } finally {
           if (unownedSubscriber) await activeRuntime.retirePeerTransport(unownedSubscriber);
         }
+      });
+      return;
+    }
+    if (message.type === "authenticated-catalogue-ready") {
+      if (!peer.subscriber || !peer.pump) throw new Error("Browser tab is not admitted");
+      const ready = await activeRuntime.hasAuthenticatedCatalogue();
+      if (
+        peer.context.peers.get(peer.tabId) !== peer ||
+        peer.context.runtime !== activeRuntime ||
+        peer.context.storageInvalidated ||
+        peer.context.closing ||
+        !peer.subscriber
+      )
+        throw new Error("Catalogue readiness admission ended");
+      post(peer.port, { type: "result", id: message.id, authenticatedCatalogueReady: ready });
+      return;
+    }
+    if (message.type === "initialization-status") {
+      if (!peer.subscriber || !peer.pump) throw new Error("Browser tab is not admitted");
+      const statuses = await activeRuntime.initializationTransactionStatus(
+        message.reservedTxIds as ReservedTxId[],
+      );
+      if (
+        peer.context.peers.get(peer.tabId) !== peer ||
+        peer.context.runtime !== activeRuntime ||
+        peer.context.storageInvalidated ||
+        peer.context.closing ||
+        !peer.subscriber
+      )
+        throw new Error("Initialization status admission ended");
+      post(peer.port, {
+        type: "result",
+        id: message.id,
+        initializationStatuses: JSON.stringify({ version: 1, statuses }),
       });
       return;
     }

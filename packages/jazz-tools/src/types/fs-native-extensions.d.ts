@@ -3,6 +3,7 @@
  * its small locking API here so every package typecheck can import it safely.
  */
 declare module "fs-native-extensions" {
+  export function waitForLock(descriptor: number): Promise<void>;
   export function waitForLockSync(descriptor: number): void;
   export function unlock(descriptor: number): void;
 }
