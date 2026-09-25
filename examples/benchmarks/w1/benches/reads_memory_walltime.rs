@@ -1,7 +1,11 @@
 use jazz::groove::storage::MemoryStorage;
 use jazz_example_benchmark_w1::{Fixture, ResumeFixture};
 
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     divan::main();
 }
 

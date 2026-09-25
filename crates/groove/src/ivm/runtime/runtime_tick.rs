@@ -1016,6 +1016,11 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Installed operator state is root-scoped; recursive child scopes are
+        // scratch. Drop them here, from this evaluation's own states, rather
+        // than scanning every installed state afterwards.
+        self.operator_states
+            .retain(|key, _| key.scope == ScopeId::root());
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -1490,9 +1495,12 @@ impl<'a> IncrementalEvaluation<'a> {
             Poll::Ready(result) => result?,
         }
         self.install(runtime);
-        runtime
-            .operator_states
-            .retain(|key, _| key.scope == ScopeId::root());
+        debug_assert!(
+            runtime
+                .operator_states
+                .keys()
+                .all(|key| key.scope == ScopeId::root())
+        );
         let notifications = std::mem::take(&mut self.pending_notifications);
         let mut dropped_subscriptions = dropped_subscriptions;
         for (subscription_id, queued) in notifications {
@@ -1951,7 +1959,11 @@ impl<'a> EvaluationSession<'a> {
                 collect_by.groups.commit_overlay();
             }
         }
-        runtime.operator_states.extend(self.operator_states);
+        runtime.operator_states.extend(
+            self.operator_states
+                .into_iter()
+                .filter(|(key, _)| key.scope == ScopeId::root()),
+        );
         for node in &self.relevant_nodes {
             if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
                 for key in keys {
@@ -2184,14 +2196,92 @@ impl IvmRuntime {
                     .with_install_observer(observer, failures)
             }),
         };
+        let (metrics, durable_writes) = self
+            .tick_detaching_cold(
+                table_deltas,
+                Vec::new(),
+                storage,
+                defer_notifications_until_durable,
+                Some(publication.clone()),
+                DetachOn::AnyRequest,
+            )
+            .await?;
+        Ok(ResidentTick {
+            metrics,
+            durable_writes,
+            publication,
+        })
+    }
+
+    /// Drive one tick of runtime-owned input changes without waiting for
+    /// remote chunks.
+    ///
+    /// Runnable work and storage reads complete before this returns. Work that
+    /// is waiting on a large-value chunk is retained as pending incremental
+    /// progress, in
+    /// order behind earlier pending evaluations, and finishes on a later
+    /// [`Self::poll_pending_incremental`] owner turn. Callers that must not
+    /// hold their own turn open for a remote fetch (for example a sync
+    /// receiver whose chunk requests leave through that same turn) use this
+    /// rather than [`Self::tick_with_params`].
+    pub(super) async fn tick_bindings_detaching_cold(
+        &mut self,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'static>,
+    ) -> Result<TickMetrics, IvmRuntimeError> {
+        if self.persistence_indeterminate.get() {
+            return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
+        }
+        let (metrics, _) = self
+            .tick_detaching_cold(
+                Vec::new(),
+                binding_deltas,
+                storage,
+                false,
+                None,
+                DetachOn::ChunkRequest,
+            )
+            .await?;
+        Ok(metrics)
+    }
+
+    async fn tick_detaching_cold(
+        &mut self,
+        table_deltas: Vec<TableDelta>,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'static>,
+        defer_notifications_until_durable: bool,
+        publication: Option<PendingResidentPublication>,
+        detach_on: DetachOn,
+    ) -> Result<(TickMetrics, Rc<RefCell<StagedWriteState>>), IvmRuntimeError> {
         let changed_tables = table_deltas
             .iter()
             .map(|delta| delta.table.as_str())
             .collect::<HashSet<_>>();
-        let affected_nodes = self
-            .graph
-            .affected_nodes(changed_tables.iter().copied(), std::iter::empty());
-
+        // Beginning the tick folds queued binding retractions into it, so
+        // hydration admission must cover their graph slice too.
+        let changed_bindings = binding_deltas
+            .iter()
+            .chain(
+                (!binding_deltas.is_empty())
+                    .then_some(self.pending_binding_retractions.iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(|delta| &delta.key)
+            .collect::<HashSet<_>>();
+        let affected_nodes = Arc::clone(
+            &self
+                .graph
+                .activation_plan(
+                    changed_tables.iter().copied(),
+                    changed_bindings.iter().copied(),
+                )
+                .map_err(IvmRuntimeError::GraphNodeNotFound)?
+                .affected,
+        );
+        drop(changed_tables);
+        drop(changed_bindings);
         // Hydration evaluates an isolated snapshot and installs that snapshot
         // atomically. Do not begin a resident tick which overlaps its graph
         // slice: beginning mutates durable evaluator state and input
@@ -2246,11 +2336,11 @@ impl IvmRuntime {
         let mut evaluation = self
             .begin_tick_with_params_and_notification_policy(
                 table_deltas,
-                Vec::new(),
+                binding_deltas,
                 storage,
                 None,
                 defer_notifications_until_durable,
-                Some(publication.clone()),
+                publication,
             )
             .await?;
         evaluation
@@ -2272,6 +2362,16 @@ impl IvmRuntime {
                         // its wake drives the next bounded turn. By contrast,
                         // an empty runnable queue is waiting on external
                         // requests and follows the existing detached path.
+                        return Poll::Pending;
+                    }
+                    Poll::Pending
+                        if detach_on == DetachOn::ChunkRequest
+                            && !evaluation.requests.has_pending_chunk() =>
+                    {
+                        // Storage completes without this caller's turn, so
+                        // await it inline as a complete tick would. Only a
+                        // chunk fetch, which may need this very turn to be
+                        // sent, is worth detaching.
                         return Poll::Pending;
                     }
                     _ => return Poll::Ready(progress),
@@ -2303,11 +2403,7 @@ impl IvmRuntime {
                 pending.order.push_back(evaluation_id);
             }
         };
-        Ok(ResidentTick {
-            metrics,
-            durable_writes,
-            publication,
-        })
+        Ok((metrics, durable_writes))
     }
 
     pub(crate) fn assign_resident_publication(
@@ -2654,12 +2750,18 @@ impl IvmRuntime {
     /// not hold a ready subscription's opening hostage).
     pub(crate) fn subscription_has_pending_progress(&self, id: SubscriptionId) -> bool {
         // A missing/failed receiver cannot prove a completed terminal.
-        if self.pending_incremental_polling
-            || self
-                .multisink_subscriptions
-                .get(&id)
-                .is_none_or(|s| s.failed)
-        {
+        self.multisink_subscriptions
+            .get(&id)
+            .is_none_or(|s| s.failed)
+            || self.subscription_has_pending_evaluation(id)
+    }
+
+    /// Whether admitted evaluation work (including notifications deferred
+    /// until durable) can still reach this subscription. Unlike
+    /// [`Self::subscription_has_pending_progress`], a failed or missing
+    /// subscription has none: its error is already queued for the receiver.
+    pub(crate) fn subscription_has_pending_evaluation(&self, id: SubscriptionId) -> bool {
+        if self.pending_incremental_polling {
             return true;
         }
         self.pending_incremental
@@ -3050,7 +3152,7 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
+        if self.eval_memo.tick_entries() > 0 {
             let mut retained_bytes = 0usize;
             self.eval_memo.retain(|key, entry| {
                 let keep = key.tick_epoch.is_none();
@@ -3743,4 +3845,14 @@ mod tests {
         assert_eq!(runtime.current_tick, before_tick);
         assert_eq!(runtime.table_frontiers, before_frontiers);
     }
+}
+
+/// Which pending requests let a detaching tick hand its evaluation to a later
+/// owner turn instead of awaiting it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetachOn {
+    /// Any external request, storage or chunk (resident writes).
+    AnyRequest,
+    /// Only a large-value chunk fetch (covered receiver installs, #3349).
+    ChunkRequest,
 }

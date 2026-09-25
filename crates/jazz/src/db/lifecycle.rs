@@ -608,6 +608,9 @@ where
         // remains ordered after every accepted mutation and wait observer.
         self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
+        // Query evaluation detached on a remote chunk (#3349) cannot finish
+        // once this runtime closes; end it rather than wait for a reconnect.
+        self.node.chunk_resolver.fail_local_demand_for_close();
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
         Ok(())
@@ -1115,6 +1118,14 @@ where
     /// events create sync work.
     pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         self.node.set_scheduler(scheduler);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    /// Model a host that polls ticks once and drops them while pending (see
+    /// [`TickScheduler::drops_pending_ticks`]) without installing a scheduler.
+    pub fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.node.set_drops_pending_ticks_for_test(drops);
     }
 
     #[cfg(any(test, feature = "testing"))]

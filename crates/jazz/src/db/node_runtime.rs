@@ -295,6 +295,7 @@ where
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
     pub(super) chunk_resolver: PeerChunkResolver,
+    detach_covered_chunk_waits: Rc<Cell<bool>>,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
     local_subscription_dirty_generation: Cell<u64>,
@@ -365,6 +366,7 @@ where
         let tx_time_reservation_clock = node.tx_time_reservation_clock();
         let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
+        let detach_covered_chunk_waits = node.detach_covered_chunk_waits_handle();
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -437,6 +439,7 @@ where
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
             chunk_resolver,
+            detach_covered_chunk_waits,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
             local_subscription_dirty_generation: Cell::new(0),
@@ -1237,8 +1240,18 @@ where
     }
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.detach_covered_chunk_waits.set(
+            scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.drops_pending_ticks()),
+        );
         *self.scheduler.borrow_mut() = scheduler;
         self.query_runtime_waker.borrow_mut().take();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.detach_covered_chunk_waits.set(drops);
     }
 
     #[cfg(test)]
@@ -4491,6 +4504,7 @@ where
                             maintained.has_covered_input_sources(),
                         );
                     }
+                    let covered_authority = authoritative_result_key.is_some();
                     match node_ref
                         .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             maintained,
@@ -4500,6 +4514,17 @@ where
                         )
                         .await
                     {
+                        // The receiver's evaluation is still waiting (for
+                        // example on large-value chunks) and nothing was
+                        // drained. Publishing now would report an incomplete
+                        // authority state, so retry on a later turn (#3349).
+                        Ok((None, _))
+                            if covered_authority
+                                && node_ref.covered_receiver_evaluation_pending(maintained) =>
+                        {
+                            retained.push(Rc::downgrade(&state));
+                            continue;
+                        }
                         Ok(update) => update,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();
