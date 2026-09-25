@@ -60,6 +60,9 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// Held while this view is the lone literal-graph subscriber of its
+    /// Local-tier client-local shape; see `NodeState::client_local_literal_shapes`.
+    client_local_literal_token: Option<std::sync::Arc<()>>,
     /// Test receipt from the exact program passed to subscribe_lowered_program,
     /// not from an unrelated prepared AppRows plan or caller-supplied label.
     #[cfg(test)]
@@ -138,6 +141,7 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            client_local_literal_token: None,
             #[cfg(test)]
             compiled_authorization_mode: None,
             read_view: Default::default(),
@@ -549,6 +553,10 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn hold_client_local_literal_token(&mut self, token: std::sync::Arc<()>) {
+        self.client_local_literal_token = Some(token);
+    }
+
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
         self.read_view = read_view;
     }

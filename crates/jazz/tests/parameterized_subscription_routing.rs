@@ -546,17 +546,20 @@ fn local_bindings_of_one_shape_share_one_prepared_source() {
         stream
     };
 
+    // The first subscriber keeps its literal graph; the second prepares the
+    // shared shape. From then on, bindings only attach to that shape.
     let first = subscribe(0);
-    let one = db.runtime_stats_for_test();
-    let rest = (1..4).map(subscribe).collect::<Vec<_>>();
+    let second = subscribe(1);
+    let two = db.runtime_stats_for_test();
+    let rest = (2..4).map(subscribe).collect::<Vec<_>>();
     let four = db.runtime_stats_for_test();
-    assert_eq!(four.active_subscriptions, one.active_subscriptions + 3);
-    assert_eq!(four.active_shape_params, one.active_shape_params + 3);
+    assert_eq!(four.active_subscriptions, two.active_subscriptions + 2);
+    assert_eq!(four.active_shape_params, two.active_shape_params + 2);
     assert_eq!(
-        four.arrangement_count, one.arrangement_count,
+        four.arrangement_count, two.arrangement_count,
         "later bindings of one Local-tier shape must reuse its prepared source"
     );
-    drop((first, rest));
+    drop((first, second, rest));
     block_on(db.close()).expect("close sharing fixture");
 }
 

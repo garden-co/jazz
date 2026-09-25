@@ -558,6 +558,13 @@ pub struct NodeState<S> {
     /// Disabled unless a core serving shell owns the complete policy inputs.
     /// This is runtime capability, never wire or durable authorization evidence.
     authoritative_scalar_exit_refresh: bool,
+    /// Local-tier client-local subscriptions that kept their literal graph
+    /// because no sibling of their shape was open, keyed by the prepared
+    /// binding-source name they would share, with the binding they hold. A
+    /// live token tells the next subscriber with a different binding to
+    /// prepare the shared shape instead.
+    client_local_literal_shapes:
+        std::collections::HashMap<String, (std::sync::Weak<()>, crate::query::Binding)>,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread

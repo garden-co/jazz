@@ -881,6 +881,7 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
+            client_local_literal_shapes: std::collections::HashMap::new(),
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),

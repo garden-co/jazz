@@ -4778,6 +4778,15 @@ impl IvmRuntime {
         self.live_attaches
     }
 
+    /// Whether any binding currently holds the prepared binding source named
+    /// `shape`. A caller can use this to keep a lone subscription on its own
+    /// literal graph and share a prepared shape only once a sibling exists.
+    pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
+        self.binding_sources
+            .get(&BindingSourceKey::prepared(shape.to_owned()))
+            .is_some_and(|source| !source.refcounts.is_empty())
+    }
+
     /// The shared nodes a live attach may borrow, or `None` when the shape is
     /// not certainly maintained for a sibling binding.
     fn live_attach_borrowed_nodes(
