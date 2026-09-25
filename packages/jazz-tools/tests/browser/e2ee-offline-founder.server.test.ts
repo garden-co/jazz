@@ -9,7 +9,12 @@ import {
 } from "jazz-tools";
 import { deploy } from "../../src/dev/catalogue.js";
 import { withTimeout } from "./support.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import {
+  blockJazzServerNetwork,
+  getJazzServerInfo,
+  stopJazzServer,
+  unblockJazzServerNetwork,
+} from "./testing-server.js";
 
 // Keep both account provenance and private E2EE material outside the Db lifetime.
 // No in-memory fallback: this fixture exercises the browser's durable store.
@@ -27,7 +32,11 @@ function browserStore(key: string): AccountStore {
 }
 
 it("automatically creates and reopens a fresh founder's encrypted text and image offline", async () => {
-  const server = await getJazzServerInfo(`e2ee-offline-founder-${crypto.randomUUID()}`);
+  const server = await getJazzServerInfo(
+    `e2ee-offline-founder-${crypto.randomUUID()}`,
+    undefined,
+    true,
+  );
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     notes: s
@@ -45,6 +54,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.notes.allowRead.always();
     policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
+    policy.notes.allowUpdate.always();
     policy.images.allowRead.always();
     policy.images.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.__e2ee_spaces.allowRead.always();
@@ -65,7 +75,8 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     store: browserStore(keys[0]!),
   };
   let db: Db | undefined;
-  let stopped = false;
+  let recipient: Db | undefined;
+  let blocked = false;
   try {
     await deploy({ ...server, schema: app, permissions });
     const accounts = await createAccountManager(managerConfig);
@@ -82,8 +93,8 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     await db.insert(app.projects, { title: "Online catalogue witness" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await stopJazzServer(server.serverUrl);
-    stopped = true;
+    await blockJazzServerNetwork(server.serverUrl);
+    blocked = true;
 
     const founder = accounts.createLocalFirst();
     expect(founder.id).not.toBe(onlineAccount.id);
@@ -123,6 +134,13 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
       "Fresh founder encrypted text did not become locally durable without authority",
     );
     expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    const updatedNote = { ...note, body: "Updated before the founder reached authority" };
+    await withTimeout(
+      db.update(app.notes, note.id, { body: updatedNote.body }).wait({ tier: "local" }),
+      10_000,
+      "Ordinary provisional encrypted update required manual transaction setup",
+    );
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(updatedNote);
 
     // A real one-pixel PNG, delivered in chunks through the public upload seam.
     const imageBytes = Uint8Array.from(
@@ -189,21 +207,52 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     );
     // Exact scope/grant records must survive, rather than a replacement epoch.
     expect(await db.all(app.projects, { tier: "local" })).toEqual([project]);
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([note]);
+    expect(await db.all(app.notes, { tier: "local" })).toEqual([updatedNote]);
     expect(await db.all(app.images, { tier: "local" })).toEqual([expectedImage]);
     expect(await db.all(app.__e2ee_spaces, { tier: "local" })).toEqual(roots);
     expect(await db.all(app.__e2ee_space_grants, { tier: "local" })).toEqual(grants);
     expect({ planCalls, sourceReads }).toEqual({ planCalls: 1, sourceReads: 1 });
+
+    await unblockJazzServerNetwork(server.serverUrl);
+    blocked = false;
+    await withTimeout(db.reconnect(), 10_000, "Founder reconnect stalled");
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(updatedNote);
+    expect(await db.one(app.images.where({ id: image.id }), { tier: "global" })).toEqual(
+      expectedImage,
+    );
+    expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+    recipient = await createDb({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      account: onlineAccount,
+      driver: { type: "persistent", dbName: `catalogue-witness-${server.appId}` },
+      e2ee: { app, store: browserStore(keys[1]!) },
+    });
+    await withTimeout(
+      db.e2ee.spaces.grant(app.projects, project.id, onlineAccount.id).wait(),
+      15_000,
+      "Accepted founder could not deliver the original image key",
+    );
+    expect(await recipient.one(app.images.where({ id: image.id }), { tier: "global" })).toEqual(
+      expectedImage,
+    );
+    expect({ planCalls, sourceReads }).toEqual({ planCalls: 1, sourceReads: 1 });
   } finally {
     try {
-      if (db) await withTimeout(db.shutdown(), 5_000, "Founder test cleanup stalled");
+      if (blocked) await unblockJazzServerNetwork(server.serverUrl);
+      await Promise.all(
+        [db, recipient].map((client) =>
+          client
+            ? withTimeout(client.shutdown(), 5_000, "Founder test cleanup stalled")
+            : undefined,
+        ),
+      );
     } finally {
       try {
-        if (!stopped)
-          await withTimeout(stopJazzServer(server.serverUrl), 5_000, "Server cleanup stalled");
+        await withTimeout(stopJazzServer(server.serverUrl), 5_000, "Server cleanup stalled");
       } finally {
         for (const key of keys) localStorage.removeItem(key);
       }
     }
   }
-}, 90_000);
+}, 120_000);
