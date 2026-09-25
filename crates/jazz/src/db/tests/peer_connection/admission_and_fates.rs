@@ -3773,6 +3773,67 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
     assert_eq!(block_on(missing), PermissionAdvice::Denied);
 }
 
+/// The row lookup must find an existing, readable row: only an `Allowed`
+/// answer distinguishes a correct lookup from one that reports every row as
+/// missing, since both a violating patch and a missing row are `Denied`.
+#[test]
+fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_update(None, public_literal_eq("done", PublicValue::Boolean(false))),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    for title in ["other-1", "other-2"] {
+        server.insert("todos", cells(title, false, author)).unwrap();
+    }
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x61; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut ask = |row, patch| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch,
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    let rename = || BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]);
+
+    assert_eq!(ask(target, rename()), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))])
+        ),
+        PermissionAdvice::Denied
+    );
+    assert_eq!(ask(row(0xef), rename()), PermissionAdvice::Denied);
+}
+
 #[test]
 #[ignore = "#3386: timing probe, run manually with --ignored"]
 /// Server tick for one Update permission advice against a growing table,
