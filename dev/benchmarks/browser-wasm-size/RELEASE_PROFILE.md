@@ -84,6 +84,14 @@ unmodified main (six tests passed, one failed). With explicit user approval,
 its helper now checks `done === false` and unwraps `value`; its data assertions
 are unchanged.
 
+That repair exposes a second fixture issue: raw streaming writes remain queued
+without a host tick driver, so the next upload stalls. A step trace reproduces
+this on both sealed main and candidate artifacts; explicitly driving the writes
+to local settlement progresses on both. The user chose to leave this additional
+fixture repair tracked in [#1844](https://github.com/garden-co/jazz/issues/1844#issuecomment-5834531502).
+The raw-WASM seven-test suite is therefore still non-green. The passing size
+fixtures above do not replace its large-value assertions.
+
 ## Reproduce
 
 Preserve each canonical package in a distinct ignored directory, then follow
