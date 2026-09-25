@@ -24,24 +24,19 @@ where
     ) -> std::collections::HashSet<String> {
         let shared_deletion_history =
             changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
+        // Parse each changed name back to its table id once, instead of
+        // formatting seven candidate names for every table of every schema.
+        let changed_table_ids = changed_tables
+            .iter()
+            .filter_map(|name| physical_table_id_for_publication_name(name))
+            .collect::<std::collections::HashSet<_>>();
         self.catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
-                    let table_id = table.table_id;
-                    let changed = shared_deletion_history
-                        || [
-                            physical_history_table_name(table_id),
-                            physical_register_table_name(table_id),
-                            physical_global_current_table_name(table_id),
-                            physical_register_global_current_table_name(table_id),
-                            physical_ahead_current_table_name(table_id),
-                            physical_register_ahead_current_table_name(table_id),
-                            physical_rejected_versions_table_name(table_id),
-                        ]
-                        .iter()
-                        .any(|name| changed_tables.contains(name));
+                    let changed =
+                        shared_deletion_history || changed_table_ids.contains(&table.table_id.0);
                     changed.then_some(logical_table.clone())
                 })
             })
@@ -294,7 +289,7 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical projection target schema alias missing",
                 ))?;
-            let target_table = self.table_in_schema(&target_table_name, target_schema)?;
+            let target_table = self.table_in_schema_ref(&target_table_name, target_schema)?;
             let projection_target =
                 physical_history_projection_target(target_alias, &target_table_name);
             let logical_output = target_table.history_storage_table().record_schema();
@@ -654,7 +649,7 @@ where
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
         let physical_fields = authored_output
             .fields()
@@ -832,7 +827,7 @@ where
         output_name: String,
         output_type: records::ValueType,
     ) -> Result<Option<ProjectField>, Error> {
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let mut cells = source_table
             .columns
             .iter()
@@ -893,7 +888,7 @@ where
                             ),
                         )?;
                     let target_column_type = self
-                        .table_in_schema(target_table_name, target_schema)?
+                        .table_in_schema_ref(target_table_name, target_schema)?
                         .columns
                         .iter()
                         .find(|column| column.name == target_column)
@@ -965,7 +960,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "target post-winner physical mapping missing",
             ))?;
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let required_enum_columns = target_table
             .columns
             .iter()
@@ -1203,7 +1198,7 @@ where
             Literal(Value),
         }
 
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let mut cells = source_table
             .columns
@@ -1478,5 +1473,64 @@ fn branch_scan(
             start: prepend(start),
             end: prepend(end),
         },
+    }
+}
+
+/// The table id of a per-table physical publication name, exactly the inverse
+/// of the `physical_*_table_name` spellings consulted by targeted refresh.
+fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
+    const SUFFIXES: [&str; 7] = [
+        "history",
+        "register",
+        "global_current",
+        "register_global_current",
+        "ahead_current",
+        "register_ahead_current",
+        "rejected_versions",
+    ];
+    let (table_id, suffix) = split_physical_table_name(name)?;
+    SUFFIXES.contains(&suffix).then_some(table_id.0)
+}
+
+// Internal test: targeted refresh only works if parsing is the exact inverse of
+// the private name formatters, and a mismatch would silently skip refreshes
+// rather than fail visibly through the public API.
+#[cfg(test)]
+mod publication_name_tests {
+    use super::*;
+
+    #[test]
+    fn publication_name_parsing_inverts_every_physical_name_formatter() {
+        for id in [0, 1, 9, 10, 42, u64::MAX] {
+            let table_id = PhysicalTableId(id);
+            for name in [
+                physical_history_table_name(table_id),
+                physical_register_table_name(table_id),
+                physical_global_current_table_name(table_id),
+                physical_register_global_current_table_name(table_id),
+                physical_ahead_current_table_name(table_id),
+                physical_register_ahead_current_table_name(table_id),
+                physical_rejected_versions_table_name(table_id),
+            ] {
+                assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
+            }
+            let history = physical_history_table_name(table_id);
+            let register = physical_register_table_name(table_id);
+            assert_eq!(physical_version_table_id(&history, false), Some(table_id));
+            assert_eq!(physical_version_table_id(&register, true), Some(table_id));
+            assert_eq!(physical_version_table_id(&history, true), None);
+            assert_eq!(physical_version_table_id(&register, false), None);
+        }
+        for name in [
+            SHARED_DELETION_HISTORY_TABLE,
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_1_histories",
+            "jazz_physical__history",
+            "jazz_physical_1",
+            "other_physical_1_history",
+        ] {
+            assert_eq!(physical_table_id_for_publication_name(name), None, "{name}");
+        }
     }
 }

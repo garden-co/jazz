@@ -8,6 +8,9 @@ import { bandChatBenchmarks } from "../../../examples/band-chat/benchmarks/metad
 import { worldTourBenchmarks } from "../../../examples/world-tour/benchmarks/metadata.ts";
 import { chatBenchmarks } from "../../../examples/chat-react/benchmarks/metadata.ts";
 import { authChatBenchmarks } from "../../../examples/auth-simple-chat/benchmarks/metadata.ts";
+import { posterShopBenchmarks } from "../../../examples/poster-shop/benchmarks/metadata.ts";
+import { recordPlayerBenchmarks } from "../../../examples/record-player/benchmarks/metadata.ts";
+import { wequencerBenchmarks } from "../../../examples/wequencer/benchmarks/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
 
 export const benchmarkMetadata = [
@@ -21,6 +24,9 @@ export const benchmarkMetadata = [
   ...worldTourBenchmarks,
   ...chatBenchmarks,
   ...authChatBenchmarks,
+  ...posterShopBenchmarks,
+  ...recordPlayerBenchmarks,
+  ...wequencerBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");

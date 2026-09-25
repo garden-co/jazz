@@ -19,6 +19,9 @@ export const workloads = [
   "world-tour",
   "chat",
   "auth-chat",
+  "poster-shop",
+  "record-player",
+  "wequencer",
 ];
 const format = "jazz-codspeed-benchmark-artifact-v1";
 // Observed codspeed-macro checkout root. Relative DWARF paths still receive
