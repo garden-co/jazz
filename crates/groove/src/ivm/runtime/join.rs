@@ -375,18 +375,58 @@ impl JoinState {
                 )?;
             }
         }
-        let bytes = output.bytes.freeze();
-        Ok(consolidate_deltas(
-            output
-                .deltas
-                .into_iter()
-                .map(|(range, weight)| RecordDelta {
-                    record: bytes.slice(range),
-                    weight,
-                })
-                .collect(),
-        ))
+        Ok(output.finish())
     }
+}
+
+/// A first-result consumer will never apply a subsequent delta. Stream its
+/// left records through the right lookup without hashing/storing each complete
+/// left record in a second arrangement. Consolidation preserves multiplicities
+/// when a left record appears more than once or expands to several array keys.
+pub(super) fn join_snapshot_with_right_arrangement(
+    left: &RecordDeltas,
+    left_keys: &[String],
+    comparison: ValueComparison,
+    right: &ArrangementState,
+    projection: &crate::records::PreparedRecordCopy,
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut output = JoinOutputBuffer {
+        bytes: BytesMut::new(),
+        deltas: Vec::new(),
+    };
+    for keyed in keyed_join_deltas(&left.descriptor, left_keys, &left.deltas, comparison)? {
+        let Some(bucket) = right.bucket(&keyed.key) else {
+            continue;
+        };
+        for (record, weight) in bucket.iter() {
+            let weight = keyed.delta.weight * weight;
+            if weight != 0 {
+                let range = projection
+                    .project_into(&[keyed.delta.raw(), record.as_ref()], &mut output.bytes)?;
+                output.deltas.push((range, weight));
+            }
+        }
+    }
+    Ok(output.finish())
+}
+
+/// Snapshot semi/anti joins need neither left buckets nor the visibility state
+/// used to retract rows after a future change to the right-hand relation.
+pub(super) fn threshold_snapshot_with_right_arrangement(
+    left: &RecordDeltas,
+    left_keys: &[String],
+    comparison: ValueComparison,
+    right: &ArrangementState,
+    semi: bool,
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut output = Vec::new();
+    for keyed in keyed_join_deltas(&left.descriptor, left_keys, &left.deltas, comparison)? {
+        let count = right.key_count(&keyed.key);
+        if if semi { count > 0 } else { count == 0 } {
+            output.push(keyed.delta.clone());
+        }
+    }
+    Ok(consolidate_deltas(output))
 }
 
 /// A consumer borrows one aligned input version and its producer's delta.
@@ -932,6 +972,21 @@ struct JoinOutputBuffer {
     /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
     /// `+1`.”
     deltas: Vec<(Range<usize>, i64)>,
+}
+
+impl JoinOutputBuffer {
+    fn finish(self) -> Vec<RecordDelta> {
+        let bytes = self.bytes.freeze();
+        consolidate_deltas(
+            self.deltas
+                .into_iter()
+                .map(|(range, weight)| RecordDelta {
+                    record: bytes.slice(range),
+                    weight,
+                })
+                .collect(),
+        )
+    }
 }
 
 struct KeyedRecordDelta<'a> {

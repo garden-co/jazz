@@ -293,8 +293,14 @@ impl TickEvaluator<'_> {
                 };
                 let left = Arc::clone(&inputs[0]);
                 let right = Arc::clone(&inputs[1]);
-                // Arrange already materialized join keys. Keep both the
-                // delta and indexed payload in the producer's representation.
+                // A first-result left input may have skipped its arrangement.
+                // Resolve only its join keys before probing, including after
+                // a missing-chunk suspension. Indexed inputs already did this.
+                let left = if self.stream_snapshot_joins() {
+                    self.materialize_indirect_fields(&left, &plan_expr_fields(&join.left_key))?
+                } else {
+                    left
+                };
                 self.update_join(
                     node,
                     join,

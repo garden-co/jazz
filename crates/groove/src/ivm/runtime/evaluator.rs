@@ -1070,6 +1070,7 @@ impl GraphRuntimeView<'_> {
                 arrangement_update_mode: ArrangementUpdateMode::Accumulate,
                 eval_mode: EvalMode::Tick,
                 hydrate_arrangements: false,
+                first_result: false,
             },
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
@@ -2308,26 +2309,36 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
-        let left_state = self
-            .arrangement_states
-            .get(&left_key)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
         let right_state = self
             .arrangement_states
             .get(&right_key)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(right_input))?;
-        let deltas = JoinState.evaluate_prepared(
-            super::join::ArrangementTransition::at(
-                left_state,
-                self.arrangement_sub_tick(&left_key),
-            ),
-            super::join::ArrangementTransition::at(
-                right_state,
-                self.arrangement_sub_tick(&right_key),
-            ),
-            &projection,
-            self.context.arrangement_update_mode,
-        )?;
+        let deltas = if self.stream_snapshot_joins() {
+            super::join::join_snapshot_with_right_arrangement(
+                _left,
+                &left_on,
+                join.comparison,
+                right_state.value(),
+                &projection,
+            )?
+        } else {
+            let left_state = self
+                .arrangement_states
+                .get(&left_key)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
+            JoinState.evaluate_prepared(
+                super::join::ArrangementTransition::at(
+                    left_state,
+                    self.arrangement_sub_tick(&left_key),
+                ),
+                super::join::ArrangementTransition::at(
+                    right_state,
+                    self.arrangement_sub_tick(&right_key),
+                ),
+                &projection,
+                self.context.arrangement_update_mode,
+            )?
+        };
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -2411,31 +2422,41 @@ impl TickEvaluator<'_> {
         )?;
         let lt = self.arrangement_sub_tick(&left_key);
         let rt = self.arrangement_sub_tick(&right_key);
-        let left = self
-            .arrangement_states
-            .get(&left_key)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
         let right = self
             .arrangement_states
             .get(&right_key)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(right_input))?;
-        let left = super::join::ArrangementTransition::at(left, lt);
-        let right = super::join::ArrangementTransition::at(right, rt);
-        let operator = self.operator_states.entry(operator_key).or_insert_with(|| {
-            if semi {
-                OperatorState::SemiJoin(SemiJoinState::default())
-            } else {
-                OperatorState::AntiJoin(AntiJoinState::default())
+        let deltas = if self.stream_snapshot_joins() {
+            super::join::threshold_snapshot_with_right_arrangement(
+                _left,
+                &left_on,
+                join.comparison,
+                right.value(),
+                semi,
+            )?
+        } else {
+            let left = self
+                .arrangement_states
+                .get(&left_key)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
+            let left = super::join::ArrangementTransition::at(left, lt);
+            let right = super::join::ArrangementTransition::at(right, rt);
+            let operator = self.operator_states.entry(operator_key).or_insert_with(|| {
+                if semi {
+                    OperatorState::SemiJoin(SemiJoinState::default())
+                } else {
+                    OperatorState::AntiJoin(AntiJoinState::default())
+                }
+            });
+            match operator {
+                OperatorState::SemiJoin(state) if semi => {
+                    state.evaluate(left, right, self.context.arrangement_update_mode)
+                }
+                OperatorState::AntiJoin(state) if !semi => {
+                    state.evaluate(left, right, self.context.arrangement_update_mode)
+                }
+                _ => return Err(IvmRuntimeError::NodeStateOperatorMismatch(node)),
             }
-        });
-        let deltas = match operator {
-            OperatorState::SemiJoin(state) if semi => {
-                state.evaluate(left, right, self.context.arrangement_update_mode)
-            }
-            OperatorState::AntiJoin(state) if !semi => {
-                state.evaluate(left, right, self.context.arrangement_update_mode)
-            }
-            _ => return Err(IvmRuntimeError::NodeStateOperatorMismatch(node)),
         };
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
@@ -3054,16 +3075,27 @@ impl TickEvaluator<'_> {
         })
     }
 
+    fn stream_snapshot_joins(&self) -> bool {
+        self.context.first_result
+            && self.context.scope == ScopeId::root()
+            && self.context.eval_mode == EvalMode::Hydrate
+            && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
+    }
+
     fn arrangement_needs_index(&self, node: NodeId) -> bool {
         self.graph.node(node).is_some_and(|arrange| {
             arrange.children.iter().any(|child| {
                 self.graph
                     .node(*child)
                     .is_some_and(|child| match &child.descriptor.operator {
-                        OpType::Join(_)
-                        | OpType::SemiJoin(_)
-                        | OpType::AntiJoin(_)
-                        | OpType::Aggregate(_) => true,
+                        OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_) => {
+                            // A first-result join streams its left input. Keep
+                            // an index if any consumer probes this arrangement
+                            // on the right, including a self-join.
+                            !self.stream_snapshot_joins()
+                                || child.descriptor.inputs.get(1) == Some(&node)
+                        }
+                        OpType::Aggregate(_) => true,
                         OpType::CollectBy(collect) => collect.mode != CollectByMode::Root,
                         _ => false,
                     })
