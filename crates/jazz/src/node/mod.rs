@@ -325,6 +325,8 @@ mod descriptor_roles;
 mod eviction;
 mod global_state;
 mod ingest;
+mod node_aliases;
+pub(crate) use node_aliases::NodeAliases;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
 pub(crate) mod physical;
@@ -569,7 +571,7 @@ pub struct NodeState<S> {
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
-    pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    pub(crate) node_aliases: NodeAliases,
     /// One completed catalogue scan proved this UUID absent. The sole alias
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.

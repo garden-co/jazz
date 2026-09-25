@@ -2793,7 +2793,7 @@ pub(super) fn current_version_index(
     versions: &[VersionRow],
     candidate_indices: &[usize],
     layer: VersionLayer,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<usize> {
     match layer {
         VersionLayer::Content => {
@@ -2831,7 +2831,7 @@ pub(super) fn version_wins_over_open_winner(
 pub(super) fn content_head_indices(
     versions: &[VersionRow],
     candidate_indices: &[usize],
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Vec<usize> {
     let txs = candidate_indices
         .iter()
@@ -2880,11 +2880,10 @@ pub(super) fn content_head_indices(
 
 pub(super) fn version_tx_id_from_aliases(
     version: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<TxId> {
     node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == version.tx_node_alias()).then_some(*node))
+        .node_for_alias(version.tx_node_alias())
         .map(|node| TxId::new(version.tx_time(), node))
 }
 
