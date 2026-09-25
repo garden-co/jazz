@@ -179,23 +179,66 @@ any mutation (`INV-STORAGE-31`).
 
 Epoch 1 is the first settled format. Stores written by pre-settlement alpha
 builds are unsupported; they are neither guessed nor silently reinterpreted.
-Within an epoch, authoritative codec bytes are immutable. An incompatible
-change requires a new top-level epoch. A future supported transition is an
-explicitly registered adjacent `N -> N+1` copy-on-write migration with a
-durable journal and an atomic manifest flip. While that journal is incomplete,
-application access is closed; reopen may resume or discard the unpublished
-target, but must expose either complete `N` or complete `N+1`, never a mixture.
-There is no synthetic migration into epoch 1.
+Within an epoch, authoritative codec bytes are immutable. Jazz node epoch 2 adds
+only `jazz.exclusive-read-evidence.v1` to its exact closed epoch-1 profile.
+Groove-only roots and separately composed auxiliary Jazz roots (including the
+catalogue-entry and account-command journals) retain their explicit epoch-1
+profiles. A Groove-only root is not a legacy Jazz node root.
+
+The supported Jazz node `1 -> 2` transition transforms no payloads. One
+Jazz-owned coordinator asks the adapter for staged admission with explicit
+source/target epochs and codec profiles. The adapter contributes its exact
+physical format ID/version/parameters. Fresh epoch-2 roots atomically persist
+their manifest and `FreshE2` admission receipt. Existing epoch-2 roots require a
+valid receipt. Exact epoch-1 roots expose only an exclusive guard with a
+read-only ordered view. Jazz scans every legacy transaction using its frozen
+descriptor, requiring reserved slots 5–8 all NULL. Neither Groove nor the
+adapter interprets those slots. Failure or cancellation before completion drops
+the guard without changing rows, families, the manifest, or receipt. Successful
+completion atomically publishes the target manifest and `CompletedE1ToE2`
+receipt before ordinary access. No separate intent is needed: interruption
+leaves either the unchanged source or the target plus its completed receipt.
+
+`JSA1` is the admission-receipt byte grammar. ASCII `JSA1` is followed by one
+tag byte: `00` for `FreshE2`, `01` for `CompletedE1ToE2`. A completed receipt
+next carries the exact source manifest as a `u32` big-endian byte length and
+canonical `JSM1` bytes. Both forms end with the exact target manifest in the
+same length-delimited encoding. Unknown tags, epochs, truncated/trailing data,
+different source/target physical formats, and mismatched expected profiles are
+invalid. Receipt absence is never interpreted as a fresh epoch-2 root.
+
+RocksDB holds its exclusive DB handle and opens only already-existing column
+families before preflight; a synced WriteBatch publishes manifest and receipt.
+SQLite holds an exclusive transaction across preflight and commits the pair
+with FULL synchronization. IndexedDB holds the broker's physical-root Web Lock
+and publishes the pair in one existing manifest-store transaction. Ordinary
+native write durability retains the caller-selected policy after admission;
+admission does not promote WalNoSync writes to FullSync. Physical formats,
+class-CF mapping, SQLite DDL and the IndexedDB schema generation do not change.
+
+The read-only layout view reuses Groove's mapping and marker validation but
+never creates families, a tree root or the layout marker. An exact epoch-1
+root interrupted between adapter initialization and its first node open may
+lack the marker only when _all_ enumerable ordinary storage is empty. Data in
+an unmapped family is not evidence of an empty root. Unknown/malformed markers
+and missing markers in nonempty roots fail closed. Explicit read-only opens
+never perform the transition. There is no synthetic migration into epoch 1.
 
 The adapter owns its physical manifest location (for example a RocksDB internal
 column family, SQLite metadata table, or IndexedDB root metadata), but it MUST
 return a successful open receipt only after validating this common contract.
-Memory storage has no durable manifest and is used solely for semantic
-conformance. Backend files are not interchange formats.
+Storage admission is explicit at the ordered-storage interface: an adapter
+reports ephemeral storage or its actual durable manifest and receipt.
+Unsupported adapters fail, and wrappers delegate rather than silently claiming
+ephemeral storage. MemoryStorage explicitly reports ephemeral. Every Jazz node
+entry checks this evidence before its first ordinary Groove Database or layout
+constructor; low-level already-opened epoch-1/Groove-only durable handles are
+rejected and callers must use the Jazz coordinator. Generic Groove Database
+construction remains unchanged. Backend files are not interchange formats.
 
 **Implementation-status note.** RocksDB and SQLite persist and validate this
 shared `JSM1` manifest. IndexedDB persists the equivalent structured-clone
-epoch-one manifest at its fixed `storage-manifest`/`epoch` location before the
+manifest at its fixed `storage-manifest`/`epoch` location before the
 caller receives a page-store handle. It includes the caller-selected closed
 codec profile, epoch, adapter/page versions, fixed 16 KiB page size, and
 `xxh3-64-le` page checksum identity. The browser physical-open receipt installs

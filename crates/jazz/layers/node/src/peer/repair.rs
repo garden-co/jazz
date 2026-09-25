@@ -35,6 +35,7 @@ impl PeerState {
             .count() as u64;
     }
 
+
     fn record_outgoing_view_update<S: OrderedKvStorage>(
         &mut self,
         _node: &NodeState<S>,

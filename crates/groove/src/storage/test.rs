@@ -542,6 +542,10 @@ impl<S> OrderedKvStorage for YieldingStorage<S>
 where
     S: OrderedKvStorage,
 {
+    fn admission(&self) -> Result<super::StorageAdmission, Error> {
+        self.inner.admission()
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.control.record_point_read();
         if let Some(value) = self.resident.borrow().get(&cf, &key) {

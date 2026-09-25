@@ -11,6 +11,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use groove::storage::{
+    BoxedStorage, ReadOnlyStorage, StagedStorageOpen, StorageAdmission, StorageAdmissionGuard,
+    StorageAdmissionReceipt, StorageOpenSpec,
+};
+use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor, ReopenableStorage,
     ScanBounds, ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor,
     StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
@@ -29,6 +33,7 @@ const USER_VERSION: i64 = 1;
 /// same-shaped foreign database cannot be silently adopted.
 const DDL_ID: &[u8] = b"jazz-groove-ordered-kv-ddl-v1";
 const EPOCH_MANIFEST_KEY: &str = "epoch_manifest";
+const ADMISSION_RECEIPT_KEY: &str = "admission_receipt";
 const META_DDL: &str = "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT";
 const COLUMN_FAMILIES_DDL: &str =
     "CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT";
@@ -69,11 +74,7 @@ impl Durability {
 /// are supported specifically for the atomic conditional primitives; this does
 /// not promote the rest of the interface to a general multi-writer API.
 pub struct SqliteStorage {
-    path: PathBuf,
     durability: Durability,
-    /// The codec profile this handle was opened with. The store pins it in
-    /// its epoch manifest, so a column-family reopen must present it again.
-    codec_profile: StorageCodecProfile,
     column_families: RefCell<BTreeMap<String, i64>>,
     connection: RefCell<Option<Connection>>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
@@ -181,9 +182,29 @@ impl StorageCursor for SqliteCursor<'_> {
 
 /// Opens SQLite stores for generic Jazz persistent-client shells.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SqliteStorageFactory;
+pub struct SqliteStorageFactory {
+    durability: Durability,
+}
+
+impl SqliteStorageFactory {
+    pub fn with_durability(durability: Durability) -> Self {
+        Self { durability }
+    }
+}
 
 impl StorageFactory for SqliteStorageFactory {
+    fn open_staged(
+        &self,
+        path: PathBuf,
+        column_families: Vec<String>,
+        source: StorageOpenSpec,
+        target: StorageOpenSpec,
+    ) -> StorageFuture<'_, Result<StagedStorageOpen, Error>> {
+        Box::pin(async move {
+            SqliteStorage::open_staged(path, column_families, source, target, self.durability).await
+        })
+    }
+
     fn open(
         &self,
         path: PathBuf,
@@ -199,7 +220,7 @@ impl StorageFactory for SqliteStorageFactory {
                 SqliteStorage::open_with_durability_and_codec_profile(
                     path,
                     &refs,
-                    Durability::default(),
+                    self.durability,
                     &codec_profile,
                 )?,
             ))
@@ -207,7 +228,168 @@ impl StorageFactory for SqliteStorageFactory {
     }
 }
 
+struct SqliteAdmissionGuard {
+    storage: SqliteStorage,
+    column_families: Vec<String>,
+    source: StorageEpochManifest,
+    target: StorageEpochManifest,
+}
+
+impl StorageAdmissionGuard for SqliteAdmissionGuard {
+    fn read_only(&self) -> ReadOnlyStorage<'_> {
+        ReadOnlyStorage::new(&self.storage)
+    }
+    fn complete(self: Box<Self>) -> StorageFuture<'static, Result<BoxedStorage, Error>> {
+        Box::pin(async move {
+            let Self {
+                storage,
+                column_families,
+                source,
+                target,
+            } = *self;
+            storage.with_connection(|connection| {
+                publish_admission(
+                    connection,
+                    &target,
+                    &StorageAdmissionReceipt::CompletedE1ToE2 {
+                        source,
+                        target: target.clone(),
+                    },
+                )?;
+                connection.execute_batch("COMMIT").map_err(backend)
+            })?;
+            storage.configure_connection()?;
+            Ok(BoxedStorage::new(storage.reopen(column_families).await?))
+        })
+    }
+}
+
+fn publish_admission(
+    connection: &Connection,
+    manifest: &StorageEpochManifest,
+    receipt: &StorageAdmissionReceipt,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES (?1,?2), (?3,?4)",
+            params![
+                EPOCH_MANIFEST_KEY,
+                manifest.encode()?,
+                ADMISSION_RECEIPT_KEY,
+                receipt.encode()?
+            ],
+        )
+        .map_err(backend)?;
+    Ok(())
+}
+
 impl SqliteStorage {
+    async fn open_staged(
+        path: PathBuf,
+        column_families: Vec<String>,
+        source: StorageOpenSpec,
+        target: StorageOpenSpec,
+        durability: Durability,
+    ) -> Result<StagedStorageOpen, Error> {
+        validate_physical_storage_names(&column_families)?;
+        let source = sqlite_manifest(&source.codec_profile)?.with_open_spec(&source)?;
+        let target = sqlite_manifest(&target.codec_profile)?.with_open_spec(&target)?;
+        StorageAdmissionReceipt::FreshE2 {
+            target: target.clone(),
+        }
+        .validate(&source, &target)?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(backend)?;
+        }
+        let connection = Connection::open(&path).map_err(backend)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(backend)?;
+        // Connection-local sync policy does not mutate the root. Admission
+        // publication is always FULL even when ordinary writes use NORMAL.
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(backend)?;
+        // A manually owned transaction avoids a self-referential Rust guard.
+        // Connection drop rolls back every failed/cancelled preflight.
+        connection
+            .execute_batch("BEGIN EXCLUSIVE")
+            .map_err(backend)?;
+        let objects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .map_err(backend)?;
+        if objects == 0 {
+            Self::validate_neutral_empty_header(&connection)?;
+            Self::write_schema(&connection, &target)?;
+            publish_admission(
+                &connection,
+                &target,
+                &StorageAdmissionReceipt::FreshE2 {
+                    target: target.clone(),
+                },
+            )?;
+        }
+        let storage = Self {
+            durability,
+            column_families: RefCell::new(BTreeMap::new()),
+            connection: RefCell::new(Some(connection)),
+            write_flush_cadence: RefCell::new(None),
+        };
+        let StorageAdmission::Durable(admission) = storage.admission()? else {
+            unreachable!()
+        };
+        let manifest = admission.manifest();
+        if manifest != &source && manifest != &target {
+            return Err(Error::InvalidStorageLayout(
+                "unsupported SQLite node manifest".into(),
+            ));
+        }
+        storage.with_connection(|connection| Self::validate_schema(connection, manifest))?;
+        let discovered = storage.discover_column_families()?;
+        validate_physical_storage_names(discovered.iter().map(|(name, _)| name))?;
+        *storage.column_families.borrow_mut() = discovered.into_iter().collect();
+        if manifest == &source && !admission.has_receipt() {
+            return Ok(StagedStorageOpen::Guard(Box::new(SqliteAdmissionGuard {
+                storage,
+                column_families,
+                source,
+                target,
+            })));
+        }
+        if manifest != &target {
+            return Err(Error::InvalidStorageLayout(
+                "unexpected SQLite legacy admission receipt".into(),
+            ));
+        }
+        admission.validate(&source, &target)?;
+        storage
+            .with_connection(|connection| connection.execute_batch("COMMIT").map_err(backend))?;
+        storage.configure_connection()?;
+        Ok(StagedStorageOpen::Ready(BoxedStorage::new(
+            storage.reopen(column_families).await?,
+        )))
+    }
+
+    fn configure_connection(&self) -> Result<(), Error> {
+        self.with_connection(|connection| {
+            let mode: String = connection
+                .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+                .map_err(backend)?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(Error::InvalidStorageLayout(
+                    "SQLite requires WAL mode".into(),
+                ));
+            }
+            connection
+                .pragma_update(None, "synchronous", self.durability.synchronous_pragma())
+                .map_err(backend)?;
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(backend)
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>, column_families: &[&str]) -> Result<Self, Error> {
         Self::open_with_durability_and_codec_profile(
             path,
@@ -260,7 +442,7 @@ impl SqliteStorage {
         } else {
             // Validation is deliberately before WAL/synchronous setup: an
             // incompatible store must fail before this adapter changes it.
-            Self::validate_schema(&connection, codec_profile)?;
+            Self::validate_schema(&connection, &sqlite_manifest(codec_profile)?)?;
         }
         let mode: String = connection
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
@@ -278,9 +460,7 @@ impl SqliteStorage {
             .map_err(backend)?;
 
         let storage = Self {
-            path,
             durability,
-            codec_profile: codec_profile.clone(),
             column_families: RefCell::new(BTreeMap::new()),
             connection: RefCell::new(Some(connection)),
             write_flush_cadence: RefCell::new(None),
@@ -309,10 +489,18 @@ impl SqliteStorage {
         connection: &mut Connection,
         codec_profile: &StorageCodecProfile,
     ) -> Result<(), Error> {
-        let manifest = sqlite_manifest(codec_profile)?.encode()?;
+        let manifest = sqlite_manifest(codec_profile)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend)?;
+        Self::write_schema(&transaction, &manifest)?;
+        transaction.commit().map_err(backend)
+    }
+
+    fn write_schema(
+        transaction: &Connection,
+        manifest: &StorageEpochManifest,
+    ) -> Result<(), Error> {
         transaction
             .execute_batch(&format!("{META_DDL};{COLUMN_FAMILIES_DDL};{KV_DDL};"))
             .map_err(backend)?;
@@ -330,16 +518,16 @@ impl SqliteStorage {
                     FORMAT,
                     FORMAT_VERSION.to_be_bytes().to_vec(),
                     DDL_ID,
-                    manifest
+                    manifest.encode()?
                 ],
             )
             .map_err(backend)?;
-        transaction.commit().map_err(backend)
+        Ok(())
     }
 
     fn validate_schema(
         connection: &Connection,
-        codec_profile: &StorageCodecProfile,
+        manifest: &StorageEpochManifest,
     ) -> Result<(), Error> {
         let application_id: i64 = connection
             .pragma_query_value(None, "application_id", |row| row.get(0))
@@ -440,7 +628,7 @@ impl SqliteStorage {
                 "unsupported sqlite ordered-kv format".to_owned(),
             ));
         }
-        sqlite_manifest(codec_profile)?.admit_existing(&epoch_manifest)?;
+        manifest.admit_existing(&epoch_manifest)?;
         Ok(())
     }
 
@@ -628,20 +816,46 @@ impl ReopenableStorage for SqliteStorage {
             {
                 return Ok(self);
             }
-            let path = self.path.clone();
-            let durability = self.durability;
-            let codec_profile = self.codec_profile.clone();
-            drop(self);
+            // Keep the admitted connection, its sync policy and pending cadence;
+            // the generic physical opener validates only epoch-one roots.
             let refs = column_families
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            Self::open_with_durability_and_codec_profile(path, &refs, durability, &codec_profile)
+            self.intern_column_families(&refs)?;
+            Ok(self)
         })
     }
 }
 
 impl OrderedKvStorage for SqliteStorage {
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.with_connection(|connection| {
+            let bytes: Vec<u8> = connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [EPOCH_MANIFEST_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            let receipt: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [ADMISSION_RECEIPT_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            StorageAdmission::durable(
+                StorageEpochManifest::decode(&bytes)?,
+                receipt
+                    .as_deref()
+                    .map(StorageAdmissionReceipt::decode)
+                    .transpose()?,
+            )
+        })
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -991,6 +1205,96 @@ fn backend(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn staged_admission_preserves_rows_and_atomic_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        futures::executor::block_on(
+            groove::storage::conformance::staged_admission_preserves_rows(
+                &super::SqliteStorageFactory::default(),
+                directory.path().join("legacy.sqlite"),
+                directory.path().join("fresh.sqlite"),
+            ),
+        );
+    }
+
+    #[test]
+    fn epoch_two_missing_receipt_rejects_before_family_expansion() {
+        block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("root.sqlite");
+            let factory = SqliteStorageFactory::default();
+            let source = StorageOpenSpec {
+                epoch: 1,
+                codec_profile: StorageCodecProfile::groove_epoch_1(),
+            };
+            let target = StorageOpenSpec {
+                epoch: 2,
+                codec_profile: source.codec_profile.clone(),
+            };
+            let StagedStorageOpen::Ready(storage) = factory
+                .open_staged(
+                    path.clone(),
+                    vec!["records".into()],
+                    source.clone(),
+                    target.clone(),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("fresh admission")
+            };
+            storage
+                .set("records".into(), b"key".to_vec(), b"retained".to_vec())
+                .await
+                .unwrap();
+            drop(storage);
+            let raw = Connection::open(&path).unwrap();
+            let before: Vec<u8> = raw
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [EPOCH_MANIFEST_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            raw.execute("DELETE FROM meta WHERE key=?1", [ADMISSION_RECEIPT_KEY])
+                .unwrap();
+            assert!(
+                factory
+                    .open_staged(path, vec!["must-not-exist".into()], source, target)
+                    .await
+                    .is_err()
+            );
+            let after: Vec<u8> = raw
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [EPOCH_MANIFEST_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, after);
+            let count: i64 = raw
+                .query_row(
+                    "SELECT COUNT(*) FROM meta WHERE key=?1",
+                    [ADMISSION_RECEIPT_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+            let names = raw
+                .prepare("SELECT name FROM column_families ORDER BY name")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(names, ["records"]);
+            let value: Vec<u8> = raw
+                .query_row("SELECT v FROM kv", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, b"retained");
+        });
+    }
+
     use super::*;
     use futures::executor::block_on;
     use groove::storage::ReopenableStorage;

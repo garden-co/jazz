@@ -214,6 +214,33 @@ groove::define_record! {
     }
 }
 
+/// Validate epoch-one rows before storage admission without converting their
+/// canonical modern four-slot read evidence into a different encoding.
+#[doc(hidden)]
+pub fn validate_epoch_one_transaction_record(
+    record: groove::records::BorrowedRecord<'_>,
+) -> Result<(), Error> {
+    let slots = [
+        record.get_nullable_bytes(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
+        record.get_nullable_bytes(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
+        record.get_nullable_bytes(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
+        record.get_nullable_bytes(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
+    ];
+    if slots.iter().any(Option::is_some)
+        && (slots.iter().any(Option::is_none)
+            || tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?
+                != TxKind::Exclusive)
+    {
+        return Err(Error::InvalidStoredValue(
+            "incomplete or nonexclusive stored read evidence",
+        ));
+    }
+    super::exclusive_read_evidence::decode_evidence_slots(
+        slots[0], slots[1], slots[2], slots[3],
+    )?;
+    Ok(())
+}
+
 groove::define_record! {
 pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
@@ -3619,14 +3646,14 @@ pub(super) fn transaction_values_with_cardinality_scope(
     view_scoped_cardinality: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
-    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
-    // pending, null otherwise (SPEC 2 §2.8).
+    // Slots 5-8 retain `jazz.exclusive-read-evidence.v1` across settlement so
+    // recovered commit units preserve the author's exact captured proof.
     let [
         base_snapshot,
         row_read_set,
         absent_read_set,
         predicate_read_set,
-    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
+    ] = super::exclusive_read_evidence::evidence_slot_values(tx)?;
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3842,6 +3869,11 @@ pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
+    if existing.permission_subject != incoming.permission_subject
+        || !super::exclusive_read_evidence::compatible(existing, incoming)
+    {
+        return false;
+    }
     let mut redacted_existing = existing.clone();
     redacted_existing.base_snapshot = None;
     redacted_existing.row_read_set = None;
@@ -3852,10 +3884,7 @@ pub(super) fn known_transaction_payload_matches(
     redacted_incoming.row_read_set = None;
     redacted_incoming.absent_read_set = None;
     redacted_incoming.predicate_read_set = None;
-    existing == incoming
-        || &redacted_existing == incoming
-        || existing == &redacted_incoming
-        || redacted_existing == redacted_incoming
+    redacted_existing == redacted_incoming
 }
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
@@ -3877,7 +3906,8 @@ pub fn known_transaction_payload_matches_redacted_permission_subject(
     known_transaction_payload_matches(
         &transaction_without_permission_subject(existing),
         &transaction_without_permission_subject(incoming),
-    )
+    ) && super::exclusive_read_evidence::is_absent(existing)
+        == super::exclusive_read_evidence::is_absent(incoming)
 }
 
 pub(super) fn known_transaction_payload_matches_redacted_cardinality(

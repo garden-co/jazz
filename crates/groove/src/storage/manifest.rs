@@ -13,6 +13,7 @@ use super::Error;
 
 /// First settled Jazz/Groove durable format. Earlier alpha stores are unsupported.
 pub const STORAGE_EPOCH_1: u16 = 1;
+pub const STORAGE_EPOCH_2: u16 = 2;
 const MAGIC: &[u8; 4] = b"JSM1";
 
 /// The closed, mandatory Groove-owned epoch-one payload families.
@@ -89,6 +90,205 @@ impl StorageCodecProfile {
     }
 }
 
+/// An explicit epoch and closed payload profile; adapters supply only their
+/// own physical-format identity and parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageOpenSpec {
+    pub epoch: u16,
+    pub codec_profile: StorageCodecProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageAdmission {
+    Ephemeral,
+    Durable(DurableStorageAdmission),
+}
+
+/// Target-bound admission evidence, retaining the current manifest only once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableStorageAdmission {
+    manifest: StorageEpochManifest,
+    origin: Option<AdmissionOrigin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AdmissionOrigin {
+    FreshE2,
+    CompletedE1ToE2 { source: StorageEpochManifest },
+}
+
+impl StorageAdmission {
+    pub fn durable(
+        manifest: StorageEpochManifest,
+        receipt: Option<StorageAdmissionReceipt>,
+    ) -> Result<Self, Error> {
+        let origin = receipt
+            .map(|receipt| {
+                receipt.validate_shape()?;
+                let (origin, target) = match receipt {
+                    StorageAdmissionReceipt::FreshE2 { target } => {
+                        (AdmissionOrigin::FreshE2, target)
+                    }
+                    StorageAdmissionReceipt::CompletedE1ToE2 { source, target } => {
+                        (AdmissionOrigin::CompletedE1ToE2 { source }, target)
+                    }
+                };
+                if target != manifest {
+                    return Err(invalid(
+                        "admission receipt target differs from current manifest",
+                    ));
+                }
+                Ok(origin)
+            })
+            .transpose()?;
+        Ok(Self::Durable(DurableStorageAdmission { manifest, origin }))
+    }
+}
+
+impl DurableStorageAdmission {
+    pub fn manifest(&self) -> &StorageEpochManifest {
+        &self.manifest
+    }
+
+    pub fn has_receipt(&self) -> bool {
+        self.origin.is_some()
+    }
+
+    pub fn is_migrated(&self) -> bool {
+        matches!(self.origin, Some(AdmissionOrigin::CompletedE1ToE2 { .. }))
+    }
+
+    pub fn validate(
+        &self,
+        source: &StorageEpochManifest,
+        target: &StorageEpochManifest,
+    ) -> Result<(), Error> {
+        validate_admission_transition(source, target)?;
+        if &self.manifest != target {
+            return Err(invalid(
+                "admission manifest does not match the exact target profile",
+            ));
+        }
+        match &self.origin {
+            Some(AdmissionOrigin::FreshE2) => Ok(()),
+            Some(AdmissionOrigin::CompletedE1ToE2 { source: found }) if found == source => Ok(()),
+            None => Err(invalid("missing storage admission receipt")),
+            _ => Err(invalid(
+                "admission receipt does not bind the exact source profile",
+            )),
+        }
+    }
+}
+
+fn validate_admission_transition(
+    source: &StorageEpochManifest,
+    target: &StorageEpochManifest,
+) -> Result<(), Error> {
+    if source.epoch != STORAGE_EPOCH_1
+        || target.epoch != STORAGE_EPOCH_2
+        || source.adapter != target.adapter
+        || source.parameters != target.parameters
+    {
+        return Err(invalid("unsupported admission transition"));
+    }
+    Ok(())
+}
+
+/// JSA1 binds the exact manifests, not merely their epoch numbers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageAdmissionReceipt {
+    FreshE2 {
+        target: StorageEpochManifest,
+    },
+    CompletedE1ToE2 {
+        source: StorageEpochManifest,
+        target: StorageEpochManifest,
+    },
+}
+
+impl StorageAdmissionReceipt {
+    pub fn validate(
+        &self,
+        source: &StorageEpochManifest,
+        target: &StorageEpochManifest,
+    ) -> Result<(), Error> {
+        validate_admission_transition(source, target)?;
+        match self {
+            Self::FreshE2 { target: found } if found == target => Ok(()),
+            Self::CompletedE1ToE2 {
+                source: from,
+                target: to,
+            } if from == source && to == target => Ok(()),
+            _ => Err(invalid(
+                "admission receipt does not bind the exact profiles",
+            )),
+        }
+    }
+
+    /// ASCII JSA1, tag 0 (fresh) or 1 (completed), then a u32 big-endian
+    /// length and JSM1 bytes for source (completed only), then target.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate_shape()?;
+        let mut bytes = b"JSA1".to_vec();
+        bytes.push(match self {
+            Self::FreshE2 { .. } => 0,
+            Self::CompletedE1ToE2 { .. } => 1,
+        });
+        let mut put = |manifest: &StorageEpochManifest| -> Result<(), Error> {
+            let encoded = manifest.encode()?;
+            let len = u32::try_from(encoded.len()).map_err(|_| invalid("receipt too large"))?;
+            bytes.extend_from_slice(&len.to_be_bytes());
+            bytes.extend_from_slice(&encoded);
+            Ok(())
+        };
+        match self {
+            Self::FreshE2 { target } => {
+                put(target)?;
+            }
+            Self::CompletedE1ToE2 { source, target } => {
+                put(source)?;
+                put(target)?;
+            }
+        }
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let mut input = bytes;
+        if take(&mut input, 4)? != b"JSA1" {
+            return Err(invalid("invalid admission receipt magic"));
+        }
+        let tag = take_u8(&mut input)?;
+        fn manifest(input: &mut &[u8]) -> Result<StorageEpochManifest, Error> {
+            let length = u32::from_be_bytes(take(input, 4)?.try_into().unwrap()) as usize;
+            StorageEpochManifest::decode(take(input, length)?)
+        }
+        let receipt = match tag {
+            0 => Self::FreshE2 {
+                target: manifest(&mut input)?,
+            },
+            1 => Self::CompletedE1ToE2 {
+                source: manifest(&mut input)?,
+                target: manifest(&mut input)?,
+            },
+            _ => return Err(invalid("unsupported admission receipt tag")),
+        };
+        receipt.validate_shape()?;
+        if !input.is_empty() {
+            return Err(invalid("admission receipt has trailing bytes"));
+        }
+        Ok(receipt)
+    }
+
+    fn validate_shape(&self) -> Result<(), Error> {
+        match self {
+            Self::FreshE2 { target } if target.epoch == STORAGE_EPOCH_2 => Ok(()),
+            Self::CompletedE1ToE2 { source, target } => self.validate(source, target),
+            _ => Err(invalid("unsupported admission receipt epoch")),
+        }
+    }
+}
+
 /// Adapter-specific physical format identity, pinned by the top-level epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterFormat {
@@ -149,6 +349,21 @@ impl StorageEpochManifest {
         };
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    pub fn with_open_spec(&self, spec: &StorageOpenSpec) -> Result<Self, Error> {
+        let manifest = Self {
+            epoch: spec.epoch,
+            adapter: self.adapter.clone(),
+            required_codecs: spec.codec_profile.required_codecs.clone(),
+            parameters: self.parameters.clone(),
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn epoch(&self) -> u16 {
+        self.epoch
     }
 
     /// Stable, length-delimited bytes. This is intentionally not serde: map
@@ -241,7 +456,7 @@ impl StorageEpochManifest {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if self.epoch != STORAGE_EPOCH_1 {
+        if !matches!(self.epoch, STORAGE_EPOCH_1 | STORAGE_EPOCH_2) {
             return Err(invalid("unsupported storage epoch"));
         }
         valid_id("adapter ID", &self.adapter.id)?;
@@ -273,8 +488,8 @@ fn require_groove_epoch_1_codecs(codecs: &BTreeSet<String>) -> Result<(), Error>
     Ok(())
 }
 
-/// A future migration must be explicitly registered for exactly one adjacent
-/// epoch transition. There is intentionally no epoch-1 migration.
+/// Future payload-transform migrations are separate from the concrete staged
+/// admission guard used by the no-payload-transform E1-to-E2 transition.
 pub trait StorageMigration {
     fn source_epoch(&self) -> u16;
     fn target_epoch(&self) -> u16;
@@ -388,6 +603,74 @@ mod tests {
     }
 
     #[test]
+    fn admission_receipt_v1_corpus_binds_exact_manifests() {
+        let source = manifest();
+        let target = source
+            .with_open_spec(&StorageOpenSpec {
+                epoch: 2,
+                codec_profile: StorageCodecProfile::groove_epoch_1(),
+            })
+            .unwrap();
+        let fresh = StorageAdmissionReceipt::FreshE2 {
+            target: target.clone(),
+        };
+        let completed = StorageAdmissionReceipt::CompletedE1ToE2 {
+            source: source.clone(),
+            target: target.clone(),
+        };
+        let fresh_bytes = b"JSA1\x00\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let completed_bytes = b"JSA1\x01\x00\x00\x00\x7eJSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        assert_eq!(fresh.encode().unwrap(), fresh_bytes);
+        assert_eq!(completed.encode().unwrap(), completed_bytes);
+        assert_eq!(StorageAdmissionReceipt::decode(fresh_bytes).unwrap(), fresh);
+        assert_eq!(
+            StorageAdmissionReceipt::decode(completed_bytes).unwrap(),
+            completed
+        );
+        for bytes in [fresh_bytes.as_slice(), completed_bytes.as_slice()] {
+            for length in 0..bytes.len() {
+                assert!(StorageAdmissionReceipt::decode(&bytes[..length]).is_err());
+            }
+            let mut trailing = bytes.to_vec();
+            trailing.push(0);
+            assert!(StorageAdmissionReceipt::decode(&trailing).is_err());
+            let mut unknown = bytes.to_vec();
+            unknown[4] = 2;
+            assert!(StorageAdmissionReceipt::decode(&unknown).is_err());
+        }
+        let different = source
+            .with_open_spec(&StorageOpenSpec {
+                epoch: 1,
+                codec_profile: StorageCodecProfile::groove_epoch_1()
+                    .with_additional_codecs(["owner.other.v1"])
+                    .unwrap(),
+            })
+            .unwrap();
+        assert!(completed.validate(&different, &target).is_err());
+        let different_target = target
+            .with_open_spec(&StorageOpenSpec {
+                epoch: 2,
+                codec_profile: StorageCodecProfile::groove_epoch_1()
+                    .with_additional_codecs(["owner.other.v1"])
+                    .unwrap(),
+            })
+            .unwrap();
+        assert!(fresh.validate(&source, &different_target).is_err());
+        assert!(
+            StorageAdmission::durable(different_target.clone(), Some(fresh)).is_err(),
+            "a receipt must bind the actual stored manifest before its target is discarded"
+        );
+        let StorageAdmission::Durable(admission) =
+            StorageAdmission::durable(target.clone(), Some(completed)).unwrap()
+        else {
+            unreachable!()
+        };
+        admission.validate(&source, &target).unwrap();
+        assert!(admission.validate(&different, &target).is_err());
+        assert!(admission.validate(&source, &different_target).is_err());
+    }
+
+    #[test]
     fn epoch_1_codec_corpus_round_trips_committed_bytes_exactly() {
         // This is the backend-neutral semantic-to-byte corpus. The companion
         // fixture records the settlement commit/checksum and is intentionally
@@ -422,7 +705,7 @@ mod tests {
         assert!(StorageEpochManifest::decode(noncanonical).is_err());
 
         let mut unknown = committed;
-        unknown[5] = 2;
+        unknown[5] = 3;
         assert!(StorageEpochManifest::decode(&unknown).is_err());
     }
 

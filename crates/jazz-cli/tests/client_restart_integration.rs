@@ -280,7 +280,7 @@ fn make_context(
         data_dir,
         storage: ClientStorage::Persistent,
         storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         )),
         account_id: None,
         jwt_token: Some(jwt_token),

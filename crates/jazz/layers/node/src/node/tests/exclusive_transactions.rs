@@ -975,6 +975,137 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
 }
 
 #[test]
+fn exclusive_pending_duplicates_require_complete_evidence_and_versions() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    client.tx_query(open, &shape, &binding).unwrap();
+    client
+        .tx_write(open, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let repeated = client
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &repeated[..],
+        [SyncMessage::FateUpdate {
+            fate: Fate::Pending,
+            ..
+        }]
+    ));
+    let mut missing_reads = tx.clone();
+    missing_reads.predicate_read_set = None;
+    let mut different_versions = versions.clone();
+    different_versions[0] = version_record(row(2), Vec::new(), title_cells("substituted"), None);
+    for (altered_tx, altered_versions) in [
+        (missing_reads, versions.clone()),
+        (tx.clone(), different_versions.clone()),
+    ] {
+        assert!(matches!(
+            client.ingest_commit_unit_settled(
+                altered_tx,
+                altered_versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            ),
+            Err(Error::ConflictingCommitUnit(id)) if id == tx.tx_id
+        ));
+    }
+    let (_partial_core_dir, mut partial_core) = open_node_with_uuid(node(8));
+    let mut partial = tx.clone();
+    partial.predicate_read_set = None;
+    assert!(matches!(
+        partial_core.ingest_commit_unit_settled(
+            partial,
+            versions.clone(),
+            u64::MAX - SKEW_TOLERANCE_MS,
+        ),
+        Err(Error::InvalidStoredValue(_))
+    ));
+    assert!(partial_core.query_transaction(tx.tx_id).unwrap().is_none());
+    assert!(partial_core.transaction_state_settled(tx.tx_id).is_none());
+    assert!(
+        partial_core
+            .query_table_versions("todos")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        partial_core
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    let accepted_after_partial = partial_core
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &accepted_after_partial[..],
+        [SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            ..
+        }] if *tx_id == tx.tx_id
+    ));
+    assert_eq!(
+        partial_core
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row(2)],
+        "complete original evidence remains admissible after a malformed first submission",
+    );
+    let accepted = core
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert!(matches!(
+        &accepted[..],
+        [SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }]
+    ));
+    assert!(matches!(
+        core.ingest_commit_unit_settled(tx.clone(), different_versions, u64::MAX - SKEW_TOLERANCE_MS),
+        Err(Error::ConflictingCommitUnit(id)) if id == tx.tx_id
+    ));
+    let mut redacted = tx;
+    redacted.base_snapshot = None;
+    redacted.row_read_set = None;
+    redacted.absent_read_set = None;
+    redacted.predicate_read_set = None;
+    assert_eq!(
+        core.ingest_commit_unit_settled(redacted, versions, u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(2), title_cells("mine"))])
+    );
+}
+
+#[test]
 fn local_exclusive_predicate_rejects_remote_phantom_ingested_after_begin() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
@@ -1727,7 +1858,8 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
     assert!(
         program_fact_adds
-            .added_rows().iter()
+            .added_rows()
+            .iter()
             .any(|fact| { matches!(fact, input if input.row == row(1)) })
     );
     assert!(peer.shipped_complete_tx_payloads().is_empty());
@@ -2025,7 +2157,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
     assert_eq!(
         program_fact_adds
-            .added_rows().iter()
+            .added_rows()
+            .iter()
             .map(|input| (input.version_table.clone(), input.row, input.version.tx))
             .collect::<Vec<_>>(),
         vec![(
