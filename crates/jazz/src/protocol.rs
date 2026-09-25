@@ -1249,8 +1249,49 @@ mod version_record_wire_row {
             DESCRIPTOR_PROOFS.with(|cache| {
                 let cache = cache.borrow();
                 assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
-                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_BYTES);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
             });
+        }
+
+        // Large descriptors hit the total byte bound long before the entry
+        // bound. Eviction must keep both indexes pointing at retained entries,
+        // and evicted descriptors must still encode to the same bytes.
+        #[test]
+        fn descriptor_proof_cache_byte_bound_eviction_keeps_indexes_consistent() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let big = (0..40)
+                .map(|index| {
+                    RecordDescriptor::new([(
+                        format!("{index:04}{}", "y".repeat(60 * 1024)),
+                        ValueType::U64,
+                    )])
+                })
+                .collect::<Vec<_>>();
+            let encoded = big
+                .iter()
+                .map(|descriptor| descriptor_for_encode(descriptor).unwrap().encoded)
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+                assert!(cache.entries.len() < big.len());
+                assert_eq!(cache.by_source.len(), cache.entries.len());
+                assert_eq!(cache.by_encoded.len(), cache.entries.len());
+                for (id, proof) in &cache.entries {
+                    assert_eq!(cache.by_source.get(&proof.source), Some(id));
+                    assert_eq!(cache.by_encoded.get(proof.encoded.as_ref()), Some(id));
+                }
+            });
+            for (descriptor, bytes) in big.iter().zip(&encoded) {
+                assert_eq!(
+                    descriptor_for_encode(descriptor).unwrap().encoded.as_ref(),
+                    bytes.as_ref()
+                );
+                assert_eq!(
+                    descriptor_for_decode(bytes).unwrap().canonical,
+                    descriptor_for_encode(descriptor).unwrap().canonical
+                );
+            }
         }
 
         // A view update interleaves rows from many tables and schema
