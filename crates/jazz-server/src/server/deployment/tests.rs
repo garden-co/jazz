@@ -112,14 +112,10 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
         result["published"]["schemas"],
         json!([SchemaHash::compute(&base).to_string()])
     );
-    let head = http(&router, "GET", "/permissions/head", Value::Null)
-        .await
-        .1;
+    let head = http(&router, "GET", "/permissions", Value::Null).await.1;
     assert_eq!(deploy_ok(&router, initial).await["changed"], false);
     assert_eq!(
-        http(&router, "GET", "/permissions/head", Value::Null)
-            .await
-            .1,
+        http(&router, "GET", "/permissions", Value::Null).await.1,
         head
     );
     let mut allow_read = request(&base, &[], vec![]);

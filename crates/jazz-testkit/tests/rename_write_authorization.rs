@@ -458,13 +458,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         .await
         .unwrap();
     }
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &left,
-    )
-    .await;
+    activate_legacy_fixture(&server, &left, support::allow_all_permissions(&left)).await;
     let alice = support::connect_ready_user(
         &server,
         &left,
@@ -485,10 +479,8 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         "right_owner",
         vec!["user".into(), "identity".into(), "subject".into()],
     );
-    support::publish_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
+    activate_legacy_fixture(
+        &server,
         &right,
         [(
             TableName::new("right_notes"),
@@ -498,7 +490,6 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
                 .with_update(Some(owner.clone()), owner.clone())
                 .with_delete(owner),
         )],
-        None,
     )
     .await;
     let reader = support::connect_ready_user(
@@ -559,10 +550,8 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         "left_owner",
         vec!["user".into(), "identity".into(), "subject".into()],
     );
-    support::publish_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
+    activate_legacy_fixture(
+        &server,
         &left,
         [(
             TableName::new("left_notes"),
@@ -570,7 +559,6 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
                 .with_select(owner.clone())
                 .with_insert(owner),
         )],
-        None,
     )
     .await;
     // C -> A -> B drops C's extra column and supplies B's default.
@@ -608,6 +596,36 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
     alice.shutdown().await.unwrap();
     reader.shutdown().await.unwrap();
     server.shutdown().await;
+}
+
+// These fixtures exercise historical graphs that public deploy now rejects.
+// Select their policies directly in the runtime to retain projection coverage.
+async fn activate_legacy_fixture(
+    server: &JazzServer,
+    schema: &jazz::tools::Schema,
+    permissions: impl IntoIterator<Item = (jazz::tools::TableName, jazz::tools::TablePolicies)>,
+) {
+    let permissions = permissions.into_iter().collect::<HashMap<_, _>>();
+    let mut source = schema.clone();
+    for (name, table) in &mut source {
+        table.policies = permissions.get(name).cloned().unwrap_or_default();
+    }
+    let runtime = server.server_state().runtime().unwrap();
+    let revision = runtime
+        .trusted_catalogue_snapshot_for_test()
+        .await
+        .unwrap()
+        .current_write_schema
+        .revision
+        + 1;
+    runtime
+        .activate_schema(
+            revision,
+            jazz::schema::JazzSchema::new(&source).unwrap(),
+            permissions,
+        )
+        .await
+        .unwrap();
 }
 
 /// A sibling path drops `a` before adding it again; the merged view uses its
@@ -688,14 +706,9 @@ async fn merged_schema_via_sibling_path_defaults_reintroduced_column_without_era
                 )
                 .await
                 .unwrap();
-                publish_allow_all_permissions(
-                    &server.base_url(),
-                    server.app_id(),
-                    server.admin_secret(),
-                    to,
-                )
-                .await;
             }
+            activate_legacy_fixture(&server, &merged, support::allow_all_permissions(&merged))
+                .await;
             let reader = support::connect_ready_user(
                 &server,
                 &merged,

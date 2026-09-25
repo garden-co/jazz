@@ -4,11 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use jazz::schema::JazzSchema;
 
-use jazz::tools::public_schema::{Schema, SchemaHash, TableName};
+use jazz::tools::public_schema::{Schema, SchemaHash};
 use jazz::tools::schema_lens::runtime::compile_lens;
 use jazz::tools::schema_lens::{Lens, LensOp};
 
+#[cfg(test)]
 use super::catalogue::{ActiveSchemaSummary, CatalogueError};
+#[cfg(test)]
+use jazz::tools::public_schema::TableName;
 
 use super::{ServerRuntimeHandle, ServerState};
 
@@ -33,12 +36,25 @@ pub(crate) async fn publish_runtime_catalogue(
     publish_runtime_catalogue_locked(state, schemas, lenses).await
 }
 
+#[cfg(test)]
+#[derive(Debug)]
 pub(crate) enum PermissionsPublicationError {
     Catalogue(CatalogueError),
     LineageUnavailable(String),
     Bridge(String),
 }
 
+#[cfg(test)]
+impl std::fmt::Display for PermissionsPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Catalogue(error) => write!(f, "{error}"),
+            Self::LineageUnavailable(message) | Self::Bridge(message) => f.write_str(message),
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn publish_permissions_and_runtime(
     state: &ServerState,
     schema_hash: SchemaHash,

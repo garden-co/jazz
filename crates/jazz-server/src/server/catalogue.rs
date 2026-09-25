@@ -1,7 +1,9 @@
 mod deployment;
 pub(crate) use deployment::DeploymentResponse;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,14 +129,10 @@ pub(crate) trait CatalogueStore {
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError>;
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
     fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError>;
     fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError>;
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
@@ -329,34 +327,6 @@ impl CatalogueIndex {
         let mut hashes = self.schemas.keys().copied().collect::<Vec<_>>();
         hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         hashes
-    }
-
-    fn are_schema_hashes_connected(&self, from_hash: SchemaHash, to_hash: SchemaHash) -> bool {
-        if !self.schemas.contains_key(&from_hash) || !self.schemas.contains_key(&to_hash) {
-            return false;
-        }
-        let mut seen = HashSet::from([from_hash]);
-        let mut queue = VecDeque::from([from_hash]);
-        while let Some(current) = queue.pop_front() {
-            if current == to_hash {
-                return true;
-            }
-            for &(source, target) in &self.lens_edges {
-                let next = if source == current {
-                    Some(target)
-                } else if target == current {
-                    Some(source)
-                } else {
-                    None
-                };
-                if let Some(next) = next
-                    && seen.insert(next)
-                {
-                    queue.push_back(next);
-                }
-            }
-        }
-        false
     }
 
     fn active_schema(&self) -> Option<ActiveSchema> {
@@ -697,15 +667,6 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.schema_published_at.get(schema_hash).copied())
     }
 
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.are_schema_hashes_connected(from_hash, to_hash))
-    }
-
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
@@ -728,6 +689,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.active_schema())
     }
 
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
@@ -871,15 +833,6 @@ impl ServerCatalogue {
         store.schema_published_at(schema_hash)
     }
 
-    pub(crate) fn are_schema_hashes_connected(
-        &self,
-        store: &impl CatalogueStore,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        store.are_schema_hashes_connected(from_hash, to_hash)
-    }
-
     pub(crate) fn publish_schema(
         &self,
         store: &impl CatalogueStore,
@@ -902,6 +855,7 @@ impl ServerCatalogue {
         store.active_schema()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_permissions_bundle(
         &self,
         store: &impl CatalogueStore,

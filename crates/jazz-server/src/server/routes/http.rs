@@ -12,13 +12,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::middleware::auth::validate_admin_secret;
 use crate::server::{ServerState, ShutdownPhase};
-use jazz::tools::public_schema::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
+use jazz::tools::public_schema::{ColumnType, Schema, TableName, TablePolicies, Value};
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz::tools::transport_error::ErrorResponse;
 
 use super::utils::{
-    parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
-    permissions_map_view, unix_timestamp_millis,
+    parse_app_id_param, parse_schema_hash_param, permissions_head_view, permissions_map_view,
+    unix_timestamp_millis,
 };
 
 #[derive(Debug, Serialize)]
@@ -46,13 +46,6 @@ pub(super) struct StoredSchemaResponse {
 pub(super) struct AdminSubscriptionIntrospectionParams {
     #[serde(rename = "appId")]
     app_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SchemaConnectivityParams {
-    pub(super) from_hash: String,
-    pub(super) to_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,27 +95,6 @@ pub(super) enum PublishLensOp {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct PublishSchemaRequest {
-    schema: Schema,
-    permissions: Option<std::collections::HashMap<TableName, TablePolicies>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishPermissionsRequest {
-    schema_hash: String,
-    permissions: std::collections::HashMap<String, TablePolicies>,
-    expected_parent_bundle_object_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishSchemaResponse {
-    object_id: String,
-    hash: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PermissionsHeadView {
@@ -134,20 +106,9 @@ pub(super) struct PermissionsHeadView {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PermissionsHeadResponse {
-    head: Option<PermissionsHeadView>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct StoredPermissionsResponse {
     head: Option<PermissionsHeadView>,
     permissions: Option<std::collections::HashMap<String, TablePolicies>>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct SchemaConnectivityResponse {
-    connected: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,13 +116,6 @@ pub(super) struct ShutdownResponse {
     status: &'static str,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishMigrationResponse {
-    object_id: String,
-    from_hash: String,
-    to_hash: String,
-}
 /// Return the catalogue schema for the given hash plus its publish timestamp.
 ///
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
@@ -312,147 +266,6 @@ pub(super) async fn schema_hashes_handler(
 /// Return whether two known schema hashes are connected by non-draft uploaded migrations.
 ///
 /// Requires a valid admin secret.
-pub(super) async fn schema_connectivity_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Query(params): Query<SchemaConnectivityParams>,
-) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    }
-
-    let from_hash = match parse_schema_hash_param(&params.from_hash) {
-        Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-    let to_hash = match parse_schema_hash_param(&params.to_hash) {
-        Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-
-    match state
-        .catalogue
-        .are_schema_hashes_connected(&state.catalogue_store, from_hash, to_hash)
-    {
-        Ok(connected) => (
-            StatusCode::OK,
-            Json(SchemaConnectivityResponse { connected }),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to compute schema connectivity: {err}"
-            ))),
-        )
-            .into_response(),
-    }
-}
-
-/// Publish a schema object into the catalogue.
-///
-/// Requires a valid admin secret.
-pub(super) async fn publish_schema_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<PublishSchemaRequest>,
-) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    }
-
-    let _publication = state.runtime_catalogue_publication.lock().await;
-    if request.permissions.is_some() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(
-                "schema publishing no longer accepts permissions; publish permissions via POST /admin/permissions".to_string(),
-            )),
-        )
-            .into_response();
-    }
-
-    if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) = jazz::schema::JazzSchema::new(&request.schema)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(format!(
-                "schema is not supported by the server shell: {err}"
-            ))),
-        )
-            .into_response();
-    }
-
-    let schema = request.schema;
-    let schema_hash = SchemaHash::compute(&schema);
-    let object_id = match state
-        .catalogue
-        .publish_schema(&state.catalogue_store, schema.clone())
-    {
-        Ok(object_id) => object_id,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to publish schema catalogue: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue_locked(
-        &state,
-        std::slice::from_ref(&schema),
-        &[],
-    )
-    .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to bridge schema into server shell: {err}"
-            ))),
-        )
-            .into_response();
-    }
-
-    (
-        StatusCode::CREATED,
-        Json(PublishSchemaResponse {
-            object_id: object_id.to_string(),
-            hash: schema_hash.to_string(),
-        }),
-    )
-        .into_response()
-}
-
 pub(super) async fn migration_graph_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -474,39 +287,6 @@ pub(super) async fn migration_graph_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "failed to read migration graph: {err}"
-            ))),
-        )
-            .into_response(),
-    }
-}
-
-pub(super) async fn permissions_head_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    }
-
-    match state
-        .catalogue
-        .active_schema_summary(&state.catalogue_store)
-    {
-        Ok(head) => {
-            let head = head.map(permissions_head_view);
-            (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response()
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read permissions head: {err}"
             ))),
         )
             .into_response(),
@@ -553,156 +333,7 @@ pub(super) async fn permissions_handler(
     }
 }
 
-pub(super) async fn publish_permissions_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<PublishPermissionsRequest>,
-) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    }
-
-    let schema_hash = match parse_schema_hash_param(&request.schema_hash) {
-        Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-
-    let expected_parent_bundle_object_id = match request.expected_parent_bundle_object_id {
-        Some(object_id) => match parse_object_id_param(&object_id) {
-            Ok(object_id) => Some(object_id),
-            Err(message) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::bad_request(message)),
-                )
-                    .into_response();
-            }
-        },
-        None => None,
-    };
-
-    let target_schema = match state
-        .catalogue
-        .known_schema(&state.catalogue_store, &schema_hash)
-    {
-        Ok(Some(schema)) => schema,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "target schema catalogue not found for hash {}",
-                    schema_hash
-                ))),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to read known schemas: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-    let mut schema_with_permissions = target_schema.clone();
-
-    let permissions = request
-        .permissions
-        .into_iter()
-        .map(|(table_name, policies)| (TableName::new(table_name), policies))
-        .collect::<std::collections::HashMap<_, _>>();
-
-    for (table_name, policies) in &permissions {
-        let Some(table) = schema_with_permissions.get_mut(table_name) else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(format!(
-                    "permissions reference unknown table {}",
-                    table_name.as_str()
-                ))),
-            )
-                .into_response();
-        };
-        table.policies = policies.clone();
-    }
-
-    if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) = jazz::schema::JazzSchema::new(&schema_with_permissions)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(format!(
-                "permissions schema is not supported by the server shell: {err}"
-            ))),
-        )
-            .into_response();
-    }
-
-    match crate::server::runtime_catalogue::publish_permissions_and_runtime(
-        &state,
-        schema_hash,
-        permissions,
-        expected_parent_bundle_object_id,
-    )
-    .await
-    {
-        Ok(head) => (
-            StatusCode::CREATED,
-            Json(PermissionsHeadResponse {
-                head: Some(permissions_head_view(head)),
-            }),
-        )
-            .into_response(),
-        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Catalogue(
-            crate::server::catalogue::CatalogueError::WriteError(message),
-        )) if message.starts_with("stale permissions parent") => (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::bad_request(message)),
-        )
-            .into_response(),
-        Err(crate::server::runtime_catalogue::PermissionsPublicationError::LineageUnavailable(
-            message,
-        )) => (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(message)),
-        )
-            .into_response(),
-        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Bridge(message)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to bridge permissions head into server shell: {message}"
-            ))),
-        )
-            .into_response(),
-        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Catalogue(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to publish permissions catalogue: {err}"
-            ))),
-        )
-            .into_response(),
-    }
-}
-
-/// Publish a reviewed migration edge into the catalogue.
-///
-/// Requires a valid admin secret. The source and target schemas must already be
-/// known to the server; only the lens edge itself is created here.
+/// Lower a deployment migration against its resolved source and target schemas.
 pub(crate) fn lower_migration(
     request: PublishMigrationRequest,
     source_schema: &Schema,
@@ -812,159 +443,6 @@ pub(crate) fn lower_migration(
     }
 
     Ok(Lens::new(source_hash, target_hash, forward))
-}
-
-pub(super) async fn publish_migration_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<PublishMigrationRequest>,
-) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    }
-
-    let _publication = state.runtime_catalogue_publication.lock().await;
-    let source_hash = match parse_schema_hash_param(&request.from_hash) {
-        Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-
-    let target_hash = match parse_schema_hash_param(&request.to_hash) {
-        Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-
-    let source_schema = match state
-        .catalogue
-        .known_schema(&state.catalogue_store, &source_hash)
-    {
-        Ok(Some(schema)) => schema,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "source schema catalogue not found for hash {}",
-                    source_hash
-                ))),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to read source schema catalogue: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-
-    let target_schema = match state
-        .catalogue
-        .known_schema(&state.catalogue_store, &target_hash)
-    {
-        Ok(Some(schema)) => schema,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "target schema catalogue not found for hash {}",
-                    target_hash
-                ))),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to read target schema catalogue: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-
-    let from_hash = request.from_hash.clone();
-    let to_hash = request.to_hash.clone();
-    let lens = match lower_migration(request, &source_schema, &target_schema) {
-        Ok(lens) => lens,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
-    };
-    let object_id = match state.catalogue.publish_lens(&state.catalogue_store, &lens) {
-        Ok(object_id) => object_id,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to publish migration lens: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-
-    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue_locked(
-        &state,
-        &[],
-        std::slice::from_ref(&lens),
-    )
-    .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to bridge migration lens into server shell: {err}"
-            ))),
-        )
-            .into_response();
-    }
-
-    if let Err(err) = state.catalogue.flush(&state.catalogue_store) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to flush published migration lens: {err}"
-            ))),
-        )
-            .into_response();
-    }
-
-    (
-        StatusCode::CREATED,
-        Json(PublishMigrationResponse {
-            object_id: object_id.to_string(),
-            from_hash,
-            to_hash,
-        }),
-    )
-        .into_response()
 }
 
 pub(super) async fn admin_subscription_introspection_handler(

@@ -37,23 +37,15 @@ import {
 } from "../schema-permissions.js";
 import { DeploymentError } from "./catalogue-api.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
-import {
-  fetchSchemaHashes,
-  fetchStoredWasmSchema,
-  type StoredPermissionsHead,
-} from "./catalogue-api.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import {
   assertMigrationMatchesCanonicalBundle,
   computeSchemaHash,
-  MissingMigrationError,
   deployArtifacts,
   serializeForwardLenses,
   type DeployResult as CatalogueDeployResult,
-  pushMigration as pushCatalogueMigration,
-  pushPermissions as pushCataloguePermissions,
-  pushSchema as pushCatalogueSchema,
   resolveKnownSchemaHash,
   schemaTransitionRequiresRowTransform,
   shortSchemaHash,
@@ -89,50 +81,10 @@ export interface CatalogueProjectOptions {
   onEvent?: (event: CatalogueEvent) => void;
 }
 
-export interface PushSchemaOptions extends CatalogueProjectOptions {}
-
-export interface PushSchemaResult {
+export interface DeploySchemaResult {
   hash: string;
   schemaFile: string;
-  status: "published";
-  objectId?: string;
-}
-
-export type DeploySchemaResult =
-  | PushSchemaResult
-  | {
-      hash: string;
-      schemaFile: string;
-      status: "already-stored";
-    };
-
-export interface PushPermissionsOptions extends CatalogueProjectOptions {
-  schemaHash: string;
-}
-
-export interface PushPermissionsResult {
-  schemaHash: string;
-  permissionsFile: string;
-  previousHead: StoredPermissionsHead | null;
-  head: StoredPermissionsHead | null;
-}
-
-export interface PushMigrationOptions {
-  appId: string;
-  serverUrl: string;
-  adminSecret: string;
-  migrationsDir: string;
-  fromHash: string;
-  toHash: string;
-  onEvent?: (event: CatalogueEvent) => void;
-}
-
-export interface PushMigrationResult {
-  fromHash: string;
-  toHash: string;
-  status: "published";
-  filePath?: string;
-  objectId?: string;
+  status: "published" | "already-stored";
 }
 
 export interface DeployResult extends CatalogueDeployResult {
@@ -253,70 +205,6 @@ export async function compileSchema(options: CompileSchemaOptions): Promise<Comp
       options.migrationsDir,
       currentSchema,
     ),
-  };
-}
-
-/**
- * Publishes a schema to the Jazz server.
- *
- * When using this function, permissions and migrations need to be updated
- * separately, using {@link pushPermissions} and {@link pushMigration}.
- *
- * Prefer using {@link deploy}, which handles all operations.
- */
-export async function pushSchema(options: PushSchemaOptions): Promise<PushSchemaResult> {
-  const compiled = await loadCompiledSchema(options.schemaDir);
-  emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
-
-  const result = await pushCatalogueSchema({
-    appId: options.appId,
-    serverUrl: options.serverUrl,
-    adminSecret: options.adminSecret,
-    schema: compiled.wasmSchema,
-  });
-  emit(options, { type: "schema-published", hash: result.hash, objectId: result.objectId });
-
-  return {
-    hash: result.hash,
-    schemaFile: compiled.schemaFile,
-    status: "published",
-    objectId: result.objectId,
-  };
-}
-
-/**
- * Publishes permissions to a known schema.
- *
- * The target schema must already be identified by `options.schemaHash`.
- * @throws when no `permissions.ts` file exists.
- *
- * @param options - Project, server, admin credentials, and schema hash for the permissions push.
- * @returns The previous and new permissions heads.
- */
-export async function pushPermissions(
-  options: PushPermissionsOptions,
-): Promise<PushPermissionsResult> {
-  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
-  emit(options, { type: "permissions-loaded", permissionsFile: compiled.permissionsFile });
-
-  const result = await pushCataloguePermissions({
-    appId: options.appId,
-    serverUrl: options.serverUrl,
-    adminSecret: options.adminSecret,
-    schemaHash: options.schemaHash,
-    permissions: compiled.permissions,
-  });
-  emit(options, {
-    type: "permissions-published",
-    schemaHash: result.schemaHash,
-    version: result.head?.version,
-  });
-
-  return {
-    schemaHash: result.schemaHash,
-    permissionsFile: compiled.permissionsFile,
-    previousHead: result.previousHead,
-    head: result.head,
   };
 }
 
@@ -1241,7 +1129,7 @@ async function bundleToPrivateTempFile(
   }
 }
 
-async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
+export async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
   const { outFile, tempDir } = await bundleToPrivateTempFile(filePath);
   try {
     const loaded = (await import(pathToFileURL(outFile).href)) as {
@@ -1273,39 +1161,6 @@ function unwrapMigrationExport(value: unknown): unknown {
   }
 
   return current;
-}
-
-async function findMigrationFile(
-  migrationsDir: string,
-  fromHash: string,
-  toHash: string,
-): Promise<string | undefined> {
-  if (!(await pathExists(migrationsDir))) {
-    return undefined;
-  }
-
-  const fromShortHash = shortSchemaHash(fromHash);
-  const toShortHash = shortSchemaHash(toHash);
-  const files = await readdir(migrationsDir);
-  const matches = files
-    .filter((file) => file.endsWith(".ts"))
-    .filter(
-      (file) =>
-        file.includes(`-${fromShortHash}-${toShortHash}.ts`) ||
-        file.includes(`-${fromHash}-${toHash}.ts`),
-    );
-
-  if (matches.length === 0) {
-    return undefined;
-  }
-
-  if (matches.length > 1) {
-    throw new Error(
-      `Multiple migration files found for ${fromHash} -> ${toHash}: ${matches.join(", ")}`,
-    );
-  }
-
-  return join(migrationsDir, matches[0]!);
 }
 
 async function resolveSnapshotEntry(
@@ -1392,75 +1247,6 @@ async function resolveRemoteHistoricalSchema(
     }
     throw error;
   }
-}
-
-/**
- * Publishes the migration that connects two schemas.
- *
- * When a reviewed migration file is not present, this publishes an empty migration
- * only if the schema transition does not require row transformations.
- */
-export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
-  // `push` reads executable migration source as well as the snapshot/create
-  // commands' durable files.  Initialize the common storage boundary first so
-  // it cannot silently follow a symlinked migrations directory.
-  const storage = new MigrationStorage(options.migrationsDir);
-  await storage.initialize();
-  const { hashes } = await fetchSchemaHashes(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-  });
-  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
-  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-  const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
-
-  const migration = filePath ? await loadDefinedMigration(filePath) : null;
-
-  let result: PushMigrationResult;
-  try {
-    result = await pushCatalogueMigration(
-      migration
-        ? {
-            appId: options.appId,
-            serverUrl: options.serverUrl,
-            adminSecret: options.adminSecret,
-            fromHash,
-            toHash,
-            migration,
-          }
-        : {
-            appId: options.appId,
-            serverUrl: options.serverUrl,
-            adminSecret: options.adminSecret,
-            fromHash,
-            toHash,
-          },
-    );
-  } catch (error) {
-    if (error instanceof MissingMigrationError) {
-      throw new Error(
-        noMigrationFileMessage(options.appId, options.migrationsDir, error.fromHash, error.toHash),
-      );
-    }
-    throw error;
-  }
-  const projectResult = { ...result, filePath };
-  emit(options, {
-    type: "migration-published",
-    fromHash: projectResult.fromHash,
-    toHash: projectResult.toHash,
-    filePath: projectResult.filePath,
-  });
-  return projectResult;
-}
-
-function noMigrationFileMessage(
-  appId: string,
-  migrationsDir: string,
-  fromHash: string,
-  toHash: string,
-): string {
-  return `No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}. Run \`jazz-tools migrations create ${appId} --fromHash ${shortSchemaHash(fromHash)} --toHash ${shortSchemaHash(toHash)}\` first.`;
 }
 
 function migrationHashesFromFileName(fileName: string): { from: string; to: string } {

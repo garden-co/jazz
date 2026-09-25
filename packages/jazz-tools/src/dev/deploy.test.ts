@@ -1,11 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
-import {
-  computeSchemaHash,
-  deploy,
-  pushSchema,
-  SchemaHashMismatchError,
-} from "./catalogue.js";
+import { computeSchemaHash, deploy } from "./catalogue.js";
 import type { DeploymentRequest } from "./catalogue-api.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
@@ -163,39 +158,4 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
     }),
   );
   await deploy({ ...server, schema: target, migration, permissions: {} });
-});
-
-// An alpha.56 server parses published schemas with serde defaults and drops the
-// unknown `composite_indexes` field, storing (and hashing) the plain schema.
-it("fails pushSchema when the server stores a different schema than was sent", async () => {
-  const plain = s.defineApp({
-    notes: s.table({ owner: s.string(), rank: s.int() }, {}),
-  });
-  const composite = s.defineApp({
-    notes: s.table({ owner: s.string(), rank: s.int() }, {}).compositeIndex(["owner", "rank"]),
-  });
-  const plainHash = await computeSchemaHash(plain.wasmSchema);
-  const compositeHash = await computeSchemaHash(composite.wasmSchema);
-  expect(compositeHash).not.toBe(plainHash);
-  const writes: string[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/admin/schemas")) {
-        writes.push("schema");
-        expect(JSON.parse(String(init?.body)).schema.tables.notes.composite_indexes).toEqual([
-          ["owner", "rank"],
-        ]);
-        return reply({ hash: plainHash, objectId: "schema-object" }, 201);
-      }
-      writes.push(input);
-      throw new Error(`Unexpected request: ${input}`);
-    }),
-  );
-
-  const pushed = pushSchema({ ...server, schema: composite });
-  await expect(pushed).rejects.toBeInstanceOf(SchemaHashMismatchError);
-  await expect(pushed).rejects.toMatchObject({ localHash: compositeHash, serverHash: plainHash });
-  await expect(pushed).rejects.toThrow(/did not store the schema as sent/);
-  expect(writes).toEqual(["schema"]);
 });

@@ -31,9 +31,8 @@ use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, deploy_handler, health_handler,
-    internal_shutdown_handler, migration_graph_handler, permissions_handler,
-    permissions_head_handler, publish_migration_handler, publish_permissions_handler,
-    publish_schema_handler, schema_connectivity_handler, schema_handler, schema_hashes_handler,
+    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
+    schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
@@ -88,14 +87,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
         .route("/deploy", post(deploy_handler))
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
-        .route("/schemas", post(publish_schema_handler))
-        .route("/schema-connectivity", get(schema_connectivity_handler))
-        .route("/permissions/head", get(permissions_head_handler))
-        .route(
-            "/permissions",
-            get(permissions_handler).post(publish_permissions_handler),
-        )
-        .route("/migrations", post(publish_migration_handler))
+        .route("/permissions", get(permissions_handler))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
@@ -267,28 +259,20 @@ mod tests {
         create_router(state)
     }
 
-    async fn publish_schema_for_test(app: &axum::Router, schema: Schema) {
-        let schema_json = serde_json::to_value(&schema).expect("schema request json");
-        assert!(
-            schema_json.get("tables").is_some(),
-            "admin schema requests retain the public Schema envelope"
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema_json }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .expect("publish schema through admin route");
-        assert_eq!(response.status(), StatusCode::CREATED);
+    // Legacy catalogue fixtures need isolated drafts that public deploy rejects.
+    async fn store_schema_draft_for_test(state: &ServerState, schema: Schema) {
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema)
+            .unwrap();
+    }
+
+    fn migration_deployment(migration: Value) -> Value {
+        serde_json::json!({
+            "targetSchemaHash": migration["toHash"],
+            "schemas": [], "migrations": [migration],
+            "permissions": std::collections::HashMap::<TableName, TablePolicies>::new(),
+        })
     }
 
     async fn post_internal_shutdown(
@@ -331,7 +315,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::OPTIONS)
-                    .uri(test_app_route("/admin/schemas"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header(header::ORIGIN, "http://localhost:3000")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
@@ -705,321 +689,18 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": legacy_tables }).to_string(),
+                        serde_json::json!({ "targetSchemaHash": "a".repeat(64), "schemas": [{"hash": "a".repeat(64), "schema": legacy_tables}], "migrations": [], "permissions": {} }).to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .expect("publish obsolete schema shape");
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn permissions_handlers_publish_linear_head_and_reject_stale_parent() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state.clone());
-
-        let initial_head = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions/head"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(initial_head.status(), StatusCode::OK);
-        let initial_body = body::to_bytes(initial_head.into_body(), usize::MAX)
-            .await
-            .expect("initial permissions head body");
-        let initial_json: Value =
-            serde_json::from_slice(&initial_body).expect("initial permissions head json");
-        assert!(initial_json["head"].is_null());
-
-        let first_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            }
-        });
-        let first_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(first_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(first_response.status(), StatusCode::CREATED);
-        let first_body = body::to_bytes(first_response.into_body(), usize::MAX)
-            .await
-            .expect("first publish body");
-        let first_json: Value = serde_json::from_slice(&first_body).expect("first publish json");
-        let first_bundle_object_id = first_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("first bundle object id")
-            .to_string();
-        assert_eq!(first_json["head"]["version"].as_u64(), Some(1));
-        assert_eq!(first_json["head"]["parentBundleObjectId"], Value::Null);
-
-        let second_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "False" } }
-                }
-            },
-            "expectedParentBundleObjectId": first_bundle_object_id,
-        });
-        let second_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(second_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(second_response.status(), StatusCode::CREATED);
-        let second_body = body::to_bytes(second_response.into_body(), usize::MAX)
-            .await
-            .expect("second publish body");
-        let second_json: Value = serde_json::from_slice(&second_body).expect("second publish json");
-        let second_bundle_object_id = second_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("second bundle object id")
-            .to_string();
-        assert_eq!(second_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            second_json["head"]["parentBundleObjectId"].as_str(),
-            Some(first_bundle_object_id.as_str())
-        );
-
-        let stale_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            },
-            "expectedParentBundleObjectId": first_bundle_object_id,
-        });
-        let stale_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(stale_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(stale_response.status(), StatusCode::CONFLICT);
-
-        let head_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions/head"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(head_response.status(), StatusCode::OK);
-        let head_body = body::to_bytes(head_response.into_body(), usize::MAX)
-            .await
-            .expect("current permissions head body");
-        let head_json: Value =
-            serde_json::from_slice(&head_body).expect("current permissions head json");
-        assert_eq!(head_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            head_json["head"]["bundleObjectId"].as_str(),
-            Some(second_bundle_object_id.as_str())
-        );
-
-        let permissions_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(permissions_response.status(), StatusCode::OK);
-        let permissions_body = body::to_bytes(permissions_response.into_body(), usize::MAX)
-            .await
-            .expect("current permissions body");
-        let permissions_json: Value =
-            serde_json::from_slice(&permissions_body).expect("current permissions json");
-        assert_eq!(permissions_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            permissions_json["permissions"]["users"]["select"]["using"]["type"].as_str(),
-            Some("False")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn concurrent_permissions_publications_install_only_the_winning_runtime_head() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state.clone());
-        let start = Arc::new(tokio::sync::Barrier::new(2));
-
-        let publish =
-            |app: axum::Router, start: Arc<tokio::sync::Barrier>, policy_type: &'static str| {
-                let schema_hash = schema_hash.to_string();
-                tokio::spawn(async move {
-                    let request_body = serde_json::json!({
-                        "schemaHash": schema_hash,
-                        "permissions": {
-                            "users": {
-                                "select": { "using": { "type": policy_type } }
-                            }
-                        }
-                    });
-                    start.wait().await;
-                    app.oneshot(
-                        axum::http::Request::builder()
-                            .method("POST")
-                            .uri(test_app_route("/admin/permissions"))
-                            .header("Content-Type", "application/json")
-                            .header("X-Jazz-Admin-Secret", "admin-secret")
-                            .body(axum::body::Body::from(request_body.to_string()))
-                            .unwrap(),
-                    )
-                    .await
-                    .expect("publish permissions through admin route")
-                })
-            };
-
-        let allow_publish = publish(app.clone(), start.clone(), "True");
-        let deny_publish = publish(app, start, "False");
-        let (allow_response, deny_response) = tokio::join!(allow_publish, deny_publish);
-        let allow_response = allow_response.expect("allow publish task");
-        let deny_response = deny_response.expect("deny publish task");
-        let allow_status = allow_response.status();
-        let deny_status = deny_response.status();
-        assert_eq!(
-            [allow_status, deny_status]
-                .into_iter()
-                .filter(|status| *status == StatusCode::CREATED)
-                .count(),
-            1
-        );
-        assert_eq!(
-            [allow_status, deny_status]
-                .into_iter()
-                .filter(|status| *status == StatusCode::CONFLICT)
-                .count(),
-            1
-        );
-
-        let (winning_policy, created_response, conflict_response) =
-            if allow_status == StatusCode::CREATED {
-                (PolicyExpr::True, allow_response, deny_response)
-            } else {
-                (PolicyExpr::False, deny_response, allow_response)
-            };
-        let conflict_body = body::to_bytes(conflict_response.into_body(), usize::MAX)
-            .await
-            .expect("stale publish body");
-        let conflict_json: Value =
-            serde_json::from_slice(&conflict_body).expect("stale publish json");
-        assert!(
-            conflict_json["error"]
-                .as_str()
-                .is_some_and(|message| message.starts_with("stale permissions parent"))
-        );
-
-        let created_body = body::to_bytes(created_response.into_body(), usize::MAX)
-            .await
-            .expect("winning publish body");
-        let created_json: Value =
-            serde_json::from_slice(&created_body).expect("winning publish json");
-        let winning_bundle_object_id = created_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("winning bundle object id");
-        assert_eq!(created_json["head"]["version"].as_u64(), Some(1));
-        assert_eq!(created_json["head"]["parentBundleObjectId"], Value::Null);
-
-        let current = state
-            .catalogue
-            .active_schema(&state.catalogue_store)
-            .expect("read winning permissions")
-            .expect("winning permissions head");
-        let users = TableName::new("users");
-        assert_eq!(current.summary.schema_hash, schema_hash);
-        assert_eq!(
-            current.summary.bundle_object_id.to_string(),
-            winning_bundle_object_id
-        );
-        assert_eq!(
-            current
-                .permissions
-                .get(&users)
-                .expect("winning users permissions")
-                .select
-                .using
-                .as_ref(),
-            Some(&winning_policy)
-        );
-
-        let runtime_snapshot = state
-            .runtime()
-            .expect("runtime shell started")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read runtime catalogue");
-        let active_schema = runtime_snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
-            .expect("active runtime schema");
-        assert_eq!(
-            active_schema
-                .schema
-                .public_schema()
-                .get(&users)
-                .expect("runtime users table")
-                .policies
-                .select
-                .using
-                .as_ref(),
-            Some(&winning_policy)
-        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1255,35 +936,34 @@ mod tests {
         let from = SchemaHash::compute(&v1).to_string();
         let to = SchemaHash::compute(&v2).to_string();
         let isolated_hash = SchemaHash::compute(&isolated).to_string();
-        let app = make_test_router(make_state_with_schema(v1).await);
-        publish_schema_for_test(&app, v2).await;
-        publish_schema_for_test(&app, isolated).await;
+        let state = make_state_with_schema(v1.clone()).await;
+        let app = make_test_router(state.clone());
+        store_schema_draft_for_test(&state, v2).await;
+        store_schema_draft_for_test(&state, isolated).await;
         assert_eq!(
             read_migration_graph(&app).await["migrations"],
             serde_json::json!([])
         );
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "fromHash": from, "toHash": to,
-                            "forward": [{"table": "users", "operations": [{
-                                "type": "rename", "column": "email", "value": "email_address"
-                            }]}]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+        let mut transform = jazz::tools::schema_lens::LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".into(),
+                old_name: "email".into(),
+                new_name: "email_address".into(),
+            },
+            false,
+        );
+        state
+            .catalogue
+            .publish_lens(
+                &state.catalogue_store,
+                &jazz::tools::schema_lens::Lens::new(
+                    SchemaHash::compute(&v1),
+                    SchemaHash::from_hex(&to).unwrap(),
+                    transform,
+                ),
             )
-            .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
         let graph = read_migration_graph(&app).await;
         let mut hashes = vec![from.clone(), to.clone(), isolated_hash];
         hashes.sort();
@@ -1294,27 +974,15 @@ mod tests {
         );
         assert_eq!(read_migration_graph(&app).await, graph);
 
-        let permissions = std::collections::HashMap::<String, TablePolicies>::new();
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "schemaHash": to, "permissions": permissions,
-                            "expectedParentBundleObjectId": null
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
+        state
+            .catalogue
+            .publish_permissions_bundle(
+                &state.catalogue_store,
+                SchemaHash::from_hex(&to).unwrap(),
+                std::collections::HashMap::new(),
+                None,
             )
-            .await
             .unwrap();
-        assert!(response.status().is_success());
         let active = read_migration_graph(&app).await;
         assert_eq!(active["activeSchemaHash"], to);
         assert_eq!(active["schemas"], graph["schemas"]);
@@ -1322,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_connectivity_handler_reports_uploaded_migration_connectivity() {
+    async fn migration_graph_reports_deployed_migration() {
         let v1 = SchemaBuilder::new()
             .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .build();
@@ -1335,7 +1003,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
         let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
         let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
@@ -1368,40 +1036,21 @@ mod tests {
             "publishing a schema draft must not expose it before its lineage lens"
         );
 
-        let disconnected = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash={}&toHash={}",
-                        test_app_route("/admin/schema-connectivity"),
-                        v1_hash,
-                        v2_hash
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(disconnected.status(), StatusCode::OK);
-        let disconnected_body = body::to_bytes(disconnected.into_body(), usize::MAX)
-            .await
-            .expect("disconnected body");
-        let disconnected_json: Value =
-            serde_json::from_slice(&disconnected_body).expect("disconnected json");
-        assert_eq!(disconnected_json["connected"], Value::Bool(false));
+        assert_eq!(
+            read_migration_graph(&app).await["migrations"],
+            serde_json::json!([])
+        );
 
         let publish_migration_response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({
+                        migration_deployment(serde_json::json!({
                             "fromHash": v1_hash.to_string(),
                             "toHash": v2_hash.to_string(),
                             "forward": [{
@@ -1412,69 +1061,19 @@ mod tests {
                                     "value": "email_address"
                                 }]
                             }]
-                        })
+                        }))
                         .to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(publish_migration_response.status(), StatusCode::CREATED);
+        assert_eq!(publish_migration_response.status(), StatusCode::OK);
 
-        let connected = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash={}&toHash={}",
-                        test_app_route("/admin/schema-connectivity"),
-                        v1_hash,
-                        v2_hash
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(connected.status(), StatusCode::OK);
-        let connected_body = body::to_bytes(connected.into_body(), usize::MAX)
-            .await
-            .expect("connected body");
-        let connected_json: Value =
-            serde_json::from_slice(&connected_body).expect("connected json");
-        assert_eq!(connected_json["connected"], Value::Bool(true));
-    }
-
-    #[tokio::test]
-    async fn publish_schema_rejects_inline_permissions() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_state_with_schema(schema.clone()).await;
-        let app = make_test_router(state);
-
-        let request_body = serde_json::json!({
-            "schema": schema,
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            }
-        });
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let graph = read_migration_graph(&app).await;
+        assert_eq!(graph["migrations"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["migrations"][0]["fromHash"], v1_hash.to_string());
+        assert_eq!(graph["migrations"][0]["toHash"], v2_hash.to_string());
     }
 
     #[tokio::test]
@@ -1491,7 +1090,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
         let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
         let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
@@ -1536,13 +1135,14 @@ mod tests {
                 }]
             }]
         });
+        let request_body = migration_deployment(request_body);
 
         let unauthorized = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(request_body.to_string()))
                     .unwrap(),
@@ -1555,7 +1155,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1563,7 +1163,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.status(), StatusCode::OK);
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id())
@@ -1581,13 +1181,6 @@ mod tests {
             lens.is_some(),
             "published lens should be stored in the catalogue"
         );
-        assert!(
-            state
-                .catalogue
-                .are_schema_hashes_connected(&state.catalogue_store, v1_hash, v2_hash)
-                .expect("read schema connectivity"),
-            "published lens should connect the source and target schema hashes"
-        );
     }
 
     #[tokio::test]
@@ -1604,7 +1197,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1619,12 +1212,13 @@ mod tests {
                 }]
             }]
         });
+        let request_body = migration_deployment(request_body);
 
         let created = app
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1638,7 +1232,7 @@ mod tests {
             .expect("migration response body");
         assert_eq!(
             created_status,
-            StatusCode::CREATED,
+            StatusCode::OK,
             "{}",
             String::from_utf8_lossy(&created_body)
         );
@@ -1689,7 +1283,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2.clone()).await;
+        store_schema_draft_for_test(&state, v2.clone()).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1707,12 +1301,13 @@ mod tests {
                 }
             ]
         });
+        let request_body = migration_deployment(request_body);
 
         let created = app
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1720,7 +1315,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.status(), StatusCode::OK);
 
         let lens = state
             .catalogue_store
@@ -2020,9 +1615,8 @@ mod tests {
     async fn catalogue_ingress_cap_blocks_only_oversized_request() {
         fn padded_migration(length: usize) -> Vec<u8> {
             let mut value = serde_json::json!({
-                "fromHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "toHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "forward": [],
+                "targetSchemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "schemas": [], "migrations": [], "permissions": {},
                 "padding": ""
             });
             let base = serde_json::to_vec(&value).unwrap().len();
@@ -2037,7 +1631,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -2047,12 +1641,12 @@ mod tests {
             )
             .await
             .expect("exact ingress response");
-        assert_eq!(exact.status(), StatusCode::NOT_FOUND);
+        assert_eq!(exact.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let oversized = app
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -2074,38 +1668,18 @@ mod tests {
             })
     }
 
-    fn named_route(name: &str, path: &str) -> String {
-        format!(
-            "/apps/{}/{}",
-            AppId::from_name(name),
-            path.trim_start_matches('/')
+    async fn store_legacy_schema(state: &ServerState, schema: &Schema) {
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .unwrap();
+        crate::server::runtime_catalogue::publish_runtime_catalogue(
+            state,
+            std::slice::from_ref(schema),
+            &[],
         )
-    }
-
-    async fn admin_post(app: &axum::Router, route: String, request: Value) -> StatusCode {
-        app.clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(route)
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(request.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .status()
-    }
-
-    async fn publish_schema_via_admin(app: &axum::Router, name: &str, schema: &Schema) {
-        let request = serde_json::json!({ "schema": serde_json::to_value(schema).unwrap() });
-        assert_eq!(
-            admin_post(app, named_route(name, "/admin/schemas"), request).await,
-            StatusCode::CREATED
-        );
-        // Startup picks the newest schema by its millisecond publish time.
-        // Keep consecutive publications strictly ordered.
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -2137,21 +1711,19 @@ mod tests {
             .build()
             .await
             .unwrap();
-        publish_schema_via_admin(&built.app, name, &first).await;
-        let permissions = serde_json::json!({
-            "schemaHash": SchemaHash::compute(&first).to_string(),
-            "permissions": { "notes": { "select": { "using": { "type": "True" } } } },
-        });
-        assert_eq!(
-            admin_post(
-                &built.app,
-                named_route(name, "/admin/permissions"),
-                permissions
-            )
-            .await,
-            StatusCode::CREATED
-        );
-        publish_schema_via_admin(&built.app, name, &unbridged).await;
+        store_legacy_schema(&built.state, &first).await;
+        crate::server::runtime_catalogue::publish_permissions_and_runtime(
+            &built.state,
+            SchemaHash::compute(&first),
+            std::collections::HashMap::from([(
+                TableName::new("notes"),
+                TablePolicies::new().with_select(PolicyExpr::True),
+            )]),
+            None,
+        )
+        .await
+        .unwrap();
+        store_legacy_schema(&built.state, &unbridged).await;
         built.shutdown().await;
 
         let restarted = persistent_dynamic_builder(dir.path(), name)
@@ -2191,8 +1763,8 @@ mod tests {
             .build()
             .await
             .unwrap();
-        publish_schema_via_admin(&built.app, name, &first).await;
-        publish_schema_via_admin(&built.app, name, &unbridged).await;
+        store_legacy_schema(&built.state, &first).await;
+        store_legacy_schema(&built.state, &unbridged).await;
         built.shutdown().await;
 
         let restarted = persistent_dynamic_builder(dir.path(), name)

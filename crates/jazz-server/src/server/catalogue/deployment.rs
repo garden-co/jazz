@@ -100,6 +100,8 @@ impl StoredCatalogue {
             .filter(|(_, table)| table.policies != TablePolicies::default())
             .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
+        validate_permissions_relation_unions(&permissions)
+            .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         let current = expected.active_schema();
         let same_active = current.as_ref().is_some_and(|active| {
             active.summary.schema_hash == schema_hash

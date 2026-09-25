@@ -189,14 +189,15 @@ fn parse_bound_port_record(contents: &str) -> Option<u16> {
 
 #[cfg(unix)]
 fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
-    let body = serde_json::to_string(&json!({
-        "schema": empty_schema().public_schema(),
-    }))
+    let body = serde_json::to_string(&jazz_testkit::schema_deployment(
+        empty_schema().public_schema(),
+        [],
+    ))
     .expect("serialize empty schema");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
     write!(
         stream,
-        "POST /apps/00000000-0000-0000-0000-000000000001/admin/schemas HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /apps/00000000-0000-0000-0000-000000000001/admin/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
@@ -206,7 +207,7 @@ fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
         .read_to_string(&mut response)
         .expect("read schema publish response");
     assert!(
-        response.starts_with("HTTP/1.1 201"),
+        response.starts_with("HTTP/1.1 200"),
         "schema publication failed: {response}"
     );
     assert!(

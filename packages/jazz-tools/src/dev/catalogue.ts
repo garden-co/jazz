@@ -18,24 +18,17 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 import { computeSchemaHash } from "../schema-hash.js";
 import {
   encodePublishedMigrationValue,
-  fetchPermissionsHead,
-  fetchSchemaHashes,
   fetchStoredWasmSchema,
-  publishStoredMigration,
-  publishStoredPermissions,
-  publishStoredSchema,
   publishDeployment,
   type DeploymentArtifacts,
   type DeploymentResponse,
   type PublishedTableLens,
-  type StoredPermissionsHead,
 } from "./catalogue-api.js";
 import {
   columnTypeSignature,
   normalizeSchemaHashInput,
   shortSchemaHash,
   tableSchemasEqual,
-  wasmSchemasEqual,
 } from "./schema-utils.js";
 
 import { fetchMigrationGraph, type MigrationGraph } from "./migration-graph.js";
@@ -49,51 +42,10 @@ export interface CatalogueServerOptions {
   adminSecret: string;
 }
 
-export interface PushSchemaOptions extends CatalogueServerOptions {
-  schema: SchemaSourceInput;
-}
-
-export interface PushSchemaResult {
+export interface DeploySchemaResult {
   hash: string;
   schemaFile?: string;
-  status: "published";
-  objectId?: string;
-}
-
-export type DeploySchemaResult =
-  | PushSchemaResult
-  | {
-      hash: string;
-      schemaFile?: string;
-      status: "already-stored";
-    };
-
-export interface PushPermissionsOptions extends CatalogueServerOptions {
-  schemaHash: string;
-  permissions: CompiledPermissionsMap;
-}
-
-export interface PushPermissionsResult {
-  schemaHash: string;
-  permissionsFile?: string;
-  previousHead: StoredPermissionsHead | null;
-  head: StoredPermissionsHead | null;
-}
-
-export type PushMigrationOptions = CatalogueServerOptions &
-  (
-    | {
-        migration: DefinedMigration;
-        fromHash?: string;
-        toHash?: string;
-      }
-    | { fromHash: string; toHash: string; migration?: undefined }
-  );
-export interface PushMigrationResult {
-  fromHash: string;
-  toHash: string;
-  status: "published";
-  objectId?: string;
+  status: "published" | "already-stored";
 }
 
 export interface DeployOptions extends CatalogueServerOptions {
@@ -129,50 +81,6 @@ export class MissingMigrationError extends Error {
       `Schema transition ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} requires a migration.`,
     );
   }
-}
-
-/**
- * The server stored a schema under a different structural hash than the one
- * computed locally. This happens when the server predates a schema feature the
- * local schema uses (for example composite indexes on an alpha.56 server) and
- * silently dropped it while parsing. Deploy stops before publishing a
- * migration or permissions against the server's hash.
- */
-export class SchemaHashMismatchError extends Error {
-  readonly name = "SchemaHashMismatchError";
-
-  constructor(
-    readonly localHash: string,
-    readonly serverHash: string,
-  ) {
-    super(
-      `Schema publish returned hash ${shortSchemaHash(serverHash)}, but the local schema hashes to ` +
-        `${shortSchemaHash(localHash)}. The server did not store the schema as sent; it likely predates ` +
-        "a schema feature this schema uses (such as composite indexes) and dropped it. Upgrade the " +
-        "server before deploying. No migration or permissions were published for this schema.",
-    );
-  }
-}
-
-/**
- * Publishes `wasmSchema` and verifies that the server stored exactly it: the
- * structural hash the server returns must equal the locally computed one.
- */
-async function publishStoredSchemaVerified(
-  options: CatalogueServerOptions,
-  wasmSchema: WasmSchema,
-  localHash?: string,
-): Promise<{ objectId: string; hash: string }> {
-  const expectedHash = localHash ?? (await computeSchemaHash(wasmSchema));
-  const result = await publishStoredSchema(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schema: wasmSchema,
-  });
-  if (result.hash !== expectedHash) {
-    throw new SchemaHashMismatchError(expectedHash, result.hash);
-  }
-  return result;
 }
 
 function resolveMigrationDefinitionWasmSchema(input: unknown): WasmSchema {
@@ -335,41 +243,6 @@ export function schemaTransitionRequiresRowTransform(
   );
 }
 
-export async function resolveStoredStructuralSchemaHash(
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
-  wasmSchema: WasmSchema,
-): Promise<string | null> {
-  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
-  const storedSchemas = await Promise.all(
-    hashes.map(async (hash) => ({
-      hash,
-      schema: (await fetchStoredWasmSchema(serverUrl, { appId, adminSecret, schemaHash: hash }))
-        .schema,
-    })),
-  );
-
-  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
-  return match?.hash ?? null;
-}
-
-export async function resolveStoredStructuralSchemaHashOrThrow(
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
-  wasmSchema: WasmSchema,
-): Promise<string> {
-  const hash = await resolveStoredStructuralSchemaHash(appId, serverUrl, adminSecret, wasmSchema);
-  if (!hash) {
-    throw new Error(
-      "No stored structural schema matches the provided schema. Publish the structural schema before pushing permissions.",
-    );
-  }
-
-  return hash;
-}
-
 function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
   if (typeof sqlType === "string") {
     switch (sqlType) {
@@ -446,105 +319,6 @@ async function loadSchema(options: CatalogueServerOptions, hash: string): Promis
     schemaHash: hash,
   });
   return storedSchema.schema;
-}
-
-/**
- * Publishes a schema to the Jazz server.
- *
- * When using this function, permissions and migrations need to be updated
- * separately, using {@link pushPermissions} and {@link pushMigration}.
- *
- * Prefer using {@link deploy}, which handles all operations.
- */
-export async function pushSchema(options: PushSchemaOptions): Promise<PushSchemaResult> {
-  const result = await publishStoredSchemaVerified(options, resolveSchemaSource(options.schema));
-
-  return {
-    hash: result.hash,
-    status: "published",
-    objectId: result.objectId,
-  };
-}
-
-/**
- * Publishes permissions to a known schema.
- *
- * The target schema must already be identified by `options.schemaHash`.
- *
- * @param options - Server, admin credentials, permissions, and schema hash for the permissions push.
- * @returns The previous and new permissions heads.
- */
-export async function pushPermissions(
-  options: PushPermissionsOptions,
-): Promise<PushPermissionsResult> {
-  const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-  });
-
-  const { head } = await publishStoredPermissions(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schemaHash: options.schemaHash,
-    permissions: options.permissions,
-    expectedParentBundleObjectId: previousHead?.bundleObjectId ?? null,
-  });
-
-  return {
-    schemaHash: options.schemaHash,
-    previousHead,
-    head,
-  };
-}
-
-/**
- * Publishes the migration that connects two schemas.
- *
- * When a migration is not present, this publishes an empty migration
- * only if the schema transition does not require row transformations.
- */
-export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
-  const serverOptions: CatalogueServerOptions = {
-    appId: options.appId,
-    serverUrl: options.serverUrl,
-    adminSecret: options.adminSecret,
-  };
-  const migration = options.migration;
-  const fromWitness = migration ? resolveMigrationDefinitionWasmSchema(migration.from) : undefined;
-  const toWitness = migration ? resolveMigrationDefinitionWasmSchema(migration.to) : undefined;
-  const fromHash = options.fromHash ?? (await computeSchemaHash(fromWitness!));
-  const toHash = options.toHash ?? (await computeSchemaHash(toWitness!));
-  const fromSchema = options.fromHash ? await loadSchema(serverOptions, fromHash) : fromWitness!;
-  const toSchema = options.toHash ? await loadSchema(serverOptions, toHash) : toWitness!;
-
-  if (migration) {
-    assertMigrationMatchesCanonicalBundle(migration, {
-      fromHash,
-      toHash,
-      fromSchema,
-      toSchema,
-    });
-  }
-
-  const forward = serializeForwardLenses(migration?.forward ?? []);
-  if (forward.length === 0 && schemaTransitionRequiresRowTransform(fromSchema, toSchema)) {
-    throw new MissingMigrationError(fromHash, toHash);
-  }
-
-  const published = await publishStoredMigration(serverOptions.serverUrl, {
-    appId: serverOptions.appId,
-    adminSecret: serverOptions.adminSecret,
-    fromHash,
-    toHash,
-    forward,
-  });
-
-  return {
-    fromHash,
-    toHash,
-    status: "published",
-    objectId: published.objectId,
-  };
 }
 
 /** Diff against the fetched graph and publish all missing artifacts in one request. */

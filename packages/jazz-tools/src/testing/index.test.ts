@@ -1,3 +1,4 @@
+import { computeSchemaHash } from "../schema-hash.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -205,7 +206,7 @@ describe("startLocalJazzServer", () => {
     }
   }, 15_000);
 
-  it("accepts a schema publish via /admin/schemas when admin secret matches", async () => {
+  it("accepts a deployment via /admin/deploy when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -216,22 +217,32 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": adminSecret,
         },
-        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
+        body: JSON.stringify({
+          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          schemas: [
+            {
+              hash: await computeSchemaHash(testApp.wasmSchema),
+              schema: { tables: testApp.wasmSchema },
+            },
+          ],
+          migrations: [],
+          permissions: testPermissions,
+        }),
       });
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
     } finally {
       await stopTrackedLocalJazzServer(server);
     }
   });
 
-  it("rejects a schema publish via /admin/schemas when admin secret doesn't match", async () => {
+  it("rejects a deployment via /admin/deploy when admin secret doesn't match", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -242,13 +253,23 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
-        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
+        body: JSON.stringify({
+          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          schemas: [
+            {
+              hash: await computeSchemaHash(testApp.wasmSchema),
+              schema: { tables: testApp.wasmSchema },
+            },
+          ],
+          migrations: [],
+          permissions: testPermissions,
+        }),
       });
 
       expect(response.status).toBe(401);
