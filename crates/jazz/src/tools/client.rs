@@ -804,11 +804,11 @@ impl Backend {
         )
     }
 
-    fn prepare_query(
+    async fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema(query)
+        self.0.prepare_query_for_open_schema_async(query).await
     }
 
     async fn row_provenance_for_subscription(
@@ -1243,13 +1243,11 @@ impl ClientDb {
         transaction_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let prepared = {
-            let inner = self.inner.borrow();
-            inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?
-        };
+        let prepared = self
+            .backend()?
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
@@ -2210,16 +2208,11 @@ impl ClientDbInner {
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            (
-                inner.backend_clone()?,
-                inner
-                    .backend()?
-                    .prepare_query(&query)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            )
-        };
+        let db = inner.borrow().backend_clone()?;
+        let prepared = db
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -2259,7 +2252,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2287,14 +2280,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        if crate::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -2347,13 +2340,13 @@ impl ClientDbInner {
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
         let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            let prepared = inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?;
-            (inner.backend_clone()?, prepared)
+        let db = inner.borrow().backend_clone()?;
+        let prepared = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            prepared = db.prepare_query(&query) => {
+                prepared.map_err(|error| JazzError::Query(error.to_string()))?
+            }
         };
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
@@ -3247,7 +3240,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3694,7 +3687,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
@@ -5500,6 +5493,52 @@ mod tests {
             (0, 0),
             "cancelling the remote one-shot must release its coverage owner"
         );
+    }
+
+    // This is an internal test because the suspended node operation it needs
+    // (the client's sync turn awaiting large-value chunks or cold storage) is
+    // timing-dependent through the public API; #3514 hit it only under load.
+    // Holding the owner makes that suspension deterministic. The assertion is
+    // public: `JazzClient::query` waits for the owner instead of panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_waits_for_a_suspended_node_operation() {
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
+            AppId::from_name("query-waits-for-suspended-owner"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        )))
+        .await
+        .expect("connect offline client");
+        client
+            .upsert(
+                "todos",
+                Uuid::from_u128(0x3514),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("held".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write local row");
+        let backend = client
+            .db
+            .inner
+            .borrow()
+            .backend_clone()
+            .expect("client is open");
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut owner = Box::pin(backend.0.hold_node_owner_for_test());
+        assert!(owner.as_mut().poll(&mut context).is_pending());
+
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::LocalFirst));
+        assert!(
+            query.as_mut().poll(&mut context).is_pending(),
+            "a query must wait while another operation owns the node"
+        );
+
+        drop(owner);
+        let rows = query.await.expect("query after the owner is released");
+        assert_eq!(rows.len(), 1);
     }
 
     // This is an internal fault-injection test because a real fatal tick error

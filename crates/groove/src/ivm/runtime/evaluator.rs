@@ -774,9 +774,6 @@ pub(super) struct RootOrderingWindows {
     entries: Vec<(Vec<u8>, GroupWindow)>,
     descriptor: Option<RecordDescriptor>,
     identity: Vec<usize>,
-    /// Field-0 positions across all groups, for outputs without a proven
-    /// identity: built once, first position wins, as before.
-    field_zero: std::cell::OnceCell<RootPositions>,
     /// Each group's first and last entry, so an output reaching a few groups
     /// does not scan every touched group's windows. Reset by `record`.
     group_entries: std::cell::OnceCell<HashMap<Vec<u8>, (usize, usize)>>,
@@ -789,12 +786,6 @@ type WindowPair<'a> = (&'a [WindowedRecord], &'a [WindowedRecord]);
 struct GroupWindow {
     before: Vec<WindowedRecord>,
     after: Vec<WindowedRecord>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RootPositions {
-    before: BTreeMap<Vec<u8>, usize>,
-    after: BTreeMap<Vec<u8>, usize>,
 }
 
 impl RootOrderingWindows {
@@ -818,40 +809,6 @@ impl RootOrderingWindows {
                 after: after.to_vec(),
             },
         ));
-    }
-
-    fn positions<'a>(
-        &self,
-        entries: impl Iterator<Item = &'a GroupWindow>,
-        key_fields: &[usize],
-    ) -> Result<RootPositions, IvmRuntimeError> {
-        let mut positions = RootPositions::default();
-        let Some(descriptor) = self.descriptor else {
-            return Ok(positions);
-        };
-        for window in entries {
-            extend_root_window_positions(
-                descriptor,
-                &window.before,
-                key_fields,
-                &mut positions.before,
-            )?;
-            extend_root_window_positions(
-                descriptor,
-                &window.after,
-                key_fields,
-                &mut positions.after,
-            )?;
-        }
-        Ok(positions)
-    }
-
-    fn field_zero(&self) -> Result<&RootPositions, IvmRuntimeError> {
-        if let Some(positions) = self.field_zero.get() {
-            return Ok(positions);
-        }
-        let positions = self.positions(self.entries.iter().map(|(_, window)| window), &[0])?;
-        Ok(self.field_zero.get_or_init(|| positions))
     }
 
     /// A group's window across this tick: its first before and last after.
@@ -1384,14 +1341,11 @@ impl TickEvaluator<'_> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
             return Ok(());
         };
+        // Positions are keyed by the TopBy's row identity. An output whose
+        // chain does not carry that identity keys its terminal edits by its
+        // own fields, so no position can address them: registration skips
+        // such outputs, and one sharing an ordering node gets no moves.
         let Some((identity, groups)) = identity else {
-            let positions = windows.field_zero()?;
-            apply_root_ordering_operations(
-                &positions.before,
-                &positions.after,
-                root_descriptor,
-                terminal,
-            );
             return Ok(());
         };
         let Some(descriptor) = windows.descriptor else {
@@ -1551,39 +1505,68 @@ impl TickEvaluator<'_> {
     }
 
     fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        if let Some(value) = self
-            .node_meta
-            .get(&node)
-            .and_then(|meta| meta.has_hydration_state_ancestor)
-        {
+        let cached = |meta: &HashMap<NodeId, NodeRuntimeMeta>, node: NodeId| {
+            meta.get(&node)
+                .and_then(|meta| meta.has_hydration_state_ancestor)
+        };
+        if let Some(value) = cached(self.node_meta, node) {
             return Ok(value);
         }
         // Node descriptors and input edges are immutable while installed. The
         // metadata is retired with the node; consumer attachment and runtime
         // state cleanup do not change this ancestor classification.
-        let mut ancestors = HashSet::new();
-        self.graph.mark_ancestors(node, &mut ancestors);
-        let mut depends = false;
-        for ancestor in ancestors {
+        //
+        // A node depends on an aggregate when it is one or any input does.
+        // Memoizing every visited node keeps a whole graph's classification
+        // linear; walking each node's full ancestor set separately was
+        // quadratic in graph depth across a subscription's nodes.
+        let mut pending = vec![(node, false)];
+        while let Some((current, expanded)) = pending.pop() {
+            if cached(self.node_meta, current).is_some() {
+                continue;
+            }
             let graph_node = self
                 .graph
-                .node(ancestor)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(
-                graph_node.descriptor.operator,
-                OpType::Aggregate(_)
-                    | OpType::ArgMinBy(_)
-                    | OpType::ArgMaxBy(_)
-                    | OpType::Arrange(_)
-            ) {
-                depends = true;
-                break;
-            }
+                .node(current)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(current))?;
+            let depends = if holds_hydration_state(&graph_node.descriptor.operator) {
+                true
+            } else if expanded {
+                graph_node
+                    .descriptor
+                    .inputs
+                    .iter()
+                    .any(|input| cached(self.node_meta, *input) == Some(true))
+            } else {
+                pending.push((current, true));
+                pending.extend(
+                    graph_node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .filter(|input| cached(self.node_meta, **input).is_none())
+                        .map(|input| (*input, false)),
+                );
+                continue;
+            };
+            self.node_meta
+                .entry(current)
+                .or_default()
+                .has_hydration_state_ancestor = Some(depends);
         }
-        self.node_meta
-            .entry(node)
-            .or_default()
-            .has_hydration_state_ancestor = Some(depends);
+        let depends = cached(self.node_meta, node).expect("classified above");
+        // Tests check the memoized recursion against the full ancestor walk.
+        #[cfg(test)]
+        {
+            let mut ancestors = HashSet::new();
+            self.graph.mark_ancestors(node, &mut ancestors);
+            let expected = ancestors.iter().any(|ancestor| {
+                self.graph
+                    .node(*ancestor)
+                    .is_some_and(|node| holds_hydration_state(&node.descriptor.operator))
+            });
+            assert_eq!(depends, expected, "aggregate ancestry of {node:?}");
+        }
         Ok(depends)
     }
 
@@ -3724,4 +3707,13 @@ async fn cooperative_operator_yield() {
         }
     })
     .await
+}
+
+/// Operators whose hydration rebuilds retained state that a cached record
+/// batch downstream cannot vouch for.
+fn holds_hydration_state(operator: &OpType) -> bool {
+    matches!(
+        operator,
+        OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_) | OpType::Arrange(_)
+    )
 }

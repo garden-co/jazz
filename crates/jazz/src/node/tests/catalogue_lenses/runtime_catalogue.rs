@@ -295,7 +295,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         schema: evolved_payload.id,
     })
     .unwrap();
-    assert!(core.table_in_schema("notes", evolved_payload.id).is_ok());
+    assert!(core.table_in_schema_ref("notes", evolved_payload.id).is_ok());
 
     let note = row(0x3e);
     assert!(

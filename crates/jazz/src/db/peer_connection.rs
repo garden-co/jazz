@@ -1398,8 +1398,12 @@ where
                 rebind_pending = true;
                 continue;
             };
-            for subscription in refresh_subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut refresh_subscribers = refresh_subscribers.into_iter().peekable();
+            while let Some(subscription) = refresh_subscribers.next() {
+                let update =
+                    take_last_or_clone(&mut shared_update, refresh_subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     maintained_subscription,
@@ -1687,8 +1691,11 @@ where
                 *serve_dirty = true;
                 continue;
             };
-            for subscription in subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut subscribers = subscribers.into_iter().peekable();
+            while let Some(subscription) = subscribers.next() {
+                let update = take_last_or_clone(&mut shared_update, subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     group_subscription,
@@ -5956,8 +5963,14 @@ where
                                 summarize_subscription_key(group_subscription),
                                 summarize_sync_message(&update)
                             ));
-                            for subscription in group.subscribers.iter().copied() {
-                                let mut update = retarget_view_update(update.clone(), subscription);
+                            let mut shared_update = Some(update);
+                            let mut subscribers = group.subscribers.iter().copied().peekable();
+                            while let Some(subscription) = subscribers.next() {
+                                let update = take_last_or_clone(
+                                    &mut shared_update,
+                                    subscribers.peek().is_some(),
+                                );
+                                let mut update = retarget_view_update(update, subscription);
                                 stamp_view_update_authorization_progress_from(
                                     peer,
                                     group_subscription,
@@ -6089,13 +6102,13 @@ pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrg
 fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     #[cfg(feature = "cold-settle-attribution")]
     let started = Instant::now();
-    let encoded = encode_sync_message(message);
+    let len = crate::wire::encoded_sync_message_len(message).unwrap_or(0);
     #[cfg(feature = "cold-settle-attribution")]
     crate::cold_settle_attribution::record_preflight_payload(
         started.elapsed().as_nanos() as u64,
-        encoded.as_ref().map_or(0, Vec::len),
+        len,
     );
-    encoded.map_or(0, |bytes| bytes.len())
+    len
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -7321,12 +7334,13 @@ where
             .authorization_progress
             .get_or_insert_with(|| peer.authorization_progress_for_subscription(*subscription));
     }
+    bound_view_update_inline_bodies(&mut message)?;
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
         "transport send {}",
         summarize_sync_message(&message)
     ));
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+    if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
         eprintln!(
@@ -7403,6 +7417,119 @@ fn stamp_subscriber_opening_state<S>(
             payload.peer_payload_inventory.opening_pending = true;
         }
     }
+}
+
+/// Keep an over-limit `ViewUpdate` admissible by leaving some inline bodies
+/// to the existing row-version repair lane (#3477).
+///
+/// Inline carriers are an availability optimization, not membership: the
+/// supporting-row manifest alone declares the (complete) snapshot or delta,
+/// and a receiver that lacks a referenced body holds the whole update, fetches
+/// the missing bodies with bounded `FetchRowVersions` requests, and only then
+/// applies it atomically. Known-state dedup already omits bodies this way.
+///
+/// Only bodies the receiver's preflight can detect and repair are omitted:
+/// settled (non-`Pending`) main-branch content versions whose exact
+/// `(table, row, tx)` is a supporting-row addition. Everything else (deletion
+/// witnesses, replacement winners, pending transactions whose fates must be
+/// routed, complete-exclusive extras) stays inline. Messages already within
+/// the budget are returned unchanged, byte for byte.
+fn bound_view_update_inline_bodies(message: &mut SyncMessage) -> Result<(), Error> {
+    fn carriers_of(message: &mut SyncMessage) -> Option<&mut Vec<crate::protocol::VersionCarrier>> {
+        match message {
+            SyncMessage::ViewUpdate(view) => Some(&mut view.version_carriers),
+            _ => None,
+        }
+    }
+    let SyncMessage::ViewUpdate(view) = &*message else {
+        return Ok(());
+    };
+    if view.peer_payload_inventory.opening_pending {
+        return Ok(());
+    }
+    let budget = super::routed_messages::max_routed_payload_bytes();
+    let encoded_len = |message: &SyncMessage| {
+        crate::wire::encoded_sync_message_len(message).unwrap_or(usize::MAX)
+    };
+    // A size walk without allocation; ordinary updates stop here unchanged.
+    let size = encoded_len(message);
+    if size <= budget {
+        return Ok(());
+    }
+    let SyncMessage::ViewUpdate(view) = &*message else {
+        return Ok(());
+    };
+    let malformed = |_| Error::new(ErrorCode::Protocol, "malformed version-bundle run");
+    let carrier_bytes = view
+        .version_carriers
+        .iter()
+        .map(|carrier| postcard::experimental::serialized_size(carrier).unwrap_or(0))
+        .sum::<usize>();
+    // Everything except the carrier bodies.
+    let fixed_bytes = size.saturating_sub(carrier_bytes);
+    let repairable = view
+        .supporting_rows
+        .added_rows()
+        .iter()
+        .filter(|row| row.version.layer == crate::protocol::ResultRowLayer::Content)
+        .map(|row| (row.version_table.as_str(), row.row, row.version.tx))
+        .collect::<HashSet<_>>();
+    let bundles = expand_version_carriers(&view.version_carriers)
+        .map_err(malformed)?
+        .into_iter()
+        .map(|bundle| {
+            let bytes = postcard::experimental::serialized_size(&bundle).unwrap_or(usize::MAX);
+            let omittable = !matches!(bundle.fate, Fate::Pending)
+                && !bundle.versions.is_empty()
+                && bundle.versions.iter().all(|version| {
+                    version.deletion().is_none()
+                        && version.branch_key().values.is_empty()
+                        && repairable.contains(&(
+                            version.table(),
+                            version.row_uuid(),
+                            bundle.tx.tx_id,
+                        ))
+                });
+            (bundle, bytes, omittable)
+        })
+        .collect::<Vec<_>>();
+    drop(repairable);
+    let original = carriers_of(message).map(std::mem::take).unwrap_or_default();
+    // Singleton sizes only estimate the rebuilt run carriers, so measure the
+    // real encoding and tighten the estimate by any overshoot.
+    let mut target = budget;
+    for _ in 0..4 {
+        let mut kept_bytes = fixed_bytes;
+        let kept = bundles
+            .iter()
+            .filter(|(_, bytes, omittable)| {
+                if *omittable && kept_bytes.saturating_add(*bytes) > target {
+                    return false;
+                }
+                kept_bytes = kept_bytes.saturating_add(*bytes);
+                true
+            })
+            .map(|(bundle, _, _)| bundle.clone())
+            .collect::<Vec<_>>();
+        if kept.len() == bundles.len() {
+            // Nothing repairable is left to omit.
+            break;
+        }
+        if let Some(carriers) = carriers_of(message) {
+            *carriers =
+                crate::protocol::build_version_carriers_from_singletons(kept).map_err(malformed)?;
+        }
+        let trimmed_size = encoded_len(message);
+        if trimmed_size <= budget {
+            return Ok(());
+        }
+        target = target.saturating_sub(trimmed_size - budget + budget / 1024);
+    }
+    // Unchanged; routed admission reports the limit as before.
+    if let Some(carriers) = carriers_of(message) {
+        *carriers = original;
+    }
+    Ok(())
 }
 
 /// A retained publication already owns its opening/authorization envelope.
@@ -7663,6 +7790,17 @@ fn stamp_view_update_authorization_progress_from(
         return;
     }
     peer_payload_inventory.authorization_progress = Some(source_progress);
+}
+
+/// Hand one generated update to each sibling subscriber: every sibling but
+/// the last gets a clone, and the last takes the original, so the common
+/// single-subscriber group never deep-copies its (often large) snapshot.
+fn take_last_or_clone(slot: &mut Option<SyncMessage>, more_follow: bool) -> SyncMessage {
+    if more_follow {
+        slot.clone().expect("update remains for later siblings")
+    } else {
+        slot.take().expect("update remains for the last sibling")
+    }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {

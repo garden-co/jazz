@@ -1435,13 +1435,16 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
-test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
+test("CodSpeed baselines every main merge and runs only for benchmark-labeled PRs", () => {
+  // Every main merge queues a CodSpeed run. Otherwise PR reports compare
+  // against a stale main run and attribute intervening merges to the PR
+  // (#3488).
   const document = parse(codspeedWorkflow);
-  assert.equal(document.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  assert.deepEqual(document.on.push, { branches: ["main"] });
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  assert.deepEqual(document.on.schedule, [{ cron: "17 3 * * *" }]);
+  assert.equal(document.on.schedule, undefined, "per-merge runs replace the nightly baseline");
   assert.equal(document.on.workflow_dispatch, null);
   // Every root job carries the label gate; dependent jobs inherit its skip.
   const labelGate =
@@ -1452,13 +1455,35 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
     }
   };
   rootJobsAreGated(document.jobs);
+  // Main runs share one group and are never cancelled mid-run, so a burst of
+  // merges coalesces to the running commit plus the latest. PR runs cancel
+  // superseded pushes.
+  assert.deepEqual(document.concurrency, {
+    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
+  assert.throws(() => {
+    // Keying main runs by commit would run every merge of a burst in parallel.
+    const thrash = parse(codspeedWorkflow.replace("|| github.ref }}", "|| github.sha }}"));
+    assert.match(thrash.concurrency.group, /github\.ref \}\}$/);
+  }, /match/);
 
   assert.throws(() => {
+    const unsafe = parse(codspeedWorkflow.replace("  push:\n    branches: [main]\n", ""));
+    assert.deepEqual(unsafe.on.push, { branches: ["main"] });
+  }, /Expected values to be strictly deep-equal/);
+  assert.throws(() => {
     const unsafe = parse(
-      codspeedWorkflow.replace("  schedule:\n", "  push:\n    branches: [main]\n  schedule:\n"),
+      codspeedWorkflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: true",
+      ),
     );
-    assert.equal(unsafe.on.push, undefined, "ordinary main pushes must not run CodSpeed");
-  }, /ordinary main pushes/);
+    assert.equal(
+      unsafe.concurrency["cancel-in-progress"],
+      "${{ github.event_name == 'pull_request' }}",
+    );
+  }, /strictly equal/);
   assert.throws(() => {
     const unsafe = parse(
       codspeedWorkflow.replace(
@@ -1472,24 +1497,38 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
 
 test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
   const document = parse(codspeedWorkflow);
-  const job = document.jobs["route-subscription-walltime"];
-  assert.ok(job, "route subscription wall-time job must remain present");
+  const plan = document.jobs["native-workloads-plan"];
+  const measure = document.jobs["native-workloads-walltime"];
   assert.equal(
-    job.if,
+    plan.if,
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
-  assert.equal(job["runs-on"], "codspeed-macro");
-  const commands = job.steps
-    .map((step) => step.run)
-    .filter(Boolean)
-    .join("\n");
-  assert.match(
-    commands,
-    /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/,
+  assert.deepEqual(measure.needs, ["native-workloads-plan", "native-workloads-build"]);
+  assert.equal(measure["runs-on"], "codspeed-macro");
+  const matrix = spawnSync(
+    "node",
+    [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), "matrix"],
+    { encoding: "utf8" },
+  ).stdout;
+  assert.ok(
+    JSON.parse(matrix).includes("route-subscription"),
+    "route subscription wall-time workload must remain present",
   );
-  const run = job.steps.find((step) => step.with?.run)?.with?.run;
-  assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
-  assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
+  // Features are selected at `cargo codspeed build` time. `run` only executes
+  // that copied target; cargo-codspeed rejects Cargo feature flags there, which
+  // once left this receipt reporting no walltime benchmarks.
+  const args = (action) =>
+    spawnSync(
+      "node",
+      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, "route-subscription"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+  assert.equal(
+    args("build-args"),
+    "--package jazz --bench route_subscription_curve --features testing",
+  );
+  assert.equal(args("run-args"), "--package jazz --bench route_subscription_curve");
+  assert.doesNotMatch(JSON.stringify(measure), /--features|JAZZ_ROUTE_CURVE_ROUTES/);
   assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
   assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
   assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);
@@ -1729,28 +1768,30 @@ test("CodSpeed measures every example benchmark suite in wall-clock mode", () =>
   // fall back to simulation.
   assert.doesNotMatch(codspeedWorkflow, /mode: simulation/);
 
-  const commands = new Map();
-  for (const command of ["build", "run"]) {
-    for (const [benchmarkPackage, benches] of [
-      ["jazz-example-big-label-benchmark", ["ingest_walltime", "loads"]],
-      [
-        "jazz-example-benchmark-w1",
-        ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
-      ],
-    ]) {
-      const match = codspeedWorkflow.match(
-        new RegExp(`cargo codspeed ${command} [^\\n]*--package ${benchmarkPackage}(?: [^\\n]*)?`),
-      );
-      assert.ok(match, `CodSpeed must ${command} ${benchmarkPackage}`);
-      if (command === "build") assert.match(match[0], /--measurement-mode walltime/);
-      for (const bench of benches) assert.match(match[0], new RegExp(`--bench ${bench}(?: |$)`));
-      commands.set(`${command}:${benchmarkPackage}`, match[0]);
+  // Build and run arguments come from the artifact script's workload table.
+  const args = (action, workload) =>
+    spawnSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, workload], {
+      encoding: "utf8",
+    }).stdout.trim();
+  for (const [workload, benchmarkPackage, benches] of [
+    ["big-label", "jazz-example-big-label-benchmark", ["ingest_walltime", "loads"]],
+    [
+      "w1",
+      "jazz-example-benchmark-w1",
+      ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
+    ],
+  ]) {
+    for (const action of ["build-args", "run-args"]) {
+      const line = args(action, workload);
+      assert.match(line, new RegExp(`--package ${benchmarkPackage}(?: |$)`));
+      for (const bench of benches) assert.match(line, new RegExp(`--bench ${bench}(?: |$)`));
     }
   }
+  assert.match(codspeedWorkflow, /cargo codspeed build -m walltime "\$\{args\[@\]\}"/);
   assert.throws(
     () =>
       assert.match(
-        commands.get("build:jazz-example-benchmark-w1").replace(" --bench ahead_current", ""),
+        args("build-args", "w1").replace(" --bench ahead_current", ""),
         /--bench ahead_current(?: |$)/,
       ),
     /ahead_current/,

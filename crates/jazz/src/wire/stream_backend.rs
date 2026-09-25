@@ -239,13 +239,19 @@ impl OrderedChannelBackend {
             return Err("outbound codec generation mismatch".into());
         }
         let payload = if let Some(encoder) = encoder {
-            let mut output = vec![0; MAX_CHANNEL_FRAME_PAYLOAD];
+            // Size the extent for this chunk rather than the largest possible
+            // one, and grow only up to the unchanged physical bound when the
+            // encoder stalls, so a 40-byte fate no longer zeroes ~70 KB.
+            let mut output = vec![0; encoded_extent_capacity(chunk.bytes.len())];
             let mut consumed = 0;
             let mut written = 0;
             while consumed < chunk.bytes.len() {
                 let progress = encoder.encode(&chunk.bytes[consumed..], &mut output[written..])?;
                 if progress.consumed == 0 && progress.written == 0 {
-                    return Err("channel encoder exceeded physical extent bound".into());
+                    if !grow_encoded_extent(&mut output) {
+                        return Err("channel encoder exceeded physical extent bound".into());
+                    }
+                    continue;
                 }
                 consumed += progress.consumed;
                 written += progress.written;
@@ -256,7 +262,7 @@ impl OrderedChannelBackend {
                 if progress.finished {
                     break;
                 }
-                if progress.written == 0 {
+                if progress.written == 0 && !grow_encoded_extent(&mut output) {
                     return Err("channel flush exceeded physical extent bound".into());
                 }
             }
@@ -397,6 +403,13 @@ impl OrderedChannelBackend {
                 extent.class,
                 size,
             )?);
+            // The declared length is already admitted by the budget above;
+            // reserve it once rather than growing on every extent. The spare
+            // byte is the decoder's overrun probe on the final extent.
+            state
+                .payload
+                .try_reserve_exact(size + 1)
+                .map_err(|_| "channel reassembly allocation failed".to_owned())?;
             self.reserved += size;
             state.message_len = size;
             state.started = Some(Instant::now());
@@ -415,38 +428,57 @@ impl OrderedChannelBackend {
         if state.payload.len() + expected > state.message_len {
             return Err("channel exceeds declared logical length".into());
         }
-        let bytes = if let Some(decoder) = &mut state.decoder {
-            let mut output = vec![0; expected + 1];
-            let mut consumed = 0;
-            let mut written = 0;
-            loop {
-                let progress =
-                    decoder.decode(&extent.payload[consumed..], &mut output[written..])?;
-                consumed += progress.consumed;
-                written += progress.written;
-                if written > expected || progress.finished {
-                    return Err("channel codec ended or exceeded declared decoded extent".into());
+        if let Some(decoder) = &mut state.decoder {
+            // Decode straight into the reassembly buffer. One spare byte still
+            // detects a codec that overruns the declared decoded extent.
+            let base = state.payload.len();
+            state
+                .payload
+                .try_reserve_exact(expected + 1)
+                .map_err(|_| "channel reassembly allocation failed".to_owned())?;
+            state.payload.resize(base + expected + 1, 0);
+            let decoded = (|| {
+                let output = &mut state.payload[base..];
+                let mut consumed = 0;
+                let mut written = 0;
+                loop {
+                    let progress =
+                        decoder.decode(&extent.payload[consumed..], &mut output[written..])?;
+                    consumed += progress.consumed;
+                    written += progress.written;
+                    if written > expected || progress.finished {
+                        return Err(
+                            "channel codec ended or exceeded declared decoded extent".to_owned()
+                        );
+                    }
+                    if progress.consumed == 0 && progress.written == 0 {
+                        break;
+                    }
                 }
-                if progress.consumed == 0 && progress.written == 0 {
-                    break;
+                if consumed != extent.payload.len() || written != expected {
+                    return Err(
+                        "channel flush did not produce exact declared decoded extent".to_owned(),
+                    );
+                }
+                Ok(written)
+            })();
+            match decoded {
+                Ok(written) => state.payload.truncate(base + written),
+                Err(error) => {
+                    state.payload.truncate(base);
+                    return Err(error);
                 }
             }
-            if consumed != extent.payload.len() || written != expected {
-                return Err("channel flush did not produce exact declared decoded extent".into());
-            }
-            output.truncate(written);
-            output
         } else {
             if extent.payload.len() != expected {
                 return Err("uncompressed channel extent size mismatch".into());
             }
-            extent.payload
-        };
-        state
-            .payload
-            .try_reserve_exact(bytes.len())
-            .map_err(|_| "channel reassembly allocation failed".to_owned())?;
-        state.payload.extend_from_slice(&bytes);
+            state
+                .payload
+                .try_reserve_exact(extent.payload.len())
+                .map_err(|_| "channel reassembly allocation failed".to_owned())?;
+            state.payload.extend_from_slice(&extent.payload);
+        }
         state.progressed = Some(Instant::now());
         state.sequence = state
             .sequence
@@ -485,4 +517,21 @@ impl Drop for OrderedChannelBackend {
             credits.close();
         }
     }
+}
+
+/// Initial output for compressing one chunk: the same slack formula as
+/// `MAX_CHANNEL_FRAME_PAYLOAD`, applied to this chunk's length.
+fn encoded_extent_capacity(chunk_len: usize) -> usize {
+    (chunk_len + chunk_len / 10 + 64).min(MAX_CHANNEL_FRAME_PAYLOAD)
+}
+
+/// Double a stalled extent buffer up to the physical bound. Returns false
+/// when it is already at the bound, which is the pre-existing error case.
+fn grow_encoded_extent(output: &mut Vec<u8>) -> bool {
+    if output.len() >= MAX_CHANNEL_FRAME_PAYLOAD {
+        return false;
+    }
+    let grown = (output.len() * 2).min(MAX_CHANNEL_FRAME_PAYLOAD);
+    output.resize(grown, 0);
+    true
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 fn trace_template(event: &str) {
     #[cfg(any(test, feature = "testing"))]
-    if std::env::var_os("JAZZ_QUERY_TEMPLATE_TRACE").is_some() {
+    if crate::debug_env::query_template_trace() {
         eprintln!("JAZZ_QUERY_TEMPLATE_TRACE {event}");
     }
     let _ = event;
@@ -71,7 +71,7 @@ impl QueryProgramTemplateCache {
             }
             trace_template("typed_bound");
             #[cfg(any(test, feature = "testing"))]
-            if std::env::var_os("JAZZ_QUERY_TEMPLATE_TRACE").is_some() {
+            if crate::debug_env::query_template_trace() {
                 let (compiled, reused) = self.physical.counters();
                 eprintln!("JAZZ_QUERY_TEMPLATE_TRACE physical compiled={compiled} reused={reused}");
             }
@@ -87,7 +87,7 @@ impl QueryProgramTemplateCache {
         describe: impl Fn(GraphBuilder) -> Result<groove::ivm::TemplateGraphInput, groove::db::Error>,
     ) -> QueryCompileResult {
         #[cfg(any(test, feature = "testing"))]
-        if std::env::var_os("JAZZ_QUERY_TEMPLATE_TRACE").is_some() {
+        if crate::debug_env::query_template_trace() {
             eprintln!(
                 "JAZZ_QUERY_TEMPLATE_REQUEST prepared={} values={}",
                 compilation.request.input.binding.source_shape.is_some(),
