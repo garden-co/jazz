@@ -527,6 +527,9 @@ where
         &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
     ) -> Result<VersionRow, Error> {
         let author_schema = version.schema_version();
+        // Fail with TableNotFound before allocating aliases or resolving authored
+        // columns, matching the error ordering in commit_bundles.
+        self.table_in_schema_ref(version.table(), author_schema)?;
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
@@ -710,6 +713,8 @@ where
         let mut stored_versions = Vec::new();
         for version in versions {
             let author_schema = version.schema_version();
+            // Fail with TableNotFound first, matching the error ordering in commit_bundles.
+            self.table_in_schema_ref(version.table(), author_schema)?;
             let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
             let authored_column_ids = self.authored_column_ids_for_names(
                 author_schema,
