@@ -425,7 +425,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
-  it("keeps reconnecting through an outage longer than ten seconds and keeps armed waits pending", async () => {
+  it("keeps reconnecting through an outage longer than ten seconds after reporting it", async () => {
     vi.useFakeTimers();
     const sockets: FakeWebSocket[] = [];
     let serverDown = false;
@@ -470,35 +470,31 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
       await runtime.waitForUpstreamServerConnection();
       expect(runtime.remoteLinkState()).toBe("connected");
-      const txId = await committedTxId(
-        runtime.insert(
-          "todos",
-          { title: { type: "Text", value: "pending during outage" } },
-          null,
-          "00000000-0000-0000-0000-000000000009",
-        ),
-      );
-      let outcome: "pending" | "resolved" | "rejected" = "pending";
-      const pending = runtime.waitForTransaction(txId, "global").then(
-        () => {
-          outcome = "resolved";
-        },
-        () => {
-          outcome = "rejected";
-        },
-      );
+      const insertTodo = async () =>
+        await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "pending during outage" } },
+            null,
+            "00000000-0000-0000-0000-000000000009",
+          ),
+        );
+      const txId = await insertTodo();
+      const duringOutage = runtime.waitForTransaction(txId, "global");
+      const rejected = expect(duringOutage).rejects.toThrow("websocket closed");
       await armed.promise;
 
       serverDown = true;
       sockets[0]!.emitServerClose();
       await vi.advanceTimersByTimeAsync(60_000);
 
-      // Well past the former 10-attempt (~7.5 s) cutoff: still retrying, the
-      // link truthfully reports the outage, and nothing has turned terminal.
+      // The outage is reported once so Global waits do not hang, but the
+      // client keeps retrying well past the former 10-attempt (~7.5 s) cutoff.
+      await rejected;
+      expect(terminal).toHaveBeenCalledTimes(1);
       expect(sockets.length).toBeGreaterThan(11);
       expect(runtime.remoteLinkState()).toBe("unavailable");
-      expect(terminal).not.toHaveBeenCalled();
-      expect(outcome).toBe("pending");
+      await expect(runtime.waitForTransaction(txId, "global")).rejects.toThrow("websocket closed");
       // Backoff is capped: an idle minute-long outage is not a reconnect storm.
       expect(sockets.length).toBeLessThan(40);
 
@@ -509,11 +505,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       await runtime.waitForUpstreamServerConnection();
       expect(runtime.remoteLinkState()).toBe("connected");
 
+      // A Global wait armed after recovery settles normally.
+      const afterRecovery = runtime.waitForTransaction(await insertTodo(), "global");
       settlement.resolve();
       await vi.advanceTimersByTimeAsync(100);
-      await pending;
-      expect(outcome).toBe("resolved");
-      expect(terminal).not.toHaveBeenCalled();
+      await expect(afterRecovery).resolves.toBeUndefined();
+      expect(terminal).toHaveBeenCalledTimes(1);
     } finally {
       settlement.resolve();
       await runtime.close();

@@ -115,6 +115,11 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 // clients does not reconnect in lockstep after a server restart.
 const NETWORK_RETRY_INITIAL_DELAY_MS = 100;
 const NETWORK_RETRY_MAX_DELAY_MS = 5_000;
+// Once an established link has been down this long, the outage is published
+// like a transport error so Global reads and waits reject instead of hanging.
+// Retries continue, and a reconnect clears the published outage. This keeps
+// the former 10-attempt (~7.5 s) reporting point independent of the backoff.
+const NETWORK_OUTAGE_REPORT_MS = 7_500;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 /** Runtime read tier whose empty opening the core Db may hold for the server. */
@@ -726,6 +731,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReconnectReject: ((error: Error) => void) | null = null;
   private preHelloRetryCount = 0;
   private networkRetryCount = 0;
+  /** The current `serverTransportError` is a published outage, not a terminal failure. */
+  private serverOutageReported = false;
+  private serverOutageTimer: ReturnType<typeof setTimeout> | null = null;
   private serverLinkRequested = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
@@ -2227,7 +2235,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private async startServerConnection(intent: ServerReplacementIntent): Promise<WebSocketCarrier> {
     const { generation, url, authJson: normalizedAuthJson, features } = intent;
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
-    this.serverTransportError = null;
+    // A published outage stays visible to Global readers until a retry
+    // actually reconnects; each failed attempt must not hide it again.
+    if (!this.serverOutageReported) this.serverTransportError = null;
     this.serverEndpointUrl = url;
     this.serverAuthJson = normalizedAuthJson;
     this.remoteLink.changed();
@@ -2353,6 +2363,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return carrier;
         }
         this.networkRetryCount = 0;
+        this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
         this.remoteLink.changed();
@@ -2456,6 +2467,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.preHelloRetryCount = 0;
       this.networkRetryCount = 0;
     }
+    this.serverOutageReported = false;
     this.clearServerReconnectTimer();
     if (!this.serverReplacementRetirement) this.serverTransportError = null;
     if (options.rejectWaiters) {
@@ -2559,6 +2571,8 @@ export class NativeRuntimeAdapter implements Runtime {
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
+    // Armed waiters without a latched error keep their channel for a later one.
+    if (!this.serverTransportError) return;
     this.serverTransportError = null;
     this.clearServerTransportErrorWaiters();
     this.remoteLink.changed();
@@ -3668,7 +3682,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
     return (
       !this.closed &&
-      this.serverTransportError === null &&
+      (this.serverTransportError === null || this.serverOutageReported) &&
       attempt === this.serverConnectionAttempt &&
       attempt.generation === this.serverConnectionGeneration &&
       error.retry === "later" &&
@@ -3697,6 +3711,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
+    if (!this.serverOutageTimer && !this.serverOutageReported) {
+      const outage = new Error(error.message);
+      this.serverOutageTimer = setTimeout(() => {
+        this.serverOutageTimer = null;
+        if (this.closed || this.serverTransport || this.networkRetryCount === 0) return;
+        this.serverOutageReported = true;
+        this.handleServerTransportError(outage);
+      }, NETWORK_OUTAGE_REPORT_MS);
+    }
     const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
       this.serverReconnectReject = reject;
       this.serverReconnectTimer = setTimeout(() => {
@@ -3771,7 +3794,22 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private clearServerOutage(): void {
+    this.clearServerOutageTimer();
+    if (!this.serverOutageReported) return;
+    this.serverOutageReported = false;
+    this.serverTransportError = null;
+    this.clearServerTransportErrorWaiters();
+    this.remoteLink.changed();
+  }
+
+  private clearServerOutageTimer(): void {
+    if (this.serverOutageTimer) clearTimeout(this.serverOutageTimer);
+    this.serverOutageTimer = null;
+  }
+
   private clearServerReconnectTimer(): void {
+    this.clearServerOutageTimer();
     if (this.serverReconnectTimer) {
       clearTimeout(this.serverReconnectTimer);
       this.serverReconnectTimer = null;
