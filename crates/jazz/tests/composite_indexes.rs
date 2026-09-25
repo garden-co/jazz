@@ -484,3 +484,42 @@ fn hand_built_unsorted_composite_indexes_are_canonical() {
     }
     assert_ne!(different, sorted, "the set of indexes is still identity");
 }
+
+/// A composite index's logical name cannot collide with a single-column
+/// index, whatever the column is called. `composite_5_owner_4_rank` is the
+/// column name that would have spelled the `(owner, rank)` composite index's
+/// former `by_app_composite_5_owner_4_rank` name as `by_app_<column>`.
+///
+/// The logical global-current table is a public lowering descriptor, not a
+/// query result, so this inspects its index names directly.
+#[test]
+fn composite_index_logical_names_cannot_collide_with_single_column_indexes() {
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                tasks_table()
+                    .column("composite_5_owner_4_rank", ColumnType::Text)
+                    .index_only(["composite_5_owner_4_rank"])
+                    .composite_index(["owner", "rank"]),
+            )
+            .build(),
+    )
+    .expect("schema compiles");
+    let global_current = &schema.tables()[0].global_current_storage_tables()[0];
+    let names = global_current
+        .indices
+        .iter()
+        .map(|index| index.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&"by_app_composite_5_owner_4_rank"),
+        "{names:?}"
+    );
+    assert!(names.contains(&"by_composite_5_owner_4_rank"), "{names:?}");
+    let distinct = names.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        distinct.len(),
+        names.len(),
+        "duplicate index name: {names:?}"
+    );
+}

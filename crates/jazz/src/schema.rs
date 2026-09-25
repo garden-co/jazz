@@ -1665,9 +1665,16 @@ pub(crate) fn global_current_index_name(column: &str) -> String {
     format!("by_app_{column}")
 }
 
+/// Logical name of a composite global-current index.
+///
+/// Single-column indexes are `by_app_<column>` for an arbitrary column name,
+/// so a composite name must not start with `by_app_`: a column literally named
+/// `composite_5_owner_4_rank` would otherwise collide with the `(owner, rank)`
+/// index. `by_composite_` is a prefix no single-column name can produce, and
+/// the `<len>_<name>` segments keep distinct column lists distinct.
 pub(crate) fn global_current_composite_index_name(columns: &[String]) -> String {
     format!(
-        "by_app_composite_{}",
+        "by_composite_{}",
         columns
             .iter()
             .map(|column| format!("{}_{}", column.len(), column))
