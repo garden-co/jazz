@@ -121,16 +121,8 @@ impl IvmRuntime {
                 .sum(),
             arrangement_count: self.arrangement_states.len(),
             eval_memo_entries: self.eval_memo.len(),
-            hydration_memo_entries: self
-                .eval_memo
-                .keys()
-                .filter(|key| key.tick_epoch.is_none())
-                .count(),
-            eval_memo_bytes: self
-                .eval_memo
-                .values()
-                .map(|entry| entry.payload_bytes)
-                .sum(),
+            hydration_memo_entries: self.eval_memo.len() - self.eval_memo.tick_entries(),
+            eval_memo_bytes: self.tracked_eval_memo_bytes(),
             hydration_memo_hits: self.hydration_memo_hits,
             hydration_memo_computes: self.hydration_memo_computes,
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
@@ -138,6 +130,19 @@ impl IvmRuntime {
             deduped_graph_nodes: self.graph.nodes().len(),
             ..RuntimeStats::default()
         }
+    }
+
+    /// `eval_memo_bytes` is maintained at every memo mutation; debug builds
+    /// check it against a full recount.
+    fn tracked_eval_memo_bytes(&self) -> usize {
+        debug_assert_eq!(
+            self.eval_memo_bytes,
+            self.eval_memo
+                .values()
+                .map(|entry| entry.payload_bytes)
+                .sum::<usize>()
+        );
+        self.eval_memo_bytes
     }
 
     pub(super) fn record_hydration_memo_metrics(&mut self, metrics: &TickMetrics) {
@@ -227,7 +232,15 @@ impl IvmRuntime {
                 .retain(|key, _| !removed.contains(&key.node));
             self.arrangement_states
                 .retain(|key, _| !removed.contains(&key.input));
-            self.eval_memo.retain(|key, _| !removed.contains(&key.node));
+            let mut removed_bytes = 0usize;
+            self.eval_memo.retain(|key, entry| {
+                let keep = !removed.contains(&key.node);
+                if !keep {
+                    removed_bytes = removed_bytes.saturating_add(entry.payload_bytes);
+                }
+                keep
+            });
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(removed_bytes);
             for node in removed {
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);
