@@ -4275,6 +4275,7 @@ function readOptions(
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
+  if (options.result_only === true) readOptions.result_only = true;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;

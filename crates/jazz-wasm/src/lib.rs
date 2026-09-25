@@ -3248,6 +3248,9 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    if let Some(result_only) = optional_bool_prop(&value, "result_only")? {
+        opts.result_only = result_only;
+    }
     Ok(opts)
 }
 

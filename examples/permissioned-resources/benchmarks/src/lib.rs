@@ -776,6 +776,7 @@ fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
                     } else {
                         jazz::db::LocalUpdates::Immediate
                     },
+                    result_only: true,
                     ..ReadOpts::default()
                 },
                 None,

@@ -3430,6 +3430,7 @@ impl JazzClient {
             include_deleted: false,
             read_view: CoreReadViewSpec::default(),
             empty_opening: CoreEmptyOpening::Deliver,
+            result_only: false,
         }
     }
 

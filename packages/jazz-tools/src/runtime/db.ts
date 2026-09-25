@@ -256,11 +256,13 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
     tier?: unknown;
     branch?: unknown;
     base?: unknown;
+    resultOnly?: unknown;
   };
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  if (candidate.resultOnly === true) lowered.resultOnly = true;
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
 }

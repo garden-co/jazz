@@ -356,7 +356,8 @@ where
         // A bounded Global first page can be served directly by the admitted
         // authority. An immediate read only uses this route while it has no
         // local write to compose; unavailable/old peers use ordinary coverage.
-        if require_coverage
+        if opts.result_only
+            && require_coverage
             && open_tx.is_none()
             && unscoped
             && author.is_none()

@@ -2927,7 +2927,7 @@ impl NapiDb {
         &self,
         query: Uint8Array,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; result_only?: boolean; sync?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         open_transaction_id: Option<String>,
@@ -3107,7 +3107,7 @@ impl NapiDb {
         &self,
         query: Uint8Array,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; result_only?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
@@ -4069,6 +4069,9 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     }
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
+    }
+    if let Some(result_only) = optional_json_bool_prop(&value, "result_only")? {
+        opts.result_only = result_only;
     }
     if let Some(read_view) = value
         .get("read_view")

@@ -3242,6 +3242,12 @@ pub struct ReadOpts {
     /// only; an absent serde field is [`EmptyOpening::Deliver`].
     #[serde(default)]
     pub empty_opening: EmptyOpening,
+    /// Permit a server-confirmed one-shot result without first installing its
+    /// supporting rows into the local cache. An unsupported read falls back to
+    /// the ordinary materializing path. A successful result-only read does not
+    /// prepare an offline read of the same query.
+    #[serde(default)]
+    pub result_only: bool,
 }
 
 impl Default for ReadOpts {
@@ -3253,6 +3259,7 @@ impl Default for ReadOpts {
             include_deleted: false,
             read_view: ReadViewSpec::default(),
             empty_opening: EmptyOpening::Deliver,
+            result_only: false,
         }
     }
 }

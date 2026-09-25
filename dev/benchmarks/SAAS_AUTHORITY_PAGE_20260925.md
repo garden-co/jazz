@@ -2,18 +2,20 @@
 
 ## Why ship this
 
-A cold, permissioned Global one-shot read used to settle a receiver-side
-maintained graph and supporting row history before returning a small page.
-For eligible serialized reads, the admitted Core now evaluates and hydrates the
-page under the admitted identity and claims, then sends the binding-encoded
-result directly. A client with pending local writes uses the existing coverage
-path. Unsupported queries and older peers use that path too. Live subscriptions,
-history, deletions, and local-write semantics are unchanged.
+A cold, permissioned Global one-shot read settles a receiver-side maintained
+graph and supporting row history before returning a small page. With the
+explicit `resultOnly: true` option, the admitted Core evaluates and hydrates
+the page under the admitted identity and claims, then sends the binding-encoded
+result directly. This result does not populate the receiver's offline cache.
+Ordinary reads continue to materialize local data. A client with pending local
+writes, unsupported queries, and older peers use the coverage path. Live
+subscriptions, history, and deletions are unchanged.
 
 On the anonymized SaaS fixture with no deleted rows, the 39-query, 100-row-per-
-query relay workload drops from a median **1,679 ms to 502 ms (3.34×)** over
-three matched runs on main after #3352 merged. All 879 returned row IDs match a separate authority
-evaluation. The authority route also matches its exact binding-encoded bytes.
+query relay workload drops from a median **1,594 ms to 483 ms (3.30×)** over
+three matched runs on main `5b6417fe5`. All 879 returned row IDs match a
+separate authority evaluation. The authority route also matches its exact
+binding-encoded bytes.
 
 ## Measurement
 
@@ -48,6 +50,21 @@ candidate/control pair has SHA-256
 `481d28490665a8c169296d3348c41eeab563bb2ae79bee69ac37462f22dcf979`.
 Receipts are prefixed `latest-main-` in the same directory.
 
+After #3451 (ordered pages), #3354 (incremental attach), and the bulk ingest
+changes merged into main `5b6417fe5`, the same opt-in source was rebased and
+rerun through the relay. The control differs only by disabling the authority
+route in the read eligibility condition:
+
+| 39 pages, 879 rows | Run 1 | Run 2 | Run 3 | Median |
+| ------------------ | ----: | ----: | ----: | -----: |
+| Receiver coverage  | 1,634 | 1,562 | 1,594 |  1,594 |
+| Authority result   |   498 |   483 |   482 |    483 |
+
+The median speedup is **3.30×**. Candidate/control binary SHA-256 values are
+`4e9a2f1729390b17c7a2540147c9c813c520f6dd941006e2afe10577be1242f7` /
+`2cc3e71e29112e6ed2bf6dd566f47768f517f9e93ecda689ac6ef25d1a973d8b`.
+The six `main-5b6417-` receipts record row counts and phase timings.
+
 Set `JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold
 JAZZ_CUSTOMER_NO_DIAGNOSTICS=1 JAZZ_CUSTOMER_CLIENT_ONESHOT=1
 JAZZ_CUSTOMER_QUERY_LIMIT=100 JAZZ_CUSTOMER_MAX_TICKS=200000`; add
@@ -56,6 +73,8 @@ JAZZ_CUSTOMER_QUERY_LIMIT=100 JAZZ_CUSTOMER_MAX_TICKS=200000`; add
 `JAZZ_CUSTOMER_ONLY_TABLE=res_l_child_3` for the child-only case. The binary is
 `target/perf/permissioned-resources-profile` after building the example
 benchmark with `--profile perf --features cold-settle-attribution`.
+The benchmark requests result-only delivery in both arms; the matched control
+temporarily disables its authority route and uses coverage instead.
 
 ## Limits and next win
 

@@ -100,6 +100,7 @@ fn bounded_global_read_returns_only_authorized_rows_without_receiver_coverage() 
         ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Immediate,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,
@@ -125,6 +126,37 @@ fn bounded_global_read_returns_only_authorized_rows_without_receiver_coverage() 
     };
     assert_eq!(actual, expected);
     assert_eq!(client.query_coverage_attachment_counts_for_test(), (0, 0));
+
+    // The ordinary Global read still waits for receiver coverage and returns
+    // locally materialized rows. Result-only delivery is an explicit choice.
+    drop(read);
+    let mut ordinary = Box::pin(client.all_serialized_query(
+        &bytes,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        None,
+        None,
+        None,
+        true,
+        || false,
+        |attachment| client.detach_query(attachment),
+    ));
+    let result = (0..64)
+        .find_map(|_| {
+            if let Poll::Ready(result) = ordinary.as_mut().poll(&mut context) {
+                return Some(result.unwrap());
+            }
+            client.tick().unwrap();
+            core.tick().unwrap();
+            None
+        })
+        .expect("ordinary Global read settled through receiver coverage");
+    let SerializedReadResult::Rows(rows) = result else {
+        panic!("ordinary Global read must materialize local rows");
+    };
+    assert_eq!(row_ids(&rows), vec![visible]);
 }
 
 #[test]
@@ -191,6 +223,7 @@ fn bounded_global_read_proxies_through_scope_isolated_relay() {
         ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Deferred,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,
@@ -248,6 +281,7 @@ fn bounded_global_read_falls_back_when_peer_lacks_remote_read_feature() {
         ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Deferred,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,
@@ -299,6 +333,7 @@ fn bounded_global_read_discards_result_after_session_claim_revision_changes() {
         &bytes,
         ReadOpts {
             tier: DurabilityTier::Global,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,
@@ -375,6 +410,7 @@ fn immediate_global_read_with_local_write_uses_coverage_fallback() {
         ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Immediate,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,

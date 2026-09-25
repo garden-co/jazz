@@ -431,6 +431,8 @@ export interface QueryExecutionOptions {
   tier?: QueryReadTier;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
+  /** Permit a remote one-shot result without first filling the local offline cache. */
+  resultOnly?: boolean;
 }
 
 /**
@@ -446,11 +448,12 @@ export function publicQueryExecutionOptions(
   options?: QueryExecutionOptions,
 ): QueryExecutionOptions | undefined {
   if (!options) return undefined;
-  const candidate = options as { tier?: unknown; branch?: unknown };
+  const candidate = options as { tier?: unknown; branch?: unknown; resultOnly?: unknown };
   rejectRemovedReadTier(candidate.tier);
   const result: QueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
+  if (candidate.resultOnly === true) result.resultOnly = true;
   return result;
 }
 
@@ -481,6 +484,7 @@ export interface ResolvedQueryExecutionOptions {
   propagation: QueryPropagation;
   visibility: QueryVisibility;
   branch?: BranchView;
+  resultOnly: boolean;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -635,6 +639,7 @@ export function resolveEffectiveQueryExecutionOptions(
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
+    resultOnly: options?.resultOnly === true,
   };
 }
 
@@ -675,6 +680,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_id?: string;
+    result_only?: boolean;
     read_view?: {
       source: {
         BranchView: {
@@ -695,6 +701,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
   }
+  if (options.resultOnly === true) payload.result_only = true;
   if (options.branch) {
     const base = options.branch.base;
     payload.read_view = {
@@ -711,6 +718,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     !payload.propagation &&
     !payload.local_updates &&
     !payload.transaction_id &&
+    !payload.result_only &&
     !payload.read_view
   ) {
     return undefined;
