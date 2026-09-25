@@ -877,6 +877,43 @@ describe("SubscriptionManager", () => {
     expect(manager.size).toBe(3);
   });
 
+  it("keeps positions exact for indexed changes after a removal run", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = ["A", "B", "C", "D", "E"];
+    const frames = [
+      handleDecodedDelta(
+        manager,
+        ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, index) })),
+        transform,
+      ),
+    ];
+    frames.push(
+      handleDecodedDelta(
+        manager,
+        [
+          { kind: 1, id: "B", index: 1 },
+          { kind: 1, id: "C", index: 1 },
+        ],
+        transform,
+      ),
+    );
+    frames.push(handleDecodedDelta(manager, [{ kind: 1, id: "E", index: 2 }], transform));
+    expect(manager.all().map((item) => item.id)).toEqual(["A", "D"]);
+    frames.push(
+      handleDecodedDelta(
+        manager,
+        [
+          { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 5) },
+          { kind: 2, id: "D", index: 0, row: makeRow("D", "D", 6) },
+        ],
+        transform,
+      ),
+    );
+
+    expect(manager.all().map((item) => item.id)).toEqual(["D", "B", "A"]);
+    expect(reduceDeltas(...frames.map((frame) => ({ delta: frame.delta })))).toEqual(manager.all());
+  });
+
   it("clears state", () => {
     const manager = new SubscriptionManager<TestItem>();
     handleDecodedDelta(
