@@ -1,7 +1,7 @@
 # Authority-served unbounded SaaS reads (2026-09-25)
 
-On main `5b6417fe5`, the complete opt-in relay workload falls from a median
-**6,378 ms to 858 ms (7.43×)**. All 27,518 rows match the independent
+On main `f629fa7a9`, the complete opt-in relay workload falls from a median
+**6,652 ms to 847 ms (7.85×)**. All 27,518 rows match the independent
 authorized result, including exact binding bytes on the candidate.
 
 ## Why ship this separately
@@ -95,6 +95,23 @@ binding bytes. Candidate/control binary SHA-256 values are
 `d4fd758d2fe2de036ec7ed77b57d250d6d70273fe90153e5ea5a64d2fca4f19a` /
 `32e41a046b5cfe0f39386c96353d7a9376e69d925f61a87628908fab419f0c91`.
 The six `main-5b6417-` receipts record row counts and phase timings.
+
+On main `f629fa7a9`, after #3452 and #3460 merged, the same matched relay
+workload was rerun three times. Both arms request `resultOnly: true`, and the
+control disables only the authority eligibility check:
+
+| 39 unbounded Global reads | Run 1 | Run 2 | Run 3 | Median |
+| ------------------------- | ----: | ----: | ----: | -----: |
+| Receiver coverage         | 6,652 | 6,986 | 6,461 |  6,652 |
+| Authority result          |   843 |   851 |   847 |    847 |
+
+The median gain is **7.85×** for the same 27,518 authorized rows and
+13,408,002 binding bytes. Median candidate Core/relay/Client ticks are
+741/69/34 ms; the control's are 2,125/2,652/1,156 ms. Candidate/control
+binary SHA-256 values are
+`3042a1514bab3ff67cd100c7c4191200d42c5a2deacbae96f14deac8ce38d21c` /
+`c77fefb0a9c1130515e7914ab7c2d3151dfc31cf22ced08f37d73ea1d4b430f8`.
+The six `main-f629fa7-` receipts contain row counts, bytes, and phases.
 
 To reproduce, build `permissioned-resources-profile` with
 `cargo build -p jazz-example-permissioned-resources-benchmark --bin
