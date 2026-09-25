@@ -1172,14 +1172,9 @@ where
         // installation must be folded into the public stream owner's snapshot
         // with the same terminal reducer used for every later update.  In
         // particular, do not materialize the authority result set here.
-        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
-        snapshot_index.roots = subscription
-            .root_occurrence_ids()
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, occurrence)| (occurrence, index))
-            .collect();
+        let mut snapshot_index = RelationSnapshotIndex::with_root_occurrences(
+            subscription.root_occurrence_ids().iter().cloned(),
+        );
         if authorization_mode == QueryAuthorizationMode::ClientLocal
             && let Some(authority_result_key) = settled_authority_result.as_ref()
         {
@@ -1259,28 +1254,19 @@ where
             })),
             requested_tier: read_tier,
         };
-        let mut root_occurrence_ids = snapshot_index
+        let root_occurrence_ids = snapshot_index
             .roots
             .iter()
-            .map(|(occurrence, index)| (*index, occurrence.clone()))
-            .collect::<Vec<_>>();
-        root_occurrence_ids.sort_by_key(|(index, _)| *index);
-        let root_occurrence_ids = root_occurrence_ids
-            .into_iter()
-            .map(|(_, occurrence)| occurrence)
+            .flatten()
+            .cloned()
             .collect::<Vec<_>>();
         let initial_outputs = {
             materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
             subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?
         };
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
-        snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
-        snapshot_index.roots = root_occurrence_ids
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, occurrence)| (occurrence, index))
-            .collect();
+        snapshot_index =
+            RelationSnapshotIndex::with_root_occurrences(root_occurrence_ids.iter().cloned());
         snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
         let pending_initial_owner_result = authorization_mode
             == QueryAuthorizationMode::ClientLocal

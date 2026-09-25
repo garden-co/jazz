@@ -471,6 +471,7 @@ pub mod db;
 mod debug_env;
 /// Host-facing exclusive lifecycle for foreground transaction-node identities.
 pub mod foreground_node_lease;
+pub(crate) mod positional_order;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
 /// Wire-stable identifiers.
