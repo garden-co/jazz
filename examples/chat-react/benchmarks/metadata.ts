@@ -10,7 +10,7 @@ export const chatBenchmarks: BenchmarkMetadata[] = [1000, 10000].flatMap((messag
     name: `chat_open_chat[${messages}]`,
     title: "Chat · open a chat",
     description:
-      "A member opens a private chat: the newest 21 messages with their senders, newest first, through the membership read policy (the chat is public or the reader is a member).",
+      "A member opens a private chat: the newest 21 messages with their senders, newest first, through the membership read policy (the chat is public or the reader is a member). A policy-protected ordered page currently loads the chat's full visible history before trimming to 21 (https://github.com/garden-co/jazz/issues/1733), so this grows with the chat's size rather than the page's.",
     fixture: fixture(messages),
     storage,
     includes: ["subscribe_for_identity opening, runtime ticks and the first published page"],

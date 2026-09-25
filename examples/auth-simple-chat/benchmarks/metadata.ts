@@ -5,6 +5,9 @@ const storage = "In-memory Jazz database; in-process authority, no network";
 const fixture = (roomMessages: number) =>
   `${roomMessages.toLocaleString("en-US")} messages in the general room and ${roomMessages.toLocaleString("en-US")} in announcements, from 16 authors; settled before timing.`;
 
+// Mirrors `sends_for` in benches/walltime.rs.
+const sendsFor = (roomMessages: number) => (roomMessages >= 10000 ? 10 : 100);
+
 export const authChatBenchmarks: BenchmarkMetadata[] = [1000, 10000].flatMap((roomMessages) => [
   {
     name: `auth_chat_open_room[${roomMessages}]`,
@@ -26,10 +29,9 @@ export const authChatBenchmarks: BenchmarkMetadata[] = [1000, 10000].flatMap((ro
     source,
   },
   {
-    name: `auth_chat_send_100[${roomMessages}]`,
+    name: `auth_chat_send[${roomMessages}]`,
     title: "Auth chat · send messages",
-    description:
-      "A signed-in member sends 100 messages into the room they have open. Each is a standalone write that the in-process authority checks against the claim-gated insert policy and accepts, and that then appears in the open room.",
+    description: `A signed-in member sends ${sendsFor(roomMessages)} messages into the room they have open. Each is a standalone write that the in-process authority checks against the claim-gated insert policy and accepts, and that then appears in the open room. The open room retains its whole history, and each send's room update currently scales with that history (https://github.com/garden-co/jazz/issues/2086), so the per-message cost at ${roomMessages.toLocaleString("en-US")} messages is mostly that update, not the cost of sending one message.`,
     fixture: `${fixture(roomMessages)} The room is already open before timing.`,
     storage,
     includes: [
@@ -38,9 +40,9 @@ export const authChatBenchmarks: BenchmarkMetadata[] = [1000, 10000].flatMap((ro
     ],
     excludes: ["Room opening, seeding, token verification and network"],
     work: {
-      count: 100,
+      count: sendsFor(roomMessages),
       unit: "messages sent/s",
-      explanation: "100 messages, each sent, accepted and shown before the next.",
+      explanation: `${sendsFor(roomMessages)} messages, each sent, accepted and shown before the next.`,
     },
     source,
   },

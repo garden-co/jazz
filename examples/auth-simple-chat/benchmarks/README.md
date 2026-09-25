@@ -15,9 +15,11 @@ timing; token verification is outside the receipt. The measured workloads are:
 
 - `auth_chat_open_room`: the member subscribes to the general room's whole
   history in send order (`ChatPanel`'s query) until the first published result;
-- `auth_chat_send_100`: the member sends 100 messages into the open room. The
-  in-process authority runs the claim-gated insert policy and accepts each
-  message, and the open room shows it before the next is sent.
+- `auth_chat_send`: the member sends 100 messages (10 at 10,000 messages) into
+  the open room. The in-process authority runs the claim-gated insert policy
+  and accepts each message, and the open room shows it before the next is sent.
+  Each send's room update scales with the retained history (#2086), which is
+  why the 10k case sends fewer messages; compare per-message cost.
 
 Tests assert that a user without a role claim sees nothing and that a member's
 announcement is rejected.
