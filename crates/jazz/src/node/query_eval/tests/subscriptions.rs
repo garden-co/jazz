@@ -1599,8 +1599,12 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_global_source() 
     assert!(relay_authority.policy_binding.is_some());
 }
 
+/// Internal: the access-path choice is not observable through public results.
+/// Retraction on delete and grant loss is pinned by
+/// `maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer`
+/// and the public `shared_query_hydration` point-subscription tests (#3511).
 #[test]
-fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
+fn maintained_policy_point_subscription_uses_point_source_and_keeps_witnesses() {
     let schema = owner_policy_schema();
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
     let target = row(0x71);
@@ -1611,10 +1615,13 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     assert!(
-        node.current_query_primary_key_access_paths(&shape, &binding)
-            .unwrap()
-            .is_empty(),
-        "policy-scoped maintained rows must retain their full source so deletion markers can remove them"
+        matches!(
+            node.current_query_primary_key_access_paths(&shape, &binding)
+                .unwrap()
+                .get(&root_source_id("issues")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
+        ),
+        "a policy-scoped maintained id lookup narrows its content source to the one row"
     );
     let program = node
         .compile_current_query_program_for_read_view(
