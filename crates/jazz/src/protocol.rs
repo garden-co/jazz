@@ -266,12 +266,22 @@ pub struct RemoteReadRequest {
 }
 
 /// `rows` uses the same binary row envelope as the NAPI and WASM bindings.
+///
+/// Postcard field order is declaration order: `request_id`, `rows`,
+/// `receipt`. The frame is pinned by `crates/jazz/fixtures/wire_message_frames.json`.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct RemoteReadResponse {
     /// Nonce copied from the admitted request.
     pub request_id: PermissionAdviceRequestId,
     /// Binding row envelope, or unavailable when the authority cannot serve it.
     pub rows: Option<Vec<u8>>,
+    /// Core evidence for exactly the returned rows, in result order: every
+    /// coordinate is `Readable` and carries its current default-root content
+    /// (and deletion register, when one exists) as view-scoped version bundles.
+    /// A receiver installs these through ordinary current-row ingestion before
+    /// exposing `rows`; without a valid receipt it must not use `rows`, so its
+    /// local store never lags a result it already returned.
+    pub receipt: Option<CurrentRowsReceipt>,
 }
 
 /// Maximum known rows in one current-availability request.

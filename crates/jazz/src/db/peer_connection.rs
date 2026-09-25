@@ -2808,13 +2808,16 @@ where
                                 continue;
                             }
                             SyncMessage::RemoteReadResponse(response) => {
+                                let selected = *self.admitted_upstream_authority.borrow();
                                 remote_reads::receive_remote_read(
+                                    &self.node,
                                     &self.remote_reads,
-                                    *self.admitted_upstream_authority.borrow(),
+                                    selected,
                                     *expected_scope_authority,
                                     authority_receipt_eligible,
                                     response,
-                                );
+                                )
+                                .await;
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 applied = true;
                                 continue;
@@ -4101,6 +4104,7 @@ where
                                     SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
                                         request_id: request.request_id,
                                         rows: None,
+                                        receipt: None,
                                     }),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
@@ -4108,13 +4112,29 @@ where
                                 continue;
                             };
                             if self.node.borrow().can_mint_current_row_receipts() {
-                                let rows = remote_reads::evaluate_remote_read(
-                                    &self.node, &request, identity, claims,
+                                // Shares the current-row progress sequence: both
+                                // receipt kinds are evidence in this Core epoch.
+                                let progress = {
+                                    let mut router = self.current_rows.borrow_mut();
+                                    let progress = router.progress.entry(connection_epoch).or_default();
+                                    *progress = progress.checked_add(1).expect("current row progress exhausted");
+                                    *progress
+                                };
+                                let core_epoch = self
+                                    .transport
+                                    .connection_session_context()
+                                    .map_or(0, |session| session.local.epoch);
+                                let result = remote_reads::evaluate_remote_read(
+                                    &self.node, &request, identity, claims, core_epoch, progress,
                                 ).await;
-                                queue_direct_control(&mut self.pending_control_responses,
+                                let (rows, receipt) = result.map_or((None, None), |(rows, receipt)| (Some(rows), Some(receipt)));
+                                // Carriers follow the repair-payload send path so
+                                // per-peer sync context precedes their bodies.
+                                queue_sync_context_control(&mut self.pending_control_responses,
                                     SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
                                         request_id: request.request_id,
                                         rows,
+                                        receipt,
                                     }),
                                 );
                             } else {
@@ -4136,6 +4156,7 @@ where
                                         SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
                                             request_id: request.request_id,
                                             rows: None,
+                                            receipt: None,
                                         }),
                                     );
                                 }

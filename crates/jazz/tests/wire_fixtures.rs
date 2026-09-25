@@ -473,6 +473,46 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::RemoteReadResponse(jazz::protocol::RemoteReadResponse {
                 request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
                 rows: Some(vec![0x01, 0x02, 0x03]),
+                receipt: None,
+            }),
+        ),
+        (
+            "remote_read_response_rows_with_current_rows_receipt",
+            "RemoteReadResponse",
+            SyncMessage::RemoteReadResponse(jazz::protocol::RemoteReadResponse {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+                rows: Some(vec![0x01, 0x02, 0x03]),
+                receipt: Some(jazz::protocol::CurrentRowsReceipt {
+                    request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+                    rows: vec![jazz::protocol::CurrentRowCoordinate {
+                        schema: schema_version,
+                        table: "todos".to_owned(),
+                        physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                            [0x7b; 16],
+                        )),
+                        row: RowUuid::from_bytes([0x90; 16]),
+                    }],
+                    outcomes: vec![jazz::protocol::CurrentRowOutcome::Readable],
+                    context: jazz::protocol::PolicyBindingKey::from_delegated_session(
+                        &DelegatedSessionBinding {
+                            identity: AuthorSubject::for_test_bytes([0x7c; 16]),
+                            claims: BTreeMap::from([(
+                                "user_id".to_owned(),
+                                Value::String("reader".to_owned()),
+                            )]),
+                        },
+                    ),
+                    core: NodeUuid::from_bytes([0x7d; 16]),
+                    core_epoch: 3,
+                    claims_revision: 4,
+                    policy_epoch: 5,
+                    settled_through: GlobalTime(106),
+                    authorization_progress: 6,
+                    version_carriers: mixed_version_carriers(schema_version, author)
+                        .into_iter()
+                        .take(1)
+                        .collect(),
+                }),
             }),
         ),
         (
@@ -481,6 +521,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::RemoteReadResponse(jazz::protocol::RemoteReadResponse {
                 request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
                 rows: None,
+                receipt: None,
             }),
         ),
         (

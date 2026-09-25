@@ -83,67 +83,123 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 receipt.outcomes[index] = CurrentRowOutcome::CurrentUnavailable;
                 continue;
             };
-            let table_id =
-                self.physical_table_id_for_schema(coordinate.schema, &coordinate.table)?;
-            // includeDeleted provenance may name the register event. Fetch
-            // content and deletion winners independently, as ordinary views do.
-            let Some(tx_id) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Content,
-                )
-                .await
-            else {
-                continue;
-            };
-            let mut transactions = BTreeSet::from([tx_id]);
-            if let Some(deletion_tx) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Deletion,
-                )
-                .await
-            {
-                transactions.insert(deletion_tx);
-            }
-            let mut carriers = Vec::new();
-            for tx in transactions {
-                let versions = self
-                    .query_versions_for_tx(tx)
-                    .await?
-                    .into_iter()
-                    .filter(|version| {
-                        version.row_uuid() == coordinate.row
-                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
-                    })
-                    .collect::<Vec<_>>();
-                // Default root only: a branch-qualified row requires a future explicit contract.
-                if versions.is_empty()
-                    || versions
-                        .iter()
-                        .any(|version| !version.branch_key().values.is_empty())
-                {
-                    carriers.clear();
-                    break;
-                }
-                let stored = self
-                    .query_transaction(tx)
-                    .await?
-                    .ok_or(Error::MissingTransaction(tx))?;
-                let mut bundle = self
-                    .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
-                    .await?;
-                bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
-                carriers.push(VersionCarrier::Bundle(bundle));
-            }
-            if !carriers.is_empty() {
+            if let Some(carriers) = self.current_row_version_carriers(coordinate).await? {
                 receipt.outcomes[index] = CurrentRowOutcome::Readable;
                 receipt.version_carriers.extend(carriers);
             }
         }
         Ok(receipt)
+    }
+
+    /// Receipt for rows the caller has just evaluated as readable under
+    /// `context` (for example, a bounded authority page). Every coordinate is
+    /// `Readable` with complete current carriers, or there is no receipt: a
+    /// partial receipt would let a receiver expose rows its store lacks.
+    /// Caller holds the node owner lock throughout evaluation and capture.
+    pub(crate) async fn readable_current_rows_receipt(
+        &mut self,
+        request_id: crate::protocol::PermissionAdviceRequestId,
+        rows: impl IntoIterator<Item = (&str, RowUuid)>,
+        context: PolicyBindingKey,
+        core_epoch: u64,
+        progress: u64,
+    ) -> Result<Option<CurrentRowsReceipt>, Error> {
+        if !self.can_mint_current_row_receipts() || !self.permissions_ready() {
+            return Ok(None);
+        }
+        let mut coordinates = Vec::new();
+        let mut version_carriers = Vec::new();
+        for (table, row) in rows {
+            let Ok(coordinate) = self.current_row_coordinate(table, row) else {
+                return Ok(None);
+            };
+            if coordinates.contains(&coordinate) || !self.table(table)?.branch_by.is_empty() {
+                return Ok(None);
+            }
+            let Some(carriers) = self.current_row_version_carriers(&coordinate).await? else {
+                return Ok(None);
+            };
+            version_carriers.extend(carriers);
+            coordinates.push(coordinate);
+        }
+        Ok(Some(CurrentRowsReceipt {
+            request_id,
+            outcomes: vec![CurrentRowOutcome::Readable; coordinates.len()],
+            rows: coordinates,
+            claims_revision: self.session_claim_revision(context.identity),
+            context,
+            core: self.node_uuid(),
+            core_epoch,
+            policy_epoch: self.active_catalogue_seq(),
+            settled_through: self.committed_global_time(),
+            authorization_progress: progress,
+            version_carriers,
+        }))
+    }
+
+    /// Current Global content and deletion-register carriers for one
+    /// default-root coordinate. The caller has already established that the
+    /// row is readable under its policy context. `None` means no complete
+    /// carrier set exists, never that the row is unavailable.
+    async fn current_row_version_carriers(
+        &mut self,
+        coordinate: &CurrentRowCoordinate,
+    ) -> Result<Option<Vec<VersionCarrier>>, Error> {
+        let table_id = self.physical_table_id_for_schema(coordinate.schema, &coordinate.table)?;
+        // includeDeleted provenance may name the register event. Fetch
+        // content and deletion winners independently, as ordinary views do.
+        let Some(tx_id) = self
+            .visible_global_layer_tx_id_for_physical_table_now(
+                table_id,
+                coordinate.row,
+                VersionLayer::Content,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        let mut transactions = BTreeSet::from([tx_id]);
+        if let Some(deletion_tx) = self
+            .visible_global_layer_tx_id_for_physical_table_now(
+                table_id,
+                coordinate.row,
+                VersionLayer::Deletion,
+            )
+            .await
+        {
+            transactions.insert(deletion_tx);
+        }
+        let mut carriers = Vec::new();
+        for tx in transactions {
+            let versions = self
+                .query_versions_for_tx(tx)
+                .await?
+                .into_iter()
+                .filter(|version| {
+                    version.row_uuid() == coordinate.row
+                        && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                })
+                .collect::<Vec<_>>();
+            // Default root only: a branch-qualified row requires a future explicit contract.
+            if versions.is_empty()
+                || versions
+                    .iter()
+                    .any(|version| !version.branch_key().values.is_empty())
+            {
+                carriers.clear();
+                break;
+            }
+            let stored = self
+                .query_transaction(tx)
+                .await?
+                .ok_or(Error::MissingTransaction(tx))?;
+            let mut bundle = self
+                .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
+                .await?;
+            bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
+            carriers.push(VersionCarrier::Bundle(bundle));
+        }
+        Ok((!carriers.is_empty()).then_some(carriers))
     }
 }
 

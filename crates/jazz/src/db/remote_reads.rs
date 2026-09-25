@@ -1,7 +1,9 @@
 //! Bounded first-page reads routed to the selected serving authority.
 use super::peer_connection::{ConnectionLink, PeerConnection, transport_error};
 use super::*;
-use crate::protocol::{PolicyBindingKey, RemoteReadRequest, RemoteReadResponse};
+use crate::protocol::{
+    CurrentRowsReceipt, PolicyBindingKey, RemoteReadRequest, RemoteReadResponse,
+};
 
 const MAX_PENDING: usize = 64;
 pub(super) const MAX_QUERY_BYTES: usize = 32 * 1024;
@@ -37,20 +39,30 @@ impl RemoteReadRouter {
         true
     }
 
-    pub fn finish(&mut self, id: PermissionAdviceRequestId, rows: Option<Vec<u8>>) {
+    /// A local requester receives rows only after their receipt was ingested;
+    /// a relay forwards both, rebinding the receipt to the downstream nonce.
+    pub fn finish(&mut self, id: PermissionAdviceRequestId, result: Option<RemoteReadResult>) {
         let Some(mut route) = self.routes.remove(&id) else {
             return;
         };
         if let Some((epoch, downstream_id)) = route.downstream {
+            let (rows, receipt) = match result {
+                Some((rows, mut receipt)) => {
+                    receipt.request_id = downstream_id;
+                    (Some(rows), Some(receipt))
+                }
+                None => (None, None),
+            };
             self.responses
                 .entry(epoch)
                 .or_default()
                 .push_back(RemoteReadResponse {
                     request_id: downstream_id,
                     rows,
+                    receipt,
                 });
         } else if let Some(sender) = route.sender.take() {
-            let _ = sender.send(rows);
+            let _ = sender.send(result.map(|(rows, _)| rows));
         }
     }
 
@@ -108,14 +120,21 @@ pub(super) fn valid_request(request: &RemoteReadRequest) -> bool {
     !request.query.is_empty() && request.query.len() <= MAX_QUERY_BYTES
 }
 
+/// Encoded rows plus the Core receipt that installs exactly those rows.
+pub(super) type RemoteReadResult = (Vec<u8>, CurrentRowsReceipt);
+
 /// A serving Core owns both query evaluation and final row hydration. A relay
-/// never evaluates under its own incomplete policy inputs.
+/// never evaluates under its own incomplete policy inputs. The receipt is
+/// captured under the same owner lock and scoped claims as the query, so its
+/// carriers are the current versions of exactly the returned rows.
 pub(super) async fn evaluate_remote_read<S: OrderedKvStorage>(
     node: &SharedNodeState<S>,
     request: &RemoteReadRequest,
     identity: AuthorSubject,
     claims: BTreeMap<String, Value>,
-) -> Option<Vec<u8>> {
+    core_epoch: u64,
+    progress: u64,
+) -> Option<RemoteReadResult> {
     let query: Query = crate::wire::decode_postcard_exact(&request.query).ok()?;
     if !matches!(query.limit, Some(1..=1000))
         || query.relation.is_some()
@@ -136,6 +155,7 @@ pub(super) async fn evaluate_remote_read<S: OrderedKvStorage>(
         .validate_with_schema_version(&schema, request.schema)
         .ok()?;
     let binding = shape.bind(BTreeMap::new()).ok()?;
+    let context = PolicyBindingKey::from_canonical_parts(identity, claims.clone());
     let mut scoped = owner.scoped_active_session_claims(identity, claims);
     let mut rows = scoped
         .query_rows_with_prepared_plan_for_identity(
@@ -148,8 +168,25 @@ pub(super) async fn evaluate_remote_read<S: OrderedKvStorage>(
         .await
         .ok()?;
     scoped.hydrate_current_rows(&mut rows).await.ok()?;
+    let receipt = scoped
+        .readable_current_rows_receipt(
+            request.request_id,
+            rows.iter().map(|row| (row.table(), row.row_uuid())),
+            context,
+            core_epoch,
+            progress,
+        )
+        .await
+        .ok()??;
     let bytes = crate::binding_codec::encode_rows(&rows).ok()?;
-    (bytes.len() <= MAX_RESULT_BYTES).then_some(bytes)
+    within_result_budget(&bytes, &receipt).then_some((bytes, receipt))
+}
+
+/// The byte budget covers the page and its ingestible carriers together.
+fn within_result_budget(rows: &[u8], receipt: &CurrentRowsReceipt) -> bool {
+    rows.len() <= MAX_RESULT_BYTES
+        && postcard::experimental::serialized_size(receipt)
+            .is_ok_and(|size| rows.len() + size <= MAX_RESULT_BYTES)
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
@@ -239,7 +276,8 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
                 let Some(response) = response else {
                     break;
                 };
-                super::peer_connection::queue_direct_control(
+                // Forwarded carriers keep the repair-payload sync context.
+                super::peer_connection::queue_sync_context_control(
                     &mut self.pending_control_responses,
                     SyncMessage::RemoteReadResponse(response),
                 );
@@ -355,7 +393,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
     }
 }
 
-pub(super) fn receive_remote_read(
+/// Rows reach a local requester (or a relay's downstream) only after the Core
+/// receipt for exactly those rows passed the same freshness checks as a
+/// current-row receipt and was installed through ordinary ingestion. A missing
+/// or invalid receipt yields no result, so the caller takes the coverage path
+/// instead of returning rows its local store does not hold.
+pub(super) async fn receive_remote_read<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    node: &SharedNodeState<S>,
     router: &SharedRemoteReads,
     selected: Option<AuthorityContext>,
     expected: Option<AuthorityContext>,
@@ -365,19 +409,62 @@ pub(super) fn receive_remote_read(
     let Some(expected) = expected else {
         return;
     };
-    let valid_route = router
-        .borrow()
-        .routes
-        .get(&response.request_id)
-        .is_some_and(|route| {
-            eligible
-                && selected.is_some_and(|selected| selected.same_admitted_link(expected))
-                && route
-                    .upstream
-                    .is_some_and(|sent| sent.same_admitted_link(expected))
-        });
-    if valid_route {
-        let rows = response.rows.filter(|rows| rows.len() <= MAX_RESULT_BYTES);
-        router.borrow_mut().finish(response.request_id, rows);
+    let id = response.request_id;
+    let identity = router.borrow().routes.get(&id).and_then(|route| {
+        (eligible
+            && selected.is_some_and(|selected| selected.same_admitted_link(expected))
+            && route
+                .upstream
+                .is_some_and(|sent| sent.same_admitted_link(expected)))
+        .then_some(route.context.identity)
+    });
+    let Some(identity) = identity else {
+        return;
+    };
+    let result = match (response.rows, response.receipt) {
+        (Some(rows), Some(receipt))
+            if receipt.request_id == id
+                // The Core evaluated under the link's admitted binding; a
+                // client may not hold that exact claims snapshot locally, so
+                // only the subject is bound here. Claim changes during the
+                // read are rejected by the caller's claims-revision check.
+                && receipt.context.identity == identity
+                && within_result_budget(&rows, &receipt) =>
+        {
+            ingest_remote_read_receipt(node, &receipt)
+                .await
+                .then_some((rows, receipt))
+        }
+        _ => None,
+    };
+    router.borrow_mut().finish(id, result);
+}
+
+async fn ingest_remote_read_receipt<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    node: &SharedNodeState<S>,
+    receipt: &CurrentRowsReceipt,
+) -> bool {
+    if receipt.core.0.is_nil()
+        || receipt.core_epoch == 0
+        || receipt.authorization_progress == 0
+        || receipt.outcomes.len() != receipt.rows.len()
+        || receipt
+            .outcomes
+            .iter()
+            .any(|outcome| *outcome != crate::protocol::CurrentRowOutcome::Readable)
+    {
+        return false;
     }
+    let mut node = node.lock().await;
+    if receipt.rows.iter().any(|row| {
+        node.current_row_coordinate(&row.table, row.row)
+            .ok()
+            .as_ref()
+            != Some(row)
+    }) || node.active_catalogue_seq() > receipt.policy_epoch
+        || node.committed_global_time() > receipt.settled_through
+    {
+        return false;
+    }
+    node.ingest_current_rows_receipt(receipt).await.is_ok()
 }
