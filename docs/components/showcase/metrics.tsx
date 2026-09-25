@@ -9,8 +9,6 @@ import {
 import { change, type MetricSummary } from "@/lib/showcase/summary";
 
 const codspeed = "https://app.codspeed.io/garden-co/jazz";
-/** Asks the history explorer to show one benchmark. */
-export const selectEvent = "perf-timeline:select";
 
 export function basisText(summary: MetricSummary): string {
   return summary.basis === "release"
@@ -123,26 +121,22 @@ export function HistoryPopover({
       </p>
       {metadata && (
         <p className="mt-2 text-fd-muted-foreground">
+          What is timed: {metadata.description} {metadata.fixture}
+        </p>
+      )}
+      {metadata && (
+        <p className="mt-2 text-fd-muted-foreground">
           Workload rate: {formatThroughput(summary.headline.median, metadata, true)}
         </p>
       )}
-      <p className="mt-2 flex gap-3">
-        <a
-          className="underline"
-          href="#history"
-          onClick={() =>
-            window.dispatchEvent(new CustomEvent(selectEvent, { detail: benchmarkId }))
-          }
-        >
-          Full history
-        </a>
+      <p className="mt-2">
         <a
           className="underline"
           href={`${codspeed}/benchmarks/${benchmarkId}`}
           target="_blank"
           rel="noreferrer"
         >
-          CodSpeed ↗
+          Full history on CodSpeed ↗
         </a>
       </p>
     </div>

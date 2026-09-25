@@ -17,11 +17,7 @@ import {
   type Lookup,
 } from "@/lib/showcase/catalogue";
 import { summarize, type MetricSummary } from "@/lib/showcase/summary";
-import videos from "@/lib/showcase/videos.json";
 
-type UploadedVideo = { mp4: string; poster: string; bytes: number };
-const uploadedVideos: Record<string, UploadedVideo | undefined> = videos;
-import { Dashboard } from "@/components/perf-timeline/dashboard";
 import { basisText, Change, HistoryPopover } from "./metrics";
 
 const repo = "https://github.com/garden-co/jazz";
@@ -114,26 +110,21 @@ function MetricCard({
 }
 
 function Video({ example }: { example: HeroExample }) {
-  const uploaded = example.video ? uploadedVideos[example.video.id] : undefined;
-  if (!example.video || !uploaded)
+  if (!example.video)
     return (
       <div className="flex aspect-video flex-col items-center justify-center rounded-xl border border-dashed border-fd-border bg-fd-muted/40 p-6 text-center">
         <span className="rounded-full border border-fd-border px-2 py-0.5 text-[11px] uppercase tracking-wider text-fd-muted-foreground">
           Walkthrough coming
         </span>
-        <p className="mt-3 max-w-sm text-sm text-fd-muted-foreground">
-          {example.video
-            ? "The walkthrough is scripted and will appear here once it has been recorded and uploaded."
-            : example.plannedVideo}
-        </p>
+        <p className="mt-3 max-w-sm text-sm text-fd-muted-foreground">{example.plannedVideo}</p>
       </div>
     );
   return (
     <figure>
       <video
         className="aspect-video w-full rounded-xl border border-fd-border bg-black object-contain"
-        src={uploaded.mp4}
-        poster={uploaded.poster}
+        src={example.video.src}
+        poster={example.video.poster}
         controls
         muted
         loop
@@ -339,12 +330,6 @@ export function Showcase() {
   };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
 
-  // /perf-timeline?benchmark=… redirects here; take those visitors to the explorer.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("benchmark"))
-      document.getElementById("history")?.scrollIntoView();
-  }, []);
-
   return (
     <main className="mx-auto w-full max-w-[1400px] px-4 pt-14 sm:px-8">
       <header className="max-w-3xl">
@@ -375,12 +360,6 @@ export function Showcase() {
           >
             More benchmarks
           </a>
-          <a
-            href="#history"
-            className="rounded-full border border-fd-border px-3 py-1 hover:border-fd-primary"
-          >
-            Full history
-          </a>
         </nav>
         {error && (
           <p
@@ -403,8 +382,7 @@ export function Showcase() {
           * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
           allowance for a typical modern machine being faster than the shared CI runner. This is
           illustrative, not a measured prediction for your hardware; every popover also shows the
-          measured runner time. Each benchmark&apos;s exact timing boundaries are in the full
-          history below.
+          measured runner time.
         </p>
       </header>
       <div className="mt-10">
@@ -419,9 +397,6 @@ export function Showcase() {
         ))}
       </div>
       <MiscBenchmarks summaries={summaries} loading={loading} />
-      <section id="history" className="scroll-mt-16 border-t border-fd-border pt-4">
-        <Dashboard />
-      </section>
     </main>
   );
 }

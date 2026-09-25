@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import "@/components/perf-timeline/style.css";
 import { Showcase } from "@/components/showcase/showcase";
 
 export const metadata: Metadata = {
