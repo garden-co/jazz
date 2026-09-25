@@ -95,6 +95,65 @@ where
         Ok(rows)
     }
 
+    /// Answer "Q at W" for a single-table supporting set from the `by_seq`
+    /// index: rows of `current` whose seq moved past `position` are sent
+    /// again, and rows that moved past it but are no longer in the set leave.
+    /// Everything at or below the watermark is already held by the receiver.
+    pub(crate) async fn supporting_catch_up_after<'a>(
+        &mut self,
+        table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
+        current: impl Iterator<Item = &'a crate::protocol::SupportingRow>,
+        position: GlobalTime,
+        predecessor: [u8; 16],
+    ) -> Result<crate::protocol::SupportingRowsUpdate, Error> {
+        let mut moved = BTreeMap::new();
+        for record in self.global_current_records_after(table, position).await? {
+            let record = record.borrowed();
+            let alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                "global current node alias must exist",
+            ))?;
+            let tx_id = TxId::new(
+                TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                node,
+            );
+            moved.insert(
+                RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
+                tx_id,
+            );
+        }
+        let mut changed = Vec::new();
+        for row in current.filter(|row| row.physical_table == physical_table) {
+            if moved.remove(&row.row).is_some() {
+                changed.push(row.clone());
+            }
+        }
+        let branch = BranchKey::default().canonical_bytes();
+        let left = moved
+            .into_iter()
+            .map(|(row, tx)| crate::protocol::SupportingRow {
+                physical_table,
+                version_table: table.to_owned().into(),
+                row,
+                version: crate::protocol::RowVersionRefEntry {
+                    tx,
+                    schema_version: None,
+                    layer: crate::protocol::ResultRowLayer::Content,
+                    batch: Some(tx),
+                    branch_or_prefix: (!branch.is_empty()).then(|| branch.clone()),
+                    row_digest: None,
+                },
+            })
+            .collect();
+        Ok(crate::protocol::SupportingRowsUpdate::CatchUp {
+            predecessor,
+            revision: *uuid::Uuid::new_v4().as_bytes(),
+            changed,
+            left,
+        })
+    }
+
     /// The largest seq of any accepted change to `table`.
     pub(super) async fn global_table_seq(&mut self, table: &str) -> Result<GlobalTime, Error> {
         let table_id =

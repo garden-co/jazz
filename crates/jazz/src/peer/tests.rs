@@ -316,6 +316,9 @@ fn direct_supporting_manifest_preserves_owned_reference_wire_bytes() {
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
             },
+            crate::protocol::SupportingRowsUpdate::CatchUp { .. } => {
+                panic!("a live publication never answers with a catch-up")
+            }
         };
         assert_eq!(
             payload.supporting_rows, expected_update,

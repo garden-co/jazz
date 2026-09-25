@@ -32,6 +32,34 @@ impl PeerState {
         }
     }
 
+    /// A watermark is answered once: afterwards the receiver holds a new
+    /// revision, so later rehydrates only reuse the position for body dedupe.
+    pub(crate) fn settle_watermark_declaration(&mut self, subscription: SubscriptionKey) {
+        if let Some(KnownStateDeclaration::Watermark {
+            position,
+            authorization_progress,
+            ..
+        }) = self.downstream_known_states.get(&subscription).cloned()
+        {
+            self.downstream_known_states.insert(
+                subscription,
+                match authorization_progress {
+                    Some(authorization_progress) => {
+                        KnownStateDeclaration::FastWithAuthorizationProgress {
+                            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                            position,
+                            authorization_progress,
+                        }
+                    }
+                    None => KnownStateDeclaration::Fast {
+                        completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                        position,
+                    },
+                },
+            );
+        }
+    }
+
     /// Advance retained per-binding authorization generations after this
     /// reader's authority is rebuilt.
     pub(crate) fn advance_authorization_progress(&mut self) {

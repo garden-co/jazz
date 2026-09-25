@@ -354,6 +354,20 @@ pub enum SupportingRowsUpdate {
         /// Physical memberships leaving this set, not globally deleted bytes.
         removes: Vec<SupportingRow>,
     },
+    /// Watermark catch-up against the receiver's declared revision: only rows
+    /// whose `row_seq` moved past the declared watermark. The receiver
+    /// replaces or removes its entries at these coordinates.
+    CatchUp {
+        /// Revision the receiver declared together with its watermark.
+        predecessor: [u8; 16],
+        /// Successor revision.
+        revision: [u8; 16],
+        /// Rows that changed after the watermark and are in the set now.
+        changed: Vec<SupportingRow>,
+        /// Rows that changed after the watermark and left the set; their
+        /// version is the row's current image (for example its deletion).
+        left: Vec<SupportingRow>,
+    },
 }
 
 impl SupportingRowsUpdate {
@@ -368,7 +382,9 @@ impl SupportingRowsUpdate {
     /// Exact successor identity.
     pub fn revision(&self) -> [u8; 16] {
         match self {
-            Self::Snapshot { revision, .. } | Self::Delta { revision, .. } => *revision,
+            Self::Snapshot { revision, .. }
+            | Self::Delta { revision, .. }
+            | Self::CatchUp { revision, .. } => *revision,
         }
     }
 
@@ -377,6 +393,7 @@ impl SupportingRowsUpdate {
         match self {
             Self::Snapshot { rows, .. } => rows,
             Self::Delta { adds, .. } => adds,
+            Self::CatchUp { changed, .. } => changed,
         }
     }
 
@@ -385,12 +402,15 @@ impl SupportingRowsUpdate {
         match self {
             Self::Snapshot { .. } => &[],
             Self::Delta { removes, .. } => removes,
+            Self::CatchUp { left, .. } => left,
         }
     }
 
     /// Whether this update establishes an independent complete predecessor.
+    /// A catch-up does too: with the declared revision it names the complete
+    /// set at its revision.
     pub fn is_snapshot(&self) -> bool {
-        matches!(self, Self::Snapshot { .. })
+        matches!(self, Self::Snapshot { .. } | Self::CatchUp { .. })
     }
 
     /// Mutably access rows whose bodies this message supplies or references.
@@ -398,6 +418,7 @@ impl SupportingRowsUpdate {
         match self {
             Self::Snapshot { rows, .. } => rows,
             Self::Delta { adds, .. } => adds,
+            Self::CatchUp { changed, .. } => changed,
         }
     }
 }
@@ -773,6 +794,8 @@ impl SyncMessage {
         if view.supporting_rows.revision() == [0; 16]
             || matches!(&view.supporting_rows, SupportingRowsUpdate::Delta { predecessor, revision, adds, removes }
                 if *predecessor == [0; 16] || (predecessor == revision && (!adds.is_empty() || !removes.is_empty())))
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::CatchUp { predecessor, revision, .. }
+                if *predecessor == [0; 16] || predecessor == revision)
         {
             return Err(WireContractError::InvalidSupportingRevision);
         }
@@ -3573,6 +3596,19 @@ pub enum KnownStateDeclaration {
         position: GlobalTime,
         /// Server-stamped authorization generation echoed by the receiver.
         authorization_progress: u64,
+    },
+    /// "I have Q at watermark W": the receiver holds the supporting set it
+    /// installed as `supporting_revision`, complete through `position`. A
+    /// serving peer that can answer from its `by_seq` index replies with a
+    /// [`SupportingRowsUpdate::CatchUp`] against that revision; any other
+    /// peer treats it as a fast declaration at `position`.
+    Watermark {
+        /// Watermark (global seq) the receiver's set is complete through.
+        position: GlobalTime,
+        /// Server-stamped authorization generation echoed by the receiver.
+        authorization_progress: Option<u64>,
+        /// Receiver's installed supporting-set revision.
+        supporting_revision: [u8; 16],
     },
     /// Exact declaration of row-version payloads currently held by the receiver.
     ExactVersionSet {

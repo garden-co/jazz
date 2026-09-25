@@ -2223,6 +2223,86 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 }
 
 #[test]
+fn warm_reconnect_catches_up_from_the_watermark_with_only_changed_rows() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, client_author, &schema);
+    let rows = (0..40)
+        .map(|index| {
+            seed(
+                &server,
+                "todos",
+                cells(&format!("todo {index}"), false, owner),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(false))));
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+    assert_eq!(
+        delta_rows(next_settled_opening(&mut subscription)).0.len(),
+        40
+    );
+    let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+    drop(upstream);
+    drop(subscriber);
+
+    // While the client is away: one row changes, one leaves the result and
+    // one is added.
+    block_on(
+        server
+            .update("todos", rows[3], cells("todo 3 renamed", false, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    block_on(
+        server
+            .update("todos", rows[7], cells("todo 7", true, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    seed(&server, "todos", cells("todo 40", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let resumed = server.accept_subscriber(server_transport, client_author);
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+
+    let titles = prepared_read(&client, &query)
+        .into_iter()
+        .map(|row| match row.cell(&schema.tables[0], "title") {
+            Some(Value::String(title)) => title,
+            other => panic!("unexpected title {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(titles.len(), 40);
+    assert!(titles.contains("todo 3 renamed"));
+    assert!(titles.contains("todo 40"));
+    assert!(!titles.contains("todo 7"));
+    let catch_up_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    assert!(
+        catch_up_bytes * 4 < full_bytes,
+        "a watermark catch-up carries only the three moved rows: full={full_bytes}, catch_up={catch_up_bytes}"
+    );
+}
+
+#[test]
 fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);

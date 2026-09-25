@@ -1053,6 +1053,15 @@ impl MaintainedSubscriptionView {
         self.supporting.acknowledged_rows()
     }
 
+    /// The only physical table this view reads, when it reads exactly one.
+    pub(crate) fn single_physical_table(
+        &self,
+    ) -> Option<(&str, crate::ids::GlobalPhysicalTableId)> {
+        let mut tables = self.physical_tables.iter();
+        let (table, id) = tables.next()?;
+        tables.next().is_none().then_some((table.as_str(), *id))
+    }
+
     pub(crate) fn supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
         self.supporting.rows()
     }

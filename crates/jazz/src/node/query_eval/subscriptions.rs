@@ -444,6 +444,29 @@ where
     /// Return the exact policy-scoped durable identity fixed at subscription
     /// admission. Wire updates contain only the usage handle and cannot choose
     /// or reconstruct this identity themselves.
+    /// Whether this receiver's installed supporting set for `subscription`
+    /// is exactly `revision`.
+    pub(crate) fn holds_supporting_revision(
+        &self,
+        subscription: SubscriptionKey,
+        revision: [u8; 16],
+    ) -> bool {
+        self.authority_result_key_for_subscription(subscription)
+            .ok()
+            .and_then(|key| self.query.authority_results.get(&key))
+            .is_some_and(|state| state.supporting_revision == Some(revision))
+    }
+
+    /// Stop declaring a watermark for `subscription` until a new complete set
+    /// is installed; the next subscribe asks for one.
+    pub(crate) fn forget_supporting_revision(&mut self, subscription: SubscriptionKey) {
+        if let Ok(key) = self.authority_result_key_for_subscription(subscription)
+            && let Some(state) = self.query.authority_results.get_mut(&key)
+        {
+            state.supporting_revision = None;
+        }
+    }
+
     pub(crate) fn authority_result_key_for_subscription(
         &self,
         subscription: SubscriptionKey,
@@ -1113,11 +1136,26 @@ where
             .get(&authority_result_key)
             .and_then(|state| state.settled_through)
         {
-            let authorization_progress = self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .and_then(|state| state.authorization_progress);
+            let state = self.query.authority_results.get(&authority_result_key);
+            let authorization_progress = state.and_then(|state| state.authorization_progress);
+            // "Q at W": with an installed, claimed supporting set the serving
+            // peer can answer with only the rows that moved past W.
+            if let Some(supporting_revision) = state
+                .filter(|state| {
+                    state.pending_authoritative_reset.is_none()
+                        && matches!(
+                            state.source_closure,
+                            crate::node::AuthoritySourceClosure::Claimed { .. }
+                        )
+                })
+                .and_then(|state| state.supporting_revision)
+            {
+                return Ok(Some(KnownStateDeclaration::Watermark {
+                    position,
+                    authorization_progress,
+                    supporting_revision,
+                }));
+            }
             return Ok(Some(match authorization_progress {
                 Some(authorization_progress) => {
                     KnownStateDeclaration::FastWithAuthorizationProgress {

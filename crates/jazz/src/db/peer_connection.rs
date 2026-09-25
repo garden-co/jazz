@@ -2930,6 +2930,26 @@ where
                                 let predecessor_is_waiting = pending_row_version_repairs.iter().any(|repair|
                                     !repair.superseded && matches!(&repair.update, SyncMessage::ViewUpdate(view)
                                         if view.subscription == subscription));
+                                // A catch-up is a delta against the revision declared
+                                // with its watermark. If this receiver has moved on
+                                // since (an older frame landed in between), ask again
+                                // without a watermark for a complete set.
+                                if let SyncMessage::ViewUpdate(view) = &message
+                                    && let crate::protocol::SupportingRowsUpdate::CatchUp { predecessor, .. } =
+                                        &view.supporting_rows
+                                    && (predecessor_is_waiting
+                                        || pending_view_updates.iter().any(|pending| pending.parts.subscription == subscription)
+                                        || !self.node.lock().await.holds_supporting_revision(subscription, *predecessor))
+                                {
+                                    let request = sent_subscriptions.get(&subscription).ok_or(
+                                        crate::node::Error::InvalidStoredValue("catch-up has no admitted subscription"))?;
+                                    self.node.lock().await.forget_supporting_revision(subscription);
+                                    awaiting_support_snapshots.insert(subscription, settled_through);
+                                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                                    self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    continue;
+                                }
                                 // Dependent deltas cannot be coalesced as complete
                                 // snapshots were. Bound each stalled chain and reopen
                                 // its exact admitted usage instead of retaining an
@@ -4726,6 +4746,16 @@ where
                             // withhold delivery pending upstream settlement, but
                             // the cursor retains the same usage-site ownership.
                             peer.declare_known_state(subscription, known_state.clone());
+                            // The first usage's rehydrate is the group's; let
+                            // it answer that usage's "Q at W" as a catch-up.
+                            if first_subscriber
+                                && matches!(
+                                    known_state,
+                                    Some(crate::protocol::KnownStateDeclaration::Watermark { .. })
+                                )
+                            {
+                                peer.declare_known_state(group_subscription, known_state.clone());
+                            }
                             peer.set_subscription_policy_binding(
                                 subscription,
                                 subscription_policy_binding.clone(),

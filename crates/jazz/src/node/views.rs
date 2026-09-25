@@ -315,6 +315,20 @@ where
         tier: DurabilityTier,
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
+        self.storage_backed_current_image(table, row_uuid, tier, context, true)
+            .await
+    }
+
+    /// The row's current image from storage; with `deletion_only`, only an
+    /// image that carries a deletion event.
+    async fn storage_backed_current_image(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        tier: DurabilityTier,
+        context: &mut ViewEvaluationContext,
+        deletion_only: bool,
+    ) -> Result<Option<VersionRow>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         let tx_id = match tier {
@@ -340,7 +354,7 @@ where
             .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted_row)
             .await?
             .into_iter()
-            .find(|version| version.deletion().is_some()))
+            .find(|version| !deletion_only || version.deletion().is_some()))
     }
 
     async fn preflight_view_bundle_conflicts(
@@ -696,6 +710,42 @@ where
         if revision == [0; 16] {
             return Err(invalid());
         }
+        if let SupportingRowsUpdate::CatchUp {
+            predecessor,
+            revision,
+            changed,
+            left,
+        } = wire
+        {
+            // Resolve the watermark catch-up against the set this receiver
+            // installed as `predecessor` into the complete set it describes:
+            // coordinates that moved are replaced or dropped, the rest are
+            // held here already. From then on it is an ordinary snapshot.
+            let Some(state) = self.query.authority_results.get(&key).filter(|state| {
+                !revisions.contains_key(&key) && state.supporting_revision == Some(*predecessor)
+            }) else {
+                return Err(invalid());
+            };
+            let moved = changed
+                .iter()
+                .chain(left)
+                .map(CoveredInputCoordinate::from)
+                .collect::<BTreeSet<_>>();
+            let mut rows = state
+                .covered_input_versions
+                .iter()
+                .filter(|(coordinate, _)| !moved.contains(*coordinate))
+                .map(|(_, row)| row.clone())
+                .collect::<Vec<_>>();
+            rows.extend(changed.iter().cloned());
+            update.wire_rows = Some(SupportingRowsUpdate::Snapshot {
+                revision: *revision,
+                rows,
+            });
+        }
+        let Some(wire) = update.wire_rows.as_ref() else {
+            return Ok(None);
+        };
         if let SupportingRowsUpdate::Delta { predecessor, .. } = wire {
             let current = revisions.get(&key).copied().or_else(|| {
                 self.query
@@ -820,7 +870,8 @@ where
         let known_state_position = match &known_state {
             Some(
                 KnownStateDeclaration::Fast { position, .. }
-                | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. },
+                | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. }
+                | KnownStateDeclaration::Watermark { position, .. },
             ) => Some(*position),
             Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
         };
@@ -830,7 +881,8 @@ where
             }
             Some(
                 KnownStateDeclaration::Fast { .. }
-                | KnownStateDeclaration::FastWithAuthorizationProgress { .. },
+                | KnownStateDeclaration::FastWithAuthorizationProgress { .. }
+                | KnownStateDeclaration::Watermark { .. },
             )
             | None => BTreeSet::new(),
         };
@@ -1202,10 +1254,23 @@ where
         let mut removed_row_candidates = row_result_removes
             .iter()
             .map(|(table, row, tx)| (table.to_string(), *row, Some(*tx), true))
-            .chain(supporting_update.removed_rows().iter().filter_map(|row| {
-                let table = *logical_tables.get(&row.physical_table)?;
-                Some((table.to_owned(), row.row, Some(row.version.tx), false))
-            }))
+            .chain(
+                // A catch-up's leaving rows name their current image, which
+                // is exactly what must ship; the cursor scan below adds them.
+                if matches!(
+                    supporting_update,
+                    crate::protocol::SupportingRowsUpdate::CatchUp { .. }
+                ) {
+                    Default::default()
+                } else {
+                    supporting_update.removed_rows()
+                }
+                .iter()
+                .filter_map(|row| {
+                    let table = *logical_tables.get(&row.physical_table)?;
+                    Some((table.to_owned(), row.row, Some(row.version.tx), false))
+                }),
+            )
             .fold(
                 BTreeMap::<(String, RowUuid), (Option<TxId>, bool)>::new(),
                 |mut acc, (table, row, tx, is_member)| {
@@ -1216,8 +1281,11 @@ where
             );
         // A reset from a known cursor cannot name the rows the reader holds,
         // so every source row that changed after the cursor is a candidate.
-        if let (crate::protocol::SupportingRowsUpdate::Snapshot { .. }, Some(position)) =
-            (&supporting_update, known_state_position)
+        if let (
+            crate::protocol::SupportingRowsUpdate::Snapshot { .. }
+            | crate::protocol::SupportingRowsUpdate::CatchUp { .. },
+            Some(position),
+        ) = (&supporting_update, known_state_position)
         {
             let tables = logical_tables.values().copied().collect::<BTreeSet<_>>();
             for table in tables {
@@ -1228,6 +1296,18 @@ where
                 }
             }
         }
+        // Rows leaving by catch-up ship their current image, deleted or not,
+        // so the receiver's copy stops matching the query.
+        let catch_up_left = match &supporting_update {
+            crate::protocol::SupportingRowsUpdate::CatchUp { left, .. } => left
+                .iter()
+                .filter_map(|row| {
+                    let table = *logical_tables.get(&row.physical_table)?;
+                    Some((table.to_owned(), row.row))
+                })
+                .collect::<BTreeSet<_>>(),
+            _ => BTreeSet::new(),
+        };
         for ((entry_table, row_uuid), (old_tx_id, is_member)) in &removed_row_candidates {
             let entry_table = entry_table.as_str();
             let (content_winner, retained_deletion_winner) =
@@ -1236,16 +1316,18 @@ where
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
                 None => {
+                    let leaves = catch_up_left.contains(&(entry_table.to_owned(), *row_uuid));
                     let winner = self
-                        .storage_backed_maintained_deletion_winner(
+                        .storage_backed_current_image(
                             entry_table,
                             *row_uuid,
                             tier,
                             &mut context,
+                            !leaves,
                         )
                         .await?;
                     let winner = winner.filter(|winner| {
-                        winner.deletion() == Some(crate::tx::DeletionEvent::Deleted)
+                        leaves || winner.deletion() == Some(crate::tx::DeletionEvent::Deleted)
                     });
                     if let Some(winner) = &winner {
                         storage_deletion_txs.insert(self.version_tx_id(winner)?);
@@ -2032,6 +2114,13 @@ where
             }
             Some(crate::protocol::SupportingRowsUpdate::Delta { adds, removes, .. }) => {
                 (adds, removes)
+            }
+            // Normalization turns a catch-up into an exact delta first.
+            Some(crate::protocol::SupportingRowsUpdate::CatchUp { .. }) => {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription,
+                    transition: "catch-up without an installed predecessor".to_owned(),
+                });
             }
             None => (Vec::new(), Vec::new()),
         };

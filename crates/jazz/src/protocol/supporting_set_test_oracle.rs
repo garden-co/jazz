@@ -41,6 +41,31 @@ impl SupportingSetTestOracle {
                 }
                 set
             }
+            SupportingRowsUpdate::CatchUp {
+                predecessor,
+                changed,
+                left,
+                ..
+            } => {
+                let (revision, previous) = self
+                    .sets
+                    .get(&view.subscription)
+                    .expect("catch-up requires snapshot");
+                assert_eq!(predecessor, revision, "catch-up names the held revision");
+                let coordinate = |row: &SupportingRow| (row.physical_table, row.row);
+                let replaced = changed
+                    .iter()
+                    .chain(left)
+                    .map(coordinate)
+                    .collect::<BTreeSet<_>>();
+                let mut set = previous
+                    .iter()
+                    .filter(|row| !replaced.contains(&coordinate(row)))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                set.extend(changed.iter().cloned());
+                set
+            }
         };
         self.sets.insert(
             view.subscription,

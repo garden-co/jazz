@@ -1938,7 +1938,27 @@ impl PeerState {
         } else {
             reset_input_set
         };
-        let bundle_known_state = if cursor_membership_mismatch {
+        // "Q at W" against a single table: membership depends only on each
+        // row's own image, so the rows whose seq moved past W are the whole
+        // difference between the receiver's set and the current one.
+        let catch_up = if watermark.0 > 0 {
+            watermark_catch_up(
+                node,
+                &known_state,
+                read_view.is_default(),
+                maintained.single_physical_table(),
+                maintained.supporting_rows(),
+                None,
+            )
+            .await?
+        } else {
+            None
+        };
+        if catch_up.is_some() {
+            result_member_removes.clear();
+            self.settle_watermark_declaration(subscription);
+        }
+        let bundle_known_state = if cursor_membership_mismatch && catch_up.is_none() {
             None
         } else {
             known_state.clone()
@@ -1965,7 +1985,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2543,6 +2563,39 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up = {
+            let canonical = self
+                .publication_states
+                .get(&maintained_subscription)
+                .ok_or(Error::InvalidStoredValue(
+                    "coverage group subscription is missing peer state",
+                ))?;
+            match canonical.maintained_subscription_view.as_ref() {
+                Some(view) if settled_through.0 > 0 => {
+                    watermark_catch_up(
+                        node,
+                        &known_state,
+                        read_view.is_default(),
+                        view.maintained.single_physical_table(),
+                        view.maintained.supporting_rows(),
+                        canonical.supporting_revision,
+                    )
+                    .await?
+                }
+                _ => None,
+            }
+        };
+        if catch_up.is_some() {
+            self.settle_watermark_declaration(target_subscription);
+        }
+        let (known_state, target_result_member_removes) = if catch_up.is_some() {
+            (Some(known_state).flatten(), Vec::new())
+        } else {
+            (
+                (!authorization_mismatch).then_some(known_state).flatten(),
+                target_result_member_removes,
+            )
+        };
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -2556,7 +2609,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2564,7 +2617,7 @@ impl PeerState {
                         subscription: target_subscription,
                         settled_through,
                         peer_complete_tx_payloads,
-                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        known_state,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2767,6 +2820,39 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up = {
+            let canonical = self
+                .publication_states
+                .get(&maintained_subscription)
+                .ok_or(Error::InvalidStoredValue(
+                    "coverage group subscription is missing peer state",
+                ))?;
+            match canonical.maintained_subscription_view.as_ref() {
+                Some(view) if settled_through.0 > 0 => {
+                    watermark_catch_up(
+                        node,
+                        &known_state,
+                        read_view.is_default(),
+                        view.maintained.single_physical_table(),
+                        view.maintained.supporting_rows(),
+                        canonical.supporting_revision,
+                    )
+                    .await?
+                }
+                _ => None,
+            }
+        };
+        if catch_up.is_some() {
+            self.settle_watermark_declaration(target_subscription);
+        }
+        let (known_state, target_result_member_removes) = if catch_up.is_some() {
+            (Some(known_state).flatten(), Vec::new())
+        } else {
+            (
+                (!authorization_mismatch).then_some(known_state).flatten(),
+                target_result_member_removes,
+            )
+        };
         let target_reset = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -2780,7 +2866,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2788,7 +2874,7 @@ impl PeerState {
                         subscription: target_subscription,
                         settled_through,
                         peer_complete_tx_payloads,
-                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        known_state,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2823,4 +2909,39 @@ impl PeerState {
     pub(crate) fn review_publication_count(&self) -> usize {
         self.publication_states.len()
     }
+}
+
+/// Answer a "Q at W" declaration from the `by_seq` index when the view reads
+/// a single table, so its membership depends only on each row's own image.
+/// `revision` pins the successor to a canonical publisher's revision.
+async fn watermark_catch_up<'a, S: OrderedKvStorage>(
+    node: &mut NodeState<S>,
+    known_state: &Option<KnownStateDeclaration>,
+    default_read_view: bool,
+    single_table: Option<(&str, crate::ids::GlobalPhysicalTableId)>,
+    rows: impl Iterator<Item = &'a crate::protocol::SupportingRow>,
+    revision: Option<[u8; 16]>,
+) -> Result<Option<crate::protocol::SupportingRowsUpdate>, Error> {
+    let Some(KnownStateDeclaration::Watermark {
+        position,
+        supporting_revision,
+        ..
+    }) = known_state
+    else {
+        return Ok(None);
+    };
+    let (true, Some((table, physical_table))) = (default_read_view, single_table) else {
+        return Ok(None);
+    };
+    let mut update = node
+        .supporting_catch_up_after(table, physical_table, rows, *position, *supporting_revision)
+        .await?;
+    if let (
+        Some(pinned),
+        crate::protocol::SupportingRowsUpdate::CatchUp { revision, .. },
+    ) = (revision, &mut update)
+    {
+        *revision = pinned;
+    }
+    Ok(Some(update))
 }
