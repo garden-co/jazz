@@ -1434,9 +1434,12 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
-test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
+test("CodSpeed baselines every main merge and runs only for benchmark-labeled PRs", () => {
+  // Every main commit needs its own CodSpeed run. Otherwise PR reports compare
+  // against the newest older main run and attribute intervening merges to the
+  // PR (#3488).
   const document = parse(codspeedWorkflow);
-  assert.equal(document.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  assert.deepEqual(document.on.push, { branches: ["main"] });
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
@@ -1446,13 +1449,29 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
     document.jobs.examples.if,
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
+  // Main runs are keyed by commit and never cancelled; PR runs cancel
+  // superseded pushes.
+  assert.deepEqual(document.concurrency, {
+    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.sha }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
 
   assert.throws(() => {
+    const unsafe = parse(codspeedWorkflow.replace("  push:\n    branches: [main]\n", ""));
+    assert.deepEqual(unsafe.on.push, { branches: ["main"] });
+  }, /Expected values to be strictly deep-equal/);
+  assert.throws(() => {
     const unsafe = parse(
-      codspeedWorkflow.replace("  schedule:\n", "  push:\n    branches: [main]\n  schedule:\n"),
+      codspeedWorkflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: true",
+      ),
     );
-    assert.equal(unsafe.on.push, undefined, "ordinary main pushes must not run CodSpeed");
-  }, /ordinary main pushes/);
+    assert.equal(
+      unsafe.concurrency["cancel-in-progress"],
+      "${{ github.event_name == 'pull_request' }}",
+    );
+  }, /strictly equal/);
   assert.throws(() => {
     const unsafe = parse(
       codspeedWorkflow.replace(

@@ -3,6 +3,11 @@ name: CodSpeed Example Benchmarks
 on:
   pull_request:
     types: [labeled, synchronize, reopened]
+  # Every main merge gets its own baseline. Without it CodSpeed compares PRs
+  # against the newest older main run and attributes intervening merges to the
+  # PR (#3488).
+  push:
+    branches: [main]
   schedule:
     # Nightly default-branch baseline. The non-round minute avoids the busiest
     # part of GitHub's scheduler window.
@@ -13,9 +18,11 @@ permissions:
   contents: read
   id-token: write
 
+# PR runs cancel superseded pushes. Main runs are keyed by commit and never
+# cancelled, so consecutive merges cannot leave a commit without a baseline.
 concurrency:
-  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   examples:
