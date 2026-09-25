@@ -545,6 +545,7 @@ pub(super) fn select_current_access_path(
     Some(CurrentAccessPath::Index {
         column,
         order_column: None,
+        reverse: false,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
         maintained: false,
@@ -557,7 +558,11 @@ pub(super) fn select_current_access_path(
 /// Predicates use logical values, but secondary-index keys are physical
 /// current-row values, so preserve that declared nullable shape before adding
 /// the storage envelope.
-fn physical_current_index_value(table: &TableSchema, column: &str, value: Value) -> Value {
+pub(super) fn physical_current_index_value(
+    table: &TableSchema,
+    column: &str,
+    value: Value,
+) -> Value {
     let logical_value = match table
         .columns
         .iter()

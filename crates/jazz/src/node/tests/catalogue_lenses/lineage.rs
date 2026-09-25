@@ -224,6 +224,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
                 identity: user(0x71),
                 trust: CommitUnitTrust::Session,
                 admitted_write_authorization: false,
+                version_receipts_validated: false,
             }),
         ).resolve(),
         Err(Error::UnauthorizedCatalogueUpdate)

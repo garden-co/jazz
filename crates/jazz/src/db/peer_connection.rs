@@ -262,6 +262,7 @@ where
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
                     admitted_write_authorization: false,
+                    version_receipts_validated: false,
                 }),
             )
             .await?;
@@ -312,7 +313,8 @@ where
                     .ingest_relay_commit_unit_with_encoder_trust(
                         tx.clone(),
                         versions.clone(),
-                        ingest_context.trust.is_trusted(),
+                        ingest_context.trust.is_trusted()
+                            || ingest_context.version_receipts_validated,
                     )
                     .await?;
                 if same_scope_author {
@@ -1799,6 +1801,7 @@ where
                     message: message.message,
                     lease: message.lease,
                     authority_receipt_eligible: false,
+                    receipts_validated: message.receipts_validated,
                 }),
                 Ok(None) => {
                     self.inbound_authority_receipt_quarantine = false;
@@ -2566,6 +2569,7 @@ where
                                     lease: message.lease,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
+                                    receipts_validated: message.receipts_validated,
                                 }),
                                 Ok(None) => {
                                     self.inbound_authority_receipt_quarantine = false;
@@ -2588,6 +2592,7 @@ where
                             message,
                             lease,
                             authority_receipt_eligible,
+                            receipts_validated,
                         }) = next
                         else {
                             break;
@@ -2600,7 +2605,7 @@ where
                                 return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
                             }
                             deferred_repair_fates.push_back(StagedInboundMessage {
-                                message, lease, authority_receipt_eligible,
+                                message, lease, authority_receipt_eligible, receipts_validated,
                             });
                             continue;
                         }
@@ -2712,6 +2717,7 @@ where
                                                 },
                                                 authority_receipt_eligible: false,
                                                 lease: None,
+                                                receipts_validated: false,
                                             });
                                         }
                                     }
@@ -2748,6 +2754,7 @@ where
                                         message: SyncMessage::CatalogueSnapshot(snapshot),
                                         lease: lease.clone(),
                                         authority_receipt_eligible,
+                                        receipts_validated,
                                     });
                                     break;
                                 }
@@ -3647,7 +3654,7 @@ where
                                     && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
                                 {
                                     drop(ingress_owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible, receipts_validated });
                                     break;
                                 }
                                 if *local_receiver {
@@ -3933,12 +3940,17 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding, lease) =
+                    let (message, parked_policy_binding, lease, receipts_validated) =
                         if let Some(staged) = self.staged_inbound.pop_front() {
-                            (Box::new(staged.message), None, staged.lease)
+                            (Box::new(staged.message), None, staged.lease, staged.receipts_validated)
                         } else {
                             match self.transport.try_recv_owned_result() {
-                                Ok(Some(message)) => (Box::new(message.message), None, message.lease),
+                                Ok(Some(message)) => (
+                                    Box::new(message.message),
+                                    None,
+                                    message.lease,
+                                    message.receipts_validated,
+                                ),
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
@@ -3969,6 +3981,7 @@ where
                                         Box::new(SyncMessage::Subscribe(pending.subscribe)),
                                         Some(pending.policy_binding),
                                         None,
+                                        false,
                                     )
                                 }
                             }
@@ -5310,7 +5323,7 @@ where
                                 let mut owner = self.node.lock().await;
                                 if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
                                     drop(owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false, receipts_validated });
                                     catalogue_deferred = true;
                                     return Ok::<bool, Error>(false);
                                 }
@@ -5320,7 +5333,10 @@ where
                                 &self.node,
                                 peer,
                                 *local_receiver,
-                                *ingest_context,
+                                CommitUnitIngestContext {
+                                    version_receipts_validated: receipts_validated,
+                                    ..*ingest_context
+                                },
                                 session_claim_binding.clone().expect(
                                     "subscriber dispatch has an admitted immutable session binding",
                                 ),

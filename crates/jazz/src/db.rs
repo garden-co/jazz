@@ -1948,6 +1948,8 @@ struct StagedInboundMessage {
     message: SyncMessage,
     lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
+    /// See [`ReceivedSyncMessage`]: set only from the checked wire decoder.
+    receipts_validated: bool,
 }
 
 struct PendingAuthorityViewUpdate {
