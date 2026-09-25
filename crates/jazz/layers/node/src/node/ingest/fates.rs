@@ -59,6 +59,9 @@ where
         {
             return Err(Error::NonMonotoneState("global seq cannot move backwards"));
         }
+        let already_accepted = matches!(stored.fate, Fate::Accepted);
+        let previous_global_time = stored.global_time;
+        let previous_durability = stored.durability;
         stored.fate = next_fate(&stored.fate, fate)?;
         stored.global_time = global_time.or(stored.global_time);
         if let Some(durability) = durability {
@@ -71,6 +74,27 @@ where
         } else {
             Vec::new()
         };
+
+        if already_accepted
+            && stored.tx.kind == TxKind::Mergeable
+            && !stored.view_scoped_cardinality
+            && stored.global_time.is_some()
+            && stored.global_time == previous_global_time
+            && stored.durability == previous_durability
+            && advanced_global_times.is_empty()
+        {
+            // A complete mergeable transaction installs its current indexes
+            // atomically with accepted metadata. Replaying the same receipt
+            // has no durable work after monotonicity/conflict validation.
+            // Exclusive fragments deliberately defer current installation and
+            // must still run the ordinary repair path below, even when their
+            // fate metadata is unchanged.
+            *terminal_fate_persisted = true;
+            self.persist_storage_consistency_marker_through(tx_id.time).await?;
+            self.rejections.child_txs_by_parent.remove(&tx_id);
+            self.prune_child_edges(tx_id);
+            return Ok(());
+        }
 
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
