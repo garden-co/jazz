@@ -342,14 +342,21 @@ export class SubscriptionManager<T extends { id: string }> {
         ),
         removedRoots,
       );
+      let result = wireResult;
       if (terminalOperations.length > 0) {
         const terminalResult = this.handleTerminalOperations(terminalOperations, transform);
         const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
-        return reset
+        result = reset
           ? { delta: combined, all: this.all(), reset: true }
           : { delta: combined, all: this.all() };
       }
-      return wireResult;
+      // A removed root's ordered-key address is only needed while the root is
+      // part of the result; re-adding it registers the address again. Pruning
+      // keeps the map bounded by the live result instead of every key seen.
+      for (const { id, address } of removedKeys) {
+        if (!this.currentResults.has(id)) this.terminalOccurrenceAddresses.delete(address);
+      }
+      return result;
     } catch (error) {
       this.restore(snapshot);
       throw error;

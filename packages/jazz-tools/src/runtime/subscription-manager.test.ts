@@ -630,6 +630,117 @@ describe("SubscriptionManager", () => {
     expect(deferred.all).toEqual(result.all);
   });
 
+  it("keeps occurrence addresses bounded by the live result under churn", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const addresses = () =>
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size;
+    const id = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+    const window = 10;
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: Array.from({ length: window }, (_, n) => runtimeAddedRoot(id(n), n, `r${n}`)),
+      }),
+      transformIncluded,
+    );
+    for (let n = window; n < window + 500; n++) {
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          added: [runtimeAddedRoot(id(n), window - 1, `r${n}`)],
+          removed: [runtimeRemovedRecord(id(n - window), 0)],
+        }),
+        transformIncluded,
+      );
+    }
+    expect(manager.size).toBe(window);
+    expect(addresses()).toBe(window);
+
+    // A root that leaves and comes back is addressable by descendant edits again.
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(id(0), 0, "back")] }),
+      transformIncluded,
+    );
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(id(0))],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all?.[0]).toEqual({
+      id: id(0),
+      title: "back",
+      children: [{ id: childId, name: "child" }],
+    });
+    expect(addresses()).toBe(window + 1);
+  });
+
+  it("replays a deferred edit on a typed root after its address was pruned", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    const sidecar = typedResultKey(uuidBytes(rootId), [uuidBytes(joinedId)], [[1, "arm"]]);
+    const added = (title: string): RuntimeSubscriptionAddedRow => ({
+      sourceId: rootId,
+      occurrenceKey: sidecar,
+      index: 0,
+      row: includedRootRow(rootId, title),
+    });
+    // Groove's ordered root key for this occurrence: root UUID, then the
+    // union-arm label ahead of the joined UUID it discriminates.
+    const orderedRoot = [
+      10,
+      ...uuidBytes(rootId),
+      6,
+      ...new TextEncoder().encode("arm"),
+      0,
+      0,
+      10,
+      ...uuidBytes(joinedId),
+    ];
+    manager.handleDelta(emptyRuntimeDelta({ added: [added("first")] }), transformIncluded);
+    manager.handleDelta(
+      emptyRuntimeDelta({ removed: [{ sourceId: rootId, occurrenceKey: sidecar, index: 0 }] }),
+      transformIncluded,
+    );
+    expect(manager.all()).toEqual([]);
+
+    const deferred = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: orderedRoot,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(deferred.all).toEqual([]);
+
+    const rehydrated = manager.handleDelta(
+      emptyRuntimeDelta({ added: [added("again")] }),
+      transformIncluded,
+    );
+    expect(rehydrated.all).toEqual([
+      { id: rootId, title: "again", children: [{ id: childId, name: "child" }] },
+    ]);
+  });
+
   it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
