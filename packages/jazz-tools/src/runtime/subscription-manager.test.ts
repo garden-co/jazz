@@ -741,6 +741,58 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("keeps a root that one frame removes and re-adds addressable by descendant edits", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const otherId = "00000000-0000-4000-8000-000000000003";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: [runtimeAddedRoot(rootId, 0, "original"), runtimeAddedRoot(otherId, 1, "other")],
+      }),
+      transformIncluded,
+    );
+
+    // The root stays in the result, so its occurrence address must survive
+    // pruning and its retained row must survive the removal.
+    const readded = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [runtimeRemovedRecord(rootId, 0)],
+        added: [runtimeAddedRoot(rootId, 1, "readded")],
+      }),
+      transformIncluded,
+    );
+    expect(readded.all).toEqual([
+      { id: otherId, title: "other", children: [] },
+      { id: rootId, title: "readded", children: [] },
+    ]);
+    expect(
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size,
+    ).toBe(2);
+
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all).toEqual([
+      { id: otherId, title: "other", children: [] },
+      { id: rootId, title: "readded", children: [{ id: childId, name: "child" }] },
+    ]);
+  });
+
   it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
