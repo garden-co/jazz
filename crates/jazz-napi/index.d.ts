@@ -77,7 +77,7 @@ export declare class NapiDb {
    * Decode, prepare, and execute one read inside Rust. Query-plan ownership
    * never crosses the language boundary.
    */
-  all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; result_only?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   /**
