@@ -19,7 +19,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
   policy.chatOwners.allowInsert.where((binding) =>
     allOf([
       { accountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.chats.exists.where({
+      policy.chats.existsIncludingCreated.where({
         id: binding.chatId,
         ownerId: binding.accountId,
         "$createdBy.account": session.user.account,
@@ -33,7 +33,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
     ]),
   );
   policy.chatMembers.allowInsert.where((member) =>
-    policy.chats.exists.where({ id: member.chatId, ownerId: session.user.account }),
+    policy.chats.existsIncludingCreated.where({ id: member.chatId, ownerId: session.user.account }),
   );
   policy.chatMembers.allowUpdate
     .whereOld((member) =>
@@ -59,8 +59,11 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
     allOf([
       { senderId: session.user.account, "$createdBy.account": session.user.account },
       anyOf([
-        policy.chats.exists.where({ id: message.chatId, ownerId: session.user.account }),
-        policy.chatMembers.exists.where({
+        policy.chats.existsIncludingCreated.where({
+          id: message.chatId,
+          ownerId: session.user.account,
+        }),
+        policy.chatMembers.existsIncludingCreated.where({
           chatId: message.chatId,
           accountId: session.user.account,
         }),
@@ -75,14 +78,20 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
     allOf([
       { accountId: session.user.account, "$createdBy.account": session.user.account },
       // Account correlation comes first: it is the shared declared-reference join.
-      policy.chatOwners.exists.where({ accountId: space.accountId, chatId: space.identifier }),
+      policy.chatOwners.existsIncludingCreated.where({
+        accountId: space.accountId,
+        chatId: space.identifier,
+      }),
     ]),
   );
   policy.__e2ee_space_grants.allowRead.where(authenticated);
   policy.__e2ee_space_grants.allowInsert.where((grant) =>
     allOf([
       { authorAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.exists.where({ id: grant.spaceId, accountId: session.user.account }),
+      policy.__e2ee_spaces.existsIncludingCreated.where({
+        id: grant.spaceId,
+        accountId: session.user.account,
+      }),
     ]),
   );
   policy.__e2ee_space_successors.allowRead.where(authenticated);

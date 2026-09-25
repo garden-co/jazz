@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import type { DbConfig } from "jazz-tools";
+import { ReadTier, type DbConfig } from "jazz-tools";
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import { LockKeyholeIcon, PlusIcon } from "lucide-react";
-import { validate as isUuid } from "uuid";
 import { app } from "../schema.js";
 import { prepareAccountConfig } from "./account.js";
 import { createChat, shareChat } from "./chat.js";
@@ -45,25 +44,10 @@ function ChatApp() {
   const db = useDb();
   const session = useSession();
   const accountId = session?.user.account;
-  const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [chatId, setChatId] = useState(() => new URLSearchParams(location.search).get("chat"));
-  const rooms = useAll(ready ? app.chats : undefined, { tier: "global" });
-  useEffect(() => {
-    let cancelled = false;
-    db.e2ee.devices.list().then(
-      () => {
-        if (!cancelled) setReady(true);
-      },
-      (cause) => {
-        if (!cancelled) setError(String(cause));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [db]);
+  const rooms = useAll(app.chats, { tier: ReadTier.LocalFirst });
   useEffect(() => {
     const onNavigation = () => setChatId(new URLSearchParams(location.search).get("chat"));
     window.addEventListener("popstate", onNavigation);
@@ -86,21 +70,22 @@ function ChatApp() {
         </Button>
         <div className="text-xs break-all">
           Your account:{" "}
-          {ready && accountId ? (
-            <code data-testid="account-id">{accountId}</code>
-          ) : (
-            "Preparing device…"
-          )}
+          {accountId ? <code data-testid="account-id">{accountId}</code> : "Preparing device…"}
         </div>
         <Button
-          disabled={!ready || !accountId || creating}
+          disabled={!accountId || creating}
           onClick={async () => {
             if (!accountId) return;
             setCreating(true);
             setError("");
             try {
-              const room = await createChat(db, accountId);
-              selectChat(room.id);
+              const { chat, completion } = await createChat(db, accountId);
+              selectChat(chat.id);
+              void completion.wait({ tier: "global" }).catch((cause) => {
+                setError(
+                  `Server confirmation is unavailable: ${String(cause)}. Your local chat is retained; inspect it before creating another.`,
+                );
+              });
             } catch (cause) {
               setError(
                 `${String(cause)}. A failed handoff does not imply rollback; inspect your chat list before creating another room.`,
@@ -119,10 +104,9 @@ function ChatApp() {
           {error}
         </p>
       )}
-      {ready &&
-        accountId &&
+      {accountId &&
         (chatId ? (
-          isUuid(chatId) ? (
+          /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(chatId) ? (
             <ChatView key={chatId} chatId={chatId} accountId={accountId} />
           ) : (
             <p role="alert" className="p-8">
@@ -163,14 +147,35 @@ function ChatApp() {
 
 function ChatView({ chatId, accountId }: { chatId: string; accountId: string }) {
   const db = useDb();
-  const rooms = useAll(app.chats.where({ id: chatId }), { tier: "global" });
+  const rooms = useAll(app.chats.where({ id: chatId }), { tier: ReadTier.LocalFirst });
+  const remoteRooms = useAll(app.chats.select("id").where({ id: chatId }), {
+    tier: ReadTier.Remote,
+  });
   const room = rooms.data?.[0];
   const messages = useAll(
     room
       ? app.messages.select("*", "$createdAt").where({ chatId }).orderBy("$createdAt", "desc")
       : undefined,
-    { tier: "global" },
+    { tier: ReadTier.LocalFirst },
   );
+  const remoteMessages = useAll(room ? app.messages.select("id").where({ chatId }) : undefined, {
+    tier: ReadTier.Remote,
+  });
+  const remoteIds = new Set(remoteMessages.data?.map((message) => message.id));
+  const [receipts, setReceipts] = useState<Record<string, string>>({});
+  const onSaved = (id: string, accepted: Promise<unknown>) => {
+    setReceipts((current) => ({ ...current, [id]: "Saved on this device · pending acceptance" }));
+    void accepted.then(
+      () => setReceipts((current) => ({ ...current, [id]: "Accepted by server" })),
+      (cause) => {
+        setReceipts((current) => ({
+          ...current,
+          [id]: "Saved on this device · acceptance unconfirmed",
+        }));
+        setError(`${String(cause)}. Inspect the existing message before resending.`);
+      },
+    );
+  };
   const [recipient, setRecipient] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -182,7 +187,19 @@ function ChatView({ chatId, accountId }: { chatId: string; accountId: string }) 
       </p>
     );
   if (rooms.isLoading) return <p className="p-8">Loading chat…</p>;
-  if (!room) return <p className="p-8">You don't have permission to access this chat.</p>;
+  if (!room) {
+    if (remoteRooms.error)
+      return (
+        <p role="alert" className="p-8">
+          Chat is not available locally. Server lookup failed: {remoteRooms.error.message}
+        </p>
+      );
+    if (remoteRooms.isLoading)
+      return <p className="p-8">Chat is not available locally. Waiting for the server…</p>;
+    if (remoteRooms.data?.some((remoteRoom) => remoteRoom.id === chatId))
+      return <p className="p-8">Chat is available from the server. Waiting for local data…</p>;
+    return <p className="p-8">You don't have permission to access this chat.</p>;
+  }
   return (
     <>
       <header className="border-b px-4 py-3 bg-background flex flex-col gap-2">
@@ -190,6 +207,13 @@ function ChatView({ chatId, accountId }: { chatId: string; accountId: string }) 
         <div className="text-xs break-all">
           Room ID: <code data-testid="chat-id">{chatId}</code>
         </div>
+        <p className="text-xs">
+          Local visibility is not acceptance. “Available from server” does not confirm Global
+          settlement or that a recipient has read the message.
+        </p>
+        {remoteMessages.error && (
+          <p className="text-xs">Server confirmation unavailable; local messages remain visible.</p>
+        )}
         {room.ownerId === accountId && (
           <form
             className="flex flex-wrap items-center gap-2"
@@ -268,12 +292,23 @@ function ChatView({ chatId, accountId }: { chatId: string; accountId: string }) 
           </p>
         ) : (
           messages.data?.map((message) => (
-            <ChatMessage key={message.id} message={message} isMe={message.senderId === accountId} />
+            <ChatMessage
+              key={message.id}
+              message={message}
+              isMe={message.senderId === accountId}
+              status={
+                receipts[message.id] === "Accepted by server"
+                  ? "Accepted by server"
+                  : remoteIds.has(message.id)
+                    ? "Available from server"
+                    : (receipts[message.id] ?? "Local · acceptance unconfirmed")
+              }
+            />
           ))
         )}
         {messages.isLoading && <p>Loading encrypted messages…</p>}
       </div>
-      <MessageComposer chatId={chatId} accountId={accountId} />
+      <MessageComposer chatId={chatId} accountId={accountId} onSaved={onSaved} />
     </>
   );
 }
