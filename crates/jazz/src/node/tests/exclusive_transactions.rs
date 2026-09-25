@@ -2228,3 +2228,154 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     let reopened = reopen_node_at(&writer_b_dir, node(2), schema());
     assert!(reopened.rejected_transaction(rejected).is_none());
 }
+
+// Internal: the history decode counter is the only observable of how many
+// history scans a transaction table read performs; results alone cannot tell
+// one table-wide scan from a re-scan per row (#3473).
+#[test]
+fn exclusive_table_read_decodes_each_history_version_once() {
+    let (_temp_dir, mut core) = open_node();
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), u64::from(ordinal))
+                .cells(title_cells(format!("first-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), 100 + u64::from(ordinal))
+                .cells(title_cells(format!("second-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(3), 200).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    let tx_id = OpenTransactionId::new();
+    core.open_exclusive(tx_id).unwrap();
+    // Arrives after the snapshot, so the transaction must not see it.
+    let late = TxId::new(TxTime::from(300), node(2));
+    ingest_relay_version(&mut core, late, 300, Vec::new(), row(5), "late");
+    core.tx_write(tx_id, "todos", row(7), title_cells("pending"), None)
+        .unwrap();
+    let stored_versions = 16 * 2 + 1 + 1;
+
+    super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+    let rows = core
+        .tx_current_rows(tx_id, "todos")
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
+        stored_versions,
+        "a transaction table read must decode each stored version once"
+    );
+
+    let mut expected = Vec::new();
+    for ordinal in 1..=16 {
+        if let Some(cells) = core.tx_read(tx_id, "todos", row(ordinal)).unwrap() {
+            expected.push((row(ordinal), cells));
+        }
+    }
+    assert_eq!(rows, expected);
+    assert!(!rows.iter().any(|(row_uuid, _)| *row_uuid == row(3)));
+    assert!(rows.contains(&(row(5), title_cells("second-5"))));
+    assert!(rows.contains(&(row(7), title_cells("pending"))));
+}
+
+// Differential: a whole-table read inside an exclusive transaction must equal
+// per-row point reads under concurrent content heads, delete/restore,
+// accepted and pending foreign versions, versions that arrive after the
+// snapshot, and staged writes and deletes.
+#[test]
+fn exclusive_table_read_matches_point_reads_across_seeds() {
+    for seed in 0..60u64 {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut rand = move |n: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let (_temp_dir, mut core) = open_node();
+        let rows = 6u8;
+        let mut heads: BTreeMap<u8, Vec<TxId>> = BTreeMap::new();
+        let mut time = 1u64;
+        let mut global = 10_000u64;
+        let mut ops = |core: &mut NodeState<_>, rand: &mut dyn FnMut(u64) -> u64, after_snapshot: bool| {
+            for _ in 0..30 {
+                let r = 1 + rand(rows as u64) as u8;
+                time += 1;
+                let known = heads.entry(r).or_default();
+                let parents: Vec<TxId> = known.iter().copied().filter(|_| rand(2) == 0).collect();
+                match rand(if after_snapshot { 2 } else { 4 }) {
+                    0 | 1 if !after_snapshot => {
+                        let mut commit = MergeableCommit::new("todos", row(r), time)
+                            .cells(title_cells(format!("s{seed}-{time}")))
+                            .parents(parents);
+                        if rand(5) == 0 {
+                            commit = commit.deletion(if rand(2) == 0 {
+                                DeletionEvent::Deleted
+                            } else {
+                                DeletionEvent::Restored
+                            });
+                        }
+                        if let Ok(tx) = core.commit_mergeable_settled(commit) {
+                            known.push(tx);
+                        }
+                    }
+                    _ => {
+                        let tx = TxId::new(TxTime::from(time), node(2 + rand(2) as u8));
+                        ingest_relay_version(core, tx, time, parents, row(r), &format!("f{seed}-{time}"));
+                        if rand(2) == 0 {
+                            global += 1;
+                            let _ = core.apply_fate_update(
+                                tx,
+                                Fate::Accepted,
+                                Some(GlobalTime(global)),
+                                Some(DurabilityTier::Global),
+                            );
+                        }
+                        known.push(tx);
+                    }
+                }
+            }
+        };
+        ops(&mut core, &mut rand, false);
+        let tx_id = OpenTransactionId::new();
+        core.open_exclusive(tx_id).unwrap();
+        ops(&mut core, &mut rand, true);
+        for r in 1..=rows + 2 {
+            match rand(4) {
+                0 => core
+                    .tx_write(tx_id, "todos", row(r), title_cells(format!("staged-{r}")), None)
+                    .unwrap(),
+                1 => {
+                    let _ = core.tx_write(
+                        tx_id,
+                        "todos",
+                        row(r),
+                        BTreeMap::<String, Value>::new(),
+                        Some(DeletionEvent::Deleted),
+                    );
+                }
+                _ => {}
+            }
+        }
+        let table = core
+            .tx_current_rows(tx_id, "todos")
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for r in 1..=rows + 2 {
+            if let Some(cells) = core.tx_read(tx_id, "todos", row(r)).unwrap() {
+                expected.push((row(r), cells));
+            }
+        }
+        assert_eq!(table, expected, "seed {seed}");
+    }
+}

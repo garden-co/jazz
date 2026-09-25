@@ -7,7 +7,17 @@ import { chmod, copyFile, mkdir, readFile, lstat, readdir, writeFile } from "nod
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const workloads = ["todo", "permissioned-resources", "policy-scoped-documents"];
+// The single list of native wall-time workloads. `matrix` prints it for the
+// CodSpeed workflow's build and measurement jobs, so adding an example here is
+// the only workflow change it needs. Each workload names the Cargo package
+// `jazz-example-<workload>-benchmark` with a `walltime` bench target.
+export const workloads = [
+  "todo",
+  "permissioned-resources",
+  "policy-scoped-documents",
+  "band-chat",
+  "world-tour",
+];
 const format = "jazz-codspeed-benchmark-artifact-v1";
 // Observed codspeed-macro checkout root. Relative DWARF paths still receive
 // origin=unknown; match the absolute repository root uploaded by the runner.
@@ -150,10 +160,14 @@ async function main() {
     console.log(sourcePathFlags(process.cwd()));
     return;
   }
+  if (action === "matrix") {
+    console.log(JSON.stringify(workloads));
+    return;
+  }
   const { binary, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
-    "usage: codspeed-artifact.mjs seal|install WORKLOAD",
+    "usage: codspeed-artifact.mjs seal|install WORKLOAD | rustflags | matrix",
   );
   await platform();
   const identity = context();

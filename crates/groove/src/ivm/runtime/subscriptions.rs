@@ -846,12 +846,14 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 index,
                 scan,
                 intersections,
+                candidate_filter,
                 row_projection,
             } => {
                 table.hash(&mut hasher);
                 index.hash(&mut hasher);
                 scan.hash(&mut hasher);
                 intersections.hash(&mut hasher);
+                candidate_filter.hash(&mut hasher);
                 row_projection.hash(&mut hasher);
             }
             GraphBuilder::FrontierSource { binding, output } => {
@@ -1092,16 +1094,18 @@ pub(crate) fn graph_builders_equal_with(
                     index: b,
                     scan: c,
                     intersections: d,
-                    row_projection: e,
+                    candidate_filter: e,
+                    row_projection: f,
                 },
                 GraphBuilder::Index {
                     table: x,
                     index: y,
                     scan: z,
                     intersections: w,
-                    row_projection: v,
+                    candidate_filter: v,
+                    row_projection: u,
                 },
-            ) if a == x && b == y && c == z && d == w && e == v => {}
+            ) if a == x && b == y && c == z && d == w && e == v && f == u => {}
             (
                 GraphBuilder::FrontierSource {
                     binding: a,
@@ -2900,6 +2904,38 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.apply_input_source_deltas_in_mode(input_deltas, storage, InputSourceTickMode::Complete)
+            .await
+    }
+
+    /// Like the blocking form, but runnable work alone completes before this
+    /// returns: evaluation waiting on cold storage or a remote chunk is
+    /// retained as pending runtime progress for a later owner turn.
+    pub async fn apply_input_source_deltas_detaching_cold<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.apply_input_source_deltas_in_mode(
+            input_deltas,
+            storage,
+            InputSourceTickMode::DetachCold,
+        )
+        .await
+    }
+
+    async fn apply_input_source_deltas_in_mode<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         let mut canonical = BTreeMap::<
             InputSourceId,
             (RecordDescriptor, BTreeSet<Vec<u8>>, BTreeSet<Vec<u8>>),
@@ -3011,13 +3047,7 @@ impl IvmRuntime {
         if deltas.is_empty() {
             return Ok(TickMetrics::default());
         }
-        self.tick_with_params(
-            Vec::new(),
-            deltas,
-            OwnedStorage::new(Rc::clone(storage)),
-            None,
-        )
-        .await
+        self.tick_input_sources(deltas, storage, mode).await
     }
 
     /// Atomically replace the complete record multisets of runtime-owned
@@ -3034,6 +3064,34 @@ impl IvmRuntime {
         &mut self,
         replacements: impl IntoIterator<Item = InputSourceReplacement>,
         storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.replace_input_sources_in_mode(replacements, storage, InputSourceTickMode::Complete)
+            .await
+    }
+
+    /// Like the blocking form, but runnable work alone completes before this
+    /// returns: evaluation waiting on cold storage or a remote chunk is
+    /// retained as pending runtime progress for a later owner turn.
+    pub async fn replace_input_sources_detaching_cold<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.replace_input_sources_in_mode(replacements, storage, InputSourceTickMode::DetachCold)
+            .await
+    }
+
+    async fn replace_input_sources_in_mode<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
     ) -> Result<TickMetrics, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3135,13 +3193,28 @@ impl IvmRuntime {
         if deltas.is_empty() {
             return Ok(TickMetrics::default());
         }
-        self.tick_with_params(
-            Vec::new(),
-            deltas,
-            OwnedStorage::new(Rc::clone(storage)),
-            None,
-        )
-        .await
+        self.tick_input_sources(deltas, storage, mode).await
+    }
+
+    async fn tick_input_sources<S>(
+        &mut self,
+        deltas: Vec<BindingDelta>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let storage = OwnedStorage::new(Rc::clone(storage));
+        match mode {
+            InputSourceTickMode::Complete => {
+                self.tick_with_params(Vec::new(), deltas, storage, None)
+                    .await
+            }
+            InputSourceTickMode::DetachCold => {
+                self.tick_bindings_detaching_cold(deltas, storage).await
+            }
+        }
     }
 
     /// Retire runtime-owned input sources permanently.
@@ -5113,4 +5186,11 @@ mod bounded_graph_traversal_tests {
             .join()
             .expect("normal-stack traversal test must not overflow");
     }
+}
+
+/// Whether an input-source tick waits for cold work or leaves it pending.
+#[derive(Clone, Copy)]
+enum InputSourceTickMode {
+    Complete,
+    DetachCold,
 }

@@ -796,6 +796,12 @@ impl CoreTickScheduler for NapiTickScheduler {
         );
     }
 
+    fn drops_pending_ticks(&self) -> bool {
+        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
+        // if it is still pending.
+        true
+    }
+
     fn query_runtime_waker(&self) -> Option<Waker> {
         Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
             callback: self.callback.clone(),
