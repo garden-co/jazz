@@ -316,10 +316,6 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   const result = await createCatalogueMigration(options);
 
   switch (result.status) {
-    case "initial-snapshot":
-      console.log("Wrote initial schema snapshot: " + result.snapshotPath);
-      console.log("No migration created because there was no previous local schema baseline.");
-      return null;
     case "unchanged":
       console.log("No schema changes detected.");
       return null;

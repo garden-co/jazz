@@ -133,10 +133,6 @@ interface CreateMigrationOptions {
 
 type CreateMigrationResult =
   | {
-      status: "initial-snapshot";
-      snapshotPath: string;
-    }
-  | {
       status: "unchanged";
     }
   | {
@@ -844,6 +840,35 @@ async function resolveHistoricalSchemaForCreateMigration(
   );
 }
 
+async function loadMigrationBaseline(
+  options: CreateMigrationOptions,
+  storage: MigrationStorage,
+): Promise<ResolvedSchemaInput> {
+  const local = await loadLatestCommittedSnapshot(storage);
+  if (local) return local;
+  if (!options.serverUrl) {
+    throw new Error(
+      "No local schema snapshot found. Pass --server-url and --admin-secret to use the server's active schema as the migration baseline.",
+    );
+  }
+  const appId = requireAppId(options.appId);
+  const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
+  const graph = await fetchMigrationGraph({ appId, serverUrl: options.serverUrl, adminSecret });
+  if (!graph.activeSchemaHash) {
+    throw new Error(
+      "No local schema snapshot or active server schema found. Deploy the initial schema before creating a migration. No snapshot was created.",
+    );
+  }
+  return resolveRemoteHistoricalSchema(
+    storage,
+    graph.activeSchemaHash,
+    "active schema",
+    appId,
+    options.serverUrl,
+    adminSecret,
+  );
+}
+
 async function createMigrationUnlocked(
   options: CreateMigrationOptions,
   storage: MigrationStorage,
@@ -856,11 +881,6 @@ async function createMigrationUnlocked(
   let fromSchema: ResolvedSchemaInput;
   let toSchema: ResolvedSchemaInput;
   let shouldWriteCommittedSnapshot = false;
-  // Snapshot filenames are the ordering source for the implicit migration
-  // baseline. Treat their second-resolution timestamp as a logical clock so
-  // rapid successive schema edits cannot let the hash suffix pick the winner.
-  const timestamp = await nextCommittedSnapshotTimestamp(storage);
-
   if (explicitHashFlow) {
     if (options.fromHash) {
       fromSchema = await resolveHistoricalSchemaForCreateMigration(
@@ -872,13 +892,7 @@ async function createMigrationUnlocked(
         options.adminSecret,
       );
     } else {
-      const latest = await loadLatestCommittedSnapshot(storage);
-      if (!latest) {
-        throw new Error(
-          "No committed snapshot found. Provide --fromHash or run `jazz-tools migrations create` once to create an initial snapshot.",
-        );
-      }
-      fromSchema = latest;
+      fromSchema = await loadMigrationBaseline(options, storage);
     }
 
     toSchema = options.toHash
@@ -893,25 +907,15 @@ async function createMigrationUnlocked(
       : currentSchema!;
     shouldWriteCommittedSnapshot = !options.toHash;
   } else {
-    const latest = await loadLatestCommittedSnapshot(storage);
-    if (!latest) {
-      const snapshot = await committedSnapshotPublication(storage, currentSchema!, timestamp);
-      if (!snapshot) throw new Error("Initial committed snapshot already exists");
-      await publishMigrationFilesRecoverably(storage, [snapshot]);
-      return {
-        status: "initial-snapshot",
-        snapshotPath: snapshot.finalPath,
-      };
-    }
-
-    if (latest.hash === currentSchema!.hash) {
-      return { status: "unchanged" };
-    }
-
-    fromSchema = latest;
+    fromSchema = await loadMigrationBaseline(options, storage);
     toSchema = currentSchema!;
     shouldWriteCommittedSnapshot = true;
   }
+
+  // Snapshot filenames are the ordering source for the implicit migration
+  // baseline. Treat their second-resolution timestamp as a logical clock so
+  // rapid successive schema edits cannot let the hash suffix pick the winner.
+  const timestamp = await nextCommittedSnapshotTimestamp(storage);
 
   if (fromSchema.hash === toSchema.hash) {
     return { status: "unchanged" };

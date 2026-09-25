@@ -468,11 +468,9 @@ export const app = s.defineApp({
       const before = await compileSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
       const exported = JSON.parse(await readFile(before.snapshotPath!, "utf8"));
       expect(wasmSchemasEqual(exported, before.schema)).toBe(true);
-      const initial = await createMigration({ schemaDir: root, migrationsDir });
-      expect(initial.status).toBe("initial-snapshot");
-      if (initial.status !== "initial-snapshot") throw new Error("Expected initial snapshot");
+      const initial = await compileSchema({ schemaDir: root, migrationsDir });
       expect(
-        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath, "utf8")), before.schema),
+        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath!, "utf8")), before.schema),
       ).toBe(true);
       await writeFile(schemaPath, source(true));
       const generated = await createMigration({ schemaDir: root, migrationsDir });

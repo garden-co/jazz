@@ -18,7 +18,10 @@ import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
-import { createMigration as createCatalogueMigration } from "./dev/catalogue-project.js";
+import {
+  createMigration as createCatalogueMigration,
+  compileSchema as saveBaseline,
+} from "./dev/catalogue-project.js";
 import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
@@ -1026,6 +1029,8 @@ describe("cli migrations", () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
     await mkdir(migrationsDir, { recursive: true });
     const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
     await mkdir(externalLock);
@@ -1073,7 +1078,7 @@ describe("cli migrations", () => {
     // The lock is a filesystem boundary, not an in-process mutex: independently
     // launched CLI processes must all observe the external owner before it is released.
     await waitForMarkers(contentionMarkers);
-    await expect(access(join(migrationsDir, "snapshots"))).rejects.toThrow();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toEqual([]);
     await rm(externalLock, { recursive: true });
     const results = await resultsPromise;
 
@@ -1081,13 +1086,11 @@ describe("cli migrations", () => {
       results.map((result) => result.code),
       JSON.stringify(results, null, 2),
     ).toEqual([0, 0, 0, 0]);
-    expect(
-      results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
-    ).toHaveLength(1);
+    expect(results.filter((result) => result.stdout.includes("Generated:"))).toHaveLength(1);
     expect(results.filter((result) => result.stdout.includes("No schema changes"))).toHaveLength(3);
     expect(
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
   });
 
@@ -1096,6 +1099,8 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     const marker = join(root, "lock-held.marker");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
 
     const child = spawnMigrationCreate(root, migrationsDir, "lock-held", marker);
     await waitForCrashMarker(marker, child);
@@ -1105,13 +1110,10 @@ describe("cli migrations", () => {
       createCatalogueMigration({ schemaDir: root, migrationsDir }),
       createCatalogueMigration({ schemaDir: root, migrationsDir }),
     ]);
-    expect(results.map((result) => result.status).sort()).toEqual([
-      "initial-snapshot",
-      "unchanged",
-    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["generated", "unchanged"]);
     expect(
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
   });
 
@@ -1121,6 +1123,8 @@ describe("cli migrations", () => {
     const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
     const marker = join(root, "lock-quarantined.marker");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
     await mkdir(lockDir, { recursive: true });
     await writeFile(
       join(lockDir, "owner.json"),
@@ -1132,7 +1136,7 @@ describe("cli migrations", () => {
     await killChild(child);
 
     const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    expect(result.status).toBe("initial-snapshot");
+    expect(result.status).toBe("generated");
     expect(await fileExists(lockDir)).toBe(false);
   });
 
@@ -1191,7 +1195,7 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     const marker = join(root, "between-publications.marker");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await saveBaseline({ schemaDir: root, migrationsDir });
     await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
 
     const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
@@ -1221,7 +1225,7 @@ describe("cli migrations", () => {
       const migrationsDir = join(root, "migrations");
       const marker = join(root, "between-publications.marker");
       await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      await saveBaseline({ schemaDir: root, migrationsDir });
       await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
       const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
       await waitForCrashMarker(marker, child);
@@ -1274,6 +1278,9 @@ describe("cli migrations", () => {
     const releaseMarker = join(root, "journaled.release");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
     const child = spawnMigrationCreate(root, migrationsDir, "journaled", marker, releaseMarker);
     await waitForCrashMarker(marker, child);
     const journal = JSON.parse(
@@ -1296,7 +1303,7 @@ describe("cli migrations", () => {
       const migrationsDir = join(root, "migrations");
       const snapshotsDir = join(migrationsDir, "snapshots");
       await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      await saveBaseline({ schemaDir: root, migrationsDir });
       const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
       expect(snapshot).toBeDefined();
       const snapshotPath = join(snapshotsDir, snapshot!);
@@ -1329,31 +1336,87 @@ describe("cli migrations", () => {
     },
   );
 
-  it("writes an initial committed snapshot on first run", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+  it.each(["offline", "empty-server", "failed-server"])(
+    "does not save an initial snapshot without a usable baseline (%s)",
+    async (kind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      const fetchMock = vi.fn(async () =>
+        kind === "failed-server"
+          ? new Response("unavailable", { status: 503 })
+          : Response.json({ activeSchemaHash: null, schemas: [], migrations: [] }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(
+        createCatalogueMigration({
+          schemaDir: root,
+          migrationsDir,
+          appId: APP_ID,
+          ...(kind === "offline"
+            ? {}
+            : { serverUrl: "http://localhost:1625", adminSecret: "admin-secret" }),
+        }),
+      ).rejects.toThrow(
+        kind === "failed-server" ? "Migration graph fetch failed" : "No local schema snapshot",
+      );
+      expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+      expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toEqual([]);
+      if (kind === "offline") expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
-    const { result, logs } = await captureConsoleLogs(() =>
-      createMigration({
+  it.each([false, true])(
+    "uses the active server schema on first run (unchanged=%s)",
+    async (unchanged) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      const baseline = await saveBaseline({
         schemaDir: root,
+        migrationsDir: join(root, "server-fixture"),
+      });
+      if (!unchanged) await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith("/migrations/graph"))
+          return Response.json({
+            activeSchemaHash: baseline.hash,
+            schemas: [baseline.hash],
+            migrations: [],
+          });
+        expect(url).toBe(`http://localhost:1625/apps/${APP_ID}/schema/${baseline.hash}`);
+        return Response.json({
+          schema: { tables: baseline.schema },
+          publishedAt: Date.UTC(2026, 0, 1),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const result = await createCatalogueMigration({
+        schemaDir: root,
+        migrationsDir,
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
-        migrationsDir,
-      }),
-    );
-
-    expect(result).toBeNull();
-    const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
-    expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
-    expect(logs.some((line) => line.startsWith("Wrote initial schema snapshot:"))).toBe(true);
-    expect(logs).toContain(
-      "No migration created because there was no previous local schema baseline.",
-    );
-  });
+      });
+      expect(result.status).toBe(unchanged ? "unchanged" : "generated");
+      const snapshots = (await readdir(join(migrationsDir, "snapshots"))).sort();
+      expect(snapshots).toHaveLength(unchanged ? 1 : 2);
+      expect(
+        JSON.parse(await readFile(join(migrationsDir, "snapshots", snapshots[0]!), "utf8")),
+      ).toEqual(baseline.schema);
+      if (result.status === "generated") {
+        expect(result.fromHash).toBe(baseline.hash);
+        expect(await readFile(result.filePath, "utf8")).toContain(
+          '"notes": s.add.string({ default: null }),',
+        );
+      }
+      fetchMock.mockClear();
+      expect(await createCatalogueMigration({ schemaDir: root, migrationsDir })).toEqual({
+        status: "unchanged",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("creates a migration from the latest committed snapshot and then no-ops when rerun", async () => {
     const { root } = await createWorkspace();
@@ -1364,12 +1427,7 @@ describe("cli migrations", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-08-25T06:00:00.000Z"));
     try {
-      await createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-      });
+      await saveBaseline({ schemaDir: root, migrationsDir });
 
       await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
 
@@ -1678,12 +1736,7 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-    });
+    await saveBaseline({ schemaDir: root, migrationsDir });
 
     await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
 
