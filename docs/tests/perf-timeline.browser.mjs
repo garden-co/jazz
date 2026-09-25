@@ -202,8 +202,8 @@ try {
   await page.keyboard.press("Enter");
   assert.match(await page.locator(".receipt").innerText(), /Checkpoint 1/);
   await page.locator(".receipts-table summary").click();
-  assert.equal(await page.locator("tbody tr").count(), 4);
-  assert.match(await page.locator("tbody").innerText(), /1\.000000000 s/);
+  assert.equal(await page.locator(".receipts-table tbody tr").count(), 4);
+  assert.match(await page.locator(".receipts-table tbody").innerText(), /1\.000000000 s/);
   await page.getByLabel("Find a benchmark").fill("other");
   await page.locator(".bench-item").click();
   assert.match(page.url(), /benchmark=second/);
@@ -318,8 +318,8 @@ try {
   await page.getByLabel("Checkpoint status").selectOption("released");
   assert.equal(await page.locator(".chart-point").count(), 1);
   await page.locator(".receipts-table summary").click();
-  assert.match(await page.locator("tbody").innerText(), /v2.0.0-alpha.54/);
-  assert.match(await page.locator("tbody").innerText(), /Sep 10.*measured Sep 14/);
+  assert.match(await page.locator(".receipts-table tbody").innerText(), /v2.0.0-alpha.54/);
+  assert.match(await page.locator(".receipts-table tbody").innerText(), /Sep 10.*measured Sep 14/);
   await page.screenshot({
     path: new URL("../.next/perf-timeline-receipts/historical-backfill.png", import.meta.url)
       .pathname,
