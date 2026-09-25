@@ -473,6 +473,7 @@ where
     /// `requested` when this store's catalogue already holds it, and on a
     /// fresh store. Otherwise reopen with the store's own current schema: its
     /// active selection, else its write pointer, else its genesis.
+    #[cfg(feature = "runtime")]
     pub(crate) async fn select_durable_reopen_schema(
         storage: S,
         requested: JazzSchema,
