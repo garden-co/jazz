@@ -1639,9 +1639,7 @@ where
                 .map_err(malformed)?,
         );
         let tx_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+            .node_aliases.node_for_alias(tx_node_alias)
             .ok_or(Error::InvalidStoredValue(
                 "current row references unknown node alias",
             ))?;

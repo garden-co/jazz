@@ -86,7 +86,7 @@ pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
-pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
+pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -2524,6 +2524,15 @@ fn direct_schema_view_lens(
                 ErrorCode::Schema,
                 format!(
                     "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.composite_indexes != target_table.composite_indexes {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes composite indexes on {} without explicit index admission",
                     target_table.name
                 ),
             ));
