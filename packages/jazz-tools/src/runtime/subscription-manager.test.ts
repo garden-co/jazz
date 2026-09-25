@@ -570,6 +570,66 @@ describe("SubscriptionManager", () => {
     expect(manager.all()).toEqual([{ id: rootId, title: "reopened", children: [] }]);
   });
 
+  it("removes many roots in one frame while keeping edits on surviving roots", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const count = 2000;
+    const ids = Array.from(
+      { length: count },
+      (_, index) => `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`,
+    );
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: ids.map((id, index) => runtimeAddedRoot(id, index, id)) }),
+      transformIncluded,
+    );
+
+    const survivor = ids[count - 1]!;
+    const result = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: ids.slice(0, -1).map((id) => runtimeRemovedRecord(id, 0)),
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(ids[0]!)],
+            path: [{ Collection: 1 }],
+            edit: { Remove: { key: childKey } },
+          },
+          {
+            root_key: [10, ...uuidBytes(survivor)],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+
+    expect(result.all).toEqual([
+      { id: survivor, title: survivor, children: [{ id: childId, name: "child" }] },
+    ]);
+    expect(manager.size).toBe(1);
+
+    // A removed root no longer has a retained terminal row, so a later child
+    // edit for it waits for re-hydration instead of patching stale state.
+    const deferred = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(ids[1]!)],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "late") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(deferred.all).toEqual(result.all);
+  });
+
   it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";

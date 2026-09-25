@@ -321,14 +321,15 @@ export class SubscriptionManager<T extends { id: string }> {
         change.id = rootId;
       }
       for (const change of decoded) {
-        if (change.kind === RowChangeKind.Removed) {
-          for (const rootId of removedRoots) this.terminalRows.delete(rootId);
-        } else if (change.row) {
+        if (change.kind !== RowChangeKind.Removed && change.row) {
           // Retained roots are immutable. The first descendant edit in a
           // later frame makes a private writable copy of the whole root.
           this.terminalRows.set(change.id, change.row);
         }
       }
+      // Removals follow every set in `decoded`, so dropping the removed roots
+      // once afterwards is equivalent to dropping them at each removal.
+      for (const rootId of removedRoots) this.terminalRows.delete(rootId);
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
       // Complete roots already include this frame's descendant edits. Replaying
       // those edits would remove children twice or apply moves to the new order.
