@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
@@ -17,7 +17,6 @@ const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
 let db: Db | undefined;
 
 afterEach(async () => {
-  vi.restoreAllMocks();
   await db?.shutdown();
   db = undefined;
 });
@@ -36,7 +35,7 @@ it.each(removedReadTiers)("rejects Db reads at the removed %s tier", async (tier
   await expect(tx.all(app.notes, options)).rejects.toThrow(message);
 });
 
-it("waits for global instead of rejecting an already committed write at the removed edge tier", async () => {
+it("rejects a wait at the removed edge tier and says the write was already applied", async () => {
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
@@ -53,19 +52,19 @@ it("waits for global instead of rejecting an already committed write at the remo
       permissions,
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const edge = { tier: "edge" } as unknown as { tier: "global" };
+    const removed = /The "edge" tier was removed\. Use "global".*already applied; do not retry/;
 
-    const inserted = await db.insert(app.notes, { title: "Draft" }).wait(edge);
-    expect(inserted.title).toBe("Draft");
-    await db.update(app.notes, inserted.id, { title: "Final" }).wait(edge);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('The "edge" tier was removed'));
+    const insert = db.insert(app.notes, { title: "Draft" });
+    await expect(insert.wait(edge)).rejects.toThrow(removed);
+    const update = db.update(app.notes, insert.value.id, { title: "Final" });
+    await expect(update.wait(edge)).rejects.toThrow(removed);
 
-    // Resolving at edge means the write reached the server: a fresh client sees
-    // exactly one row, so a caller never has a reason to retry it.
+    // The rejection is not a write failure: both writes still reach the server.
+    await update.wait({ tier: "global" });
     reader = await createDb(await localAccountConfig(server.appId, server.url));
     expect(await reader.all(app.notes, { tier: "global" })).toEqual([
-      { id: inserted.id, title: "Final" },
+      { id: insert.value.id, title: "Final" },
     ]);
   } finally {
     await reader?.shutdown();

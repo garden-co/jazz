@@ -819,20 +819,18 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
   return target;
 }
 
-let warnedRemovedEdgeWriteTier = false;
-
 /**
- * The write has already been applied by the time a caller picks a wait tier,
- * so a removed tier must not reject: a caller that retries on rejection would
- * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
+ * `"edge"` was removed like the read tier. The wait tier is only chosen after
+ * the write was applied, so the error says so: a caller must not retry it.
  */
 function resolveWriteWaitTier(tier: unknown): DurabilityTier {
-  if (tier !== "edge") return tier as DurabilityTier;
-  if (!warnedRemovedEdgeWriteTier) {
-    warnedRemovedEdgeWriteTier = true;
-    console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');
+  if (tier === "edge") {
+    throw new Error(
+      'The "edge" tier was removed. Use "global" for server-confirmed writes. ' +
+        "The write was already applied; do not retry it.",
+    );
   }
-  return "global";
+  return tier as DurabilityTier;
 }
 
 /**
