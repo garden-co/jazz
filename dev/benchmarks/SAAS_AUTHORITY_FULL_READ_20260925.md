@@ -113,6 +113,38 @@ binary SHA-256 values are
 `c77fefb0a9c1130515e7914ab7c2d3151dfc31cf22ced08f37d73ea1d4b430f8`.
 The six `main-f629fa7-` receipts contain row counts, bytes, and phases.
 
+On main `c5e405fa0`, after the merged projection, subscription
+root-position, SQLite, wire-encoding, and transaction-read changes, the stack
+was rebased without conflicts. A new matched native `perf` A/B used three
+alternating control/candidate runs. Both arms requested `resultOnly: true`;
+only the authority eligibility check was disabled in the control:
+
+| 39 unbounded Global reads | Run 1 | Run 2 | Run 3 | Median |
+| ------------------------- | ----: | ----: | ----: | -----: |
+| Receiver coverage         | 6,266 | 6,129 | 6,191 |  6,191 |
+| Authority result          |   926 |   854 |   857 |    857 |
+
+The median gain is **7.22×** for the same 27,518 authorized rows and
+13,408,002 binding bytes. Candidate Core/relay/Client tick medians are
+752/69/33 ms; the control's are 2,143/2,445/980 ms. Candidate/control
+binary SHA-256 values are
+`c8bd9c2b95689004635504d2f20fc7f27f4da5974fa56dc14546db7242f31267` /
+`586300a66164044d7857487f168d165e9168f00ff19624e2431078b51d0e8093`.
+The six `main-c5e405f-` receipts record rows, bytes, and phase timings.
+Default reads and live subscriptions do not request result-only delivery and
+are unchanged by this branch.
+
+A separate ordinary live-subscription run on the same candidate binary,
+without result-only delivery, still settled 39 subscriptions and 27,518 rows
+in **6,452 ms**. Core/relay/Client tick wall times were 2,096/2,406/1,948 ms.
+The largest measured exclusive phases included Core query setup (884 ms),
+relay own work (686 ms), and Client storage apply (675 ms). It peaked at
+3.37 GB RSS. This no-deletion path remains the next architectural target: it
+still builds the receiver's supporting-row closure and maintained graph. The
+sanitized summary receipt is `main-c5e405f-live-summary.json`; the full raw
+diagnostic stays outside the public repository because it includes host
+metadata.
+
 To reproduce, build `permissioned-resources-profile` with
 `cargo build -p jazz-example-permissioned-resources-benchmark --bin
 permissioned-resources-profile --profile perf --features
