@@ -212,17 +212,17 @@ fn admitted_program_handoff_preserves_live_inputs_and_reader_isolation() {
     node.database.unsubscribe(subscription.subscription.id());
 }
 
-/// Exercise abandoned admissions beyond the executable budget through real
-/// compilation/installation, rather than asserting the cache's representation.
-#[test]
-fn admitted_program_eviction_recompiles_without_rejecting_queries() {
-    let (_dir, mut node, schema) = fixture();
-    let alice = author(1);
+fn admit_label_queries(
+    node: &mut NodeState<RocksDbStorage>,
+    schema: &JazzSchema,
+    alice: AuthorSubject,
+    count: usize,
+) -> Vec<(ValidatedQuery, Binding)> {
     let mut queries = Vec::new();
-    for index in 0..40 {
+    for index in 0..count {
         let shape = Query::from("parents")
             .filter(eq(col("label"), lit(format!("missing-{index}"))))
-            .validate(&schema)
+            .validate(schema)
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         node.ensure_peer_maintained_subscription_view_supported(
@@ -236,7 +236,45 @@ fn admitted_program_eviction_recompiles_without_rejecting_queries() {
         .unwrap();
         queries.push((shape, binding));
     }
-    for (index, should_compile) in [(39, false), (0, true)] {
+    queries
+}
+
+/// A relay admits a whole dashboard's subscriptions before it installs any of
+/// them. Every installer in a 61-list batch must take its admission product
+/// instead of compiling the same exact request a second time.
+#[test]
+fn dashboard_sized_admission_batch_hands_every_program_to_its_installer() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let queries = admit_label_queries(&mut node, &schema, alice, 61);
+    let compiled = node.query_program_compilations_for_test();
+    for (shape, binding) in &queries {
+        let (subscription, rows) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                shape,
+                binding,
+                alice,
+                DurabilityTier::Local,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        assert!(rows.rows.is_empty());
+        node.database.unsubscribe(subscription.subscription.id());
+    }
+    assert_eq!(node.query_program_compilations_for_test(), compiled);
+}
+
+/// Exercise abandoned admissions beyond the executable budget through real
+/// compilation/installation, rather than asserting the cache's representation.
+#[test]
+fn admitted_program_eviction_recompiles_without_rejecting_queries() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let admitted = crate::node::query_eval::lowering::ADMISSION_HANDOFF_MAX_PROGRAMS + 8;
+    let queries = admit_label_queries(&mut node, &schema, alice, admitted);
+    for (index, should_compile) in [(admitted - 1, false), (0, true)] {
         let (shape, binding) = &queries[index];
         let compiled = node.query_program_compilations_for_test();
         let (subscription, rows) = node
