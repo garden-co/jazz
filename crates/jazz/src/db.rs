@@ -77,7 +77,7 @@ use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
-use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
+use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures};
 
 pub(crate) mod channel_endpoint;
 mod routed_messages;
@@ -6004,7 +6004,7 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         let update_kind = match &update {
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
@@ -6196,7 +6196,7 @@ fn apply_maintained_membership_update_to_snapshot(
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             let equivalent = snapshot.rows[position].subscription_equivalent(row);
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=flat_snapshot_replace occurrence={key:?} position={position} equivalent={equivalent} old={:?} new={:?}",
                     snapshot.rows[position], row,

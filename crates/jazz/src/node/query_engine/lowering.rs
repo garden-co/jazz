@@ -625,7 +625,7 @@ fn source_authorization_for_source(
     // Client-local results are scoped by the upstream emission boundary, not
     // by a second, potentially stale/incomplete local policy evaluation.
     if request.authorization_mode == QueryAuthorizationMode::ClientLocal {
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=client_local source={source:?} policy={:?} authorization=system",
                 request.policy,
@@ -655,7 +655,7 @@ fn source_authorization_for_source(
         // membership, so proof compilation reads them under system authority.
         PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
     };
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=trusted_serving source={source:?} policy={:?} authorization={authorization:?}",
             request.policy,
