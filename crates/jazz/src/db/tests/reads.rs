@@ -1129,6 +1129,98 @@ fn ordered_composite_pages_match_unbounded_query() {
     );
 }
 
+/// Reads `query` once at Global and returns its rows with the storage reads
+/// it took.
+fn global_page_with_reads(
+    db: &Db<RocksDbStorage>,
+    query: Query,
+) -> (Vec<RowUuid>, groove::db::StorageReadMetrics) {
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    (
+        row_ids(&rows),
+        db.node.node.borrow().take_storage_read_metrics(),
+    )
+}
+
+/// A first bounded probe that finds no visible row, or only a tie, retries a
+/// larger bounded prefix instead of falling back to the whole bucket; a
+/// bucket shorter than the probe is complete without an extra row.
+///
+/// ```text
+/// bucket a, desc: rank 18 = [54], rank 17 = [53, 52, 51], rank 16 = [50, 49, 48]
+/// settle delete 54, 53
+/// desc limit 1: cap 2 -> [54 del, 53 del] -> retry cap 8 -> 52 | 51 tie | 50 worse
+/// settle delete 1..=40 in bucket a
+/// bucket b (6 rows), asc limit 20: cap 21 -> 6 entries -> exhausted, complete
+/// ```
+///
+/// Both pages equal the unbounded control and stay bounded: before retries
+/// and the exhausted proof, each fell back to the complete source.
+#[test]
+fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() {
+    let db = open_ordered_page_db();
+    let settle_deletes = |ids: &mut dyn Iterator<Item = u8>| {
+        let writes = ids
+            .map(|id| {
+                block_on(db.delete("entries", row(id), Default::default()))
+                    .unwrap()
+                    .mergeable_tx_id()
+            })
+            .collect::<Vec<_>>();
+        for tx in writes {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+    };
+    settle_deletes(&mut [54, 53].into_iter());
+
+    let top = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("a")))
+            .order_by("rank", OrderDirection::Desc)
+    };
+    let (control, _) = global_page_with_reads(&db, top());
+    let (page, reads) = global_page_with_reads(&db, top().limit(1));
+    assert_eq!(page, control[..1].to_vec());
+    assert!(
+        [row(52), row(51)].contains(&page[0]),
+        "the page holds a surviving rank-17 row: {page:?}"
+    );
+    // Two bounded attempts (2 then 8 entries) against 138 reads for the
+    // complete source.
+    assert!(
+        reads.global_current_rows.reads <= 30,
+        "a retried ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "deleted top ties");
+
+    settle_deletes(&mut 1..=40);
+    let short = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("b")))
+            .order_by("rank", OrderDirection::Asc)
+    };
+    let (control, _) = global_page_with_reads(&db, short());
+    let (page, reads) = global_page_with_reads(&db, short().limit(20));
+    assert_eq!(page, control);
+    assert_eq!(page.len(), 6);
+    assert!(
+        reads.register_global_current_rows.reads <= 6,
+        "a short bucket should read only its own deletion registers: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "short bucket");
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();

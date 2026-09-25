@@ -103,6 +103,11 @@ pub(crate) fn exact_known_state_declaration_for_test(
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+/// Bounded attempts of one ordered page probe before the complete source.
+const ORDERED_PAGE_PROBE_ATTEMPTS: usize = 3;
+/// Largest prefix a retried ordered page probe reads, unless the requested
+/// page alone is larger.
+const ORDERED_PAGE_PROBE_MAX_CAP: usize = 4_096;
 
 #[cfg(test)]
 thread_local! {
@@ -597,7 +602,7 @@ where
         identity: AuthorSubject,
         equality_column: &str,
         cap: usize,
-    ) -> Result<Option<QueryProgram>, Error> {
+    ) -> Result<Option<(QueryProgram, bool)>, Error> {
         let request = self.current_query_program_request(
             shape,
             binding,
@@ -649,27 +654,32 @@ where
         // index entries, so only their deletion winners can affect the page.
         // Policy subplans that specialise this occurrence inherit the same
         // capped path and therefore the same register.
-        let register = self
+        let (register, exhausted) = self
             .bounded_deletion_register_for_ordered_page(shape, &path, cap)
             .await?;
-        self.compile_query_program_request_with_bounded_deletion_register(
-            request,
-            access_paths,
-            (root, register),
-        )
-        .await
-        .map(Some)
+        let program = self
+            .compile_query_program_request_with_bounded_deletion_register(
+                request,
+                access_paths,
+                (root, register),
+            )
+            .await?;
+        Ok(Some((program, exhausted)))
     }
 
     /// Materialize only the deletion winners whose content rows can enter a
     /// bounded ordered page probe. The caller holds the node's read lock over
     /// both this snapshot and execution of the lowered query program.
+    ///
+    /// Also reports whether the physical index prefix is exhausted: it holds
+    /// fewer than `cap` raw entries, so the capped content source saw every
+    /// candidate the prefix can ever produce.
     async fn bounded_deletion_register_for_ordered_page(
         &mut self,
         shape: &ValidatedQuery,
         path: &CurrentAccessPath,
         cap: usize,
-    ) -> Result<GraphBuilder, Error> {
+    ) -> Result<(GraphBuilder, bool), Error> {
         let CurrentAccessPath::Index {
             column,
             order_column: Some(order_column),
@@ -711,6 +721,7 @@ where
                 ))?;
         let content_table = physical_global_current_table_name(mapping.table_id);
         let register_table = physical_register_global_current_table_name(mapping.table_id);
+        let index = physical_current_composite_index_name(&[column_id, order_column_id]);
         let branch = Value::Bytes(BranchKey::default().canonical_bytes());
         let scan_prefix = std::iter::once(branch.clone())
             .chain(prefix.iter().cloned())
@@ -741,10 +752,10 @@ where
             .database
             .query_graph(
                 GraphBuilder::variant_index_scan(
-                    content_table,
-                    physical_current_composite_index_name(&[column_id, order_column_id]),
+                    content_table.clone(),
+                    index.clone(),
                     projection,
-                    scan,
+                    scan.clone(),
                 )
                 .project(["row_uuid"]),
             )
@@ -754,6 +765,20 @@ where
             .iter()
             .map(|(row, _)| row.get_uuid(0))
             .collect::<Result<Vec<_>, _>>()?;
+        // The projection may omit a schema-incompatible entry, so a short
+        // projected list does not prove the prefix is short. Only the raw
+        // entry count, which the content source caps identically, does. The
+        // recount runs only when the projected list is already short, and
+        // reads at most `cap` index entries.
+        let exhausted = row_uuids.len() < cap
+            && self
+                .database
+                .query_graph(GraphBuilder::index_scan(content_table, index, scan))
+                .await
+                .map_err(Error::Groove)?
+                .deltas
+                .len()
+                < cap;
         let mut registers = Vec::with_capacity(row_uuids.len());
         for row_uuid in row_uuids {
             if let Some(register) = self
@@ -770,14 +795,19 @@ where
             .table_schema(&register_table)
             .map_err(Error::Groove)?
             .record_schema();
-        Ok(GraphBuilder::inline_records(descriptor, registers))
+        Ok((
+            GraphBuilder::inline_records(descriptor, registers),
+            exhausted,
+        ))
     }
 
     /// Probe an ordered current index a page at a time. The query graph still
     /// applies all filters, deletion checks, and policy. An extra visible row
-    /// with a strictly worse sort key proves that the requested page is final;
-    /// ties, sparse visibility, and short buckets fall back to the ordinary
-    /// complete source after this single probe.
+    /// with a sort key strictly worse than the page's last row proves that the
+    /// requested page is final, and so does an exhausted physical prefix. Ties and sparse visibility
+    /// retry with up to two larger bounded prefixes (4x each, at most
+    /// `max(4096, limit + 1)` entries) before falling back to the ordinary
+    /// complete source.
     async fn try_ordered_page_probe(
         &mut self,
         shape: &ValidatedQuery,
@@ -867,36 +897,56 @@ where
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
             .schema
             .clone();
-        let cap = limit.saturating_add(1);
-        let mut probe_query = query.clone();
-        probe_query.limit = Some(cap);
-        let probe_shape =
-            probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
-        let probe_binding = probe_shape.bind(binding.values().clone())?;
-        let Some(program) = self
-            .compile_ordered_page_probe_program(&probe_shape, &probe_binding, identity, column, cap)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let app_output = materialization_app_row_schema(None, Some(&program))?;
-        let deltas = self
-            .hydrate_lowered_program_once(program, &probe_binding)
-            .await?;
-        let mut rows = self.materialize_and_finalize_query_rows(
-            &probe_query,
-            shape.schema_version(),
-            &table,
-            &app_output,
-            &deltas,
-            None,
-        )?;
-        if rows.len() > limit
-            && query_order_value(&rows[limit - 1], &table, order_column)
-                != query_order_value(&rows[limit], &table, order_column)
-        {
-            rows.truncate(limit);
-            return Ok(Some(rows));
+        let mut cap = limit.saturating_add(1);
+        let max_cap = cap.max(ORDERED_PAGE_PROBE_MAX_CAP);
+        for attempt in 0..ORDERED_PAGE_PROBE_ATTEMPTS {
+            let mut probe_query = query.clone();
+            probe_query.limit = Some(cap);
+            let probe_shape =
+                probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
+            let probe_binding = probe_shape.bind(binding.values().clone())?;
+            let Some((program, exhausted)) = self
+                .compile_ordered_page_probe_program(
+                    &probe_shape,
+                    &probe_binding,
+                    identity,
+                    column,
+                    cap,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let app_output = materialization_app_row_schema(None, Some(&program))?;
+            let deltas = self
+                .hydrate_lowered_program_once(program, &probe_binding)
+                .await?;
+            let mut rows = self.materialize_and_finalize_query_rows(
+                &probe_query,
+                shape.schema_version(),
+                &table,
+                &app_output,
+                &deltas,
+                None,
+            )?;
+            // The index yields every row tied with the page's last row
+            // before any strictly worse one, so one strictly worse visible
+            // row anywhere in the probe proves the whole tie group was read
+            // and the query's own comparator ordered it. The rows are sorted,
+            // so the last one is the worst.
+            let strictly_worse_row = rows.len() > limit
+                && rows.last().is_some_and(|last| {
+                    query_order_value(&rows[limit - 1], &table, order_column)
+                        != query_order_value(last, &table, order_column)
+                });
+            if strictly_worse_row || exhausted {
+                rows.truncate(limit);
+                return Ok(Some(rows));
+            }
+            if attempt + 1 == ORDERED_PAGE_PROBE_ATTEMPTS || cap >= max_cap {
+                break;
+            }
+            cap = cap.saturating_mul(4).min(max_cap);
         }
         Ok(None)
     }

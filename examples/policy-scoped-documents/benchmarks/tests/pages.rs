@@ -96,6 +96,51 @@ fn unrelated_delete_and_restore_registers_do_not_expand_ordered_page_reads() {
     }
 }
 
+#[test]
+fn sparse_ordered_pages_do_not_scan_unrelated_deletion_registers() {
+    let fixture = Fixture::new(1_000, Policy::OwnerOrOrg);
+    let unrelated = (700..1_000).collect::<Vec<_>>();
+    fixture.delete_documents(&unrelated);
+
+    // The owner bucket has only ten rows, and the organization does not exist.
+    // Both are complete pages even without an extra row past the public limit.
+    for (page, limit, expected) in [
+        (
+            Page::Owner(2),
+            50,
+            (20..30).rev().map(document_row).collect::<Vec<_>>(),
+        ),
+        (Page::Org(25), 10, Vec::new()),
+    ] {
+        let mut session = fixture.session(page, limit, user(2));
+        let rows = session.read();
+        assert_eq!(
+            rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+            expected
+        );
+        let register_reads = session.take_metrics().register_global_current_rows.reads;
+        assert!(
+            register_reads <= 100,
+            "{page:?} read {register_reads} unrelated deletion registers"
+        );
+    }
+
+    // The first bounded batch contains only deleted rows. Later indexed
+    // candidates must fill the page without opening unrelated tombstones.
+    fixture.delete_documents(&(20..40).collect::<Vec<_>>());
+    let mut session = fixture.session(Page::Org(0), 10, user(2));
+    let rows = session.read();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        (10..20).rev().map(document_row).collect::<Vec<_>>()
+    );
+    let register_reads = session.take_metrics().register_global_current_rows.reads;
+    assert!(
+        register_reads <= 100,
+        "deleted page prefix read {register_reads} unrelated deletion registers"
+    );
+}
+
 // Public Db integration: an independently computed oracle checks both policy
 // branches, non-members, exact descending order, empty and oversized pages.
 #[test]
