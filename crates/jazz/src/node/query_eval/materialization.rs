@@ -1116,15 +1116,7 @@ where
         let reused = BOUND_PUBLICATION_FIELDS.with_borrow(|cache| {
             cache.iter().rev().find_map(|(unbound, bound)| {
                 (std::sync::Arc::ptr_eq(unbound, &row.publication_fields)
-                    && unbound.iter().zip(bound.iter()).all(|(unbound, bound)| {
-                        match (unbound, bound) {
-                            (
-                                CurrentRowPublicationField::UnresolvedSourceCell { output_name },
-                                CurrentRowPublicationField::StoredColumn { id, .. },
-                            ) => mapping.columns.get(output_name) == Some(id),
-                            _ => true,
-                        }
-                    }))
+                    && bound_fields_match_mapping(unbound, bound, &mapping.columns))
                 .then(|| bound.clone())
             })
         });
@@ -1534,6 +1526,27 @@ where
     }
 }
 
+/// Whether `bound` (an earlier binding of `unbound`) resolved every source cell
+/// to the column identity `columns` gives it now. The same unbound metadata can
+/// be shared by rows read under different schema mappings, so a cached binding
+/// is only reused when it matches the current row's mapping.
+fn bound_fields_match_mapping(
+    unbound: &[CurrentRowPublicationField],
+    bound: &[CurrentRowPublicationField],
+    columns: &BTreeMap<String, PhysicalColumnId>,
+) -> bool {
+    unbound
+        .iter()
+        .zip(bound)
+        .all(|(unbound, bound)| match (unbound, bound) {
+            (
+                CurrentRowPublicationField::UnresolvedSourceCell { output_name },
+                CurrentRowPublicationField::StoredColumn { id, .. },
+            ) => columns.get(output_name) == Some(id),
+            _ => true,
+        })
+}
+
 const BOUND_PUBLICATION_FIELDS_CAPACITY: usize = 64;
 
 type SharedPublicationFields = std::sync::Arc<Vec<CurrentRowPublicationField>>;
@@ -1545,4 +1558,56 @@ thread_local! {
     static BOUND_PUBLICATION_FIELDS: std::cell::RefCell<
         Vec<(SharedPublicationFields, SharedPublicationFields)>,
     > = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// Internal test: the bound-fields cache is keyed by the shared unbound metadata,
+// which rows read under two schema mappings can share. Producing two mappings
+// that give one output name different column identities under one descriptor
+// needs a catalogue state the public API does not construct directly, so the
+// revalidation rule is pinned here.
+#[cfg(test)]
+mod bound_publication_fields_tests {
+    use super::*;
+
+    #[test]
+    fn cached_binding_is_reused_only_under_the_mapping_it_was_bound_with() {
+        let unbound = vec![
+            CurrentRowPublicationField::UnresolvedSourceCell {
+                output_name: "title".into(),
+            },
+            CurrentRowPublicationField::UnresolvedSourceCell {
+                output_name: "done".into(),
+            },
+        ];
+        let bound = vec![
+            CurrentRowPublicationField::StoredColumn {
+                id: PhysicalColumnId(1),
+                output_name: "title".into(),
+            },
+            CurrentRowPublicationField::StoredColumn {
+                id: PhysicalColumnId(2),
+                output_name: "done".into(),
+            },
+        ];
+        let first: BTreeMap<String, PhysicalColumnId> = [
+            ("title".into(), PhysicalColumnId(1)),
+            ("done".into(), PhysicalColumnId(2)),
+        ]
+        .into();
+        let recreated_title: BTreeMap<String, PhysicalColumnId> = [
+            ("title".into(), PhysicalColumnId(7)),
+            ("done".into(), PhysicalColumnId(2)),
+        ]
+        .into();
+        let missing_done: BTreeMap<String, PhysicalColumnId> =
+            [("title".into(), PhysicalColumnId(1))].into();
+
+        assert!(bound_fields_match_mapping(&unbound, &bound, &first));
+        assert!(!bound_fields_match_mapping(
+            &unbound,
+            &bound,
+            &recreated_title
+        ));
+        assert!(!bound_fields_match_mapping(&unbound, &bound, &missing_done));
+    }
 }
