@@ -788,6 +788,13 @@ fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
         })
         .collect::<Vec<_>>();
     let mut completed = vec![None; reads.len()];
+    // Compressed wire bytes/messages sent toward the client, and from Core
+    // toward the relay, during the timed read only.
+    let downstream_before = (
+        client_relay.right_to_left.bytes.get(),
+        client_relay.right_to_left.messages.get(),
+    );
+    let core_to_relay_before = relay_core.right_to_left.bytes.get();
     let mut tick_us = [0_u128; 3];
     let mut read_poll_us = 0_u128;
     let mut ticks = 0_usize;
@@ -876,6 +883,9 @@ fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             "relay_tick_us": tick_us[1],
             "client_tick_us": tick_us[2],
             "ticks": ticks,
+            "downstream_bytes": client_relay.right_to_left.bytes.get() - downstream_before.0,
+            "downstream_messages": client_relay.right_to_left.messages.get() - downstream_before.1,
+            "core_to_relay_bytes": relay_core.right_to_left.bytes.get() - core_to_relay_before,
             "query_limit": query_limit,
             "remote_read": remote_read,
             "deferred_local_updates": deferred_local_updates,
