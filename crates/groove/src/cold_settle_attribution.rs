@@ -13,6 +13,8 @@ static MAP_BUFFER_USED: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static PIPELINE_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static PIPELINE_STAGE_VISITS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+static PIPELINE_BUFFER_CAPACITY: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_BUFFER_USED: AtomicU64 = AtomicU64::new(0);
 
 static MAP_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -27,6 +29,8 @@ pub struct Snapshot {
     pub pipeline_calls: [u64; BUCKETS],
     pub pipeline_input_records: [u64; BUCKETS],
     pub pipeline_stage_visits: [u64; BUCKETS],
+    pub pipeline_buffer_capacity: u64,
+    pub pipeline_buffer_used: u64,
     pub map_buffer_capacity: u64,
     pub map_buffer_used: u64,
     pub map_calls: [u64; BUCKETS],
@@ -46,6 +50,8 @@ pub fn reset() {
     MAP_NODES.lock().unwrap().clear();
     MAP_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
     MAP_BUFFER_USED.store(0, Ordering::Relaxed);
+    PIPELINE_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
+    PIPELINE_BUFFER_USED.store(0, Ordering::Relaxed);
     for counters in [
         &PIPELINE_CALLS,
         &PIPELINE_INPUT_RECORDS,
@@ -72,6 +78,8 @@ pub fn snapshot() -> Snapshot {
         pipeline_calls: load(&PIPELINE_CALLS),
         pipeline_input_records: load(&PIPELINE_INPUT_RECORDS),
         pipeline_stage_visits: load(&PIPELINE_STAGE_VISITS),
+        pipeline_buffer_capacity: PIPELINE_BUFFER_CAPACITY.load(Ordering::Relaxed),
+        pipeline_buffer_used: PIPELINE_BUFFER_USED.load(Ordering::Relaxed),
         map_buffer_capacity: MAP_BUFFER_CAPACITY.load(Ordering::Relaxed),
         map_buffer_used: MAP_BUFFER_USED.load(Ordering::Relaxed),
         map_calls: load(&MAP_CALLS),
@@ -85,11 +93,21 @@ pub fn snapshot() -> Snapshot {
 }
 
 /// Disjoint from standalone map kernels: visits include fused filters and maps.
-pub fn record_pipeline(hydrate: bool, input_records: usize, stage_visits: u64) {
+pub fn record_pipeline(
+    hydrate: bool,
+    input_records: usize,
+    stage_visits: u64,
+    output_capacity: usize,
+    output_used: usize,
+) {
     let index = bucket(hydrate);
     PIPELINE_CALLS[index].fetch_add(1, Ordering::Relaxed);
     PIPELINE_INPUT_RECORDS[index].fetch_add(input_records as u64, Ordering::Relaxed);
     PIPELINE_STAGE_VISITS[index].fetch_add(stage_visits, Ordering::Relaxed);
+    // Completed final buffers only; scratch rewrites and borrowed rows are not
+    // included. Keep this separate from standalone map buffers.
+    PIPELINE_BUFFER_CAPACITY.fetch_add(output_capacity as u64, Ordering::Relaxed);
+    PIPELINE_BUFFER_USED.fetch_add(output_used as u64, Ordering::Relaxed);
 }
 
 pub fn record_map(hydrate: bool, input_records: usize, output_records: usize) {

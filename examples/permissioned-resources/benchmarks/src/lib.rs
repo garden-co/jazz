@@ -6,6 +6,8 @@ pub use alloc_metrics::CountingAllocator as SelectedAllocator;
 pub use alloc_metrics::SiteAllocator as SelectedAllocator;
 mod history_cost;
 mod initial_reads;
+mod initial_selects;
+pub use initial_selects::{CompletedInitialSelects, InitialSelects};
 mod slim_memory;
 mod work_budget;
 use std::cell::{Cell, RefCell};

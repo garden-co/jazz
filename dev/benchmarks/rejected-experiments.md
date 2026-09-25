@@ -59,6 +59,18 @@ rejection concerns the additional certificate machinery. Source, binaries and
 receipts are preserved in the [#2913](https://github.com/garden-co/jazz/issues/2913)
 log. Do not infer a win from fewer compiled nodes alone.
 
+The first-result unary-boundary relaxation trial on #3545 was also rejected;
+receipts and the follow-up are in [#3542](https://github.com/garden-co/jazz/issues/3542).
+It allowed a disposable hydration frame to contract locally private unary edges
+despite observers elsewhere in the runtime. Twelve matched native initial-SELECT
+runs gave 348.778 ms control / 353.198 ms trial medians (+1.3%); the largest query
+was 202.392 / 205.027 ms (+1.3%). All four expensive 43,000-row map stages remained.
+Lower standalone map counters partly moved work into fused pipelines and did not
+establish fewer total copies. The runtime change was removed; its exact patch,
+tests, binaries and every sample remain in `target/saas-read-first-result-pipelines-ab/`.
+Revisit only with evidence that the eligibility change reaches the dominant maps
+and with separate fused-output byte counts.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.

@@ -57,3 +57,53 @@ and message decode per delivery. It does not run diagnostic codec comparisons.
 The diagnostic profile preserves those historical probes; its `wall_ms` includes
 post-read diagnostic work and excludes receiver opening. Therefore profile
 `wall_ms` and CodSpeed first-sync duration are intentionally different receipts.
+
+## Initial SELECTs (fresh runtime for every sample)
+
+Two hosted Divan cases cover direct reads separately from first synchronization:
+
+- `initial_selects_39_tables_27518_rows_rocksdb`: 39 unbounded SELECTs, 27,518 rows.
+- `initial_selects_39_tables_limit100_879_rows_rocksdb`: the same 39 queries with
+  LIMIT 100, returning 879 rows in total.
+
+Both reuse the full-scale fixture, fixed Member identity and table order. Before
+**every sample**, `with_inputs` copies the seeded RocksDB store, opens a new
+runtime with seeded node 1, and prepares all queries. The timed method executes
+only their first reads at Global / Deferred / LocalOnly and retains the results.
+Calling it twice on the same runtime fails, preventing silent warm-plan reuse.
+OS caches may be warm; "initial" refers to the runtime and query plans, not a
+cold filesystem cache. No deletion/history or recovery workload is added.
+
+Divan drops returned results after timing. That drop checks each table's exact
+UUID-ordered membership against the independent fixture oracle, encodes the
+complete results and writes `INITIAL_SELECT_RECEIPT` JSON with per-table byte
+lengths/hashes to stderr. Those hashes are diagnostic comparison values, not
+wire/storage identifiers. Database close and temp-directory removal happen
+afterward. The new cases retain all query outputs until the end of the sweep;
+the native profiling lane times queries separately and encodes/drops each
+output between queries, so their aggregate timings should not be conflated.
+
+Run just these cases with:
+
+```sh
+cargo bench -p jazz-example-permissioned-resources-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc -- initial_selects_
+```
+
+For per-query phase attribution, the existing native driver remains available:
+
+```sh
+JAZZ_CUSTOMER_INITIAL_SELECTS=1 JAZZ_CUSTOMER_REOPEN_SEEDED_NODE=1 JAZZ_CUSTOMER_PHASES=cold JAZZ_CUSTOMER_NO_DIAGNOSTICS=1 cargo run -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf --features cold-settle-attribution
+```
+
+Add `JAZZ_CUSTOMER_QUERY_LIMIT=100` for its page lane. Its copy/open/prepare and
+encoding stay outside each reported read duration. Compare instrumented
+binaries only with the same instrumentation.
+
+These benchmark IDs start new series. Historical optimization comparisons need
+the same benchmark source on both revisions, with exact result signatures
+checked; an absent baseline is not an improvement. The benchmark PR is placed
+below the read optimizations so CodSpeed can establish a common harness before
+comparing them. Existing first-sync timing and IDs are unchanged. See #3541.
+
+Tooling-friction: the old hosted suite covered first synchronization but omitted
+the direct first-read endpoint, while repeated local reads hid cold lowering.

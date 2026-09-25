@@ -16,6 +16,8 @@ pub(super) fn run(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             value.parse::<usize>().expect("valid repetitions")
         });
     let same_node = std::env::var_os("JAZZ_CUSTOMER_REOPEN_SEEDED_NODE").is_some();
+    #[cfg(feature = "cold-settle-attribution")]
+    let trace_work = std::env::var_os("JAZZ_CUSTOMER_READ_WORK").is_some();
     let reopen_node = node(if same_node { 1 } else { 6 });
     let dir = tempfile::tempdir().expect("initial SELECT store directory");
     let started = Instant::now();
@@ -53,6 +55,10 @@ pub(super) fn run(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             let prepare_us = started.elapsed().as_micros();
             #[cfg(feature = "cold-settle-attribution")]
             jazz_sim::phase_attribution::reset();
+            #[cfg(feature = "cold-settle-attribution")]
+            if trace_work {
+                jazz::groove::cold_settle_attribution::reset();
+            }
             let started = Instant::now();
             let rows = block_on(server.all_for_identity(
                 &prepared,
@@ -66,6 +72,46 @@ pub(super) fn run(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
             let read_us = started.elapsed().as_micros();
             #[cfg(feature = "cold-settle-attribution")]
             let phase_trace = jazz_sim::phase_attribution::snapshot();
+            #[cfg(feature = "cold-settle-attribution")]
+            if trace_work {
+                let work = jazz::groove::cold_settle_attribution::snapshot();
+                eprintln!(
+                    "READ_WORK {}",
+                    json!({
+                        "table": table,
+                        "iteration": repetition,
+                        "map_calls": work.map_calls,
+                        "map_input_records": work.map_input_records,
+                        "map_output_records": work.map_output_records,
+                        "map_buffer_capacity": work.map_buffer_capacity,
+                        "map_buffer_used": work.map_buffer_used,
+                        "join_calls": work.join_calls,
+                        "join_left_records": work.join_left_records,
+                        "join_right_records": work.join_right_records,
+                        "join_output_records": work.join_output_records,
+                        "pipeline_calls": work.pipeline_calls,
+                        "pipeline_stage_visits": work.pipeline_stage_visits,
+                        "pipeline_buffer_capacity": work.pipeline_buffer_capacity,
+                        "pipeline_buffer_used": work.pipeline_buffer_used,
+                    })
+                );
+                for node in jazz::groove::cold_settle_attribution::map_node_work() {
+                    eprintln!(
+                        "READ_PROJECT_NODE {}",
+                        json!({
+                            "table": table,
+                            "iteration": repetition,
+                            "node": node.node,
+                            "hydrate": node.hydrate,
+                            "calls": node.calls,
+                            "input_records": node.input_records,
+                            "output_records": node.output_records,
+                            "elapsed_ns": node.elapsed_ns,
+                            "plan": node.plan,
+                        })
+                    );
+                }
+            }
             #[cfg(not(feature = "cold-settle-attribution"))]
             let phase_trace = JsonValue::Null;
             let expected = visible[table]
