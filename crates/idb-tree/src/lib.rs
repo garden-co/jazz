@@ -1404,8 +1404,180 @@ mod tests {
     use std::task::Poll;
 
     use futures::FutureExt;
+    use std::collections::BTreeMap;
 
     use super::*;
+
+    /// A tree's logical page structure with page ids erased, so trees built
+    /// by different write paths can be compared page for page.
+    #[derive(Debug, PartialEq)]
+    enum Shape {
+        Leaf(Vec<(Vec<u8>, ShapeValue)>),
+        Internal(Vec<Vec<u8>>, Vec<Shape>),
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ShapeValue {
+        Inline(Vec<u8>),
+        Overflow { len: u64, chunks: Vec<Vec<u8>> },
+    }
+
+    fn stored_page(pages: &BTreeMap<PageId, Vec<u8>>, page_id: PageId) -> Page {
+        decode_page(pages.get(&page_id).expect("reachable page is stored")).unwrap()
+    }
+
+    fn shape_of(
+        pages: &BTreeMap<PageId, Vec<u8>>,
+        page_id: PageId,
+        reachable: &mut BTreeSet<PageId>,
+    ) -> Shape {
+        assert!(reachable.insert(page_id), "page {page_id} reached twice");
+        match stored_page(pages, page_id) {
+            Page::Leaf { entries } => Shape::Leaf(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let value = match value {
+                            ValueCell::Inline(bytes) => ShapeValue::Inline(bytes),
+                            ValueCell::Overflow { head, len } => {
+                                let mut chunks = Vec::new();
+                                let mut next = Some(head);
+                                while let Some(page_id) = next {
+                                    assert!(reachable.insert(page_id));
+                                    let Page::Overflow { next: after, bytes } =
+                                        stored_page(pages, page_id)
+                                    else {
+                                        panic!("overflow chain reaches a non-overflow page");
+                                    };
+                                    chunks.push(bytes);
+                                    next = after;
+                                }
+                                ShapeValue::Overflow { len, chunks }
+                            }
+                        };
+                        (key, value)
+                    })
+                    .collect(),
+            ),
+            Page::Internal { keys, children } => Shape::Internal(
+                keys,
+                children
+                    .into_iter()
+                    .map(|child| shape_of(pages, child, reachable))
+                    .collect(),
+            ),
+            Page::Overflow { .. } => panic!("tree descends into an overflow page"),
+        }
+    }
+
+    /// A sole-owner store that deletes the pages each commit retires.
+    #[derive(Clone, Default)]
+    struct ReclaimingStore(MemoryPageStore);
+
+    impl PageStore for ReclaimingStore {
+        fn can_reclaim_obsolete_pages(&self) -> bool {
+            true
+        }
+
+        fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+            self.0.load_metadata()
+        }
+
+        fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+            self.0.read_page(page_id)
+        }
+
+        fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+            self.0.commit(commit)
+        }
+    }
+
+    /// The durable tree's shape, after checking that the store holds exactly
+    /// the pages reachable from the durable root: nothing leaked, nothing lost.
+    fn durable_shape(store: &ReclaimingStore) -> Option<Shape> {
+        let (root, pages) = store.0.stored();
+        let mut reachable = BTreeSet::new();
+        let shape = root.map(|root| shape_of(&pages, root, &mut reachable));
+        let stored: BTreeSet<PageId> = pages.keys().copied().collect();
+        assert_eq!(
+            stored, reachable,
+            "stored pages differ from reachable pages"
+        );
+        shape
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+    }
+
+    fn random_operation(rng: &mut Xorshift) -> WriteOperation {
+        let mut key = rng.below(800).to_be_bytes().to_vec();
+        if rng.below(10) == 0 {
+            key.resize(120, b'k');
+        }
+        if rng.below(4) == 0 {
+            return WriteOperation::Delete { key };
+        }
+        let len = match rng.below(12) {
+            0 => 700 + rng.below(3_000) as usize,
+            1..=3 => 100 + rng.below(150) as usize,
+            _ => rng.below(24) as usize,
+        };
+        let byte = rng.below(256) as u8;
+        WriteOperation::Set {
+            key,
+            value: vec![byte; len],
+        }
+    }
+
+    // A batch must build page for page the tree that the same writes build one
+    // at a time, and every commit must leave the store holding exactly the
+    // reachable pages. Keys and values alone cannot catch a batch that splits
+    // at a different point, or one that strands a replaced overflow chain.
+    #[test]
+    fn a_batch_builds_the_same_pages_as_single_writes_and_leaks_none() {
+        futures::executor::block_on(async {
+            let options = Options { page_size: 1024 };
+            for seed in 1..=6u64 {
+                let batched_store = ReclaimingStore::default();
+                let single_store = ReclaimingStore::default();
+                let batched = IdbTree::open(batched_store.clone(), options).await.unwrap();
+                let single = IdbTree::open(single_store.clone(), options).await.unwrap();
+                let mut rng = Xorshift(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+                for round in 0..6 {
+                    let batch: Vec<_> = (0..40 + 120 * (round % 3))
+                        .map(|_| random_operation(&mut rng))
+                        .collect();
+                    for operation in &batch {
+                        match operation {
+                            WriteOperation::Set { key, value } => {
+                                single.put(key.clone(), value.clone()).await.unwrap()
+                            }
+                            WriteOperation::Delete { key } => {
+                                single.delete(key).await.unwrap();
+                            }
+                        }
+                    }
+                    batched.write_many(batch).await.unwrap();
+                    batched.flush().await.unwrap();
+                    single.flush().await.unwrap();
+                    let single_shape = durable_shape(&single_store);
+                    assert_eq!(
+                        durable_shape(&batched_store),
+                        single_shape,
+                        "seed {seed} round {round}"
+                    );
+                }
+            }
+        });
+    }
 
     // These are intentionally engine-level contract tests: page splitting,
     // reopen, and residency are not observably attributable through Jazz's

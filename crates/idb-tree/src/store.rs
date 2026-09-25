@@ -108,6 +108,19 @@ struct MemoryPageStoreState {
     pages: BTreeMap<PageId, Vec<u8>>,
 }
 
+#[cfg(test)]
+impl MemoryPageStore {
+    /// Every stored page and the durable root, for page-level contract tests.
+    pub(crate) fn stored(&self) -> (Option<PageId>, BTreeMap<PageId, Vec<u8>>) {
+        let state = self.inner.borrow();
+        let root = state
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.root_page_id);
+        (root, state.pages.clone())
+    }
+}
+
 impl PageStore for MemoryPageStore {
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
         Box::pin(async { Ok(self.inner.borrow().metadata.clone()) })
