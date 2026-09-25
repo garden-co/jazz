@@ -240,8 +240,11 @@ impl Database {
                 key,
             });
             staged_operations.extend(
-                super::facade::completed_large_value_cleanup_operations(&self.storage, staged_id)
-                    .await?,
+                super::facade::completed_large_value_cleanup_operations(
+                    &self.resident_storage(),
+                    staged_id,
+                )
+                .await?,
             );
         }
         let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
