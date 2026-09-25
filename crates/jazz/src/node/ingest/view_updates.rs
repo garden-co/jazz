@@ -1214,7 +1214,7 @@ where
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         let table = self
-            .table_in_schema(version.table(), schema_version)?
+            .table_in_schema_ref(version.table(), schema_version)?
             .clone();
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
@@ -1365,7 +1365,7 @@ where
                 version.bind_groove_record(
                     owned_record_from_storage_values(
                         &self
-                            .table_in_schema(version.table(), schema_version)?
+                            .table_in_schema_ref(version.table(), schema_version)?
                             .global_current_storage_tables()[1],
                         register_global_current_values(version, Some(global_time))?,
                     )
@@ -1434,7 +1434,7 @@ where
                 version.bind_groove_record(
                     owned_record_from_storage_values(
                         &self
-                            .table_in_schema(version.table(), schema_version)?
+                            .table_in_schema_ref(version.table(), schema_version)?
                             .ahead_current_storage_tables()[1],
                         register_global_current_values(version, None)?,
                     )

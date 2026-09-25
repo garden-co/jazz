@@ -1405,7 +1405,7 @@ where
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.active_schema.schema;
-        let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
+        let has_policy_table = self.table_in_schema_ref(table, write_schema).is_ok();
         if has_policy_table {
             write_schema
         } else {

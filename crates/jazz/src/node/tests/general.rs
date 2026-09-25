@@ -1602,7 +1602,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                 .schema_version_for_alias(version.schema_version_alias())
                 .unwrap();
             let table = node
-                .table_in_schema(version.table(), schema_version)
+                .table_in_schema_ref(version.table(), schema_version)
                 .unwrap()
                 .clone();
             let corrupted = VersionRow::from_parts_with_schema_version(
