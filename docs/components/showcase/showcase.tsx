@@ -2,8 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { fetchTimeline } from "@/lib/perf-timeline/client";
-import { formatTime, type Benchmark, type Timeline } from "@/lib/perf-timeline/model";
-import { getBenchmarkMetadata, formatThroughput } from "@/lib/perf-timeline/presentation";
+import type { Benchmark, Timeline } from "@/lib/perf-timeline/model";
+import {
+  getBenchmarkMetadata,
+  displayedTime,
+  estimatedSeconds,
+  ESTIMATE_DIVISOR,
+  formatThroughput,
+} from "@/lib/perf-timeline/presentation";
 import {
   heroBenchmarkNames,
   heroExamples,
@@ -11,6 +17,10 @@ import {
   type Lookup,
 } from "@/lib/showcase/catalogue";
 import { summarize, type MetricSummary } from "@/lib/showcase/summary";
+import videos from "@/lib/showcase/videos.json";
+
+type UploadedVideo = { mp4: string; poster: string; bytes: number };
+const uploadedVideos: Record<string, UploadedVideo | undefined> = videos;
 import { Dashboard } from "@/components/perf-timeline/dashboard";
 import { basisText, Change, HistoryPopover } from "./metrics";
 
@@ -67,11 +77,11 @@ function MetricCard({
     <div
       className="group relative rounded-xl border border-fd-border bg-fd-card p-4 outline-none focus-visible:ring-2 focus-visible:ring-fd-primary"
       tabIndex={0}
-      aria-label={`${metric.label}: ${formatTime(summary.headline.median)}. Focus for history.`}
+      aria-label={`${metric.label}: ${displayedTime(summary.headline.median, true)}. Focus for history.`}
     >
       <div className="text-sm text-fd-muted-foreground">{metric.label}</div>
       <div className="mt-1 whitespace-nowrap text-2xl font-medium tabular-nums">
-        {formatTime(summary.headline.median)}
+        {displayedTime(summary.headline.median, true)}
       </div>
       <div className="mt-0.5 font-mono text-[11px] text-fd-muted-foreground">
         {basisText(summary)}
@@ -84,7 +94,7 @@ function MetricCard({
         )}
       </div>
       <p className="mt-3 text-sm leading-relaxed">
-        {metric.interpret(summary.headline.median, lookup)}
+        {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
       </p>
       <HistoryPopover benchmarkId={bench.id} name={bench.name} summary={summary} />
     </div>
@@ -92,21 +102,26 @@ function MetricCard({
 }
 
 function Video({ example }: { example: HeroExample }) {
-  if (!example.video)
+  const uploaded = example.video ? uploadedVideos[example.video.id] : undefined;
+  if (!example.video || !uploaded)
     return (
       <div className="flex aspect-video flex-col items-center justify-center rounded-xl border border-dashed border-fd-border bg-fd-muted/40 p-6 text-center">
         <span className="rounded-full border border-fd-border px-2 py-0.5 text-[11px] uppercase tracking-wider text-fd-muted-foreground">
           Walkthrough coming
         </span>
-        <p className="mt-3 max-w-sm text-sm text-fd-muted-foreground">{example.plannedVideo}</p>
+        <p className="mt-3 max-w-sm text-sm text-fd-muted-foreground">
+          {example.video
+            ? "The walkthrough is scripted and will appear here once it has been recorded and uploaded."
+            : example.plannedVideo}
+        </p>
       </div>
     );
   return (
     <figure>
       <video
         className="aspect-video w-full rounded-xl border border-fd-border bg-black object-contain"
-        src={example.video.src}
-        poster={example.video.poster}
+        src={uploaded.mp4}
+        poster={uploaded.poster}
         controls
         muted
         loop
@@ -267,10 +282,10 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
                     <div
                       className="group relative text-right outline-none focus-visible:ring-2 focus-visible:ring-fd-primary"
                       tabIndex={0}
-                      aria-label={`${bench.name}: ${formatTime(summary.headline.median)}. Focus for history.`}
+                      aria-label={`${bench.name}: ${displayedTime(summary.headline.median, true)}. Focus for history.`}
                     >
                       <div className="text-sm font-medium tabular-nums">
-                        {formatTime(summary.headline.median)}
+                        {displayedTime(summary.headline.median, true)}
                         {previous && (
                           <span className="ml-2 text-xs font-normal">
                             <Change
@@ -282,7 +297,7 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
                       </div>
                       <div className="text-[11px] text-fd-muted-foreground">
                         {metadata
-                          ? `${formatThroughput(summary.headline.median, metadata)} · `
+                          ? `${formatThroughput(summary.headline.median, metadata, true)} · `
                           : ""}
                         {summary.basis === "release" ? summary.label : "main"}
                       </div>
@@ -306,7 +321,10 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
 export function Showcase() {
   const { data, error, summaries } = useSummaries();
   const loading = !data && !error;
-  const lookup: Lookup = (name) => summaries.get(name)?.summary.headline.median ?? null;
+  const lookup: Lookup = (name) => {
+    const seconds = summaries.get(name)?.summary.headline.median;
+    return seconds === undefined ? null : estimatedSeconds(seconds);
+  };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
 
   // /perf-timeline?benchmark=… redirects here; take those visitors to the explorer.
@@ -370,8 +388,11 @@ export function Showcase() {
           </p>
         )}
         <p className="mt-6 text-xs text-fd-muted-foreground">
-          Times are CodSpeed wallclock medians on its standard CI runner, not a prediction for your
-          hardware. Each benchmark&apos;s exact timing boundaries are in the full history below.
+          * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
+          allowance for a typical modern machine being faster than the shared CI runner. This is
+          illustrative, not a measured prediction for your hardware; every popover also shows the
+          measured runner time. Each benchmark&apos;s exact timing boundaries are in the full
+          history below.
         </p>
       </header>
       <div className="mt-10">

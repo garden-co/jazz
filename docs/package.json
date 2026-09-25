@@ -13,7 +13,8 @@
     "postinstall": "fumadocs-mdx",
     "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
     "test:perf-timeline:e2e": "node tests/perf-timeline.browser.mjs",
-    "capture:example-videos": "node scripts/example-videos/todo-two-devices.mjs"
+    "capture:example-videos": "node scripts/example-videos/todo-two-devices.mjs",
+    "upload:example-videos": "node scripts/example-videos/upload.mjs"
   },
   "dependencies": {
     "@vercel/analytics": "^2.0.1",
@@ -35,6 +36,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@vercel/blob": "^2.8.0",
     "playwright": "1.58.2",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",

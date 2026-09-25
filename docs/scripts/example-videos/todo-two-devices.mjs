@@ -2,20 +2,23 @@
 // syncing through the local Jazz server that the example's Vite plugin starts.
 //
 //   pnpm build:core                              # jazz-tools, WASM and NAPI
-//   pnpm --filter docs capture:example-videos    # writes docs/public/examples/videos/
+//   pnpm --filter docs capture:example-videos    # records and encodes into docs/.example-videos/
+//   pnpm --filter docs upload:example-videos     # uploads to Vercel Blob, updates the manifest
 //
 // The devices are two iframes on different origins (localhost and 127.0.0.1),
 // so each has its own IndexedDB, local-first identity and Jazz client. Nothing
 // is mocked: every change travels device → server → device.
 import { spawn } from "node:child_process";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { encode } from "./encode.mjs";
 
 const exampleDir = fileURLToPath(
   new URL("../../../examples/todo-client-localfirst-react/", import.meta.url),
 );
-const outDir = fileURLToPath(new URL("../../public/examples/videos/", import.meta.url));
+const outDir = fileURLToPath(new URL("../../.example-videos/", import.meta.url));
+const id = "todo-two-devices";
 const port = Number(process.env.EXAMPLE_PORT ?? 5199);
 const size = { width: 1280, height: 720 };
 const devices = [
@@ -141,14 +144,15 @@ try {
   await page.waitForTimeout(1400);
   await a.getByLabel("Filter by title").fill("");
   await caption("Every change: local first, then synced", 1500);
-  await page.screenshot({ path: `${outDir}todo-two-devices.png` });
 
   const video = page.video();
   await context.close();
   await mkdir(outDir, { recursive: true });
-  await rename(await video.path(), `${outDir}todo-two-devices.webm`);
+  const encoded = await encode(await video.path(), outDir, id);
   await rm(`${outDir}.recording`, { recursive: true, force: true });
-  console.log(`Wrote ${outDir}todo-two-devices.webm`);
+  console.log(
+    `Wrote ${encoded.mp4} (${(encoded.bytes / 1e6).toFixed(2)} MB) and ${encoded.poster}`,
+  );
 } catch (error) {
   console.error(example.log());
   throw error;

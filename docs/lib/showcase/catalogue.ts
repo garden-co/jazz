@@ -12,8 +12,8 @@ export type HeroMetric = {
 };
 
 export type HeroVideo = {
-  src: string;
-  poster?: string;
+  /** Key in videos.json, written by scripts/example-videos/upload.mjs. */
+  id: string;
   caption: string;
 };
 
@@ -56,8 +56,7 @@ export const heroExamples: HeroExample[] = [
       { label: "Benchmarks", path: "examples/todo-client-localfirst-ts/benchmarks" },
     ],
     video: {
-      src: "/examples/videos/todo-two-devices.webm",
-      poster: "/examples/videos/todo-two-devices.png",
+      id: "todo-two-devices",
       caption:
         "Two independent browsers (separate origins, storage and identities) syncing through a local Jazz server. Captured automatically with Playwright.",
     },

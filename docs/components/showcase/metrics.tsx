@@ -1,7 +1,11 @@
 "use client";
 
 import { formatTime, plotGeometry } from "@/lib/perf-timeline/model";
-import { getBenchmarkMetadata, formatThroughput } from "@/lib/perf-timeline/presentation";
+import {
+  getBenchmarkMetadata,
+  displayedTime,
+  formatThroughput,
+} from "@/lib/perf-timeline/presentation";
 import { change, type MetricSummary } from "@/lib/showcase/summary";
 
 const codspeed = "https://app.codspeed.io/garden-co/jazz";
@@ -89,7 +93,7 @@ export function HistoryPopover({
             return (
               <tr key={entry.point.resultId} className="border-t border-fd-border/60">
                 <td className="py-1 pr-2 font-mono text-[11px]">{entry.label}</td>
-                <td className="py-1 pr-2 text-right">{formatTime(entry.point.median)}</td>
+                <td className="py-1 pr-2 text-right">{displayedTime(entry.point.median, true)}</td>
                 <td className="py-1 text-right text-fd-muted-foreground">
                   {previous ? (
                     <Change previous={previous.point.median} current={entry.point.median} />
@@ -105,13 +109,16 @@ export function HistoryPopover({
       {summary.unreleased && (
         <p className="mt-2 text-fd-muted-foreground">
           Unreleased main ({summary.unreleased.date.slice(0, 10)}):{" "}
-          {formatTime(summary.unreleased.median)}{" "}
+          {displayedTime(summary.unreleased.median, true)}{" "}
           <Change previous={summary.headline.median} current={summary.unreleased.median} />
         </p>
       )}
+      <p className="mt-2 text-fd-muted-foreground">
+        Measured on the CodSpeed runner: {formatTime(summary.headline.median)}
+      </p>
       {metadata && (
         <p className="mt-2 text-fd-muted-foreground">
-          Workload rate: {formatThroughput(summary.headline.median, metadata)}
+          Workload rate: {formatThroughput(summary.headline.median, metadata, true)}
         </p>
       )}
       <p className="mt-2 flex gap-3">

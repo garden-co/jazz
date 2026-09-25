@@ -24,3 +24,6 @@ yarn-error.log*
 .env*.local
 .vercel
 next-env.d.ts
+
+# example walkthrough recordings (uploaded to Vercel Blob, not committed)
+/.example-videos/
