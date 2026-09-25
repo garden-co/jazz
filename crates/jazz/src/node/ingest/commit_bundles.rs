@@ -931,6 +931,16 @@ where
         for (stored, global_time) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_time)?;
         }
+        // A new synced image rebases any pending local patches on that row.
+        let settling = current_updates
+            .values()
+            .map(|(stored, _)| self.version_tx_id(stored))
+            .collect::<Result<BTreeSet<_>, Error>>()?;
+        let synced = current_updates
+            .values()
+            .map(|(stored, _)| stored.clone())
+            .collect::<Vec<_>>();
+        self.rebase_ahead_overlays(&mut batch, &synced, &settling).await?;
         #[cfg(test)]
         let current_update_versions = current_updates
             .values()

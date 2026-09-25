@@ -93,6 +93,12 @@ where
             if !global_current_updates.is_empty() {
                 self.invalidate_tx_version_tables_cache(tx_id);
             }
+            self.rebase_ahead_overlays(
+                &mut batch,
+                &global_current_updates,
+                &BTreeSet::from([tx_id]),
+            )
+            .await?;
         }
         #[cfg(test)]
         let global_current_update_versions = stored

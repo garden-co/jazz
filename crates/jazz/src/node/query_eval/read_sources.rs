@@ -1663,13 +1663,17 @@ where
                 graph
             };
             let covered = self.exclude_settled_arm(request, covered, false).await?;
-            let inputs = vec![covered, graph];
-
-            let winner = GraphBuilder::arg_max_by(
-                GraphBuilder::union(inputs),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            );
+            let winner = if receiver_local_overlay {
+                // The Ahead arm is the pending overlay, already folded over
+                // the synced row, so it wins whatever its stamp.
+                crate::node::codec::pending_overlay_over(covered, graph)
+            } else {
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([covered, graph]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+            };
             if receiver_local_overlay {
                 let deleted = self
                     .pending_deletion_winner_graph(request)?
@@ -2671,12 +2675,7 @@ where
         } else {
             let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
             let ahead = { ahead.project(physical_fields.clone()) };
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(physical_fields)
+            crate::node::codec::pending_overlay_over(global, ahead).project(physical_fields)
         };
         Ok(content.project_fields(post_winner_fields))
     }
@@ -2724,13 +2723,9 @@ where
         let ahead = branch_sources(&mut *self.node, PhysicalCurrentClass::Ahead)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             .project(fields.clone());
-        Ok(GraphBuilder::arg_max_by(
-            GraphBuilder::union([global, ahead]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(fields)
-        .filter(PredicateExpr::is_not_null("_deletion")))
+        Ok(crate::node::codec::pending_overlay_over(global, ahead)
+            .project(fields)
+            .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub(crate) fn projected_content_current_source_graph<'a>(
@@ -2943,12 +2938,7 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                 let ahead = { ahead.project(physical_fields.clone()) };
-                GraphBuilder::arg_max_by(
-                    GraphBuilder::union([global, ahead]),
-                    ["row_uuid"],
-                    ["tx_time", "tx_node_id"],
-                )
-                .project(physical_fields)
+                crate::node::codec::pending_overlay_over(global, ahead).project(physical_fields)
             };
             let content = content.project_fields(post_winner_fields);
             if !exclude_deleted {
@@ -2985,13 +2975,9 @@ where
             return Ok(global.filter(PredicateExpr::is_not_null("_deletion")));
         }
         let ahead = current(self.node, PhysicalCurrentClass::Ahead)?.project_fields(fields.clone());
-        Ok(GraphBuilder::arg_max_by(
-            GraphBuilder::union([global, ahead]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project_fields(fields)
-        .filter(PredicateExpr::is_not_null("_deletion")))
+        Ok(crate::node::codec::pending_overlay_over(global, ahead)
+            .project_fields(fields)
+            .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub(crate) async fn projected_visible_current_source_graph(

@@ -1350,12 +1350,7 @@ where
                     PhysicalCurrentClass::Ahead,
                 )?
                 .project(image_fields.clone());
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(image_fields)
+            crate::node::codec::pending_overlay_over(global, ahead).project(image_fields)
         };
         Ok(current
             .filter(not_deleted_predicate())

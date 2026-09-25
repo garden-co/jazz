@@ -3762,15 +3762,11 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     let current = if settled == DurabilityTier::Global {
         GraphBuilder::table(global_current_table_name(&table.name)).project(content_fields.clone())
     } else {
-        GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(content_fields.clone()),
-                GraphBuilder::table(ahead_current_table_name(&table.name))
-                    .project(content_fields.clone()),
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
+        pending_overlay_over(
+            GraphBuilder::table(global_current_table_name(&table.name))
+                .project(content_fields.clone()),
+            GraphBuilder::table(ahead_current_table_name(&table.name))
+                .project(content_fields.clone()),
         )
         .project(content_fields)
     };
@@ -4262,6 +4258,20 @@ pub(super) fn tx_id_value(tx_id: TxId) -> Value {
 
 pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
+}
+
+/// A row's pending overlay, when present, is what the client sees: it is
+/// already the synced image with every pending patch folded on top, so it
+/// wins regardless of how its stamp compares with the synced row.
+pub(in crate::node) fn pending_overlay_over(
+    global: GraphBuilder,
+    ahead: GraphBuilder,
+) -> GraphBuilder {
+    let overlaid = ahead.clone().project(["row_uuid"]);
+    GraphBuilder::union([
+        ahead,
+        GraphBuilder::anti_join(global, overlaid, ["row_uuid"], ["row_uuid"]),
+    ])
 }
 
 pub(super) fn ahead_current_table_name(table: &str) -> String {

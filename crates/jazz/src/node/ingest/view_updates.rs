@@ -464,28 +464,141 @@ where
         batch: &mut DatabaseBatch,
         rejected: &VersionRow,
     ) -> Result<(), Error> {
-        let rejected_tx = self.version_tx_id(rejected)?;
-        let mut newest: Option<(TxId, VersionRow)> = None;
+        self.recompute_ahead_overlay(batch, rejected, &BTreeSet::new()).await
+    }
+
+    /// Rebuild one row's ahead overlay: its synced image with the row's
+    /// still-pending local patches folded on top in tx order. Pending patches
+    /// store merge columns as ops, so the overlay is never a patch copy.
+    pub(super) async fn recompute_ahead_overlay(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        row: &VersionRow,
+        settling: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        let mut pending = Vec::new();
         for version in self
-            .query_row_versions_in_branch(rejected.table(), rejected.branch_key(), rejected.row_uuid())
+            .query_row_versions_in_branch(row.table(), row.branch_key(), row.row_uuid())
             .await?
         {
             let tx_id = self.version_tx_id(&version)?;
-            if tx_id == rejected_tx || newest.as_ref().is_some_and(|(best, _)| *best >= tx_id) {
-                continue;
+            if !settling.contains(&tx_id)
+                && matches!(
+                    self.query_transaction_state(tx_id).await?,
+                    Some((Fate::Pending, None, _))
+                )
+            {
+                pending.push((tx_id, version));
             }
-            if !matches!(
-                self.query_transaction_state(tx_id).await?,
-                Some((Fate::Pending, None, _))
-            ) {
-                continue;
-            }
-            newest = Some((tx_id, version));
         }
-        if let Some((_, version)) = newest {
-            self.write_ahead_current_insert(batch, &version)?;
+        pending.sort_by_key(|(tx_id, _)| *tx_id);
+        let Some((_, first)) = pending.first() else {
+            return Ok(());
+        };
+        let schema_version = self
+            .schema_version_for_alias(first.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "pending version schema alias must exist",
+            ))?;
+        let table_schema = self.table_in_schema(row.table(), schema_version)?;
+        let mut image = self
+            .query_global_winner_in_batch(
+                batch,
+                schema_version,
+                &table_schema.name,
+                row.branch_key(),
+                row.row_uuid(),
+            )
+            .await?;
+        for (_, patch) in pending {
+            image = Some(match image {
+                Some(base) if base.schema_version_alias() == patch.schema_version_alias() => {
+                    self.fold_pending_patch(&table_schema, &base, &patch)?
+                }
+                _ => patch,
+            });
+        }
+        if let Some(image) = image {
+            let key = self.ahead_overlay_key(&image)?;
+            self.ahead_current_keys.remove(&key);
+            self.write_ahead_current_insert(batch, &image)?;
         }
         Ok(())
+    }
+
+    /// A new synced image rebases any other pending local patches on its row.
+    pub(super) async fn rebase_ahead_overlays(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        synced: &[VersionRow],
+        settling: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        for version in synced {
+            if self.has_foreign_ahead_overlay(version, self.version_tx_id(version)?)? {
+                self.recompute_ahead_overlay(batch, version, settling).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ahead_overlay_key(&self, version: &VersionRow) -> Result<(crate::ids::PhysicalTableId, Vec<u8>), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let physical_table_id =
+            self.physical_table_id_for_schema(schema_version, version.table())?;
+        Ok((
+            physical_table_id,
+            global_current_primary_key(version.branch_key(), version.row_uuid()).into_bytes(),
+        ))
+    }
+
+    /// Whether a pending overlay row other than `tx_id`'s own image covers
+    /// this row, so a new synced image must be rebased under it.
+    pub(super) fn has_foreign_ahead_overlay(&self, version: &VersionRow, tx_id: TxId) -> Result<bool, Error> {
+        let key = self.ahead_overlay_key(version)?;
+        Ok(self.ahead_current_keys.get(&key).is_some_and(|overlay| *overlay != tx_id))
+    }
+
+    /// Apply one pending patch over an image of the same layout: authored
+    /// plain columns replace, merge columns apply their op.
+    fn fold_pending_patch(
+        &self,
+        table_schema: &TableSchema,
+        base: &VersionRow,
+        patch: &VersionRow,
+    ) -> Result<VersionRow, Error> {
+        let authored = self.authored_columns_for_version(patch)?;
+        let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+        let mut folded = patch.record.to_values()?;
+        let base_values = base.record.to_values()?;
+        if !authors(DELETION_COLUMN_NAME) {
+            folded[HistoryRowRecord::FIELD__DELETION_IDX] =
+                base_values[HistoryRowRecord::FIELD__DELETION_IDX].clone();
+        }
+        for (index, column) in table_schema.columns.iter().enumerate() {
+            let index = HistoryRowRecord::USER_CELLS + index;
+            let strategy = table_schema.merge_strategy(&column.name);
+            folded[index] = match (authors(&column.name), strategy) {
+                (false, _) => base_values[index].clone(),
+                (true, crate::schema::MergeStrategy::Lww) => continue,
+                (true, strategy) => Value::Nullable(Some(Box::new(
+                    crate::node::merge_ops::apply_merge_op(
+                        strategy,
+                        &column.column_type,
+                        &base_values[index],
+                        &folded[index],
+                    )?,
+                ))),
+            };
+        }
+        for index in [
+            HistoryRowRecord::FIELD_CREATED_BY_IDX,
+            HistoryRowRecord::FIELD_CREATED_AT_IDX,
+        ] {
+            folded[index] = base_values[index].clone();
+        }
+        patch.with_record_values(folded)
     }
 
     /// Once a transaction is rejected or globally settled, it must not remain

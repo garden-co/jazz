@@ -353,6 +353,9 @@ where
                 for stored in pending_global_updates.values() {
                     self.write_global_current_update(batch, stored, global_time)?;
                 }
+                let synced = pending_global_updates.values().cloned().collect::<Vec<_>>();
+                self.rebase_ahead_overlays(batch, &synced, &BTreeSet::from([tx.tx_id]))
+                    .await?;
             }
         }
         self.cache_tx_versions(tx.tx_id, stored_versions.clone());

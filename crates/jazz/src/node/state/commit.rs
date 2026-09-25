@@ -1278,11 +1278,7 @@ where
         )?;
         let result = self
             .database
-            .query_graph(GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ))
+            .query_graph(crate::node::codec::pending_overlay_over(global, ahead))
             .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
         let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
