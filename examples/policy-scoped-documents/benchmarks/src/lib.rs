@@ -179,7 +179,7 @@ impl Fixture {
         Self::with_order_values_and_indexes(table_rows, policy, true, order_value)
     }
 
-    fn with_order_values_and_indexes(
+    pub fn with_order_values_and_indexes(
         table_rows: usize,
         policy: Policy,
         composite_indexes: bool,

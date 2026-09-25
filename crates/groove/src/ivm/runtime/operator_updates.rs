@@ -397,6 +397,11 @@ impl NodeState {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
             let max_items = scan_max_items(input.scan.as_ref());
+            let direction = if scan_reversed(input.scan.as_ref()) {
+                ScanDirection::Reverse
+            } else {
+                ScanDirection::Forward
+            };
             let scan =
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
                 {
@@ -405,7 +410,7 @@ impl NodeState {
                             .scan(ScanRequest {
                                 cf: "indices".to_owned(),
                                 bounds: ScanBounds::Prefix(prefix),
-                                direction: ScanDirection::Forward,
+                                direction,
                                 max_items,
                             })
                             .await?
@@ -418,7 +423,7 @@ impl NodeState {
                             .scan(ScanRequest {
                                 cf: "indices".to_owned(),
                                 bounds: ScanBounds::Range { start, end },
-                                direction: ScanDirection::Forward,
+                                direction,
                                 max_items,
                             })
                             .await?

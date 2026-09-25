@@ -190,3 +190,35 @@ fn pages_match_exact_authorized_membership_and_order() {
         }
     }
 }
+
+/// Ordered pages under a restrictive policy, read as ordinary users rather
+/// than the system identity, equal the same query over a schema without
+/// composite indexes, truncated to the limit. Order values tie in groups of
+/// three, and deletes land on tie groups and at bucket edges.
+#[test]
+fn policy_scoped_pages_equal_the_unindexed_query_for_each_user() {
+    fn ids(rows: Vec<jazz::node::CurrentRow>) -> Vec<jazz::ids::RowUuid> {
+        rows.iter().map(|row| row.row_uuid()).collect()
+    }
+    let order = |index: usize| (index / 3) as u64;
+    let deleted = [39, 38, 36, 33, 25, 24, 22, 21, 20, 17, 5, 1];
+    for policy in [Policy::Unrestricted, Policy::Owner, Policy::OwnerOrOrg] {
+        let indexed = Fixture::with_order_values_and_indexes(1_000, policy, true, order);
+        let unindexed = Fixture::with_order_values_and_indexes(1_000, policy, false, order);
+        indexed.delete_documents(&deleted);
+        unindexed.delete_documents(&deleted);
+        for identity in [2, 3, 7] {
+            for page in [Page::Owner(2), Page::Owner(3), Page::Org(0), Page::Org(1)] {
+                let control = ids(unindexed.session(page, 1_000, user(identity)).read());
+                for limit in [1, 2, 3, 4, 5, 7, 9, 10, 11, 29, 50] {
+                    let expected: Vec<_> = control.iter().copied().take(limit).collect();
+                    assert_eq!(
+                        ids(indexed.session(page, limit, user(identity)).read()),
+                        expected,
+                        "{policy:?} user {identity} {page:?} limit {limit}"
+                    );
+                }
+            }
+        }
+    }
+}
