@@ -2228,3 +2228,61 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     let reopened = reopen_node_at(&writer_b_dir, node(2), schema());
     assert!(reopened.rejected_transaction(rejected).is_none());
 }
+
+// Internal: the history decode counter is the only observable of how many
+// history scans a transaction table read performs; results alone cannot tell
+// one table-wide scan from a re-scan per row (#3473).
+#[test]
+fn exclusive_table_read_decodes_each_history_version_once() {
+    let (_temp_dir, mut core) = open_node();
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), u64::from(ordinal))
+                .cells(title_cells(format!("first-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), 100 + u64::from(ordinal))
+                .cells(title_cells(format!("second-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(3), 200).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    let tx_id = OpenTransactionId::new();
+    core.open_exclusive(tx_id).unwrap();
+    // Arrives after the snapshot, so the transaction must not see it.
+    let late = TxId::new(TxTime::from(300), node(2));
+    ingest_relay_version(&mut core, late, 300, Vec::new(), row(5), "late");
+    core.tx_write(tx_id, "todos", row(7), title_cells("pending"), None)
+        .unwrap();
+    let stored_versions = 16 * 2 + 1 + 1;
+
+    super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+    let rows = core
+        .tx_current_rows(tx_id, "todos")
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
+        stored_versions,
+        "a transaction table read must decode each stored version once"
+    );
+
+    let mut expected = Vec::new();
+    for ordinal in 1..=16 {
+        if let Some(cells) = core.tx_read(tx_id, "todos", row(ordinal)).unwrap() {
+            expected.push((row(ordinal), cells));
+        }
+    }
+    assert_eq!(rows, expected);
+    assert!(!rows.iter().any(|(row_uuid, _)| *row_uuid == row(3)));
+    assert!(rows.contains(&(row(5), title_cells("second-5"))));
+    assert!(rows.contains(&(row(7), title_cells("pending"))));
+}
