@@ -15,7 +15,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{ArraySubquery, Query};
+use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -381,6 +381,82 @@ fn maintained_relation_include_single_row_changes_are_scale_independent() {
     assert!(
         alloc_ratio <= 3.0 && byte_ratio <= 3.0,
         "INV-INC-1 violation: per-change relation/include allocation scaled with accumulated state: \
+         small={small:?}, large={large:?}, alloc_ratio={alloc_ratio:.2}, byte_ratio={byte_ratio:.2}"
+    );
+}
+
+fn insert_ordered_item(db: &Db<TestStorage>, id: u64, ordinal: i32) {
+    block_on(db.insert(
+        "items",
+        BTreeMap::from([
+            ("label".to_owned(), Value::String(format!("ordered-{id}"))),
+            ("ordinal".to_owned(), Value::I32(ordinal)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(id)),
+            ..Default::default()
+        },
+    ))
+    .unwrap_or_else(|err| panic!("insert ordered item {id}: {err}"));
+}
+
+fn measure_ordered_root_single_insert(scale: usize) -> AllocSnapshot {
+    let db = open_db_with_schema(scale, reset_batch_schema());
+    for index in 0..scale {
+        insert_ordered_item(&db, 80_000_000 + index as u64, 2 * index as i32);
+    }
+    let prepared = db
+        .prepare_query(&Query::from("items").order_by("ordinal", OrderDirection::Asc))
+        .expect("prepare ordered root query");
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("subscribe ordered root query");
+    match block_on(stream.next_event()).expect("initial ordered hydration") {
+        SubscriptionEvent::Delta { added, .. } => assert_eq!(added.len(), scale),
+        other => panic!("expected ordered hydration, got {other:?}"),
+    }
+
+    // Land in the middle of the order so the edit has unchanged roots on
+    // both sides of it.
+    let middle = scale / 2;
+    reset_alloc_counter();
+    insert_ordered_item(&db, 90_000_000 + scale as u64, 2 * middle as i32 + 1);
+    let event = block_on(stream.next_event()).expect("measured ordered update");
+    let snapshot = stop_alloc_counter();
+    match event {
+        SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            assert!(!reset, "ordered root insert must remain incremental");
+            assert!(updated.is_empty() && removed.is_empty());
+            assert_eq!(added.len(), 1);
+            assert_eq!(added[0].row_uuid(), row(90_000_000 + scale as u64));
+            assert_eq!(added[0].index, middle + 1);
+        }
+        other => panic!("expected ordered delta, got {other:?}"),
+    }
+    snapshot
+}
+
+#[test]
+fn ordered_root_single_row_insert_is_scale_independent() {
+    // INV-INC-1 for an ordered root collector: one inserted row must not
+    // renumber, re-index, or reconcile every unchanged root in the
+    // subscription snapshot. Allocation counts are deterministic witnesses
+    // of such whole-result rebuilds (each rebuild allocates per root).
+    let small = measure_ordered_root_single_insert(250);
+    let large = measure_ordered_root_single_insert(4_000);
+    let alloc_ratio = large.allocs as f64 / small.allocs.max(1) as f64;
+    let byte_ratio = large.bytes as f64 / small.bytes.max(1) as f64;
+    eprintln!(
+        "ordered root canary small={small:?} large={large:?} alloc_ratio={alloc_ratio:.2} byte_ratio={byte_ratio:.2}"
+    );
+    assert!(
+        alloc_ratio <= 3.0 && byte_ratio <= 3.0,
+        "INV-INC-1 violation: ordered root single-row insert allocation scaled with result size: \
          small={small:?}, large={large:?}, alloc_ratio={alloc_ratio:.2}, byte_ratio={byte_ratio:.2}"
     );
 }

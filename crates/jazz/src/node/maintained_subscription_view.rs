@@ -80,6 +80,11 @@ pub(crate) struct MaintainedSubscriptionView {
     /// can affect publishability. Keep candidates across partial/failed drains;
     /// `None` requires a full reconcile (also used by witness-gated views).
     unreconciled_result_members: Option<RetainedResultMembers>,
+    /// The witness-gated counterpart of `unreconciled_result_members`: after a
+    /// full reconcile, only members whose weight changed or which were withheld
+    /// for want of a witness can change publishability, until an event that
+    /// could retract a witness drops this journal (`None` = full reconcile).
+    witness_gated_journal: Option<WitnessGatedJournal>,
     #[cfg(test)]
     result_member_reconcile_visits: usize,
     result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
@@ -148,6 +153,7 @@ impl Default for MaintainedSubscriptionView {
             result_weights: RetainedResultMap::default(),
             published_result_members: RetainedResultMembers::default(),
             unreconciled_result_members: None,
+            witness_gated_journal: None,
             #[cfg(test)]
             result_member_reconcile_visits: 0,
             result_payloads: RetainedResultMap::default(),
@@ -300,6 +306,21 @@ impl IntoIterator for RetainedResultMembers {
     fn into_iter(self) -> Self::IntoIter {
         self.entries.into_iter()
     }
+}
+
+/// Candidates for an incremental witness-gated reconcile.
+///
+/// Publishability is `weight > 0 && (inline content || bundle witness)`. A
+/// weight change marks its member. Witness sources that only grow (a positive
+/// version, a replacement for a previously unreplaced row, a new alias) can
+/// only promote positive, unpublished members, all of which are `withheld`.
+/// Anything that could retract a witness drops the journal instead.
+#[derive(Clone, Debug)]
+struct WitnessGatedJournal {
+    changed: BTreeSet<ResultMemberEntry>,
+    withheld: BTreeSet<ResultMemberEntry>,
+    alias_retargets: u64,
+    alias_count: usize,
 }
 
 impl RetainedResultMembers {
@@ -612,11 +633,13 @@ impl MaintainedSubscriptionView {
     pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
         self.storage_backed_result_materialization = true;
         self.unreconciled_result_members = None;
+        self.witness_gated_journal = None;
     }
 
     pub(crate) fn enable_inline_content_branch_key(&mut self, branch_key: &BranchKey) {
         self.inline_content_branch_keys
             .insert(branch_key.canonical_bytes());
+        self.witness_gated_journal = None;
     }
 
     pub(crate) fn terminal_schemas_for_program(
@@ -967,6 +990,9 @@ impl MaintainedSubscriptionView {
                     let covered_input =
                         self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
+                    if weight < 0 {
+                        self.witness_gated_journal = None;
+                    }
                     self.versions.apply_delta(payload, weight);
                     self.supporting.apply(0, covered_input, weight);
                     transitions.supporting_changed = true;
@@ -975,6 +1001,11 @@ impl MaintainedSubscriptionView {
                     let covered_input =
                         self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
+                    // A new replacement for an already replaced row can change
+                    // its winner, retracting the previous winner's witness.
+                    if weight < 0 || self.replacements.contains_key(&key) {
+                        self.witness_gated_journal = None;
+                    }
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
                     self.supporting.apply(1, covered_input, weight);
@@ -985,6 +1016,9 @@ impl MaintainedSubscriptionView {
                         self.supporting_row_for_version(source, &row, node_aliases)?;
                     let key = ReplacementKey::for_row(&row, identity.layer);
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
+                    if weight < 0 || self.replacements.contains_key(&key) {
+                        self.witness_gated_journal = None;
+                    }
                     self.versions.apply_delta(Arc::clone(&payload), weight);
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
@@ -1074,6 +1108,9 @@ impl MaintainedSubscriptionView {
         &mut self,
         witnesses: BTreeMap<SupportingRow, VersionRow>,
     ) -> bool {
+        if self.selected_deletion_witnesses != witnesses {
+            self.witness_gated_journal = None;
+        }
         let mut changed = false;
         for row in self
             .selected_deletion_witnesses
@@ -1560,19 +1597,79 @@ impl MaintainedSubscriptionView {
                 }
             }
             (adds, removes)
+        } else if let Some(journal) = self.witness_gated_journal.take().filter(|journal| {
+            !self.storage_backed_result_materialization
+                && journal.alias_retargets == node_aliases.retarget_count()
+                && journal.alias_count <= node_aliases.len()
+        }) {
+            // Visit in member order so adds and removes are ordered exactly
+            // as the full reconcile's set differences below.
+            let WitnessGatedJournal {
+                mut changed,
+                withheld,
+                ..
+            } = journal;
+            changed.extend(withheld);
+            #[cfg(test)]
+            {
+                self.result_member_reconcile_visits += changed.len();
+            }
+            let mut adds = Vec::new();
+            let mut removes = Vec::new();
+            let mut withheld = BTreeSet::new();
+            for member in changed {
+                let positive = self
+                    .result_weights
+                    .get(&member)
+                    .is_some_and(|weight| *weight > 0);
+                let publishable = positive
+                    && (self.result_member_has_inline_content_source(&member)
+                        || self.result_member_has_bundle_witness(&member, node_aliases));
+                match (self.published_result_members.contains(&member), publishable) {
+                    (false, true) => {
+                        self.published_result_members.insert(member.clone());
+                        adds.push(member);
+                    }
+                    (true, false) => {
+                        self.published_result_members.remove(&member);
+                        if positive {
+                            withheld.insert(member.clone());
+                        }
+                        removes.push(member);
+                    }
+                    (false, false) if positive => {
+                        withheld.insert(member);
+                    }
+                    _ => {}
+                }
+            }
+            self.witness_gated_journal = Some(WitnessGatedJournal {
+                changed: BTreeSet::new(),
+                withheld,
+                alias_retargets: node_aliases.retarget_count(),
+                alias_count: node_aliases.len(),
+            });
+            (adds, removes)
         } else {
             #[cfg(test)]
             {
                 self.result_member_reconcile_visits += self.result_weights.len();
             }
+            let mut withheld = BTreeSet::new();
             let publishable = self
                 .result_weights
                 .iter()
                 .filter(|(member, weight)| {
-                    **weight > 0
-                        && (self.storage_backed_result_materialization
-                            || self.result_member_has_inline_content_source(member)
-                            || self.result_member_has_bundle_witness(member, node_aliases))
+                    if **weight <= 0 {
+                        return false;
+                    }
+                    let publishable = self.storage_backed_result_materialization
+                        || self.result_member_has_inline_content_source(member)
+                        || self.result_member_has_bundle_witness(member, node_aliases);
+                    if !publishable {
+                        withheld.insert((*member).clone());
+                    }
+                    publishable
                 })
                 .map(|(member, _)| member.clone())
                 .collect::<BTreeSet<_>>();
@@ -1586,6 +1683,13 @@ impl MaintainedSubscriptionView {
                 .cloned()
                 .collect::<Vec<_>>();
             self.published_result_members = publishable.into();
+            self.witness_gated_journal =
+                (!self.storage_backed_result_materialization).then(|| WitnessGatedJournal {
+                    changed: BTreeSet::new(),
+                    withheld,
+                    alias_retargets: node_aliases.retarget_count(),
+                    alias_count: node_aliases.len(),
+                });
             (adds, removes)
         };
         self.unreconciled_result_members = self
@@ -1745,6 +1849,9 @@ impl MaintainedSubscriptionView {
     fn mark_result_member_changed(&mut self, member: &ResultMemberEntry) {
         if let Some(changed) = &mut self.unreconciled_result_members {
             changed.insert(member.clone());
+        }
+        if let Some(journal) = &mut self.witness_gated_journal {
+            journal.changed.insert(member.clone());
         }
     }
 
@@ -3409,6 +3516,13 @@ impl ReplacementIndex {
         }
         if row_versions.is_empty() {
             by_key.remove(&key);
+        }
+    }
+
+    fn contains_key(&self, key: &ReplacementKey) -> bool {
+        match key.layer {
+            VersionLayer::Content => self.content_by_key.contains_key(key),
+            VersionLayer::Deletion => self.deletion_by_key.contains_key(key),
         }
     }
 
@@ -5315,6 +5429,112 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(switched.result_member_reconcile_visits, 0);
+    }
+
+    // Internal: how many retained members a reconcile revisits is not
+    // observable through public rows. Differentially compare the witness-gated
+    // journal with the full reconcile over interleaved membership, version,
+    // replacement and alias edits, then pin the steady-state visit count.
+    #[test]
+    fn witness_gated_membership_reconciles_only_changed_or_withheld_members() {
+        let mut state = 0x5eed_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut node_aliases = aliases();
+        let mut incremental = test_maintained();
+        let mut weights = BTreeMap::<(u8, u64, u8), i64>::new();
+        let mut journal_steps = 0;
+        for step in 0..600 {
+            let row_byte = 1 + next(6) as u8;
+            let time = 10 * (1 + next(2));
+            let kind = next(5) as u8;
+            let key = (row_byte, time, if matches!(kind, 2 | 3) { kind } else { 0 });
+            let present = weights.get(&key).copied().unwrap_or(0);
+            let weight = if present > 0 && next(2) == 0 { -1 } else { 1 };
+            let event = match kind {
+                0 | 1 => result_current(ResultMemberEntry::from(result(row(row_byte), time))),
+                2 => version_content(version(row(row_byte), time, "v")),
+                3 => replacement_content(version(row(row_byte), time, "r")),
+                _ => {
+                    // Retarget alias 10 between nodes: replacement witnesses
+                    // resolved through it no longer name the member's tx.
+                    let owner = if node_aliases.node_for_alias(NodeAlias(10)) == Some(node(1)) {
+                        node(2)
+                    } else {
+                        node(1)
+                    };
+                    node_aliases.insert(owner, NodeAlias(10));
+                    result_current(ResultMemberEntry::from(result(row(row_byte), time)))
+                }
+            };
+            *weights.entry(key).or_default() += weight;
+            incremental
+                .apply_decoded_deltas([(event, weight)], &node_aliases)
+                .unwrap();
+            let mut reference = incremental.clone();
+            reference.witness_gated_journal = None;
+            journal_steps += usize::from(incremental.witness_gated_journal.is_some());
+            let expected = reference.reconcile_publishable_result_members(&node_aliases);
+            let actual = incremental.reconcile_publishable_result_members(&node_aliases);
+            assert_eq!(actual, expected, "step {step}");
+            assert_eq!(
+                incremental.published_result_members, reference.published_result_members,
+                "step {step}"
+            );
+            assert_eq!(
+                incremental.published_result_payloads, reference.published_result_payloads,
+                "step {step}"
+            );
+        }
+        assert!(journal_steps > 100, "the journal path must be exercised");
+
+        // Steady state: one fresh witnessed member revisits only itself.
+        let mut maintained = test_maintained();
+        for index in 0..1024_u64 {
+            let row_uuid = RowUuid(uuid::Uuid::from_u128(u128::from(index) + 1));
+            maintained
+                .apply_decoded_deltas(
+                    [
+                        (
+                            result_current(ResultMemberEntry::from(result(row_uuid, 10))),
+                            1,
+                        ),
+                        (version_content(version(row_uuid, 10, "seed")), 1),
+                    ],
+                    &aliases(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            maintained
+                .reconcile_publishable_result_members(&aliases())
+                .0
+                .len(),
+            1024
+        );
+        let fresh = RowUuid(uuid::Uuid::from_u128(5000));
+        let member = ResultMemberEntry::from(result(fresh, 10));
+        maintained
+            .apply_decoded_deltas(
+                [
+                    (result_current(member.clone()), 1),
+                    (version_content(version(fresh, 10, "fresh")), 1),
+                ],
+                &aliases(),
+            )
+            .unwrap();
+        maintained.result_member_reconcile_visits = 0;
+        assert_eq!(
+            maintained
+                .reconcile_publishable_result_members(&aliases())
+                .0,
+            vec![member]
+        );
+        assert_eq!(maintained.result_member_reconcile_visits, 1);
     }
 
     #[test]
