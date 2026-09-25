@@ -1010,9 +1010,17 @@ impl MaintainedSubscriptionView {
                         // Root-collector rows never reach this branch; they
                         // retain the exact opaque terminal key above.
                         let terminal_key = root.0.as_bytes().to_vec();
-                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        // Direct-row keys enter `structured_root_keys` and the
+                        // order together and are only removed together, so a
+                        // fresh key map entry is exactly a key not yet
+                        // ordered. Scanning the order instead made opening N
+                        // rows quadratic.
+                        let first_occurrence = self
+                            .structured_root_keys
+                            .insert(terminal_key.clone(), root)
+                            .is_none();
                         self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
-                        if !self.structured_root_key_order.contains(&terminal_key) {
+                        if first_occurrence {
                             self.structured_root_key_order.push(terminal_key);
                         }
                     }
