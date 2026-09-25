@@ -1599,8 +1599,12 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_global_source() 
     assert!(relay_authority.policy_binding.is_some());
 }
 
+/// Internal: the access-path choice is not observable through public results.
+/// Retraction on delete and grant loss is pinned by
+/// `maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer`
+/// and the public `shared_query_hydration` point-subscription tests (#3511).
 #[test]
-fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
+fn maintained_policy_point_subscription_uses_point_source_and_keeps_witnesses() {
     let schema = owner_policy_schema();
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
     let target = row(0x71);
@@ -1611,10 +1615,13 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     assert!(
-        node.current_query_primary_key_access_paths(&shape, &binding)
-            .unwrap()
-            .is_empty(),
-        "policy-scoped maintained rows must retain their full source so deletion markers can remove them"
+        matches!(
+            node.current_query_primary_key_access_paths(&shape, &binding)
+                .unwrap()
+                .get(&root_source_id("issues")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
+        ),
+        "a policy-scoped maintained id lookup narrows its content source to the one row"
     );
     let program = node
         .compile_current_query_program_for_read_view(
@@ -2139,4 +2146,335 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     assert_eq!(settled_rows, BTreeSet::from([row(0)]));
+}
+
+// The tests below drive the trusted serving path (`PeerState::client_link` +
+// `query_update` at the Global tier) for a point subscription on a policy
+// table, and assert the rows the *receiver* holds after each step. A missing
+// retraction then shows up as a stale row, not merely as an absent add
+// (#3511). They stay at this seam because the public `Db` API has no
+// Global-tier server whose receiver rows a test can read after each batch.
+
+fn restore_global(
+    node: &mut NodeState<RocksDbStorage>,
+    table: &str,
+    row_uuid: RowUuid,
+    now_ms: u64,
+    global_time: u64,
+) {
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new(table, row_uuid, now_ms)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("restore row");
+    node.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalTime(global_time)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept restore");
+}
+
+fn served_issue(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+        ("requiresAdmin".to_owned(), Value::Bool(false)),
+    ])
+}
+
+struct ServedPointSubscription {
+    _server_dir: tempfile::TempDir,
+    server: NodeState<RocksDbStorage>,
+    _reader_dir: tempfile::TempDir,
+    reader: NodeState<RocksDbStorage>,
+    shape: ValidatedQuery,
+    binding: Binding,
+    peer: PeerState,
+    started: bool,
+}
+
+impl ServedPointSubscription {
+    fn new(
+        schema: JazzSchema,
+        table: &str,
+        target: RowUuid,
+        reader_identity: AuthorSubject,
+    ) -> Self {
+        let (server_dir, mut server) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xd1; 16]), schema.clone());
+        let (reader_dir, mut reader) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xd2; 16]), schema.clone());
+        server.set_test_provider_claims(
+            reader_identity,
+            BTreeMap::from([("sub".to_owned(), Value::Uuid(reader_identity.test_uuid()))]),
+        );
+        let shape = Query::from(table)
+            .filter(eq(col("id"), lit(Value::Uuid(target.0))))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(&mut reader, &shape, &binding);
+        Self {
+            _server_dir: server_dir,
+            server,
+            _reader_dir: reader_dir,
+            reader,
+            shape,
+            binding,
+            peer: PeerState::client_link(reader_identity),
+            started: false,
+        }
+    }
+
+    fn step(&mut self, expected: &[RowUuid], label: &str) {
+        let message = if self.started {
+            self.peer
+                .query_update(&mut self.server, &self.shape, &self.binding)
+                .unwrap()
+        } else {
+            self.started = true;
+            self.peer
+                .rehydrate_query(&mut self.server, &self.shape, &self.binding)
+                .unwrap()
+        };
+        self.reader.apply_sync_message_settled(message).unwrap();
+        let actual = receiver_rows(
+            &mut self.reader,
+            &self.shape,
+            &self.binding,
+            DurabilityTier::Global,
+        )
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual,
+            expected.iter().copied().collect::<BTreeSet<_>>(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn served_policy_point_subscription_follows_transfer_delete_and_restore() {
+    let owner = author(0x72);
+    let other = author(0x73);
+    let target = row(0x72);
+    let neighbour = row(0x74);
+    let mut probe = ServedPointSubscription::new(owner_policy_schema(), "issues", target, owner);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t", owner),
+        1,
+        1,
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        neighbour,
+        served_issue("n", owner),
+        2,
+        2,
+    );
+    probe.step(&[target], "initial");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t2", other),
+        3,
+        3,
+    );
+    probe.step(&[], "ownership transferred away");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t3", owner),
+        4,
+        4,
+    );
+    probe.step(&[target], "ownership regained");
+    delete_global(&mut probe.server, "issues", target, 5, 5);
+    probe.step(&[], "deleted");
+    restore_global(&mut probe.server, "issues", target, 6, 6);
+    probe.step(&[target], "restored");
+    delete_global(&mut probe.server, "issues", neighbour, 7, 7);
+    probe.step(&[target], "neighbour deleted");
+    delete_global(&mut probe.server, "issues", target, 8, 8);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t4", other),
+        9,
+        9,
+    );
+    restore_global(&mut probe.server, "issues", target, 10, 10);
+    probe.step(&[], "deleted, transferred and restored in one batch");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t5", owner),
+        11,
+        11,
+    );
+    probe.step(&[target], "regained after batch");
+}
+
+#[test]
+fn served_policy_point_subscription_sees_late_insert_then_delete() {
+    let owner = author(0x72);
+    let target = row(0x72);
+    let mut probe = ServedPointSubscription::new(owner_policy_schema(), "issues", target, owner);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        row(0x74),
+        served_issue("n", owner),
+        1,
+        1,
+    );
+    probe.step(&[], "absent at subscribe");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t", owner),
+        2,
+        2,
+    );
+    probe.step(&[target], "inserted later");
+    delete_global(&mut probe.server, "issues", target, 3, 3);
+    probe.step(&[], "deleted");
+}
+
+#[test]
+fn served_policy_point_subscription_sees_restore_of_row_deleted_before_subscribe() {
+    let owner = author(0x72);
+    let target = row(0x72);
+    let mut probe = ServedPointSubscription::new(owner_policy_schema(), "issues", target, owner);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("t", owner),
+        1,
+        1,
+    );
+    delete_global(&mut probe.server, "issues", target, 2, 2);
+    probe.step(&[], "deleted at subscribe");
+    restore_global(&mut probe.server, "issues", target, 3, 3);
+    probe.step(&[target], "restored");
+}
+
+fn self_inheriting_folders_schema() -> JazzSchema {
+    public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("folders")
+                .column("title", PublicColumnType::Text)
+                .column("assignee", PublicColumnType::Uuid)
+                .nullable_fk_column("parent", "folders")
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::or(vec![
+                        PublicPolicyExpr::eq_session(
+                            "assignee",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ),
+                        PublicPolicyExpr::Inherits {
+                            operation: crate::tools::public_schema::Operation::Select,
+                            via_column: "parent".into(),
+                            max_depth: None,
+                        },
+                    ])),
+                ),
+        ),
+    )
+}
+
+fn served_folder(
+    title: &str,
+    owner: AuthorSubject,
+    parent: Option<RowUuid>,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "parent".to_owned(),
+            Value::Nullable(parent.map(|parent| Box::new(Value::Uuid(parent.0)))),
+        ),
+    ])
+}
+
+/// The inherited grant comes from another row of the *same* table, so the
+/// point source on the root must not narrow the parent's proof source.
+#[test]
+fn served_policy_point_subscription_follows_same_table_inherited_grant() {
+    let owner = author(0x72);
+    let other = author(0x73);
+    let parent = row(0x70);
+    let child = row(0x71);
+    let mut probe =
+        ServedPointSubscription::new(self_inheriting_folders_schema(), "folders", child, owner);
+    commit_global_cells(
+        &mut probe.server,
+        "folders",
+        parent,
+        served_folder("p", owner, None),
+        1,
+        1,
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "folders",
+        child,
+        served_folder("c", other, Some(parent)),
+        2,
+        2,
+    );
+    probe.step(&[child], "inherited from same-table parent");
+    commit_global_cells(
+        &mut probe.server,
+        "folders",
+        parent,
+        served_folder("p2", other, None),
+        3,
+        3,
+    );
+    probe.step(&[], "parent transferred away");
+    commit_global_cells(
+        &mut probe.server,
+        "folders",
+        parent,
+        served_folder("p3", owner, None),
+        4,
+        4,
+    );
+    probe.step(&[child], "parent regained");
+    delete_global(&mut probe.server, "folders", parent, 5, 5);
+    probe.step(&[], "parent deleted");
+    restore_global(&mut probe.server, "folders", parent, 6, 6);
+    probe.step(&[child], "parent restored");
+    delete_global(&mut probe.server, "folders", child, 7, 7);
+    probe.step(&[], "child deleted");
+    restore_global(&mut probe.server, "folders", child, 8, 8);
+    probe.step(&[child], "child restored");
+    commit_global_cells(
+        &mut probe.server,
+        "folders",
+        child,
+        served_folder("c2", other, None),
+        9,
+        9,
+    );
+    probe.step(&[], "child detached from parent");
 }

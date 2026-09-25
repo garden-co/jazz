@@ -513,3 +513,121 @@ fn first_result_intersects_index_keys_before_loading_rows() {
     block_on(stream.close()).unwrap();
     block_on(db.close()).unwrap();
 }
+
+fn point(db: &Db<TestStorage>, n: u8) -> PreparedQuery {
+    db.prepare_query(
+        &Query::from("documents").filter(eq(col("id"), jazz::query::lit(Value::Uuid(row(n).0)))),
+    )
+    .unwrap()
+}
+
+/// A retained `id == X` subscription on a policy table follows every way the
+/// row can enter or leave the reader's view: an inherited grant moving between
+/// readers, the row's own deletion and restore, a direct ownership grant, and
+/// the deletion of the parent row the inherited grant depends on.
+///
+/// alice/bob ──subscribe id==10──► documents ──inherits──► groups
+///           group member moves / doc delete+restore / owner change / group delete
+#[test]
+fn policy_id_subscription_follows_grants_deletion_restore_and_parent_deletion() {
+    let db = open(false);
+    block_on(db.insert(
+        "groups",
+        cells(jazz::row_input!("member" => jazz::tools::ObjectId::from_uuid(user(3).test_uuid()))),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    insert(&db, 10, 4, "a");
+    insert(&db, 11, 4, "a"); // same table, never matched by the point query
+    let query = point(&db, 10);
+    let mut alice = block_on(db.subscribe_for_identity(&query, opts(), user(2))).unwrap();
+    let mut bob = block_on(db.subscribe_for_identity(&query, opts(), user(3))).unwrap();
+    let mut alice_rows = BTreeSet::new();
+    let mut bob_rows = BTreeSet::new();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[]);
+    assert_state(&db, &query, 3, &mut bob, &mut bob_rows, &[10]);
+
+    block_on(db.update(
+        "groups",
+        row(1),
+        cells(jazz::row_input!("member" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()))),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[10]);
+    assert_state(&db, &query, 3, &mut bob, &mut bob_rows, &[]);
+
+    block_on(db.delete("documents", row(10), Default::default())).unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[]);
+    block_on(db.restore("documents", row(10), None, Default::default())).unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[10]);
+
+    block_on(db.update(
+        "documents",
+        row(10),
+        cells(jazz::row_input!("owner" => jazz::tools::ObjectId::from_uuid(user(3).test_uuid()))),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[10]);
+    assert_state(&db, &query, 3, &mut bob, &mut bob_rows, &[10]);
+
+    // Deleting the parent removes only the inherited grant.
+    block_on(db.delete("groups", row(1), Default::default())).unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[]);
+    assert_state(&db, &query, 3, &mut bob, &mut bob_rows, &[10]);
+    block_on(db.restore("groups", row(1), None, Default::default())).unwrap();
+    assert_state(&db, &query, 2, &mut alice, &mut alice_rows, &[10]);
+
+    block_on(alice.close()).unwrap();
+    block_on(bob.close()).unwrap();
+    block_on(db.close()).unwrap();
+}
+
+/// Retained hydration of `id == X` on a policy table must read the one row,
+/// not the whole table. The storage counter is test-only because the public
+/// result is identical either way; only the work differs (#3511).
+#[test]
+fn retained_policy_id_subscription_keeps_bounded_storage_work() {
+    let db = open(true);
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    for n in 10..90 {
+        block_on(tx.insert(
+            "documents",
+            cells(jazz::row_input!(
+                "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+                "bucket" => "a",
+                "group_id" => jazz::tools::ObjectId::from_uuid(row(1).0)
+            )),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let committed = block_on(tx.commit()).unwrap();
+    db.finalize_local_mergeable_commit_for_test(committed)
+        .unwrap();
+    let query = point(&db, 40);
+    db.reset_storage_read_metrics_for_test();
+    let mut stream = block_on(db.subscribe_for_identity(&query, opts(), user(2))).unwrap();
+    let mut rows = BTreeSet::new();
+    block_on(db.tick()).unwrap();
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            rows.extend(added.into_iter().map(|row| row.row_uuid()));
+        }
+    }
+    assert_eq!(rows, BTreeSet::from([row(40)]));
+    let metrics = db.take_storage_read_metrics_for_test();
+    assert!(
+        (1..=4).contains(&metrics.global_current_rows.reads),
+        "a retained one-row policy subscription must not hydrate all 80 rows: {metrics:?}"
+    );
+    block_on(stream.close()).unwrap();
+    block_on(db.close()).unwrap();
+}
