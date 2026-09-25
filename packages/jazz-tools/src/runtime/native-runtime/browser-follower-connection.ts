@@ -12,7 +12,6 @@ import {
   type InspectorAttachmentBinding,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
-import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 import {
   closeInspectorControlPort,
   inspectorControlAbortError,
@@ -36,9 +35,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "flush-local" }
   | { type: "flush-pending-writes" }
   | { type: "close"; releaseContext?: boolean }
-  | { type: "prepare-storage-reset" }
-  | { type: "finish-storage-reset" }
-  | { type: "abort-storage-reset" }
+  | { type: "delete-storage" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 // Connection policy, not an operation deadline. A matching pong keeps even
@@ -184,14 +181,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async deleteStorage(): Promise<void> {
     await this.ready();
     if (!this.dbName) throw new Error("Browser storage reset requires its IndexedDB name");
-    await this.request({ type: "prepare-storage-reset" });
-    try {
-      await IndexedDbPageStore.destroy(this.dbName);
-    } catch (error) {
-      await this.request({ type: "abort-storage-reset" }).catch(() => undefined);
-      throw error;
-    }
-    await this.request({ type: "finish-storage-reset" });
+    await this.request({ type: "delete-storage" });
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
@@ -420,7 +410,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "storage-reset") {
       for (const [id, pending] of this.pending) {
-        if (pending.type !== "finish-storage-reset") continue;
+        if (pending.type !== "delete-storage") continue;
         this.pending.delete(id);
         pending.resolve();
       }

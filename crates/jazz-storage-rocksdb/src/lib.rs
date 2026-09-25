@@ -27,6 +27,10 @@ use groove::storage::{
     StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
     WriteOperation, validate_physical_storage_names,
 };
+use groove::storage::{
+    ReadOnlyStorage, StagedStorageOpen, StorageAdmission, StorageAdmissionGuard,
+    StorageAdmissionReceipt, StorageOpenSpec,
+};
 
 trait RocksResultExt<T> {
     fn storage(self) -> Result<T, Error>;
@@ -66,6 +70,7 @@ const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v1";
 const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
 const ROCKSDB_VALUE_FORMAT_V1: &[u8] = b"raw-v1";
 const ROCKSDB_EPOCH_MANIFEST_KEY: &[u8] = b"epoch-manifest";
+const ROCKSDB_ADMISSION_RECEIPT_KEY: &[u8] = b"admission-receipt";
 
 #[cfg(test)]
 thread_local! {
@@ -85,11 +90,6 @@ pub enum Durability {
 
 /// RocksDB implementation of the ordered KV storage trait.
 pub struct RocksDbStorage {
-    path: PathBuf,
-    durability: Durability,
-    /// The codec profile this handle was opened with. The store pins it in
-    /// its epoch manifest, so a column-family reopen must present it again.
-    codec_profile: StorageCodecProfile,
     column_families: BTreeSet<String>,
     db: DB,
     write_options: WriteOptions,
@@ -100,10 +100,37 @@ pub struct RocksDbStorage {
 }
 
 /// Opens a native persistent store at the exact shell-provided path.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RocksDbStorageFactory;
+#[derive(Clone, Copy, Debug)]
+pub struct RocksDbStorageFactory {
+    durability: Durability,
+}
+
+impl Default for RocksDbStorageFactory {
+    fn default() -> Self {
+        Self::with_durability(Durability::WalNoSync)
+    }
+}
+
+impl RocksDbStorageFactory {
+    pub fn with_durability(durability: Durability) -> Self {
+        Self { durability }
+    }
+}
 
 impl StorageFactory for RocksDbStorageFactory {
+    fn open_staged(
+        &self,
+        path: PathBuf,
+        column_families: Vec<String>,
+        source: StorageOpenSpec,
+        target: StorageOpenSpec,
+    ) -> StorageFuture<'_, Result<StagedStorageOpen, Error>> {
+        Box::pin(async move {
+            RocksDbStorage::open_staged(path, column_families, source, target, self.durability)
+                .await
+        })
+    }
+
     fn open(
         &self,
         path: PathBuf,
@@ -125,10 +152,41 @@ impl StorageFactory for RocksDbStorageFactory {
                 RocksDbStorage::open_with_durability_and_codec_profile(
                     path,
                     &column_families,
-                    Durability::WalNoSync,
+                    self.durability,
                     &codec_profile,
                 )?,
             ))
+        })
+    }
+}
+
+struct RocksAdmissionGuard {
+    storage: RocksDbStorage,
+    column_families: Vec<String>,
+    source: StorageEpochManifest,
+    target: StorageEpochManifest,
+}
+
+impl StorageAdmissionGuard for RocksAdmissionGuard {
+    fn read_only(&self) -> ReadOnlyStorage<'_> {
+        ReadOnlyStorage::new(&self.storage)
+    }
+    fn complete(self: Box<Self>) -> StorageFuture<'static, Result<BoxedStorage, Error>> {
+        Box::pin(async move {
+            let Self {
+                storage,
+                column_families,
+                source,
+                target,
+            } = *self;
+            storage.publish_admission(
+                &target,
+                &StorageAdmissionReceipt::CompletedE1ToE2 {
+                    source,
+                    target: target.clone(),
+                },
+            )?;
+            Ok(BoxedStorage::new(storage.reopen(column_families).await?))
         })
     }
 }
@@ -234,6 +292,145 @@ struct WriteFlushCadence {
 }
 
 impl RocksDbStorage {
+    /// The exclusive DB handle is retained from exact source admission through
+    /// caller preflight and atomic receipt publication. Existing roots open
+    /// only their already-existing families until that publication succeeds.
+    async fn open_staged(
+        path: PathBuf,
+        column_families: Vec<String>,
+        source: StorageOpenSpec,
+        target: StorageOpenSpec,
+        durability: Durability,
+    ) -> Result<StagedStorageOpen, Error> {
+        validate_physical_storage_names(&column_families)?;
+        if column_families.iter().any(|cf| cf == ROCKSDB_INTERNAL_CF) {
+            return Err(Error::InvalidStorageLayout(
+                "reserved RocksDB internal family".into(),
+            ));
+        }
+        let source = rocksdb_manifest(&source.codec_profile)?.with_open_spec(&source)?;
+        let target = rocksdb_manifest(&target.codec_profile)?.with_open_spec(&target)?;
+        StorageAdmissionReceipt::FreshE2 {
+            target: target.clone(),
+        }
+        .validate(&source, &target)?;
+        let existing = inspect_existing_column_families(&path)?;
+        let fresh = existing.is_none();
+        let mut families = existing.unwrap_or_else(|| column_families.clone());
+        validate_physical_storage_names(&families)?;
+        if fresh {
+            families.push("default".into());
+            families.push(ROCKSDB_INTERNAL_CF.into());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| Error::Backend {
+                    backend: "rocksdb",
+                    message: error.to_string(),
+                })?;
+            }
+        }
+        let families = families.into_iter().collect::<BTreeSet<_>>();
+        let cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let buffers =
+            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        let mut options = rocksdb_options(&cache, &buffers);
+        options.create_if_missing(fresh);
+        options.create_missing_column_families(fresh);
+        if matches!(durability, Durability::FullSync) {
+            options.set_use_fsync(true);
+        }
+        if matches!(durability, Durability::WalNoSync) {
+            options.set_wal_bytes_per_sync(1 << 20);
+        }
+        let descriptors = families
+            .iter()
+            .filter(|name| name.as_str() != "default")
+            .map(|name| {
+                ColumnFamilyDescriptor::new(name, rocksdb_options_for_cf(name, &cache, &buffers))
+            });
+        let db = DB::open_cf_descriptors(&options, &path, descriptors).storage()?;
+        let mut write_options = WriteOptions::default();
+        write_options.set_sync(matches!(durability, Durability::FullSync));
+        let storage = Self {
+            column_families: families
+                .into_iter()
+                .filter(|cf| cf != ROCKSDB_INTERNAL_CF)
+                .collect(),
+            db,
+            write_options,
+            mutation_gate: Mutex::new(()),
+            write_flush_cadence: RefCell::new(
+                matches!(durability, Durability::WalNoSync).then_some(WriteFlushCadence {
+                    every: ROCKSDB_WAL_SYNC_WRITE_BATCHES,
+                    pending: 0,
+                }),
+            ),
+            #[cfg(test)]
+            last_wal_flush_sync: Cell::new(None),
+        };
+        if fresh {
+            storage.publish_admission(
+                &target,
+                &StorageAdmissionReceipt::FreshE2 {
+                    target: target.clone(),
+                },
+            )?;
+        } else {
+            let internal = storage.db.cf_handle(ROCKSDB_INTERNAL_CF).ok_or_else(|| {
+                Error::InvalidStorageLayout("missing RocksDB internal family".into())
+            })?;
+            if storage
+                .db
+                .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
+                .storage()?
+                .as_deref()
+                != Some(ROCKSDB_VALUE_FORMAT_V1)
+            {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB value format".into(),
+                ));
+            }
+            let StorageAdmission::Durable(admission) = storage.admission()? else {
+                unreachable!()
+            };
+            let manifest = admission.manifest();
+            if manifest == &source && !admission.has_receipt() {
+                return Ok(StagedStorageOpen::Guard(Box::new(RocksAdmissionGuard {
+                    storage,
+                    column_families,
+                    source,
+                    target,
+                })));
+            }
+            if manifest != &target {
+                return Err(Error::InvalidStorageLayout(
+                    "unsupported RocksDB node manifest".into(),
+                ));
+            }
+            admission.validate(&source, &target)?;
+        }
+        Ok(StagedStorageOpen::Ready(BoxedStorage::new(
+            storage.reopen(column_families).await?,
+        )))
+    }
+
+    fn publish_admission(
+        &self,
+        manifest: &StorageEpochManifest,
+        receipt: &StorageAdmissionReceipt,
+    ) -> Result<(), Error> {
+        let internal = self
+            .db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .ok_or_else(|| Error::InvalidStorageLayout("missing RocksDB internal family".into()))?;
+        let mut batch = WriteBatch::default();
+        batch.put_cf(internal, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V1);
+        batch.put_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY, manifest.encode()?);
+        batch.put_cf(internal, ROCKSDB_ADMISSION_RECEIPT_KEY, receipt.encode()?);
+        let mut options = WriteOptions::default();
+        options.set_sync(true);
+        self.db.write_opt(&batch, &options).storage()
+    }
+
     /// Open with the default durability tier.
     ///
     /// Default is [`Durability::WalNoSync`]: the WAL preserves batch atomicity,
@@ -373,9 +570,6 @@ impl RocksDbStorage {
             db.write_opt(&batch, &write_options).storage()?;
         }
         Ok(Self {
-            path,
-            durability,
-            codec_profile: codec_profile.clone(),
             column_families: opened_column_families
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
@@ -753,7 +947,10 @@ impl RocksDbClassProfile {
 }
 
 impl ReopenableStorage for RocksDbStorage {
-    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+    fn reopen(
+        mut self,
+        column_families: Vec<String>,
+    ) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
             validate_physical_storage_names(&column_families)?;
             if column_families
@@ -762,34 +959,51 @@ impl ReopenableStorage for RocksDbStorage {
             {
                 return Ok(self);
             }
-            let path = self.path.clone();
-            let durability = self.durability;
-            let codec_profile = self.codec_profile.clone();
-            // A column-family expansion replaces the RocksDB handle, but it
-            // is not a durability boundary. Preserve both the cadence and
-            // its outstanding WAL-sync debt so acknowledged batches before
-            // the reopen still count toward the next synchronous boundary.
-            // Capturing this before dropping the old handle also ensures an
-            // open failure cannot be reported as a successful reset.
-            let write_flush_cadence = *self.write_flush_cadence.borrow();
-            drop(self);
-            let column_families = column_families
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            let reopened = Self::open_with_durability_and_codec_profile(
-                path,
-                &column_families,
-                durability,
-                &codec_profile,
-            )?;
-            *reopened.write_flush_cadence.borrow_mut() = write_flush_cadence;
-            Ok(reopened)
+            // Expand the admitted handle without re-entering the epoch-one
+            // opener or resetting its durability policy and pending WAL debt.
+            let cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+            let buffers = WriteBufferManager::new_write_buffer_manager(
+                ROCKSDB_WRITE_BUFFER_MANAGER_BYTES,
+                false,
+            );
+            for name in column_families {
+                if name == ROCKSDB_INTERNAL_CF {
+                    return Err(Error::InvalidStorageLayout(
+                        "reserved RocksDB internal family".into(),
+                    ));
+                }
+                if !self.column_families.contains(&name) {
+                    self.db
+                        .create_cf(&name, &rocksdb_options_for_cf(&name, &cache, &buffers))
+                        .storage()?;
+                    self.column_families.insert(name);
+                }
+            }
+            Ok(self)
         })
     }
 }
 
 impl OrderedKvStorage for RocksDbStorage {
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        let internal = self
+            .db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .ok_or_else(|| Error::InvalidStorageLayout("missing RocksDB internal family".into()))?;
+        let bytes = self
+            .db
+            .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+            .storage()?
+            .ok_or_else(|| Error::InvalidStorageLayout("missing RocksDB epoch manifest".into()))?;
+        let receipt = self
+            .db
+            .get_cf(internal, ROCKSDB_ADMISSION_RECEIPT_KEY)
+            .storage()?
+            .map(|bytes| StorageAdmissionReceipt::decode(&bytes))
+            .transpose()?;
+        StorageAdmission::durable(StorageEpochManifest::decode(&bytes)?, receipt)
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1100,6 +1314,88 @@ impl OrderedKvStorage for RocksDbStorage {
 
 #[cfg(test)]
 mod tests {
+    #[futures_test::test]
+    async fn staged_admission_preserves_rows_and_atomic_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        groove::storage::conformance::staged_admission_preserves_rows(
+            &super::RocksDbStorageFactory::default(),
+            directory.path().join("legacy"),
+            directory.path().join("fresh"),
+        )
+        .await;
+    }
+
+    #[futures_test::test]
+    async fn epoch_two_missing_receipt_rejects_before_family_expansion() {
+        use groove::storage::{StagedStorageOpen, StorageFactory, StorageOpenSpec};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("root");
+        let factory = super::RocksDbStorageFactory::default();
+        let source = StorageOpenSpec {
+            epoch: 1,
+            codec_profile: StorageCodecProfile::groove_epoch_1(),
+        };
+        let target = StorageOpenSpec {
+            epoch: 2,
+            codec_profile: source.codec_profile.clone(),
+        };
+        let StagedStorageOpen::Ready(storage) = factory
+            .open_staged(
+                path.clone(),
+                vec!["records".into()],
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("fresh admission")
+        };
+        storage
+            .set("records".into(), b"key".to_vec(), b"retained".to_vec())
+            .await
+            .unwrap();
+        drop(storage);
+        let families = DB::list_cf(&Options::default(), &path).unwrap();
+        let before;
+        {
+            let raw = DB::open_cf(&Options::default(), &path, &families).unwrap();
+            let internal = raw.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+            before = raw
+                .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                .unwrap()
+                .unwrap();
+            raw.delete_cf(internal, super::ROCKSDB_ADMISSION_RECEIPT_KEY)
+                .unwrap();
+        }
+        assert!(
+            factory
+                .open_staged(path.clone(), vec!["must-not-exist".into()], source, target)
+                .await
+                .is_err()
+        );
+        assert_eq!(DB::list_cf(&Options::default(), &path).unwrap(), families);
+        let raw = DB::open_cf_for_read_only(&Options::default(), &path, &families, false).unwrap();
+        let internal = raw.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+        assert_eq!(
+            raw.get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(
+            raw.get_cf(internal, super::ROCKSDB_ADMISSION_RECEIPT_KEY)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            raw.get_cf(raw.cf_handle("records").unwrap(), b"key")
+                .unwrap()
+                .unwrap(),
+            b"retained"
+        );
+    }
+
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use flate2::read::GzDecoder;
     use groove::storage::{Error, OrderedKvStorage, ReopenableStorage, StorageCodecProfile};
@@ -2099,6 +2395,8 @@ mod tests {
             Some((5, 0)),
             "an already-synced boundary must not gain phantom debt during reopen"
         );
+        // Observe the next boundary independently of the retained DB handle.
+        storage.last_wal_flush_sync.set(None);
 
         for batch in 0u8..4 {
             ready(storage.set("records".to_owned(), vec![batch, 0xff], b"value".to_vec())).unwrap();

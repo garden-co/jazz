@@ -114,6 +114,8 @@ pub enum Error {
     NotResident(PageId),
     #[error("a read-committed IDBTree view cannot write")]
     ReadOnlyView,
+    #[error("IDBTree admission view is read-only")]
+    ReadOnly,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +173,7 @@ struct TreeCore<S> {
     /// became durable. Only [`IdbTree::reload`] recovers: the store is the
     /// sole authority on the outcome.
     commit_abandoned: bool,
+    read_only: bool,
 }
 
 struct AbandonOnDrop<'a, S>(Option<&'a RefCell<TreeCore<S>>>);
@@ -259,9 +262,34 @@ impl<S: PageStore + Clone> IdbTree<S> {
         }
     }
 
+    /// Read the existing root without allocating an empty root or dirty pages.
+    /// The caller holds exclusive admission ownership; no writer is exposed.
+    pub async fn open_read_only(store: S, options: Options) -> Result<Self, Error> {
+        let ownership = store.claim_tree_ownership().map_err(Error::Store)?;
+        let tree = TreeCore::open_existing(store, options).await?;
+        if !ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
+        Ok(Self {
+            inner: Rc::new(RefCell::new(tree)),
+            _ownership: Rc::new(ownership),
+            reload_epoch: Rc::new(Cell::new(0)),
+            read_committed: false,
+        })
+    }
+
     fn ensure_writable(&self) -> Result<(), Error> {
         if self.read_committed {
             Err(Error::ReadOnlyView)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_mutable(&self) -> Result<(), Error> {
+        self.ensure_writable()?;
+        if self.inner.borrow().read_only {
+            Err(Error::ReadOnly)
         } else {
             Ok(())
         }
@@ -272,7 +300,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         if self.read_committed {
             tree.durable_root
         } else {
-            Some(tree.root_page_id())
+            tree.metadata.root_page_id
         }
     }
 
@@ -312,14 +340,18 @@ impl<S: PageStore + Clone> IdbTree<S> {
             return Err(Error::OwnershipExpired);
         }
         self.ensure_writable()?;
-        let (store, options) = {
+        let (store, options, read_only) = {
             let tree = self.inner.borrow();
             if tree.commit_in_flight {
                 return Err(Error::CommitInFlight);
             }
-            (tree.store.clone(), tree.options)
+            (tree.store.clone(), tree.options, tree.read_only)
         };
-        let fresh = TreeCore::open(store, options).await?;
+        let fresh = if read_only {
+            TreeCore::open_existing(store, options).await?
+        } else {
+            TreeCore::open(store, options).await?
+        };
         if !self._ownership.is_live() {
             return Err(Error::OwnershipExpired);
         }
@@ -373,7 +405,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
-        self.ensure_writable()?;
+        self.ensure_mutable()?;
         loop {
             self.ensure_live()?;
             let attempt = self
@@ -388,7 +420,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
-        self.ensure_writable()?;
+        self.ensure_mutable()?;
         loop {
             self.ensure_live()?;
             let attempt = self
@@ -404,7 +436,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
         self.ensure_live()?;
-        self.ensure_writable()?;
+        self.ensure_mutable()?;
         for operation in &operations {
             let key = match operation {
                 WriteOperation::Set { key, .. } | WriteOperation::Delete { key } => key,
@@ -452,6 +484,27 @@ impl<S: PageStore + Clone> IdbTree<S> {
         }
     }
 
+    /// Admission inventory: find a physical key without decoding/copying its value.
+    pub async fn next_key(&self, start: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        loop {
+            self.ensure_live()?;
+            let attempt = {
+                let tree = self.inner.borrow();
+                let Some(root) = tree.metadata.root_page_id else {
+                    return Ok(None);
+                };
+                match tree.next_key_resident(root, start, &mut HashSet::new())? {
+                    Attempt::Missing(id) => Attempt::Missing(id),
+                    Attempt::Ready(key) => Attempt::Ready(key.map(<[u8]>::to_vec)),
+                }
+            };
+            match attempt {
+                Attempt::Ready(key) => return Ok(key),
+                Attempt::Missing(id) => self.hydrate(id).await?,
+            }
+        }
+    }
+
     pub async fn range_reverse(
         &self,
         start: &[u8],
@@ -476,7 +529,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn flush(&self) -> Result<(), Error> {
         self.ensure_live()?;
-        self.ensure_writable()?;
+        self.ensure_mutable()?;
         let (store, prepared) = {
             let mut tree = self.inner.borrow_mut();
             (tree.store.clone(), tree.prepare_commit()?)
@@ -619,6 +672,9 @@ impl<S: PageStore> TreeCore<S> {
         &mut self,
         write: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let checkpoint = self.write_checkpoint();
         let outcome = write(self);
         self.write_floor = PageId::MAX;
@@ -638,6 +694,9 @@ impl<S: PageStore> TreeCore<S> {
         &mut self,
         write: impl FnOnce(&mut Self) -> Result<Attempt<T>, Error>,
     ) -> Result<Attempt<T>, Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let checkpoint = self.write_checkpoint();
         let outcome = write(self);
         self.write_floor = PageId::MAX;
@@ -672,6 +731,16 @@ impl<S: PageStore> TreeCore<S> {
     }
 
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
+        let mut tree = Self::open_existing(store, options).await?;
+        tree.read_only = false;
+        if tree.metadata.root_page_id.is_none() {
+            let root = tree.allocate_page(Page::leaf())?;
+            tree.metadata.root_page_id = Some(root);
+        }
+        Ok(tree)
+    }
+
+    async fn open_existing(store: S, options: Options) -> Result<Self, Error> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
         let metadata = metadata.unwrap_or_else(|| Metadata::empty(options.page_size));
@@ -687,16 +756,13 @@ impl<S: PageStore> TreeCore<S> {
             retirement_undo: Vec::new(),
             commit_in_flight: false,
             commit_abandoned: false,
+            read_only: true,
         };
         if tree.metadata.page_size != options.page_size {
             return Err(Error::InvalidOptions(format!(
                 "store uses {}-byte pages, requested {}",
                 tree.metadata.page_size, options.page_size
             )));
-        }
-        if tree.metadata.root_page_id.is_none() {
-            let root = tree.allocate_page(Page::leaf())?;
-            tree.metadata.root_page_id = Some(root);
         }
         Ok(tree)
     }
@@ -896,6 +962,9 @@ impl<S: PageStore> TreeCore<S> {
     /// writes can immediately begin populating a fresh generation while the
     /// returned immutable page images are committed by the caller.
     pub fn prepare_commit(&mut self) -> Result<Option<PreparedCommit>, Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         if self.commit_in_flight {
             return Err(Error::CommitInFlight);
         }
@@ -1067,6 +1136,45 @@ impl<S: PageStore> TreeCore<S> {
                     ));
                 }
             }
+        }
+    }
+
+    fn next_key_resident(
+        &self,
+        page_id: PageId,
+        start: &[u8],
+        visited: &mut HashSet<PageId>,
+    ) -> Result<Attempt<Option<&[u8]>>, Error> {
+        if !visited.insert(page_id) {
+            return Err(Error::InvalidPage(
+                "tree child graph contains a cycle or shared page".into(),
+            ));
+        }
+        let Some(page) = self.pages.get(&page_id) else {
+            return Ok(Attempt::Missing(page_id));
+        };
+        match page {
+            Page::Leaf { entries } => Ok(Attempt::Ready(
+                entries
+                    .iter()
+                    .find(|(key, _)| key.as_slice() >= start)
+                    .map(|(key, _)| key.as_slice()),
+            )),
+            Page::Internal { keys, children } => {
+                for (index, child) in children.iter().copied().enumerate() {
+                    if index < keys.len() && keys[index].as_slice() <= start {
+                        continue;
+                    }
+                    match self.next_key_resident(child, start, visited)? {
+                        Attempt::Ready(None) => {}
+                        found => return Ok(found),
+                    }
+                }
+                Ok(Attempt::Ready(None))
+            }
+            Page::Overflow { .. } => Err(Error::InvalidPage(
+                "overflow page reached during key inventory".into(),
+            )),
         }
     }
 
@@ -1814,6 +1922,56 @@ mod tests {
     // These are intentionally engine-level contract tests: page splitting,
     // reopen, and residency are not observably attributable through Jazz's
     // public query API, while every backend must preserve them.
+    #[test]
+    fn admission_view_is_empty_without_initialization_and_rejects_writes_after_reload() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let view = IdbTree::open_read_only(store.clone(), Options::default())
+                .await
+                .unwrap();
+            assert_eq!(view.metadata().root_page_id, None);
+            assert_eq!(view.dirty_page_count(), 0);
+            assert_eq!(view.get(b"key").await.unwrap(), None);
+            assert!(view.range(b"", b"z").await.unwrap().is_empty());
+            assert!(matches!(
+                view.write_many(vec![WriteOperation::Set {
+                    key: b"key".to_vec(),
+                    value: vec![1]
+                }])
+                .await,
+                Err(Error::ReadOnly),
+            ));
+            assert_eq!(store.load_metadata().await.unwrap(), None);
+            drop(view);
+            let writer = IdbTree::open(store.clone(), Options::default())
+                .await
+                .unwrap();
+            writer
+                .put(b"key".to_vec(), b"value".to_vec())
+                .await
+                .unwrap();
+            writer.put(vec![255, 255], b"last".to_vec()).await.unwrap();
+            writer.flush().await.unwrap();
+            drop(writer);
+            let view = IdbTree::open_read_only(store.clone(), Options::default())
+                .await
+                .unwrap();
+            let before = store.load_metadata().await.unwrap();
+            view.reload().await.unwrap();
+            assert_eq!(view.get(b"key").await.unwrap(), Some(b"value".to_vec()));
+            assert_eq!(view.next_key(&[255]).await.unwrap(), Some(vec![255, 255]));
+            assert!(matches!(
+                view.put(b"key".to_vec(), b"changed".to_vec()).await,
+                Err(Error::ReadOnly)
+            ));
+            assert!(matches!(view.delete(b"key").await, Err(Error::ReadOnly)));
+            assert!(matches!(view.flush().await, Err(Error::ReadOnly)));
+            assert_eq!(store.load_metadata().await.unwrap(), before);
+            let reopened = IdbTree::open(store, Options::default()).await.unwrap();
+            assert_eq!(reopened.get(b"key").await.unwrap(), Some(b"value".to_vec()));
+        });
+    }
+
     #[test]
     fn exact_value_comparison_handles_inline_overflow_and_cold_reopen() {
         futures::executor::block_on(async {

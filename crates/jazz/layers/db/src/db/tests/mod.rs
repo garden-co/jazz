@@ -4,11 +4,11 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use groove::records::{EnumValue, RecordDescriptor, ValueType};
+use groove::storage::BoxedStorage;
 use groove::storage::{OrderedKvStorage, ReopenableStorage, YieldingStorage};
-use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
 use std::path::Path;
 
-type RocksDbStorage = YieldingStorage<ImmediateRocksDbStorage>;
+type RocksDbStorage = YieldingStorage<BoxedStorage>;
 
 trait TestRocksOpen: Sized {
     fn open(
@@ -22,7 +22,15 @@ impl TestRocksOpen for RocksDbStorage {
         path: impl AsRef<Path>,
         column_families: &[&str],
     ) -> Result<Self, groove::storage::Error> {
-        ImmediateRocksDbStorage::open(path, column_families).map(YieldingStorage::wrap)
+        crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            path.as_ref().to_path_buf(),
+            column_families
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        ))
+        .map(YieldingStorage::wrap)
     }
 }
 
@@ -137,6 +145,7 @@ use support::block_on;
 use support::*;
 use wire_transport::byte_duplex_with_session;
 
+mod candidate_authorization;
 mod catalogue;
 mod chunk_io_pump;
 mod global_read_write_order;

@@ -374,17 +374,16 @@ receipt that happens to carry a global-time field with a rejection still cannot
 make that transaction a content or deletion winner (ch. 3).
 
 Positions 5 through 8 hold exclusive read evidence in the
-`jazz.exclusive-read-evidence.v1` family, and only while it can still be
-retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
-`Transaction` commit-unit payload and authority validation seam. A node that
-authored or relays an `Exclusive` transaction whose fate is still `Pending`
+`jazz.exclusive-read-evidence.v1` family. Exclusive snapshot/read/CAS evidence
+belongs to the immutable `Transaction` commit-unit payload and authority
+validation seam. A node that authored or relays an `Exclusive` transaction
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 `predicate_read_set` in these slots, so a unit rebuilt from storage after a
-restart (outbox or relay recovery) is byte-for-byte the unit that was
-committed. The row rewrite that records a settled fate writes all four back to
-null; the slots are not an audit or revalidation log. Every other row, and any
-exclusive row whose evidence v1 cannot represent, writes all four null, and a
-missing snapshot still fails authority validation. Each non-null slot is the
+restart is the unit that was committed. Fate rewrites, duplicate delivery and
+redacted repairs retain the original proof, including its original absence;
+they never infer or backfill it from later observations. Mergeable rows and
+exclusive rows whose evidence v1 cannot represent write all four slots null;
+a missing snapshot still fails authority validation. Each non-null slot is the
 Groove typed-record v1 bytes of one fixed descriptor led by `format_v1 = 1`:
 `(format_v1, owner, global_base, local_base, dots[(time, node)])`,
 `(format_v1, reads[(table, row_uuid, version_time, version_node)])`,

@@ -269,6 +269,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
             attemptId,
             dbName: options.dbName,
             storageOwner: options.storageOwner,
+            runtimeSources: resolveBrowserWorkerRuntimeSources(options.runtimeSources),
           });
           return;
         }

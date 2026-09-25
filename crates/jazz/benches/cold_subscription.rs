@@ -4,6 +4,7 @@ use std::time::Instant;
 mod schema_fixture;
 mod support;
 
+use groove::storage::BoxedStorage;
 use jazz::block_on;
 use jazz::groove::ivm::TickMetrics;
 use jazz::groove::records::Value;
@@ -15,7 +16,7 @@ use jazz::protocol::expand_version_carriers;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use support::{
     csv_usizes, emit_json_line, insert_durability_tier, insert_node_metrics, phase_fields,
     reset_phase_counters,
@@ -219,8 +220,8 @@ fn normalized_tick_metrics(metrics: Option<&TickMetrics>) -> Option<TickMetrics>
 }
 
 struct ColdSubscriptionBench {
-    writer: NodeState,
-    core: Option<NodeState>,
+    writer: NodeState<BoxedStorage>,
+    core: Option<NodeState<BoxedStorage>>,
     schema: JazzSchema,
     _writer_dir: tempfile::TempDir,
     core_dir: tempfile::TempDir,
@@ -240,23 +241,22 @@ impl ColdSubscriptionBench {
         }
     }
 
-    fn core(&self) -> &NodeState {
+    fn core(&self) -> &NodeState<BoxedStorage> {
         self.core.as_ref().expect("core must be open")
     }
 
-    fn core_mut(&mut self) -> &mut NodeState {
+    fn core_mut(&mut self) -> &mut NodeState<BoxedStorage> {
         self.core.as_mut().expect("core must be open")
     }
 
     fn reopen_core(&mut self) {
         drop(self.core.take());
         let cfs = self.schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = RocksDbStorage::open_with_durability(
-            self.core_dir.path(),
-            &refs,
-            Durability::WalNoSync,
-        )
+        let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+            self.core_dir.path().to_path_buf(),
+            cfs,
+        ))
         .expect("reopen core rocksdb");
         self.core = Some(
             block_on(NodeState::new_with_shared_test_catalogue(
@@ -365,7 +365,11 @@ impl ColdSubscriptionBench {
     }
 }
 
-fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
+fn core_ingest(
+    core: &mut NodeState<BoxedStorage>,
+    message: &SyncMessage,
+    now_ms: u64,
+) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -393,13 +397,18 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open rocksdb");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocksdb");
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))

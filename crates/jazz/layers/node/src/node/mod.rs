@@ -368,6 +368,8 @@ pub use query_eval::{
 pub use views::MaintainedViewBundleInputs;
 pub use views::simple_scalar_exit_query;
 
+#[doc(hidden)]
+pub use codec::validate_epoch_one_transaction_record;
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;

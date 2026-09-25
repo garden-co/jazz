@@ -5246,6 +5246,7 @@ fn aggregate_current_row_from_record(
 }
 
 mod authorization;
+pub(in crate::node) use authorization::{AuthorizedCreatedEvidence, CandidateProofBudget};
 
 impl<S> HistoricalRead<'_, S>
 where

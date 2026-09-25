@@ -30,7 +30,7 @@ use crate::protocol::{
     SyncMessage,
 };
 use crate::schema::JazzSchema;
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::open_node_storage;
 use crate::wire::{TransportError, WireTransport};
 use futures::lock::Mutex as LocalMutex;
 
@@ -432,6 +432,7 @@ impl ShellDb {
             Self::Durable(db) => db.mark_subscriber_connections_dirty_after_query_runtime_wake(),
         }
     }
+
 
     fn apply_trusted_catalogue_snapshot(
         &self,
@@ -856,15 +857,11 @@ impl InMemoryServerShell {
                         "durable server storage requires a target-shell storage factory".into(),
                     )
                 })?;
-                let storage = crate::local_executor::block_on(factory.open(
-                    path.clone(),
-                    refs,
-                    epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                ))
-                .map_err(db_storage_error)?;
+                let storage = crate::db::block_on(open_node_storage(factory, path.clone(), refs))
+                    .map_err(db_storage_error)?;
                 let (storage, schema) = if config.reopen_with_durable_schema {
                     crate::local_executor::block_on(
-                        crate::node::NodeState::select_durable_reopen_schema(
+                        crate::node::NodeState::<BoxedStorage>::select_durable_reopen_schema(
                             storage,
                             config.schema,
                         ),
@@ -2384,7 +2381,7 @@ mod tests {
         let config = InMemoryServerShellConfig::new(structural.clone(), identity)
             .with_runtime_schema_bootstrap()
             .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             ));
         let mut shell = InMemoryServerShell::start_with_storage(
             config.clone(),

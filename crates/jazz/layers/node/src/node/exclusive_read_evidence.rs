@@ -1,5 +1,5 @@
 //! `jazz.exclusive-read-evidence.v1`: an exclusive transaction's snapshot and
-//! read sets, kept in `jazz_transactions` slots 5-8 while its fate is pending.
+//! read sets, kept in `jazz_transactions` slots 5-8 across settlement.
 //!
 //! Outbox and relay recovery rebuild commit units from storage. Without the
 //! evidence, a unit that was in flight at a restart would reach the authority
@@ -20,6 +20,51 @@ use crate::tx::{AbsentRead, PredicateRead, RowRead, Snapshot, Transaction, TxId,
 use groove::records::{OwnedRecord, Record, RecordDescriptor, Value, ValueType};
 
 const FORMAT_V1: u8 = 1;
+
+pub(super) fn is_absent(tx: &Transaction) -> bool {
+    tx.base_snapshot.is_none()
+        && tx.row_read_set.is_none()
+        && tx.absent_read_set.is_none()
+        && tx.predicate_read_set.is_none()
+}
+
+/// New ingress may redact an entire proof, but may not supply a partial one.
+/// Legacy partial slots remain decodable and fail closed at revalidation.
+pub(super) fn validate_presence(tx: &Transaction) -> Result<(), Error> {
+    if is_absent(tx) || tx.kind == TxKind::Exclusive && tx.has_complete_exclusive_evidence() {
+        Ok(())
+    } else {
+        Err(invalid("incomplete exclusive read evidence"))
+    }
+}
+
+/// Redaction can omit the entire proof, never replace the captured observations.
+pub(super) fn compatible(existing: &Transaction, incoming: &Transaction) -> bool {
+    if validate_presence(existing).is_err() || validate_presence(incoming).is_err() {
+        return false;
+    }
+    if is_absent(existing) || is_absent(incoming) {
+        return true;
+    }
+    if existing.base_snapshot != incoming.base_snapshot
+        || existing.row_read_set != incoming.row_read_set
+        || existing.absent_read_set != incoming.absent_read_set
+    {
+        return false;
+    }
+    // Use the existing canonical durable representation, not floating-point
+    // PartialEq: observations distinguish signed zero and preserve NaN bits.
+    let (Some(left), Some(right)) = (
+        existing.predicate_read_set.as_deref(),
+        incoming.predicate_read_set.as_deref(),
+    ) else {
+        return false;
+    };
+    match (encode_predicate_reads(left), encode_predicate_reads(right)) {
+        (Ok(Some(left)), Ok(Some(right))) => left == right,
+        _ => false,
+    }
+}
 
 fn dot_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([("time", ValueType::U64), ("node", ValueType::Uuid)])
@@ -196,13 +241,12 @@ fn encode_predicate_reads(reads: &[PredicateRead]) -> Result<Option<Vec<u8>>, Er
 
 /// Storage values for slots 5-8 of a `jazz_transactions` row.
 ///
-/// Evidence is kept only for an exclusive transaction whose fate is still
-/// pending: that is the only time a stored unit may be retransmitted for
-/// validation. It is all-or-nothing; any component that v1 cannot represent
-/// leaves every slot null, which fails closed exactly as before this format.
-pub(super) fn evidence_slot_values(tx: &Transaction, pending: bool) -> Result<[Value; 4], Error> {
+/// Evidence remains immutable across pending and terminal fates so reopening
+/// cannot replace a captured proof with current-state observations. It is
+/// all-or-nothing when a component cannot round-trip through v1.
+pub(super) fn evidence_slot_values(tx: &Transaction) -> Result<[Value; 4], Error> {
     let none = || [slot(None), slot(None), slot(None), slot(None)];
-    if !pending || tx.kind != TxKind::Exclusive {
+    if tx.kind != TxKind::Exclusive {
         return Ok(none());
     }
     let Some(snapshot) = &tx.base_snapshot else {
@@ -241,7 +285,11 @@ pub(super) fn evidence_slot_values(tx: &Transaction, pending: bool) -> Result<[V
         decoded.base_snapshot.as_ref() == Some(snapshot)
             && decoded.row_read_set == tx.row_read_set
             && decoded.absent_read_set == tx.absent_read_set
-            && decoded.predicate_read_set == tx.predicate_read_set
+            && match decoded.predicate_read_set.as_deref() {
+                Some(reads) => encode_predicate_reads(reads)
+                    .is_ok_and(|bytes| bytes == predicate),
+                None => predicate.is_none(),
+            }
     });
     if !round_trips {
         return Ok(none());
@@ -501,7 +549,7 @@ mod tests {
     }
 
     fn encoded(tx: &Transaction) -> [Option<Vec<u8>>; 4] {
-        evidence_slot_values(tx, true)
+        evidence_slot_values(tx)
             .unwrap()
             .each_ref()
             .map(slot_bytes)
@@ -548,20 +596,75 @@ mod tests {
         assert_eq!(decoded.predicate_read_set, tx.predicate_read_set);
     }
 
-    /// Evidence exists only for a pending exclusive transaction, and is
-    /// all-or-nothing: a predicate read v1 cannot represent stores nothing,
-    /// which fails closed exactly like a row without evidence.
+    /// Admission must preserve current-target epoch-one pending roots, whose
+    /// transaction rows already contain the pinned modern four-slot proof.
     #[test]
-    fn exclusive_read_evidence_is_written_only_when_replayable() {
+    fn epoch_one_transaction_admits_modern_exclusive_evidence_and_rejects_corruption() {
+        use crate::ids::NodeAlias;
+        use crate::tx::{DurabilityTier, Fate};
+        use super::super::codec::{
+            TransactionRowRecord, transaction_values, validate_epoch_one_transaction_record,
+        };
+
+        let mut tx = fixture();
+        tx.made_by = AuthorSubject::system_at(tx.tx_id.node);
+        let values = transaction_values(
+            NodeAlias(1),
+            &tx,
+            Fate::Pending,
+            None,
+            DurabilityTier::Local,
+            Value::Nullable(None),
+        )
+        .unwrap();
+        let schema = crate::schema::JazzSchema::empty().lower_to_groove();
+        let descriptor = schema.table("jazz_transactions").unwrap().record_schema();
+        let validate = |values: &[Value]| {
+            let bytes = descriptor.create(values).unwrap();
+            validate_epoch_one_transaction_record(
+                groove::records::BorrowedRecord::new(&bytes, &descriptor),
+            )
+        };
+        let slots = values[5..9]
+            .iter()
+            .map(|value| hex(&slot_bytes(value).unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            [
+                BASE_SNAPSHOT_V1_HEX,
+                ROW_READS_V1_HEX,
+                ABSENT_READS_V1_HEX,
+                PREDICATE_READS_V1_HEX,
+            ]
+        );
+        validate(&values).expect("canonical modern exclusive proof is admitted without conversion");
+
+        let mut legacy = values.clone();
+        legacy[5..9].fill(Value::Nullable(None));
+        validate(&legacy).expect("historical all-null evidence remains admissible");
+
+        for index in 5..9 {
+            let mut partial = values.clone();
+            partial[index] = Value::Nullable(None);
+            assert!(matches!(validate(&partial), Err(Error::InvalidStoredValue(_))));
+
+            let mut malformed = values.clone();
+            malformed[index] =
+                Value::Nullable(Some(Box::new(Value::Bytes(vec![0]))));
+            assert!(matches!(validate(&malformed), Err(Error::InvalidStoredValue(_))));
+        }
+        let mut wrong_kind = values;
+        wrong_kind[TransactionRowRecord::FIELD_KIND_IDX] = Value::String("mergeable".to_owned());
+        assert!(matches!(validate(&wrong_kind), Err(Error::InvalidStoredValue(_))));
+    }
+
+    /// A predicate read v1 cannot represent stores nothing, which fails closed
+    /// exactly like a legacy row without evidence.
+    #[test]
+    fn exclusive_read_evidence_is_written_only_when_representable() {
         let tx = fixture();
         let none = [None, None, None, None];
-        assert_eq!(
-            evidence_slot_values(&tx, false)
-                .unwrap()
-                .each_ref()
-                .map(slot_bytes),
-            none
-        );
         let mut mergeable = tx.clone();
         mergeable.kind = TxKind::Mergeable;
         assert_eq!(encoded(&mergeable), none);

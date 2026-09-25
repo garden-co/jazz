@@ -158,6 +158,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         node: &mut node,
         read_view: &read_view,
         inline_sources: BTreeMap::new(),
+        created_sources: BTreeMap::new(),
         covered_input_sources: BTreeMap::new(),
         covered_input_descriptors: BTreeMap::new(),
         access_paths: BTreeMap::new(),

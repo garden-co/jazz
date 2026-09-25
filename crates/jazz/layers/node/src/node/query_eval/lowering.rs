@@ -829,6 +829,7 @@ where
             access_paths,
             covered_input_sources,
             covered_input_descriptors,
+            BTreeMap::new(),
             true,
             None,
             TransactionWriteOverlay::default(),
@@ -852,6 +853,7 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             true,
             None,
             transaction_overlay,
@@ -869,6 +871,7 @@ where
             request,
             BTreeMap::new(),
             access_paths,
+            BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             false,
@@ -892,9 +895,34 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             true,
             Some(bounded_deletion_register),
             TransactionWriteOverlay::default(),
+        )
+        .await
+    }
+
+    /// Private authorization-only extension. Unlike an inline protected root,
+    /// these rows augment accepted storage at individually named occurrences.
+    pub(super) async fn compile_query_program_request_with_authorized_created_sources(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        created_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        transaction_overlay: TransactionWriteOverlay,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            inline_sources,
+            access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            created_sources,
+            true,
+            None,
+            transaction_overlay,
         )
         .await
     }
@@ -911,6 +939,7 @@ where
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
+        created_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         count_access_path_metrics: bool,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
         transaction_overlay: TransactionWriteOverlay,
@@ -979,6 +1008,7 @@ where
             node: self,
             read_view: &read_view,
             inline_sources,
+            created_sources,
             covered_input_sources,
             covered_input_descriptors,
             access_paths,
@@ -1054,6 +1084,7 @@ where
                 node: self,
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),
+                created_sources: BTreeMap::new(),
                 covered_input_sources: BTreeMap::new(),
                 covered_input_descriptors: BTreeMap::new(),
                 access_paths: BTreeMap::new(),

@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
+use groove::storage::BoxedStorage;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, PreparedQuery, Propagation, ReadOpts,
     SeededRowIdSource, SubscriptionEvent, block_on,
@@ -34,7 +35,6 @@ use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
 
@@ -231,7 +231,7 @@ struct RungReceipt {
 /// constructs this once, outside Divan's timed closure.
 struct HydrationFixture {
     _temp: tempfile::TempDir,
-    db: Db,
+    db: Db<BoxedStorage>,
     prepared: PreparedQuery,
     expected: Vec<RowUuid>,
     target_rows: usize,
@@ -547,14 +547,15 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> (Db, u128, u128) {
+fn open_db(path: &Path, schema: JazzSchema) -> (Db<BoxedStorage>, u128, u128) {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     let storage_started = Instant::now();
-    let storage = RocksDbStorage::open(path, &refs).expect("open selective-hydration RocksDB");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        column_families,
+    ))
+    .expect("open selective-hydration RocksDB");
     let storage_open_us = storage_started.elapsed().as_micros();
     let db_started = Instant::now();
     let db = block_on(Db::open_history_complete(
@@ -573,7 +574,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db, u128, u128) {
     (db, storage_open_us, db_open_us)
 }
 
-fn seed_rows(db: &Db, config: ConfigRef, table_rows: usize) {
+fn seed_rows(db: &Db<BoxedStorage>, config: ConfigRef, table_rows: usize) {
     for batch_start in (0..table_rows).step_by(config.batch_rows) {
         let batch_end = table_rows.min(batch_start + config.batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open selective-hydration seed transaction");

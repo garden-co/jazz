@@ -266,11 +266,16 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
     block_on(async {
         let old = schema(false);
         let families = old.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let directory = tempfile::tempdir().unwrap();
         let db = Db::open(DbConfig::new(
             old.clone(),
-            RocksDbStorage::open(directory.path(), &refs).unwrap(),
+            crate::storage_codec_profile::open_node_storage(
+                &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                directory.path().to_path_buf(),
+                families.clone(),
+            )
+            .await
+            .unwrap(),
             identity(),
         ))
         .await
@@ -280,7 +285,13 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
         drop(db);
         let db = Db::open(DbConfig::new(
             old.clone(),
-            RocksDbStorage::open(directory.path(), &refs).unwrap(),
+            crate::storage_codec_profile::open_node_storage(
+                &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                directory.path().to_path_buf(),
+                families,
+            )
+            .await
+            .unwrap(),
             identity(),
         ))
         .await

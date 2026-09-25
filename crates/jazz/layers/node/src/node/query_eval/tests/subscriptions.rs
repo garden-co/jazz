@@ -334,7 +334,7 @@ fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
         )]))
         .unwrap();
     let view = BindingViewKey::new(shape.shape_id(), binding.binding_id(), Default::default());
-    let window = |node: &NodeState, selected| {
+    let window = |node: &NodeState<BoxedStorage>, selected| {
         let request = node
             .current_query_program_request(
                 &shape,
@@ -381,7 +381,7 @@ fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
 /// execution path, never the trusted-serving path that expects complete
 /// current-table capabilities.
 fn receiver_rows(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
@@ -392,7 +392,7 @@ fn receiver_rows(
 }
 
 fn receiver_rows_in_read_view(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
@@ -408,7 +408,7 @@ fn receiver_rows_in_read_view(
 /// subscription must record that same immutable reader scope; an unscoped
 /// `Subscribe` models neither a direct peer nor a multiplexed relay.
 fn subscribe_query_binding_as_system_with_opts(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -1306,7 +1306,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_global_frontiers(
             subscribe_query_binding_as_system_with_opts(node, &shape, &binding, opts.clone());
         }
 
-        let commit = |node: &mut NodeState, now_ms, deletion| {
+        let commit = |node: &mut NodeState<BoxedStorage>, now_ms, deletion| {
             let mut write =
                 MergeableCommit::new("notes", row(0), now_ms).made_by(AuthorSubject::SYSTEM);
             if let Some(deletion) = deletion {
