@@ -430,7 +430,7 @@ impl RowDescriptor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     /// Row structure definition.
     pub columns: RowDescriptor,
@@ -445,10 +445,11 @@ pub struct TableSchema {
     /// equality while the following column supplies the query's sort order.
     ///
     /// Column order inside one index is significant. The set of indexes is
-    /// not: the builder and deserializer keep it, and serialization always
-    /// writes it, in canonical order (lexicographic over the columns' UTF-8
-    /// bytes), the order [`SchemaHash`] hashes, so neither schema equality nor
-    /// a schema's content-addressed catalogue bytes depend on declaration order.
+    /// not: the builder and deserializer keep it in canonical order
+    /// (lexicographic over the columns' UTF-8 bytes), and equality,
+    /// serialization, [`SchemaHash`], and schema compilation all apply that
+    /// order themselves, so a hand-built, unsorted `Vec` is equivalent to the
+    /// sorted one everywhere schemas are compared, hashed, or encoded.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -462,6 +463,17 @@ pub struct TableSchema {
     /// Ordinary immutable columns that form this table's branch key.
     #[serde(default, rename = "branchBy", skip_serializing_if = "Vec::is_empty")]
     pub branch_by: Vec<ColumnName>,
+}
+
+impl PartialEq for TableSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.indexed_columns == other.indexed_columns
+            && canonical_composite_index_order(&self.composite_indexes)
+                == canonical_composite_index_order(&other.composite_indexes)
+            && self.policies == other.policies
+            && self.branch_by == other.branch_by
+    }
 }
 
 /// Canonical order of a table's composite indexes: lexicographic over each
