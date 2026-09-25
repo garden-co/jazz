@@ -1528,6 +1528,13 @@ pub struct CommitUnitIngestContext {
     pub(crate) admitted_write_authorization: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-version write-policy evaluations, for work-accounting tests.
+    pub(crate) static WRITE_POLICY_VERSION_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Trust mode for an inbound commit-unit upload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitUnitTrust {
