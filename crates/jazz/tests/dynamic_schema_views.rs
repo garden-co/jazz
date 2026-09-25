@@ -80,6 +80,7 @@ fn metadata_schema(
             columns: RowDescriptor::new(vec![column]),
             indexed_columns: indexed_columns
                 .map(|columns| columns.into_iter().map(Into::into).collect()),
+            composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
         },

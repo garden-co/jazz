@@ -2526,6 +2526,15 @@ fn direct_schema_view_lens(
                 ),
             ));
         }
+        if source_table.composite_indexes != target_table.composite_indexes {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes composite indexes on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
         let mut ops = Vec::new();
         for target_column in &target_table.columns {
             match source_table
