@@ -3834,6 +3834,72 @@ fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
     assert_eq!(ask(row(0xef), rename()), PermissionAdvice::Denied);
 }
 
+/// With an allow-all update policy, row existence alone decides update
+/// advice: a live row is Allowed, while a row that never existed or was
+/// deleted is Denied. Guards the #3386 point lookup against treating an
+/// absent or deleted row as present.
+#[test]
+fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_policy() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let live = server
+        .insert("todos", cells("live", false, author))
+        .unwrap()
+        .row_uuid();
+    let deleted = server
+        .insert("todos", cells("deleted", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa5, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa5; 16]),
+        1,
+        NodeUuid::from_bytes([0x62; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let ask = |row| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch: BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+
+    assert_eq!(ask(live), PermissionAdvice::Allowed);
+    assert_eq!(ask(deleted), PermissionAdvice::Allowed, "live before deletion");
+    assert_eq!(ask(row(0xee)), PermissionAdvice::Denied, "never existed");
+
+    let _ = client.delete("todos", deleted, Default::default()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(ask(deleted), PermissionAdvice::Denied, "deleted");
+    assert_eq!(ask(live), PermissionAdvice::Allowed, "unrelated row stays live");
+}
+
 #[test]
 #[ignore = "#3386: timing probe, run manually with --ignored"]
 /// Server tick for one Update permission advice against a growing table,
