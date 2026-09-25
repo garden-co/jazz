@@ -1639,6 +1639,10 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_hydrate")
+    )]
     pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
         for row in rows {
             let descriptor = row.record.descriptor().clone();

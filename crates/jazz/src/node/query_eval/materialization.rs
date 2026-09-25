@@ -1064,9 +1064,16 @@ where
         row: &mut CurrentRow,
         schema: &AppRowSchema,
     ) -> Result<(), Error> {
-        row.publication_fields = std::sync::Arc::new(
-            row.record
-                .descriptor()
+        row.publication_fields = Self::app_row_publication_fields(row.record.descriptor(), schema)?;
+        Ok(())
+    }
+
+    pub(super) fn app_row_publication_fields(
+        descriptor: &records::RecordDescriptor,
+        schema: &AppRowSchema,
+    ) -> Result<std::sync::Arc<Vec<CurrentRowPublicationField>>, Error> {
+        Ok(std::sync::Arc::new(
+            descriptor
                 .fields()
                 .iter()
                 .map(|field| {
@@ -1083,8 +1090,7 @@ where
                         }))
                 })
                 .collect::<Result<Vec<_>, Error>>()?,
-        );
-        Ok(())
+        ))
     }
 
     pub(in crate::node) fn bind_current_row_columns_in_schema(
@@ -1125,6 +1131,10 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_finish")
+    )]
     pub(super) fn finish_engine_query_rows_in_schema(
         &self,
         query: &crate::query::Query,
@@ -1303,6 +1313,10 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_projection")
+    )]
     pub(super) fn apply_projection_in_schema(
         &self,
         query: &crate::query::Query,

@@ -11,7 +11,7 @@ use tracing::{
     span::{Attributes, Id, Record},
 };
 
-const PHASES: [&str; 28] = [
+const PHASES: [&str; 37] = [
     "core",
     "relay",
     "client",
@@ -40,6 +40,15 @@ const PHASES: [&str; 28] = [
     "merge_heads_rebuild",
     "terminal_net",
     "terminal_apply",
+    "read_execute",
+    "read_materialize",
+    "read_normalize",
+    "read_finish",
+    "read_projection",
+    "read_hydrate",
+    "read_install",
+    "read_progress",
+    "read_release",
 ];
 const ROLES: [&str; 4] = ["outside_node_ticks", "core", "relay", "client"];
 #[derive(Clone, Copy, Default)]
