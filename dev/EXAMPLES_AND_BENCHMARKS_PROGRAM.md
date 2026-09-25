@@ -95,7 +95,7 @@ keep independent microbenchmarks and core canaries.
 | `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent   | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
 | `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent       | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
-`moon-lander-react`, server/runtime examples, and framework/auth starters remain
+Server/runtime examples and framework/auth starters remain
 valuable focused references. They are out of catalogue scope unless a later
 scenario needs their specific runtime surface.
 

@@ -896,3 +896,66 @@ fn ordinary_created_at_column_is_accepted() {
             .any(|column| column.name == "createdAt")
     );
 }
+
+// Composite indexes are part of schema identity. Like the corpora above, the
+// observable contract is the exact cross-runtime hash (TypeScript consumes the
+// same fixture), not database behavior, so this stays beside the unit tests.
+#[test]
+fn schema_hash_matches_composite_index_cross_runtime_fixture() {
+    #[derive(serde::Deserialize)]
+    struct CompositeIndexHashFixture {
+        #[serde(rename = "compositeIndexCases")]
+        cases: Vec<CompositeIndexHashCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CompositeIndexHashCase {
+        name: String,
+        columns: Vec<String>,
+        #[serde(rename = "compositeIndexes")]
+        composite_indexes: Vec<Vec<String>>,
+        hash: String,
+    }
+
+    let fixture: CompositeIndexHashFixture = serde_json::from_str(include_str!(
+        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+    ))
+    .expect("composite-index hash fixture is valid JSON");
+
+    let mut hashes = std::collections::BTreeMap::new();
+    for case in &fixture.cases {
+        let mut table = TableSchema::builder("values");
+        for column in &case.columns {
+            table = table.column(column.as_str(), ColumnType::Text);
+        }
+        for columns in &case.composite_indexes {
+            table = table.composite_index(columns.iter().map(String::as_str));
+        }
+        let schema = SchemaBuilder::new().table(table).build();
+        let hash = SchemaHash::compute(&schema).to_hex();
+        assert_eq!(hash, case.hash, "fixture hash for {}", case.name);
+        hashes.insert(case.name.as_str(), hash);
+    }
+
+    let plain = SchemaHash::compute(
+        &SchemaBuilder::new()
+            .table(
+                TableSchema::builder("values")
+                    .column("owner", ColumnType::Text)
+                    .column("updated", ColumnType::Text),
+            )
+            .build(),
+    )
+    .to_hex();
+    assert_ne!(
+        hashes["composite-one"], plain,
+        "declaring a composite index changes schema identity"
+    );
+    assert_ne!(
+        hashes["composite-one"], hashes["composite-column-order-is-identity"],
+        "column order inside one composite index is significant"
+    );
+    assert_eq!(
+        hashes["composite-two-declared-sorted"], hashes["composite-two-declared-reversed"],
+        "declaration order of distinct composite indexes is not identity"
+    );
+}

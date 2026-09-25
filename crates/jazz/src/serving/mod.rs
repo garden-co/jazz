@@ -472,6 +472,13 @@ impl ShellDb {
         }
     }
 
+    fn declare_upload_root(&self) {
+        match self {
+            Self::Memory(db) => db.declare_upload_root(),
+            Self::Durable(db) => db.declare_upload_root(),
+        }
+    }
+
     fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         match self {
             Self::Memory(db) => db.set_large_value_staging_policy(policy),
@@ -862,6 +869,8 @@ impl InMemoryServerShell {
         };
         if role == NodeRole::Core {
             db.enable_authoritative_scalar_exit_refresh();
+            // A Core shell is the root until `connect_upstream` says otherwise.
+            db.declare_upload_root();
         }
         db.set_large_value_staging_policy(large_value_staging_policy);
 

@@ -531,7 +531,7 @@ impl records::RecordField for CatalogueRecordKind {
 // durable bytes depend on Rust field layout and accept trailing data in some
 // configurations.  Every payload below starts with its own permanent format
 // version and consumes exactly its input.
-const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+use crate::protocol::{CATALOGUE_SCHEMA_V1, CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES};
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
@@ -1047,16 +1047,21 @@ fn require_strictly_increasing(
 }
 
 pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
-    crate::protocol::canonical_catalogue_schema_v1_bytes(schema)
+    crate::protocol::canonical_catalogue_schema_bytes(schema)
         .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))
 }
 
 pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
-    let mut cursor = CataloguePayloadCursor::new(
-        payload,
-        CATALOGUE_SCHEMA_VERSION,
-        "invalid catalogue schema payload",
-    )?;
+    let version = match payload.first().copied() {
+        Some(version @ (CATALOGUE_SCHEMA_V1 | CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES)) => version,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "invalid catalogue schema payload",
+            ));
+        }
+    };
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, version, "invalid catalogue schema payload")?;
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
@@ -1072,6 +1077,11 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     if schema.version_id() != id {
         return Err(Error::InvalidStoredValue(
             "catalogue schema content id mismatch",
+        ));
+    }
+    if crate::protocol::catalogue_schema_payload_version(&schema) != version {
+        return Err(Error::InvalidStoredValue(
+            "catalogue schema payload version does not match its composite indexes",
         ));
     }
     Ok(SchemaVersion { id, schema })
@@ -1831,7 +1841,7 @@ mod catalogue_payload_tests {
     fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
         // Internal format receipt: publication content addressing consumes this
         // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
@@ -1840,6 +1850,65 @@ mod catalogue_payload_tests {
             "0117e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
         );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
+    }
+
+    fn composite_index_schema(declared: &[[&str; 2]]) -> SchemaVersion {
+        use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        let mut table = TableSchema::builder("docs")
+            .column("owner", ColumnType::Text)
+            .column("updated", ColumnType::Text);
+        for columns in declared {
+            table = table.composite_index(*columns);
+        }
+        let public = SchemaBuilder::new().table(table).build();
+        SchemaVersion::new(JazzSchema::new(&public).expect("composite schema compiles"))
+    }
+
+    #[test]
+    fn catalogue_schema_payload_uses_v2_envelope_for_composite_indexes() {
+        let schema = composite_index_schema(&[["updated", "owner"], ["owner", "updated"]]);
+        let encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES);
+        assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        // Internal format receipt: the CATS v2 envelope is byte-identical to
+        // v1 apart from its version, and the embedded public schema lists
+        // composite indexes in canonical (UTF-8 lexicographic) order
+        // regardless of declaration order. Bytes 1..17 are the schema id,
+        // which includes composite indexes under the
+        // `jazz-schema-v2-composite-indexes` id domain.
+        assert_eq!(
+            hex::encode(&encoded),
+            "02d3b863fd713d56779925512650209402e10000007b227461626c6573223a7b22646f6373223a7b22636f6c756d6e73223a5b7b226e616d65223a226f776e6572222c22636f6c756d6e5f74797065223a7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d2c7b226e616d65223a2275706461746564222c22636f6c756d6e5f74797065223a7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d5d2c22636f6d706f736974655f696e6465786573223a5b5b226f776e6572222c2275706461746564225d2c5b2275706461746564222c226f776e6572225d5d7d7d7d"
+        );
+        assert_eq!(
+            encode_catalogue_schema(&composite_index_schema(&[
+                ["owner", "updated"],
+                ["updated", "owner"],
+            ]))
+            .unwrap(),
+            encoded,
+            "declaration order does not change the canonical payload"
+        );
+        let decoded = decode_catalogue_schema(&encoded).unwrap();
+        assert_eq!(decoded, schema);
+        assert_eq!(encode_catalogue_schema(&decoded).unwrap(), encoded);
+
+        // A v1 label on a composite schema is not an alias: a reader that
+        // predates composite indexes must never be handed this schema as v1.
+        let mut mislabelled = encoded.clone();
+        mislabelled[0] = CATALOGUE_SCHEMA_V1;
+        assert!(decode_catalogue_schema(&mislabelled).is_err());
+    }
+
+    #[test]
+    fn catalogue_schema_payload_rejects_v2_label_without_composite_indexes() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let mut encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
+        encoded[0] = CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES;
+        assert!(decode_catalogue_schema(&encoded).is_err());
+        encoded[0] = 3;
+        assert!(decode_catalogue_schema(&encoded).is_err());
     }
 
     #[test]
@@ -2724,7 +2793,7 @@ pub(super) fn current_version_index(
     versions: &[VersionRow],
     candidate_indices: &[usize],
     layer: VersionLayer,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<usize> {
     match layer {
         VersionLayer::Content => {
@@ -2762,7 +2831,7 @@ pub(super) fn version_wins_over_open_winner(
 pub(super) fn content_head_indices(
     versions: &[VersionRow],
     candidate_indices: &[usize],
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Vec<usize> {
     let txs = candidate_indices
         .iter()
@@ -2811,11 +2880,10 @@ pub(super) fn content_head_indices(
 
 pub(super) fn version_tx_id_from_aliases(
     version: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<TxId> {
     node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == version.tx_node_alias()).then_some(*node))
+        .node_for_alias(version.tx_node_alias())
         .map(|node| TxId::new(version.tx_time(), node))
 }
 

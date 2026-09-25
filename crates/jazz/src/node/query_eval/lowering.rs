@@ -806,6 +806,7 @@ where
             covered_input_sources,
             covered_input_descriptors,
             true,
+            None,
         )
         .await
     }
@@ -814,6 +815,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
@@ -822,6 +824,27 @@ where
             BTreeMap::new(),
             BTreeMap::new(),
             false,
+            bounded_deletion_register,
+        )
+        .await
+    }
+
+    pub(super) async fn compile_query_program_request_with_bounded_deletion_register(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: (SourceId, GraphBuilder),
+    ) -> Result<QueryProgram, Error> {
+        // The inline register is bound to this snapshot. A cached program
+        // would retain stale deletion state after a later write.
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            BTreeMap::new(),
+            access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+            Some(bounded_deletion_register),
         )
         .await
     }
@@ -838,6 +861,7 @@ where
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         #[cfg(any(test, feature = "testing"))]
         {
@@ -880,6 +904,7 @@ where
             request,
             compilation.sources(),
             &access_paths,
+            bounded_deletion_register.as_ref(),
             &policy_replacement_lease,
         ))
         .await?;
@@ -893,6 +918,7 @@ where
             covered_input_sources,
             covered_input_descriptors,
             access_paths,
+            bounded_deletion_register,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
         };
@@ -938,6 +964,7 @@ where
         request: &QueryProgramRequest,
         source_requests: &[SourceRequest],
         outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<&(SourceId, GraphBuilder)>,
         lease: &std::rc::Rc<()>,
     ) -> Result<PolicyDependencyFootprint, Error> {
         // A deletion terminal carries the raw register but must be gated by
@@ -964,6 +991,7 @@ where
                 covered_input_sources: BTreeMap::new(),
                 covered_input_descriptors: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
+                bounded_deletion_register: None,
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
             };
@@ -984,7 +1012,10 @@ where
                         // unrelated alias of the same table is not restricted
                         // by this query occurrence's equality.
                         let path = outer_access_paths.get(&source.source).cloned();
-                        dependencies.push((dependency, path));
+                        let register = bounded_deletion_register
+                            .filter(|(source_id, _)| *source_id == source.source)
+                            .map(|(_, graph)| graph.clone());
+                        dependencies.push((dependency, path, register));
                     }
                     None => {
                         // Unsupported policy shapes must not silently become
@@ -999,17 +1030,20 @@ where
             (dependencies, footprint)
         };
         let mut grouped = BTreeMap::new();
-        for (dependency, path) in dependencies {
+        for (dependency, path, register) in dependencies {
             let key = policy_authorization_graph_cache_key(&dependency);
-            let entry = grouped.entry(key).or_insert((dependency, path.clone()));
+            let entry = grouped
+                .entry(key)
+                .or_insert((dependency, path.clone(), register.clone()));
             // The same reusable proof may serve more than one occurrence.
             // Specialize only when every consumer has the same candidate
             // domain; an unrestricted consumer forces the ordinary proof.
-            if entry.1 != path {
+            if entry.1 != path || entry.2 != register {
                 entry.1 = None;
+                entry.2 = None;
             }
         }
-        for (cache_key, (dependency, path)) in grouped {
+        for (cache_key, (dependency, path, register)) in grouped {
             let candidate_paths = match &dependency.policy {
                 PolicyContext::AuthorizationSubplan {
                     protected_source, ..
@@ -1022,9 +1056,20 @@ where
                 // scoped replacement is restored after compilation (including
                 // cancellation), leaving reusable policy caches neutral.
                 self.begin_scoped_policy_authorization_graph_replacement(&cache_key, lease);
-                match Box::pin(
-                    self.point_policy_authorization_row_id_graph(dependency, access_paths),
-                )
+                let bounded_register = match (&dependency.policy, register) {
+                    (
+                        PolicyContext::AuthorizationSubplan {
+                            protected_source, ..
+                        },
+                        Some(graph),
+                    ) => Some((protected_source.clone(), graph)),
+                    _ => None,
+                };
+                match Box::pin(self.point_policy_authorization_row_id_graph(
+                    dependency,
+                    access_paths,
+                    bounded_register,
+                ))
                 .await
                 {
                     Ok(graph) => {

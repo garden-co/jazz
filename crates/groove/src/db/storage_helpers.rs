@@ -781,7 +781,9 @@ pub(super) fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestina
     } else if table.starts_with("jazz_")
         && table.ends_with("_global_current")
         && !table.contains("_register_global_current")
-        && (index.starts_with("by_app_") || index.starts_with("by_physical_app_"))
+        && (index.starts_with("by_app_")
+            || index.starts_with("by_physical_app_")
+            || index.starts_with("by_physical_composite_"))
     {
         StorageWriteDestination::GlobalCurrentIndexes
     } else if table.starts_with("jazz_") && table.ends_with("_history") && index == "by_tx" {
