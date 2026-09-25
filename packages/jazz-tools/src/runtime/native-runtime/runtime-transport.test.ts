@@ -451,6 +451,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             insert: () => write,
+            all: () => new Uint8Array([0]),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),
@@ -486,11 +487,14 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       serverDown = true;
       sockets[0]!.emitServerClose();
+      const readDuringOutage = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
+      const readRejected = expect(readDuringOutage).rejects.toThrow("websocket closed");
       await vi.advanceTimersByTimeAsync(60_000);
 
       // The outage is reported once so Global waits do not hang, but the
       // client keeps retrying well past the former 10-attempt (~7.5 s) cutoff.
       await rejected;
+      await readRejected;
       expect(terminal).toHaveBeenCalledTimes(1);
       expect(sockets.length).toBeGreaterThan(11);
       expect(runtime.remoteLinkState()).toBe("unavailable");
@@ -504,6 +508,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(sockets.length).toBeGreaterThan(attemptsBeforeRecovery);
       await runtime.waitForUpstreamServerConnection();
       expect(runtime.remoteLinkState()).toBe("connected");
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+      ).resolves.toEqual([]);
 
       // A Global wait armed after recovery settles normally.
       const afterRecovery = runtime.waitForTransaction(await insertTodo(), "global");

@@ -2962,6 +2962,8 @@ export class NativeRuntimeAdapter implements Runtime {
     // await the in-flight connection instead of falling through to a local
     // materialization merely because the transport has not been installed yet.
     while (!this.hasUpstream()) {
+      // A published outage rejects the read even while reconnects continue.
+      this.throwServerTransportErrorForTier("global");
       const pendingConnection = this.serverCarrierPromise;
       if (!pendingConnection) return;
       const attempt = this.serverConnectionAttempt;
@@ -2969,10 +2971,20 @@ export class NativeRuntimeAdapter implements Runtime {
         () => null,
         (error: unknown) => (error instanceof Error ? error : new Error(errorMessage(error))),
       );
-      const terminal =
-        attempt?.carrier === this.serverCarrier
-          ? await Promise.race([connectionOutcome, attempt.terminal])
-          : await connectionOutcome;
+      const outage = this.waitForServerTransportError("global");
+      const outageOutcome = outage?.promise.catch((error: unknown) =>
+        error instanceof Error ? error : new Error(errorMessage(error)),
+      );
+      let terminal: Error | null;
+      try {
+        terminal = await Promise.race([
+          connectionOutcome,
+          ...(attempt?.carrier === this.serverCarrier ? [attempt.terminal] : []),
+          ...(outageOutcome ? [outageOutcome] : []),
+        ]);
+      } finally {
+        outage?.cancel();
+      }
       if (this.closed) return;
       const activeIntent = this.serverReplacementIntent;
       const activeEndpoint = activeIntent?.url ?? this.serverEndpointUrl;
