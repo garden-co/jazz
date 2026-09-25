@@ -157,7 +157,9 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         | AuthorizationScopeSubscribe { .. }
         | AuthorizationScopeIntent { .. }
         | CurrentRowsRequest(_)
-        | CurrentRowsCancel { .. } => (ChannelClass::Requests, false),
+        | CurrentRowsCancel { .. }
+        | RemoteReadRequest(_)
+        | RemoteReadCancel { .. } => (ChannelClass::Requests, false),
         ChunkUploadStart(_) | ChunkUploadNodes(_) | ChunkUploadResult(_) => {
             (ChannelClass::LargeValue, false)
         }

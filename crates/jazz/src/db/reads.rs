@@ -301,6 +301,8 @@ where
             },
             |result| match result {
                 SerializedReadResult::Rows(rows) => rows.is_empty(),
+                // `encode_rows` serializes an empty batch vector as one zero byte.
+                SerializedReadResult::EncodedRows(bytes) => bytes.as_slice() == [0],
                 SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
             },
         ))
@@ -346,10 +348,58 @@ where
             ));
         }
         let prepared = self.prepare_query_async(&decoded).await?;
+        let unscoped = request_scope.is_none();
         let prepared = match request_scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
+        // A bounded Global first page can be served directly by the admitted
+        // authority. An immediate read only uses this route while it has no
+        // local write to compose; unavailable/old peers use ordinary coverage.
+        if require_coverage
+            && open_tx.is_none()
+            && unscoped
+            && author.is_none()
+            && opts.tier == DurabilityTier::Global
+            && opts.propagation == Propagation::Full
+            && !opts.include_deleted
+            && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
+            && matches!(decoded.limit, Some(1..=1000))
+            && !is_relation
+            && decoded.array_subqueries.is_empty()
+            && (opts.local_updates == LocalUpdates::Deferred
+                || !self.node.has_local_updates_for_remote_read().await)
+        {
+            let claims_revision = self
+                .node
+                .session_claim_revision_for_remote_read(self.identity.author);
+            let request = self.node.request_remote_read(
+                query.to_vec(),
+                prepared.shape().schema_version(),
+                self.identity.author,
+            );
+            let mut request = std::pin::pin!(request);
+            let result = std::future::poll_fn(|cx| {
+                if coverage_expired() {
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "Timed out waiting for remote read result",
+                    )));
+                }
+                std::future::Future::poll(request.as_mut(), cx).map(Ok)
+            })
+            .await?;
+            if let Some(rows) = result
+                && self
+                    .node
+                    .session_claim_revision_for_remote_read(self.identity.author)
+                    == claims_revision
+                && (opts.local_updates == LocalUpdates::Deferred
+                    || !self.node.has_local_updates_for_remote_read().await)
+            {
+                return Ok(SerializedReadResult::EncodedRows(rows));
+            }
+        }
         // Read the maintained result itself, not just its coverage signal.
         // Dropping the subscription and re-evaluating below would retire its
         // exact request-scoped inputs before the one-shot consumes them.

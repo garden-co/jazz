@@ -5947,6 +5947,7 @@ impl RelayWorker {
                     .map_err(|error| {
                         RelayError::ForegroundCommand(format!("encode row payload: {error}"))
                     })?,
+                SerializedReadResult::EncodedRows(bytes) => bytes,
                 SerializedReadResult::Relation(snapshot) => {
                     jazz::binding_codec::encode_relation_snapshot(&snapshot).map_err(|error| {
                         RelayError::ForegroundCommand(format!("encode relation snapshot: {error}"))

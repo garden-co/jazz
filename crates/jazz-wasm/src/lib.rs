@@ -1843,6 +1843,7 @@ impl WasmDb {
                 .map_err(to_js_error)?;
             match result {
                 SerializedReadResult::Rows(rows) => encode_rows(&rows),
+                SerializedReadResult::EncodedRows(bytes) => Ok(bytes),
                 SerializedReadResult::Relation(snapshot) => encode_relation_snapshot(&snapshot),
             }
             .map_err(to_js_error)

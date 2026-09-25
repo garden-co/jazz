@@ -2993,6 +2993,7 @@ impl NapiDb {
                         .map_err(napi_error)?;
                     match result {
                         CoreSerializedReadResult::Rows(rows) => encode_core_rows(&rows),
+                        CoreSerializedReadResult::EncodedRows(bytes) => Ok(bytes),
                         CoreSerializedReadResult::Relation(snapshot) => {
                             encode_core_relation_snapshot(&snapshot)
                         }

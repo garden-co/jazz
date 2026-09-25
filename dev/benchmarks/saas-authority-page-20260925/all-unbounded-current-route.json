@@ -1,0 +1,1 @@
+{"benchmark":"permissioned_resources_client_one_shot","client_tick_us":973946,"connect_ms":0,"core_tick_us":2245708,"deferred_local_updates":false,"queries":39,"query_limit":null,"read_ms":6618,"read_poll_us":672116,"relay_tick_us":2721047,"remote_read":false,"rows":27518,"ticks":3,"topology":"core-device-local-relay-client"}
