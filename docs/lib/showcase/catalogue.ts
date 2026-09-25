@@ -191,8 +191,20 @@ export const heroExamples: HeroExample[] = [
     ],
     video: null,
     plannedVideo: "Walkthrough capture is planned: two bandmates editing one pattern.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "wequencer_open_pattern",
+        label: "Open a pattern",
+        interpret: (s) =>
+          `Opening a 16-track, 64-step pattern (17 live subscriptions, 1,024 pads) until every one has its first result takes ${formatTime(s)}.`,
+      },
+      {
+        benchmark: "wequencer_toggle_pad",
+        label: "Toggle a pad",
+        interpret: (s) =>
+          `Flipping one pad on a live grid, until that track's subscription delivers the change, takes ${formatTime(s)}. Syncing it to bandmates isn't included.`,
+      },
+    ],
   },
   {
     id: "poster-shop",
@@ -211,8 +223,26 @@ export const heroExamples: HeroExample[] = [
     ],
     video: null,
     plannedVideo: "Walkthrough capture is planned: two editors designing one poster.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "poster_shop_open_canvas[4096]",
+        label: "Open a poster",
+        interpret: (s) =>
+          `Opening a 4,096-shape poster, with its shapes, layers, cursors, asset shelf and checkpoints each subscribed live, takes ${formatTime(s)} until all five have their first result.`,
+      },
+      {
+        benchmark: "poster_shop_add_shape[4096]",
+        label: "Draw a shape",
+        interpret: (s) =>
+          `Adding one shape to that live canvas, until the canvas subscription delivers it, takes ${formatTime(s)}. Today this grows with the number of shapes on the canvas (#2086).`,
+      },
+      {
+        benchmark: "poster_shop_move_cursor[4096]",
+        label: "A collaborator's cursor moves",
+        interpret: (s) =>
+          `A cursor update reaches the live cursor subscription in ${formatTime(s)}, without waking the 4,096-shape canvas.`,
+      },
+    ],
   },
   {
     id: "record-player",
@@ -231,8 +261,26 @@ export const heroExamples: HeroExample[] = [
     ],
     video: null,
     plannedVideo: "Walkthrough capture is planned: browsing albums and sharing a playlist.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "record_player_open_coverflow[4096]",
+        label: "Open the library",
+        interpret: (s) =>
+          `Opening CoverFlow (a 20-album shelf plus the focused album's tracks) from a 4,096-track library takes ${formatTime(s)}, without loading any audio.`,
+      },
+      {
+        benchmark: "record_player_open_playlist[4096]",
+        label: "Open a long playlist",
+        interpret: (s) =>
+          `Opening the visible 16 entries of a 4,096-track playlist, in playlist order, takes ${formatTime(s)}.`,
+      },
+      {
+        benchmark: "record_player_add_to_playlist[4096]",
+        label: "Add a track",
+        interpret: (s) =>
+          `Inserting a track into the visible part of that live playlist, until the window delivers it, takes ${formatTime(s)}.`,
+      },
+    ],
   },
   {
     id: "epic-drop",

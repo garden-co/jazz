@@ -238,6 +238,9 @@ const suites: [prefix: string, label: string][] = [
   ["examples/permissioned-resources/", "Permissioned resources"],
   ["examples/band-chat/", "BandChat"],
   ["examples/world-tour/", "World Tour"],
+  ["examples/wequencer/", "Wequencer"],
+  ["examples/poster-shop/", "PosterShop"],
+  ["examples/record-player/", "RecordPlayer"],
 ];
 const otherSuite = "Other benchmarks";
 
