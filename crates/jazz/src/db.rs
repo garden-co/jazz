@@ -77,7 +77,7 @@ use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
-use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
+use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures};
 
 pub(crate) mod channel_endpoint;
 mod routed_messages;
