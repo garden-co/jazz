@@ -10,6 +10,16 @@ pub(crate) struct RowSetOutputRequest {
     pub(crate) facts: BTreeSet<ProgramFactKey>,
 }
 
+impl RowSetOutputRequest {
+    /// Root application rows and authorization identities consume the filtered
+    /// root only. Other fact roles retain the complete admitted source closure.
+    pub(super) fn requires_source_membership(&self) -> bool {
+        self.facts
+            .iter()
+            .any(|fact| !matches!(fact, ProgramFactKey::AuthorizedRows))
+    }
+}
+
 /// App-facing row payload request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppRowOutputRequest {

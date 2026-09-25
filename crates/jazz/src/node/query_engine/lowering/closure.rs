@@ -59,6 +59,16 @@ pub(super) fn lower_closure_membership(
             )?;
         }
     }
+    // Application rows still need required-include gates above. Application
+    // and authorization results consume the filtered root, but neither needs
+    // the child-source membership graphs used for retained coverage facts.
+    // Constructing those unused graphs repeats relation lowering.
+    if !request.output.requires_source_membership() {
+        return Ok(ClosureLowering {
+            visible_root,
+            result_members: BTreeMap::new(),
+        });
+    }
     let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
     for path in &request.input.shape.closure_paths {
         for (_, source, graph) in closure_membership_graph_for_path(

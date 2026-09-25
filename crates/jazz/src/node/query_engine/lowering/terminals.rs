@@ -331,219 +331,230 @@ pub(super) fn lowered_terminals(
                 &root_source_route_fields,
             ))
     };
-    // Source facts remain partitioned by every authority route, including
-    // policy claims. `RoutedMultisinkTerminal` consumes those fields while
-    // selecting the exact authority binding; it does not expose them in a
-    // receiver source descriptor. Dropping a policy route here instead makes
-    // independently prepared bindings share one unscoped source closure.
-    let mut covered_source_members = closure
-        .result_members
-        .iter()
-        .map(|(source_id, graph)| {
-            let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "closure source {source_id:?} was not resolved"
-                )))
-            })?;
-            Ok((
-                source_id.clone(),
-                graph
-                    .clone()
-                    .project_fields(project_source_fields_with_routes(
-                        resolved_source,
-                        &terminal_route_fields_for_source(
-                            source_id,
+    // Keep the routed visible root above for application rows and
+    // authorization identities. Only outputs that consume source membership
+    // need the witness/contributor graphs below.
+    let covered_source_members = if !request.output.requires_source_membership() {
+        BTreeMap::new()
+    } else {
+        // Source facts remain partitioned by every authority route, including
+        // policy claims. `RoutedMultisinkTerminal` consumes those fields while
+        // selecting the exact authority binding; it does not expose them in a
+        // receiver source descriptor. Dropping a policy route here instead makes
+        // independently prepared bindings share one unscoped source closure.
+        let mut covered_source_members = closure
+            .result_members
+            .iter()
+            .map(|(source_id, graph)| {
+                let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(format!(
+                        "closure source {source_id:?} was not resolved"
+                    )))
+                })?;
+                Ok((
+                    source_id.clone(),
+                    graph
+                        .clone()
+                        .project_fields(project_source_fields_with_routes(
                             resolved_source,
-                            plan.root_source(),
-                            &root_route_fields,
-                            &root_source_route_fields,
-                        ),
-                    )),
-            ))
-        })
-        .collect::<CapabilityResult<BTreeMap<_, _>>>()?;
-    covered_source_members
-        .entry(plan.root_source().clone())
-        .and_modify(|existing| {
-            *existing = GraphBuilder::union([existing.clone(), visible_root_with_routes.clone()]);
-        })
-        .or_insert_with(|| visible_root_with_routes.clone());
-    // A flat join has no explicit include path, but every join-side row that
-    // contributes to a public root is still receiver input.  Derive each
-    // contributor from the post-policy visible root—not from its raw table
-    // scan—so the authority publishes the exact residual relation the
-    // receiver will join.  Omitting this made a flat receipt look complete
-    // while containing only its root scan, which cannot reproduce the join.
-    for contribution in &request.input.shape.join_contributions {
-        let resolved_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
-            Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(format!(
-                    "join contribution source {:?} was not resolved",
-                    contribution.source
-                ))],
-                explain: ExplainPlan::default(),
+                            &terminal_route_fields_for_source(
+                                source_id,
+                                resolved_source,
+                                plan.root_source(),
+                                &root_route_fields,
+                                &root_source_route_fields,
+                            ),
+                        )),
+                ))
             })
-        })?;
-        let contribution_route_fields =
-            source_terminal_route_fields(resolved_source, &root_route_fields);
-        let graph = if contribution.id.starts_with("flat_join:") {
-            flat_join_contribution_membership_graph(
-                closure.visible_root.clone(),
-                contribution,
-                resolved_source,
-                &request.input.shape.nodes,
-                resolved_sources,
-                request,
-                &contribution_route_fields,
-            )?
-        } else {
-            let (visible_parent, parent_source) = match &contribution.parent {
-                Some(parent) => (
-                    covered_source_members.get(parent).cloned().ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(
-                            "nested join contribution requires its admitted parent".to_owned(),
-                        ))
-                    })?,
-                    resolved_sources.get(parent).ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(
-                            "nested join parent source was not resolved".to_owned(),
-                        ))
-                    })?,
-                ),
-                None => (closure.visible_root.clone(), source),
+            .collect::<CapabilityResult<BTreeMap<_, _>>>()?;
+        covered_source_members
+            .entry(plan.root_source().clone())
+            .and_modify(|existing| {
+                *existing =
+                    GraphBuilder::union([existing.clone(), visible_root_with_routes.clone()]);
+            })
+            .or_insert_with(|| visible_root_with_routes.clone());
+        // A flat join has no explicit include path, but every join-side row that
+        // contributes to a public root is still receiver input.  Derive each
+        // contributor from the post-policy visible root—not from its raw table
+        // scan—so the authority publishes the exact residual relation the
+        // receiver will join.  Omitting this made a flat receipt look complete
+        // while containing only its root scan, which cannot reproduce the join.
+        for contribution in &request.input.shape.join_contributions {
+            let resolved_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "join contribution source {:?} was not resolved",
+                        contribution.source
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+            let contribution_route_fields =
+                source_terminal_route_fields(resolved_source, &root_route_fields);
+            let graph = if contribution.id.starts_with("flat_join:") {
+                flat_join_contribution_membership_graph(
+                    closure.visible_root.clone(),
+                    contribution,
+                    resolved_source,
+                    &request.input.shape.nodes,
+                    resolved_sources,
+                    request,
+                    &contribution_route_fields,
+                )?
+            } else {
+                let (visible_parent, parent_source) = match &contribution.parent {
+                    Some(parent) => (
+                        covered_source_members.get(parent).cloned().ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(
+                                "nested join contribution requires its admitted parent".to_owned(),
+                            ))
+                        })?,
+                        resolved_sources.get(parent).ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(
+                                "nested join parent source was not resolved".to_owned(),
+                            ))
+                        })?,
+                    ),
+                    None => (closure.visible_root.clone(), source),
+                };
+                join_contribution_membership_graph(
+                    visible_parent,
+                    contribution,
+                    parent_source,
+                    resolved_source,
+                    &request.input.shape.nodes,
+                    resolved_sources,
+                    request,
+                    &contribution_route_fields,
+                )?
             };
-            join_contribution_membership_graph(
-                visible_parent,
-                contribution,
-                parent_source,
-                resolved_source,
-                &request.input.shape.nodes,
-                resolved_sources,
-                request,
-                &contribution_route_fields,
-            )?
-        };
-        covered_source_members
-            .entry(contribution.source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-            })
-            .or_insert(graph);
-    }
-    // A caller-requested `inherits` is a receiver-local semi-join.  Its
-    // parent source must cross the authority boundary, but only after the
-    // authority has applied the parent read policy.  Do not publish nested
-    // policy proof sources: those are absent from the client query AST.
-    for contribution in &request.input.shape.inherited_contributions {
-        let parent_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "inherited contribution source {:?} was not resolved",
-                contribution.source
-            )))
-        })?;
-        let parent_route_fields = source_terminal_route_fields(parent_source, &root_route_fields);
-        let graph = closure::inherited_contribution_membership_graph(
-            visible_root_with_routes.clone(),
-            contribution,
-            source,
-            parent_source,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-            &parent_route_fields,
-        )?;
-        covered_source_members
-            .entry(contribution.source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-            })
-            .or_insert(graph);
-    }
-    // Recursive reachability is receiver-local semantics too. Its admitted
-    // access rows are exact source inputs, not authority-only proof, so emit
-    // them under their own source occurrence just like join contributors.
-    // These graphs still run on the authority: retain policy routes until
-    // multisink partitioning chooses the recipient. CoveredInput encodes only
-    // source/version identities, never these private routing fields.
-    for contribution in &request.input.shape.reachable_contributions {
-        let access_source = resolved_sources
-            .get(&contribution.access_source)
-            .ok_or_else(|| {
+            covered_source_members
+                .entry(contribution.source.clone())
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+                })
+                .or_insert(graph);
+        }
+        // A caller-requested `inherits` is a receiver-local semi-join.  Its
+        // parent source must cross the authority boundary, but only after the
+        // authority has applied the parent read policy.  Do not publish nested
+        // policy proof sources: those are absent from the client query AST.
+        for contribution in &request.input.shape.inherited_contributions {
+            let parent_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
                 single_gap_report(UnsupportedReason::Runtime(format!(
-                    "reachable contribution source {:?} was not resolved",
-                    contribution.access_source
+                    "inherited contribution source {:?} was not resolved",
+                    contribution.source
                 )))
             })?;
-        let access_route_fields = source_terminal_route_fields(access_source, &root_route_fields);
-        let graph = closure::reachable_contribution_membership_graph(
-            visible_root_with_routes.clone(),
-            contribution,
-            source,
-            access_source,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-            &access_route_fields,
-        )?;
-        covered_source_members
-            .entry(contribution.access_source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-            })
-            .or_insert(graph);
-        let witness = closure::reachable_step_witness_membership_graph(
-            contribution,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-            &root_route_fields,
-        )?;
-        covered_source_members
-            .entry(contribution.edge_source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), witness.clone()]);
-            })
-            .or_insert(witness);
-        let seed = closure::reachable_seed_membership_graph(
-            contribution,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-            &root_route_fields,
-        )?;
-        if let Some((seed_source, seed)) = seed {
+            let parent_route_fields =
+                source_terminal_route_fields(parent_source, &root_route_fields);
+            let graph = closure::inherited_contribution_membership_graph(
+                visible_root_with_routes.clone(),
+                contribution,
+                source,
+                parent_source,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+                &parent_route_fields,
+            )?;
             covered_source_members
-                .entry(seed_source)
+                .entry(contribution.source.clone())
                 .and_modify(|existing| {
-                    *existing = GraphBuilder::union([existing.clone(), seed.clone()]);
+                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
                 })
-                .or_insert(seed);
+                .or_insert(graph);
         }
-    }
-    // A correlated collector owns a distinct compiled source occurrence for
-    // each child path.  The implicit-reference closure above may happen to
-    // traverse the same physical table through a separate `Alias` source,
-    // but that is neither the child's identity nor a lawful receiver input
-    // substitute.  Derive every child source from the already admitted root
-    // frontier, then publish it under that child occurrence's own descriptor.
-    // This keeps the source-coverage manifest equal to the receiver program
-    // without reopening a raw child table scan or relying on table equality.
-    if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
-        collect_correlated_covered_source_members(
-            path,
-            // Correlated contributor joins consume the exact routed residual
-            // frontier.  `closure.visible_root` is only the membership graph
-            // and may conservatively omit a policy-route carrier; the
-            // descriptor-bound projection above is the compiler-owned point
-            // that restores it for every receiver source terminal.
-            visible_root_with_routes.clone(),
-            source,
-            resolved_sources,
-            request,
-            &root_route_fields,
-            &mut covered_source_members,
-        )?;
-    }
+        // Recursive reachability is receiver-local semantics too. Its admitted
+        // access rows are exact source inputs, not authority-only proof, so emit
+        // them under their own source occurrence just like join contributors.
+        // These graphs still run on the authority: retain policy routes until
+        // multisink partitioning chooses the recipient. CoveredInput encodes only
+        // source/version identities, never these private routing fields.
+        for contribution in &request.input.shape.reachable_contributions {
+            let access_source = resolved_sources
+                .get(&contribution.access_source)
+                .ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(format!(
+                        "reachable contribution source {:?} was not resolved",
+                        contribution.access_source
+                    )))
+                })?;
+            let access_route_fields =
+                source_terminal_route_fields(access_source, &root_route_fields);
+            let graph = closure::reachable_contribution_membership_graph(
+                visible_root_with_routes.clone(),
+                contribution,
+                source,
+                access_source,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+                &access_route_fields,
+            )?;
+            covered_source_members
+                .entry(contribution.access_source.clone())
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+                })
+                .or_insert(graph);
+            let witness = closure::reachable_step_witness_membership_graph(
+                contribution,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+                &root_route_fields,
+            )?;
+            covered_source_members
+                .entry(contribution.edge_source.clone())
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), witness.clone()]);
+                })
+                .or_insert(witness);
+            let seed = closure::reachable_seed_membership_graph(
+                contribution,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+                &root_route_fields,
+            )?;
+            if let Some((seed_source, seed)) = seed {
+                covered_source_members
+                    .entry(seed_source)
+                    .and_modify(|existing| {
+                        *existing = GraphBuilder::union([existing.clone(), seed.clone()]);
+                    })
+                    .or_insert(seed);
+            }
+        }
+        // A correlated collector owns a distinct compiled source occurrence for
+        // each child path.  The implicit-reference closure above may happen to
+        // traverse the same physical table through a separate `Alias` source,
+        // but that is neither the child's identity nor a lawful receiver input
+        // substitute.  Derive every child source from the already admitted root
+        // frontier, then publish it under that child occurrence's own descriptor.
+        // This keeps the source-coverage manifest equal to the receiver program
+        // without reopening a raw child table scan or relying on table equality.
+        if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
+            collect_correlated_covered_source_members(
+                path,
+                // Correlated contributor joins consume the exact routed residual
+                // frontier.  `closure.visible_root` is only the membership graph
+                // and may conservatively omit a policy-route carrier; the
+                // descriptor-bound projection above is the compiler-owned point
+                // that restores it for every receiver source terminal.
+                visible_root_with_routes.clone(),
+                source,
+                resolved_sources,
+                request,
+                &root_route_fields,
+                &mut covered_source_members,
+            )?;
+        }
+        covered_source_members
+    };
     // Correlated include paths can preserve routes in the graph while their
     // conservative root field set omits them. Use the graph's declared output
     // after closure lowering when choosing the fields retained by maintained

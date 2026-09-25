@@ -513,3 +513,85 @@ fn first_result_intersects_index_keys_before_loading_rows() {
     block_on(stream.close()).unwrap();
     block_on(db.close()).unwrap();
 }
+
+#[test]
+fn first_result_required_include_keeps_root_gates_when_no_facts_are_requested() {
+    use jazz::query::{Include, JoinMode};
+
+    let db = open(false);
+    for (group, member) in [(1, 2), (2, 3)] {
+        block_on(db.insert(
+            "groups",
+            cells(jazz::row_input!(
+                "member" => jazz::tools::ObjectId::from_uuid(user(member).test_uuid())
+            )),
+            InsertOptions {
+                row_id: Some(row(group)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    for (document, group) in [(10, 1), (11, 2), (12, 99)] {
+        block_on(db.insert(
+            "documents",
+            cells(jazz::row_input!(
+                "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+                "bucket" => "a",
+                "group_id" => jazz::tools::ObjectId::from_uuid(row(group).0)
+            )),
+            InsertOptions {
+                row_id: Some(row(document)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let plain = Query::from("documents");
+    let optional = plain
+        .clone()
+        .include_with(Include::new("group_id").join_mode(JoinMode::Holes));
+    let required = plain.clone().include_with(
+        Include::new("group_id")
+            .join_mode(JoinMode::Holes)
+            .require_includes(),
+    );
+    let read_ids = |query: &Query| {
+        let prepared = db.prepare_query(query).unwrap();
+        block_on(db.all_for_identity(&prepared, opts(), user(2)))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        read_ids(&plain),
+        BTreeSet::from([row(10), row(11), row(12)])
+    );
+    assert_eq!(
+        read_ids(&optional),
+        BTreeSet::from([row(10), row(11), row(12)])
+    );
+    assert_eq!(
+        read_ids(&required),
+        BTreeSet::from([row(10)]),
+        "both unauthorized and missing required targets gate the root",
+    );
+    block_on(db.update(
+        "groups",
+        row(2),
+        cells(jazz::row_input!(
+            "member" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid())
+        )),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read_ids(&required), BTreeSet::from([row(10), row(11)]));
+    block_on(db.delete("groups", row(1), Default::default())).unwrap();
+    assert_eq!(read_ids(&required), BTreeSet::from([row(11)]));
+    assert_eq!(
+        read_ids(&optional),
+        BTreeSet::from([row(10), row(11), row(12)])
+    );
+    block_on(db.close()).unwrap();
+}

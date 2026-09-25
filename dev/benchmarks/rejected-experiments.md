@@ -71,6 +71,19 @@ tests, binaries and every sample remain in `target/saas-read-first-result-pipeli
 Revisit only with evidence that the eligibility change reaches the dominant maps
 and with separate fused-output byte counts.
 
+The contiguous prepared-record copy trial after #3546 was also rejected
+([#3542](https://github.com/garden-co/jazz/issues/3542)). It grouped adjacent
+fixed/variable fields into copy ranges while keeping every interior offset check.
+The first native SELECT round improved 2.2%, but the reversed-order confirmation
+regressed 2.8%; pooled medians were 309.172 / 304.293 ms overall and
+161.962 / 158.851 ms on the largest SELECT. This did not establish a robust gain
+for the added encoding-kernel complexity. All 39 encoded results matched in all
+twelve runs; 53 focused tests passed, including malformed interior offsets and
+partial-output rollback. The runtime/test changes were removed. Exact source,
+binaries and every observation remain in `target/saas-read-copy-runs-ab/`.
+Revisit only with a changed mechanism or workload that demonstrates a repeatable
+endpoint benefit, not merely fewer copy calls.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
