@@ -17,6 +17,8 @@ export const workloads = [
   "policy-scoped-documents",
   "band-chat",
   "world-tour",
+  "chat",
+  "auth-chat",
   "poster-shop",
   "record-player",
   "wequencer",
