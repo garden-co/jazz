@@ -2014,6 +2014,72 @@ mod tests {
     }
 
     #[test]
+    fn uneven_inline_values_split_and_reopen_without_losing_rows() {
+        futures::executor::block_on(async {
+            for replace in [false, true] {
+                let store = MemoryPageStore::default();
+                let options = Options::default();
+                let tree = IdbTree::open(store.clone(), options).await.unwrap();
+                let key = |prefix: u8, ordinal: u8| {
+                    let mut key = vec![prefix; 61];
+                    key[60] = ordinal;
+                    key
+                };
+                let mut expected = BTreeMap::new();
+                for ordinal in 0..4 {
+                    expected.insert(key(b'a', ordinal), vec![ordinal; 3491]);
+                }
+                for ordinal in 0..20 {
+                    expected.insert(key(b'z', ordinal), vec![ordinal; 20]);
+                }
+                if replace {
+                    expected.insert(key(b'a', 4), vec![4]);
+                }
+                for (key, value) in &expected {
+                    tree.put(key.clone(), value.clone()).await.unwrap();
+                }
+                tree.flush().await.unwrap();
+                drop(tree);
+                let tree = IdbTree::open(store.clone(), options).await.unwrap();
+                let inserted = key(b'a', 4);
+                tree.put(inserted.clone(), vec![4; 3491]).await.unwrap();
+                expected.insert(inserted, vec![4; 3491]);
+                tree.flush().await.unwrap();
+                drop(tree);
+                let reopened = IdbTree::open(store, options).await.unwrap();
+                for (key, value) in &expected {
+                    assert_eq!(reopened.get(key).await.unwrap().as_ref(), Some(value));
+                }
+                assert_eq!(
+                    reopened.range(b"", &[255]).await.unwrap(),
+                    expected.into_iter().collect::<Vec<_>>()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn leaf_split_keeps_unpromotable_key_inside_leaf() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let expected = vec![
+                (vec![b'a'; 4], Vec::new()),
+                (vec![b'b'; 980], Vec::new()),
+                (vec![b'c'], Vec::new()),
+            ];
+            for (key, value) in &expected {
+                tree.put(key.clone(), value.clone()).await.unwrap();
+            }
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(reopened.range(b"", b"d").await.unwrap(), expected);
+        });
+    }
+
+    #[test]
     fn inserts_split_reopen_and_scan_in_key_order() {
         futures::executor::block_on(async {
             let store = MemoryPageStore::default();
