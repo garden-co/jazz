@@ -76,15 +76,17 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
 
         // Apply initial state from cache
         if (entry.state.status === "fulfilled") {
+          // Own a copy: deltas are applied to this array in place, and the
+          // cache entry's array is shared with every listener on the query.
           this.current = (
-            mode === "one" ? (entry.state.data[0] ?? null) : entry.state.data
+            mode === "one" ? (entry.state.data[0] ?? null) : [...entry.state.data]
           ) as Result;
           this.isLoading = false;
         }
 
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
-            this.current = (mode === "one" ? (data[0] ?? null) : data) as Result;
+            this.current = (mode === "one" ? (data[0] ?? null) : [...data]) as Result;
             this.isLoading = false;
             this.error = null;
           },
@@ -96,7 +98,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
             } else if (this.current) {
               applyDelta(this.current as T[], delta);
             } else if (delta.reset) {
-              this.current = delta.all as Result;
+              this.current = [...delta.all] as unknown as Result;
             } else {
               this.current = [] as unknown as Result;
               applyDelta(this.current as T[], delta);

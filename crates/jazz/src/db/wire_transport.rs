@@ -252,6 +252,16 @@ pub enum WireFlushStatus {
     Backpressured,
 }
 
+/// Outcome of [`WireTransportAdapter::offer`].
+#[derive(Debug)]
+pub enum WireSendOutcome {
+    /// The adapter owns the message and will deliver it in order.
+    Accepted,
+    /// Backpressure rejected the message before admission; it is returned
+    /// unchanged to the caller.
+    Rejected(SyncMessage),
+}
+
 /// Converts logical messages to mandatory wire-v3 ordered channels.
 pub struct WireTransportAdapter<T> {
     inner: T,
@@ -598,8 +608,15 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     }
 }
 
-impl<T: WireTransport> Transport for WireTransportAdapter<T> {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+impl<T: WireTransport> WireTransportAdapter<T> {
+    /// Offer one logical message, handing it back if it was not admitted.
+    ///
+    /// `Ok(WireSendOutcome::Rejected(message))` is the only backpressure
+    /// outcome: the adapter did not take semantic ownership, so the caller
+    /// still owns `message` and must retry it before any later message to
+    /// preserve its order. [`Transport::send`] reports the same case as
+    /// `TransportError::Backpressure` and drops the message.
+    pub fn offer(&mut self, message: SyncMessage) -> Result<WireSendOutcome, TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
@@ -608,19 +625,42 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
             self.inbound_context.negotiated_features(),
         ) {
             self.send_wire_error(&error);
-            return Ok(());
+            return Ok(WireSendOutcome::Accepted);
         }
         if super::channel_endpoint::message_class(&message).0
             == crate::wire::channels::ChannelClass::Auxiliary
         {
-            self.auxiliary
+            let admitted = self
+                .auxiliary
                 .lock()
                 .map_err(|_| TransportError::Failed("auxiliary channel mutex poisoned".into()))?
-                .enqueue(message)?;
+                .try_enqueue(message);
+            if let Err(rejected) = admitted {
+                return match *rejected {
+                    (TransportError::Backpressure, message) => {
+                        Ok(WireSendOutcome::Rejected(message))
+                    }
+                    (error, _) => Err(error),
+                };
+            }
         } else {
-            let (slot, generation, class, barrier) = self.route(&message)?;
-            self.endpoint
-                .enqueue(slot, generation, class, &message, barrier)?;
+            let (slot, generation, class, barrier) = match self.route(&message) {
+                Ok(route) => route,
+                Err(TransportError::Backpressure) => {
+                    return Ok(WireSendOutcome::Rejected(message));
+                }
+                Err(error) => return Err(error),
+            };
+            match self
+                .endpoint
+                .enqueue(slot, generation, class, &message, barrier)
+            {
+                Ok(()) => {}
+                Err(TransportError::Backpressure) => {
+                    return Ok(WireSendOutcome::Rejected(message));
+                }
+                Err(error) => return Err(error),
+            }
             if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
                 self.routes.retain(|_, (existing, _)| *existing != slot);
                 self.routes
@@ -634,7 +674,16 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
             self.terminal_error = Some(error.clone());
             return Err(error);
         }
-        Ok(())
+        Ok(WireSendOutcome::Accepted)
+    }
+}
+
+impl<T: WireTransport> Transport for WireTransportAdapter<T> {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        match self.offer(message)? {
+            WireSendOutcome::Accepted => Ok(()),
+            WireSendOutcome::Rejected(_) => Err(TransportError::Backpressure),
+        }
     }
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.try_recv_result().ok().flatten()

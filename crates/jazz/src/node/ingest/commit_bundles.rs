@@ -62,8 +62,10 @@ where
         } else {
             tx
         };
-        if ingest_context.is_none_or(|context| !context.trust.is_trusted())
-            && crate::protocol::validate_version_records(&versions).is_err() {
+        // A checked wire decoder already validated these exact receipts.
+        if ingest_context.is_none_or(|context| {
+            !context.trust.is_trusted() && !context.version_receipts_validated
+        }) && crate::protocol::validate_version_records(&versions).is_err() {
             return self
                 .reject_malformed_commit(tx, "malformed version receipt".to_owned())
                 .await

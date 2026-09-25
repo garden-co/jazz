@@ -10,6 +10,7 @@ use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
 };
 
+use super::NodeAliases;
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
@@ -23,7 +24,7 @@ use super::query_engine::{
     VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{NodeAlias, NodeUuid, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
@@ -354,7 +355,7 @@ impl VersionPayload {
     fn prepare(
         row: VersionRow,
         identity: &VersionIdentity,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<Arc<Self>, super::Error> {
         let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
             super::Error::InvalidStoredValue("history tx node alias must exist"),
@@ -563,7 +564,7 @@ impl MaintainedSubscriptionView {
         &self,
         source: ProgramSourceId,
         row: &VersionRow,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<SupportingRow, super::Error> {
         let physical_table =
             *self
@@ -627,7 +628,7 @@ impl MaintainedSubscriptionView {
         deltas: &RecordDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
@@ -670,7 +671,7 @@ impl MaintainedSubscriptionView {
         deltas: MultisinkDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
@@ -825,7 +826,7 @@ impl MaintainedSubscriptionView {
     fn finalize_multisink_transitions(
         &mut self,
         transitions: &mut ResultTransitions,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) {
         // A multisink delta need not contain every terminal that participates
         // in one maintained result. In particular, a current-membership row
@@ -856,7 +857,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
     }
@@ -864,7 +865,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_delta_results(
         &mut self,
         rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
@@ -1512,7 +1513,7 @@ impl MaintainedSubscriptionView {
 
     fn reconcile_publishable_result_members(
         &mut self,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> (
         Vec<ResultMemberEntry>,
         Vec<ResultMemberEntry>,
@@ -1603,7 +1604,7 @@ impl MaintainedSubscriptionView {
     fn result_member_has_bundle_witness(
         &self,
         member: &ResultMemberEntry,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> bool {
         let Some((table, row_uuid, tx_id)) = member.as_row() else {
             // Synthetic aggregate output is self-contained in its payload
@@ -1765,7 +1766,7 @@ impl MaintainedSubscriptionView {
 fn covered_input_for_version(
     source: ProgramSourceId,
     row: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<CoveredInputEntry, super::Error> {
     let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
         super::Error::InvalidStoredValue("covered input tx node alias must exist"),
@@ -2353,7 +2354,7 @@ fn decode_typed_terminal_record(
     record: BorrowedRecord<'_>,
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
     decode_plan_cache: &mut VersionDecodePlanCache,
     payload_plans: &mut std::collections::HashMap<
         RecordDescriptor,
@@ -2446,12 +2447,9 @@ fn decode_typed_terminal_record(
             };
             let tx_time = TxTime(record_u64(record, tx_time_field)?);
             let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
-            let tx_node = node_aliases
-                .iter()
-                .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-                .ok_or(super::Error::InvalidStoredValue(
-                    "result tx node alias must exist",
-                ))?;
+            let tx_node = node_aliases.node_for_alias(tx_node_alias).ok_or(
+                super::Error::InvalidStoredValue("result tx node alias must exist"),
+            )?;
             let settle_position = schema
                 .settle_position_field
                 .as_ref()
@@ -2865,7 +2863,7 @@ fn decode_typed_relation_edge(
     record: BorrowedRecord<'_>,
     schema: &RelationEdgeSchema,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<RelationEdgeEntry, super::Error> {
     let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
     let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
@@ -2919,19 +2917,19 @@ fn table_name_from_versioned_ref(
 fn decode_relation_edge_version(
     record: BorrowedRecord<'_>,
     schema: &VersionedRowRefSchema,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<Option<RowVersionRefEntry>, super::Error> {
     let Some(ResultMembershipVersionSchema::Content(version)) = &schema.version else {
         return Ok(None);
     };
     let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
     let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
-    let tx_node = node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-        .ok_or(super::Error::InvalidStoredValue(
-            "relation edge tx node alias must exist",
-        ))?;
+    let tx_node =
+        node_aliases
+            .node_for_alias(tx_node_alias)
+            .ok_or(super::Error::InvalidStoredValue(
+                "relation edge tx node alias must exist",
+            ))?;
     let branch_or_prefix = schema
         .branch_or_prefix_field
         .as_deref()
@@ -3657,8 +3655,8 @@ mod tests {
         TxId::new(TxTime(time), node(byte))
     }
 
-    fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
-        BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    fn aliases() -> NodeAliases {
+        NodeAliases::from_iter([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
     // Internal receipt: `row_digest` is a canonical runtime result identity, so
@@ -4850,7 +4848,8 @@ mod tests {
     #[test]
     fn selected_deletion_witness_replacement_releases_facts_and_versions() {
         let version = deletion(RowUuid(uuid::Uuid::from_u128(7)), 42);
-        let aliases = BTreeMap::from([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
+        let aliases =
+            NodeAliases::from_iter([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
         let input = covered_input_for_version(test_source(), &version, &aliases).unwrap();
         let tx = input.version.tx;
         let fact = physical_input(input);

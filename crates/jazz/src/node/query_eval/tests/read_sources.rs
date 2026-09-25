@@ -161,6 +161,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         covered_input_sources: BTreeMap::new(),
         covered_input_descriptors: BTreeMap::new(),
         access_paths: BTreeMap::new(),
+        bounded_deletion_register: None,
         count_access_path_metrics: true,
         current_projection_targets: BTreeMap::new(),
     };
