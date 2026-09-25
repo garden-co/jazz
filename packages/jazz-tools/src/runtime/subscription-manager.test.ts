@@ -793,6 +793,76 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("keeps a joined root that one frame removes and re-adds addressable by descendant edits", () => {
+    // A typed occurrence's ordered key is not derivable from its public id, so
+    // a pruned address would leave descendant edits for it unresolvable.
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const sidecar = typedResultKey(uuidBytes(rootId), [uuidBytes(joinedId)], [[1, "arm"]]);
+    const orderedRootKey = [
+      10,
+      ...uuidBytes(rootId),
+      6,
+      ...new TextEncoder().encode("arm"),
+      0,
+      0,
+      10,
+      ...uuidBytes(joinedId),
+    ];
+    const added = (title: string) => ({
+      sourceId: rootId,
+      occurrenceKey: sidecar,
+      index: 0,
+      row: includedRootRow(rootId, title),
+    });
+    manager.handleDelta(emptyRuntimeDelta({ added: [added("first")] }), transformIncluded);
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [{ sourceId: rootId, occurrenceKey: sidecar, index: 0 }],
+        added: [added("again")],
+      }),
+      transformIncluded,
+    );
+
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: orderedRootKey,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: [10, ...uuidBytes(childId)],
+                row: terminalTextChild(childId, "child"),
+              },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all.map((root) => root.children)).toEqual([[{ id: childId, name: "child" }]]);
+  });
+
+  it("drops the retained row of a root that leaves the result", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "original")] }),
+      transformIncluded,
+    );
+    manager.handleDelta(
+      emptyRuntimeDelta({ removed: [runtimeRemovedRecord(rootId, 0)] }),
+      transformIncluded,
+    );
+    expect(
+      (manager as unknown as { terminalRows: Map<string, unknown> }).terminalRows.has(rootId),
+    ).toBe(false);
+  });
+
   it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
