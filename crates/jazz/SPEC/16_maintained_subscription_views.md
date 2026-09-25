@@ -253,6 +253,12 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+The explicit result-only one-shot RPC in ch. 8 §8.4.3 is separate from this
+subscription protocol. It returns application rows for one request without
+installing a maintained view or claiming receiver coverage. A caller choosing
+that mode cannot use its response as an offline cache or as a predecessor for
+live deltas.
+
 A client relay preserves each version witness's physical supplying branch,
 even when the read view projects that version into another logical branch.
 For a strict authority-backed closure, it forwards the selected upstream

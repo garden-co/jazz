@@ -471,9 +471,10 @@ authored bytes. They retain their authored schema and are interpreted through
 the admitted catalogue and lens lineage; bytes authored under one schema MUST
 NOT be relabeled as another schema's row (`INV-SYNC-31..32`).
 
-The wire carries neither result members nor query-source role labels, separate
-source-completeness facts, relation facts, residual programs, or application
-terminal operations. For example, a person/manager query receives ordinary
+The `ViewUpdate` subscription wire carries neither result members nor
+query-source role labels, separate source-completeness facts, relation facts,
+residual programs, or application terminal operations. For example, a
+person/manager query receives ordinary
 physical rows. The receiver's compiler determines which rows participate in
 each scan. If the same row plays two roles, it need not be transmitted twice
 for that reason. Internal compiler source identities and local output deltas
@@ -547,6 +548,22 @@ specified under “Readable negative evidence and the pilot boundary.” Opaque
 policy evidence and shallow aggregates require a separately specified,
 feature-negotiated extension; they MUST NOT be smuggled into ordinary row
 payloads as projected results or unnamed program facts.
+
+### 8.4.3 Explicit result-only one-shot reads
+
+An opt-in, current `Global` one-shot read may use the feature-negotiated
+`RemoteReadRequest`/`RemoteReadResponse` exchange instead of opening a
+subscription. The selected admitted authority evaluates the flat query under
+the exact link identity and claims and returns binding-encoded rows. A relay
+forwards the request with its admitted policy binding; it does not evaluate
+the query from a partial cache. Unsupported queries, unavailable authorities,
+and peers without the feature use ordinary supporting-row coverage.
+
+This response is scoped to its request and never becomes a `ViewUpdate`, a
+subscription settlement receipt, a native row version, or evidence that the
+receiver's Local/offline cache contains those rows. It cannot discharge an
+existing or later subscription. `INV-SYNC-36` continues to govern every live
+subscription and its supporting-row delivery.
 
 ### 8.5 Subscription Attach, Reset, And Detach
 
