@@ -58,11 +58,23 @@ struct VersionDecodePlan {
     authored_columns_idx: usize,
 }
 
+/// The lone-subscriber token stays with the view its subscription installed:
+/// a clone that outlives that subscription must not keep the next subscriber
+/// of the shape on the shared path, so clones start without it.
+#[derive(Debug, Default)]
+struct ClientLocalLiteralToken(Option<std::sync::Arc<()>>);
+
+impl Clone for ClientLocalLiteralToken {
+    fn clone(&self) -> Self {
+        Self(None)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
     /// Held while this view is the lone literal-graph subscriber of its
     /// Local-tier client-local shape; see `NodeState::client_local_literal_shapes`.
-    client_local_literal_token: Option<std::sync::Arc<()>>,
+    client_local_literal_token: ClientLocalLiteralToken,
     /// Test receipt from the exact program passed to subscribe_lowered_program,
     /// not from an unrelated prepared AppRows plan or caller-supplied label.
     #[cfg(test)]
@@ -141,7 +153,7 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
-            client_local_literal_token: None,
+            client_local_literal_token: ClientLocalLiteralToken::default(),
             #[cfg(test)]
             compiled_authorization_mode: None,
             read_view: Default::default(),
@@ -554,7 +566,7 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 
 impl MaintainedSubscriptionView {
     pub(crate) fn hold_client_local_literal_token(&mut self, token: std::sync::Arc<()>) {
-        self.client_local_literal_token = Some(token);
+        self.client_local_literal_token = ClientLocalLiteralToken(Some(token));
     }
 
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {

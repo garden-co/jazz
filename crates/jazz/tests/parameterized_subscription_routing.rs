@@ -640,3 +640,103 @@ fn local_bindings_bind_query_claims_from_the_readers_session() {
     drop(live);
     block_on(db.close()).expect("close claim fixture");
 }
+
+/// Six live bindings of one claim-reading shape, for one author: two teams
+/// under request-scoped claims for alice, two for bob, and two under the
+/// session's own claims (carol). Bindings that differ only by claim scope must
+/// never see each other's rows, before or after writes.
+///
+/// ```text
+/// owned_documents ──> team = $team AND owner = claims.owner
+///                        ├── alice (request) t0, t1
+///                        ├── bob   (request) t0, t1
+///                        └── carol (session) t0, t1
+/// ```
+#[test]
+fn local_bindings_keep_request_and_session_claim_scopes_apart() {
+    let reader = AuthorSubject::for_test_uuid(uuid::uuid!("71000000-0000-0000-0000-0000000000a1"));
+    let db = open_db_as(reader);
+    let owner_claims = |owner: &str| {
+        BTreeMap::from([(provider_claim_key("owner"), Value::String(owner.to_owned()))])
+    };
+    db.set_identity_claims(reader, owner_claims("carol"));
+    let insert = |document: u64, team: u64, owner: &str| {
+        block_on(db.insert(
+            "owned_documents",
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(row(1_000 + team).0)),
+                ("owner".to_owned(), Value::String(owner.to_owned())),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(document)),
+                ..Default::default()
+            },
+        ))
+        .expect("insert owned document");
+    };
+    for (document, team, owner) in [
+        (1, 0, "alice"),
+        (2, 0, "bob"),
+        (3, 1, "alice"),
+        (4, 1, "bob"),
+        (5, 0, "carol"),
+        (6, 1, "carol"),
+    ] {
+        insert(document, team, owner);
+    }
+
+    let query = Query::from("owned_documents").filter(all_of([
+        eq(col("team"), param("team")),
+        eq(col("owner"), claim(provider_claim_key("owner"))),
+    ]));
+    let bindings = [
+        (0, Some("alice")),
+        (1, Some("alice")),
+        (0, Some("bob")),
+        (1, Some("bob")),
+        (0, None),
+        (1, None),
+    ];
+    let mut live = bindings
+        .into_iter()
+        .map(|(team, owner)| {
+            let label = format!("team {team} claims {}", owner.unwrap_or("session"));
+            let prepared = team_binding(&db, &query, row(1_000 + team));
+            let prepared = match owner {
+                Some(owner) => prepared.with_identity_claims(reader, owner_claims(owner)),
+                None => prepared,
+            };
+            let mut stream = block_on(db.subscribe(&prepared, local_read_opts()))
+                .expect("subscribe claim-scoped binding");
+            let rows = take_initial_reset(&label, &mut stream);
+            (label, prepared, stream, rows)
+        })
+        .collect::<Vec<_>>();
+    let check = |live: &mut Vec<(String, PreparedQuery, SubscriptionStream, BTreeSet<RowUuid>)>,
+                 expected: [&[u64]; 6]| {
+        for ((label, prepared, stream, rows), expected) in live.iter_mut().zip(expected) {
+            apply_pending_events(label, stream, rows);
+            let expected = expected.iter().copied().map(row).collect::<BTreeSet<_>>();
+            let one_shot = block_on(db.all(prepared, local_read_opts()))
+                .expect("one-shot claim-scoped read")
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(one_shot, expected, "{label} one-shot read");
+            assert_eq!(*rows, expected, "{label} maintained subscription");
+        }
+    };
+    check(&mut live, [&[1], &[3], &[2], &[4], &[5], &[6]]);
+
+    insert(10, 0, "alice");
+    insert(11, 0, "bob");
+    insert(12, 1, "carol");
+    insert(13, 1, "bob");
+    check(
+        &mut live,
+        [&[1, 10], &[3], &[2, 11], &[4, 13], &[5], &[6, 12]],
+    );
+
+    drop(live);
+    block_on(db.close()).expect("close claim-scope fixture");
+}
