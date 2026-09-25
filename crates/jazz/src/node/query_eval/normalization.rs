@@ -249,7 +249,12 @@ pub(super) fn current_query_output_request(
                 query,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
-                matches!(output, CurrentQueryProgramOutput::AppRows),
+                // Only where `materialize_and_finalize_query_rows` strips the
+                // public projection again after sorting; flat-join and
+                // include rows skip that step and would leak the key.
+                matches!(output, CurrentQueryProgramOutput::AppRows)
+                    && query.flat_join.is_none()
+                    && query.array_subqueries.is_empty(),
             )?,
         })
     } else {
@@ -348,7 +353,7 @@ fn app_row_payload_projection(
             // public projection drops it again afterwards. Maintained views
             // carry their order as occurrence indexes instead, and their
             // terminal payload is delivered as is, so they keep the plain
-            // selection.
+            // selection. Include reads still sort without the key (#3503).
             if retain_order_keys {
                 for order in &query.order_by {
                     if order.column != "id" {

@@ -16,7 +16,7 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
-use jazz::query::{OrderDirection, Query};
+use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -30,6 +30,12 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("tasks")
                     .column("title", ColumnType::Text)
                     .column("rank", ColumnType::Integer)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("task_id", "tasks")
+                    .column("body", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -96,7 +102,11 @@ fn by_rank(direction: OrderDirection) -> Query {
 /// returned.
 fn titles(rows: impl IntoIterator<Item = CurrentRow>) -> Vec<String> {
     let schema = schema();
-    let table = &schema.tables()[0];
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name.as_str() == "tasks")
+        .expect("tasks table");
     rows.into_iter()
         .map(|row| {
             assert_eq!(
@@ -245,4 +255,18 @@ fn subscription_orders_by_an_unselected_column() {
         added.sort_by_key(|row| row.index);
         assert_eq!(titles(added.into_iter().map(|row| row.row)), expected);
     }
+}
+
+/// A read with an include (array subquery) must not return the unselected
+/// order key either. Ordering such reads by an unselected column is tracked
+/// separately in #3503; this pins only that the key does not leak.
+#[test]
+fn include_read_does_not_return_the_unselected_order_key() {
+    let db = seeded_db();
+    let query = by_rank(OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new("notes", "notes", "task_id", "id").select(["body"]));
+    let prepared = db.prepare_query(&query).expect("prepare query");
+    let mut read = titles(block_on(db.all(&prepared, local())).expect("read"));
+    read.sort();
+    assert_eq!(read, ["a", "b", "c", "d"]);
 }
