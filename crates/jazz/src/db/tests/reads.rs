@@ -1095,8 +1095,20 @@ fn ordered_composite_pages_match_unbounded_query() {
     for tier in [DurabilityTier::Global, DurabilityTier::Local] {
         ordered_pages_match_unbounded_control(&db, tier, "settled");
     }
+    // Deletion checks stay bounded too: the page reads the registers of its
+    // capped candidates, not every register in the table. Ascending, row 54
+    // (rank -5) is followed by row 2 (rank 0), which proves the page.
+    let ascending = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Asc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
     let rows = block_on(db.all_for_identity(
-        &prepared,
+        &ascending,
         ReadOpts {
             tier: DurabilityTier::Global,
             propagation: Propagation::LocalOnly,
@@ -1105,7 +1117,16 @@ fn ordered_composite_pages_match_unbounded_query() {
         AuthorSubject::SYSTEM,
     ))
     .unwrap();
-    assert_eq!(row_ids(&rows), vec![row(1)]);
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    assert!(
+        reads.register_global_current_rows.reads <= 2,
+        "a bounded ordered page should read only its candidates' registers: {reads:?}"
+    );
 }
 
 #[test]
