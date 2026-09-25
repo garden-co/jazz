@@ -367,6 +367,9 @@ where
                 SyncMessage::CurrentRowsRequest(_)
                 | SyncMessage::CurrentRowsReceipt(_)
                 | SyncMessage::CurrentRowsCancel { .. }
+                | SyncMessage::RemoteReadRequest(_)
+                | SyncMessage::RemoteReadResponse(_)
+                | SyncMessage::RemoteReadCancel { .. }
                 | SyncMessage::PermissionAdviceRequest { .. }
                 | SyncMessage::PermissionAdviceResponse { .. }
                 | SyncMessage::AuthorizationScopeSubscribe { .. }

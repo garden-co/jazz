@@ -216,6 +216,9 @@ fn one_shot(
                     .take(snapshot.root_count)
                     .map(|row| row.row_uuid())
                     .collect(),
+                SerializedReadResult::EncodedRows(_) => {
+                    panic!("this local fixture has no negotiated authority-result feature")
+                }
             };
         }
         turn(client, server);
@@ -428,6 +431,9 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
                     break rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
                 }
                 SerializedReadResult::Relation(_) => panic!("window is a row query"),
+                SerializedReadResult::EncodedRows(_) => {
+                    panic!("this legacy duplex does not negotiate authority results")
+                }
             }
         }
         turn(&alice, Some(&server));
@@ -622,6 +628,9 @@ impl Foreground {
                         rows.iter().map(|row| row.row_uuid()).collect()
                     }
                     SerializedReadResult::Relation(_) => panic!("items is a row query"),
+                    SerializedReadResult::EncodedRows(_) => {
+                        panic!("this local fixture has no negotiated authority-result feature")
+                    }
                 };
             }
             self.turn(server);
@@ -883,6 +892,9 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     let rows = match result.expect("fallback read") {
         SerializedReadResult::Rows(rows) => rows,
         SerializedReadResult::Relation(_) => panic!("window is a row query"),
+        SerializedReadResult::EncodedRows(_) => {
+            panic!("this offline fallback cannot return an authority result")
+        }
     };
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),

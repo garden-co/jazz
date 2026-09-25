@@ -1113,6 +1113,11 @@ where
         self.query.policy_authorization_graph_replacements.clear();
     }
 
+    /// Whether own local current-row versions could change an immediate read.
+    pub(crate) fn has_ahead_current_updates(&self) -> bool {
+        !self.ahead_current_keys.is_empty()
+    }
+
     /// Scope one node-locked operation to this subscriber's admitted claims.
     /// Dropping the returned guard restores the prior scope even if an awaited
     /// operation is cancelled before it returns.

@@ -241,6 +241,37 @@ pub enum SyncMessage {
         /// Nonce allocated on this connection.
         request_id: PermissionAdviceRequestId,
     },
+    /// Bounded, authority-evaluated first page of a current Global read.
+    RemoteReadRequest(RemoteReadRequest),
+    /// Encoded binding rows for one admitted request, or no result when unavailable.
+    RemoteReadResponse(RemoteReadResponse),
+    /// Retire a first-page request on this connection.
+    RemoteReadCancel {
+        /// Nonce allocated on this connection.
+        request_id: PermissionAdviceRequestId,
+    },
+}
+
+/// A first-page read keeps its query bound to the authenticated link session.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RemoteReadRequest {
+    /// Nonce allocated on this connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Canonical postcard query AST.
+    pub query: Vec<u8>,
+    /// Schema against which the caller prepared the query.
+    pub schema: SchemaVersionId,
+    /// Host-admitted relay binding, absent on ordinary client links.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// `rows` uses the same binary row envelope as the NAPI and WASM bindings.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RemoteReadResponse {
+    /// Nonce copied from the admitted request.
+    pub request_id: PermissionAdviceRequestId,
+    /// Binding row envelope, or unavailable when the authority cannot serve it.
+    pub rows: Option<Vec<u8>>,
 }
 
 /// Maximum known rows in one current-availability request.
@@ -730,6 +761,9 @@ impl SyncMessage {
             | Self::ChunkUploadStart(_)
             | Self::ChunkUploadNodes(_)
             | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
+            Self::RemoteReadRequest(_)
+            | Self::RemoteReadResponse(_)
+            | Self::RemoteReadCancel { .. } => crate::wire::FEATURE_REMOTE_READ_RESULTS,
             _ => crate::wire::FEATURE_NONE,
         }
     }

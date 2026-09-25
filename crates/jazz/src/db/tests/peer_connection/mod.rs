@@ -7,4 +7,5 @@ mod authorization_scope;
 mod shape_registration_ownership;
 mod transport_sync;
 
+mod remote_reads;
 mod row_availability;

@@ -10,15 +10,17 @@ mod work_budget;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream, Transport,
+    ConnectionSessionContext, Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{
@@ -34,8 +36,9 @@ use jazz::tools::{
     TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::wire::{
-    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression, WireStreamDecoder,
-    WireStreamEncoder, compress_sync_payload, current_wire_features,
+    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireAuthorityEndpoint,
+    WireCompression, WireStreamDecoder, WireStreamEncoder, compress_sync_payload,
+    current_wire_features,
 };
 use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 use jazz_sim::view_accounting::version_bundle_refs;
@@ -599,15 +602,443 @@ pub fn profile_main() {
     if config.identity == BenchIdentity::Member {
         assert_policy_active(&seeded, &expected);
     }
+    if std::env::var_os("JAZZ_CUSTOMER_SERVER_ONESHOT").is_some() {
+        run_server_one_shot(&schema, &seeded, &config);
+        return;
+    }
+    if std::env::var_os("JAZZ_CUSTOMER_CLIENT_ONESHOT").is_some() {
+        run_client_one_shot(&schema, &seeded, &config);
+        return;
+    }
 
     if config.runs_phase("cold") {
         let cold = run_cold(&schema, &seeded, &expected, &config);
+        assert_visible_rows(&seeded, config.identity, &cold);
         emit_summary(&config, "cold", &cold);
     }
 
     if config.runs_phase("warm") {
         let warm = run_warm(&schema, &seeded, &expected, &config);
+        assert_visible_rows(&seeded, config.identity, &warm);
         emit_summary(&config, "warm", &warm);
+    }
+}
+
+fn assert_visible_rows(seeded: &Seeded, identity: BenchIdentity, summary: &RunSummary) {
+    let visible = expected_visible_rows(seeded, identity);
+    for (table, actual) in &summary.actual_rows {
+        let allowed = visible
+            .get(table)
+            .expect("subscribed table has expected rows");
+        assert!(
+            actual.is_subset(allowed),
+            "subscription returned a row hidden from this identity in {table}"
+        );
+    }
+}
+
+/// Drive real client one-shot reads through the same Core/relay/Client links
+/// as the subscription workload. Each read owns its ordinary transient
+/// coverage attachment; this measures request-to-result, including local
+/// result evaluation and binding hydration, but excludes seeding.
+fn run_client_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
+    seeded.core.enable_authoritative_serving_for_test();
+    let visible = expected_visible_rows(seeded, config.identity);
+    let relay = open_db_node(
+        node(2),
+        schema.clone(),
+        config.client_author(seeded),
+        Some(Rc::new(tempfile::tempdir().unwrap())),
+    );
+    let client = open_client_db(
+        node(3),
+        schema.clone(),
+        config.client_author(seeded),
+        config.initial_sync_flush_cadence,
+        None,
+    );
+    let direct_core = std::env::var_os("JAZZ_CUSTOMER_DIRECT_CORE").is_some();
+    let relay_core = duplex_counted_with_session(
+        false,
+        Some((config.client_author(seeded), node(2), node(1))),
+    );
+    let client_relay = duplex_counted_with_session(
+        false,
+        Some((
+            config.client_author(seeded),
+            node(3),
+            if direct_core { node(1) } else { node(2) },
+        )),
+    );
+    let mut downstream_transport = Some(client_relay.right_transport);
+    let connect_started = Instant::now();
+    let _relay_upstream = if direct_core {
+        None
+    } else {
+        Some(block_on(
+            relay.db.connect_upstream(relay_core.left_transport),
+        ))
+    };
+    let _core_sub = if direct_core {
+        seeded.core.accept_subscriber(
+            downstream_transport.take().expect("client transport"),
+            config.client_author(seeded),
+        )
+    } else {
+        seeded.core.accept_scope_isolated_relay_subscriber_for_test(
+            relay_core.right_transport,
+            config.client_author(seeded),
+            BTreeMap::new(),
+            1,
+        )
+    };
+    let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
+    let _relay_sub = if direct_core {
+        None
+    } else {
+        Some(relay.db.accept_subscriber(
+            downstream_transport.take().expect("relay transport"),
+            config.client_author(seeded),
+        ))
+    };
+    let connect_ms = connect_started.elapsed().as_millis();
+
+    let only_table = std::env::var("JAZZ_CUSTOMER_ONLY_TABLE").ok();
+    let query_limit = std::env::var("JAZZ_CUSTOMER_QUERY_LIMIT")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("valid query limit"));
+    let queries = subscription_tables()
+        .into_iter()
+        .filter(|table| only_table.as_ref().is_none_or(|selected| table == selected))
+        .map(|table| {
+            let mut query = Query::from(table.as_str());
+            if let Some(limit) = query_limit {
+                query = query.limit(limit);
+            }
+            (table, postcard::to_allocvec(&query).expect("encode query"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!queries.is_empty(), "no matching read table");
+    let remote_read = std::env::var_os("JAZZ_CUSTOMER_EXPECT_REMOTE_READ").is_some();
+    let deferred_local_updates = std::env::var_os("JAZZ_CUSTOMER_DEFER_LOCAL_UPDATES").is_some();
+    let expected = {
+        let dir = tempfile::tempdir().expect("remote read oracle directory");
+        copy_dir_contents(seeded._core_dir.path(), dir.path()).expect("copy seeded store");
+        let oracle = block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage: BoxedStorage::new(open_storage(dir.path(), schema)),
+            identity: DbIdentity {
+                node: node(6),
+                author: config.client_author(seeded),
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node(6))))),
+        }))
+        .expect("open remote read oracle");
+        queries
+            .iter()
+            .map(|(table, bytes)| {
+                let query: Query = postcard::from_bytes(bytes).expect("query roundtrip");
+                let prepared = oracle.prepare_query(&query).expect("prepare oracle query");
+                let rows = block_on(oracle.all_for_identity(
+                    &prepared,
+                    ReadOpts {
+                        tier: jazz::tx::DurabilityTier::Global,
+                        ..ReadOpts::default()
+                    },
+                    config.client_author(seeded),
+                ))
+                .expect("oracle read");
+                let actual = rows
+                    .iter()
+                    .map(|row| row.row_uuid())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    actual.len(),
+                    visible[table].len().min(query_limit.unwrap_or(usize::MAX))
+                );
+                assert!(actual.is_subset(&visible[table]));
+                (
+                    actual,
+                    jazz::binding_codec::encode_rows(&rows).expect("oracle binding encoding"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut reads = queries
+        .iter()
+        .map(|(_, query)| {
+            Box::pin(client.db.all_serialized_query(
+                query,
+                ReadOpts {
+                    tier: jazz::tx::DurabilityTier::Global,
+                    local_updates: if deferred_local_updates {
+                        jazz::db::LocalUpdates::Deferred
+                    } else {
+                        jazz::db::LocalUpdates::Immediate
+                    },
+                    ..ReadOpts::default()
+                },
+                None,
+                None,
+                None,
+                true,
+                || false,
+                |attachment| client.db.detach_query(attachment),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut completed = vec![None; reads.len()];
+    let mut tick_us = [0_u128; 3];
+    let mut read_poll_us = 0_u128;
+    let mut ticks = 0_usize;
+    let read_started = Instant::now();
+    let mut context = Context::from_waker(Waker::noop());
+    while completed.iter().any(Option::is_none) {
+        assert!(
+            ticks < config.max_ticks,
+            "client one-shot reads did not settle"
+        );
+        for (index, read) in reads.iter_mut().enumerate() {
+            if completed[index].is_some() {
+                continue;
+            }
+            let poll_started = Instant::now();
+            let outcome = read.as_mut().poll(&mut context);
+            read_poll_us += poll_started.elapsed().as_micros();
+            if let Poll::Ready(result) = outcome {
+                let result = result
+                    .unwrap_or_else(|error| panic!("read {} failed: {error}", queries[index].0));
+                completed[index] = Some(match result {
+                    jazz::db::SerializedReadResult::Rows(rows) if !remote_read => {
+                        let allowed = &visible[&queries[index].0];
+                        let actual = rows
+                            .iter()
+                            .map(|row| row.row_uuid())
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(
+                            rows.len(),
+                            actual.len(),
+                            "one-shot returned duplicate roots"
+                        );
+                        assert_eq!(
+                            actual.len(),
+                            allowed.len().min(query_limit.unwrap_or(usize::MAX)),
+                            "one-shot result count for {}",
+                            queries[index].0
+                        );
+                        assert!(actual.is_subset(allowed), "one-shot returned a hidden row");
+                        assert!(
+                            actual == expected[index].0,
+                            "coverage result differs from independently evaluated authority page for {}",
+                            queries[index].0
+                        );
+                        actual.len()
+                    }
+                    jazz::db::SerializedReadResult::EncodedRows(bytes) if remote_read => {
+                        assert!(
+                            bytes == expected[index].1,
+                            "remote result differs from independently evaluated authority read for {}",
+                            queries[index].0
+                        );
+                        visible[&queries[index].0]
+                            .len()
+                            .min(query_limit.unwrap_or(usize::MAX))
+                    }
+                    _ => panic!("unexpected read route for {}", queries[index].0),
+                });
+            }
+        }
+        if completed.iter().all(Option::is_some) {
+            break;
+        }
+        let started = Instant::now();
+        block_on(seeded.core.tick()).expect("core tick");
+        tick_us[0] += started.elapsed().as_micros();
+        let started = Instant::now();
+        block_on(relay.db.tick()).expect("relay tick");
+        tick_us[1] += started.elapsed().as_micros();
+        let started = Instant::now();
+        block_on(client.db.tick()).expect("client tick");
+        tick_us[2] += started.elapsed().as_micros();
+        ticks += 1;
+    }
+    println!(
+        "{}",
+        json!({
+            "benchmark": "permissioned_resources_client_one_shot",
+            "topology": if direct_core { "core-client" } else { "core-device-local-relay-client" },
+            "queries": queries.len(),
+            "rows": completed.into_iter().map(|rows| rows.expect("completed read")).sum::<usize>(),
+            "connect_ms": connect_ms,
+            "read_ms": read_started.elapsed().as_millis(),
+            "read_poll_us": read_poll_us,
+            "core_tick_us": tick_us[0],
+            "relay_tick_us": tick_us[1],
+            "client_tick_us": tick_us[2],
+            "ticks": ticks,
+            "query_limit": query_limit,
+            "remote_read": remote_read,
+            "deferred_local_updates": deferred_local_updates,
+        })
+    );
+}
+
+/// Compare the same permissioned SELECT with the public trusted-host one-shot
+/// API. Copying and opening the seeded store happen before the read timer.
+fn run_server_one_shot(schema: &JazzSchema, seeded: &Seeded, config: &Config) {
+    let all_tables = std::env::var_os("JAZZ_CUSTOMER_SERVER_ONESHOT_ALL").is_some();
+    let tables = if all_tables {
+        subscription_tables()
+    } else {
+        vec![
+            std::env::var("JAZZ_CUSTOMER_ONLY_TABLE")
+                .unwrap_or_else(|_| DOMINANT_CHILD_TABLE.to_owned()),
+        ]
+    };
+    let limit = std::env::var("JAZZ_CUSTOMER_QUERY_LIMIT")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("valid query limit"));
+    let dir = tempfile::tempdir().expect("one-shot store directory");
+    copy_dir_contents(seeded._core_dir.path(), dir.path()).expect("copy seeded store");
+    let storage = BoxedStorage::new(open_storage(dir.path(), schema));
+    let server = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node(6),
+            author: config.client_author(seeded),
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node(6))))),
+    }))
+    .expect("open trusted host over seeded store");
+    let visible = expected_visible_rows(seeded, config.identity);
+    let mut per_table = Vec::new();
+    let mut total_prepare_us = 0;
+    let mut total_read_us = 0;
+    let mut total_wire_us = 0;
+    let mut total_rows = 0;
+    for table in tables {
+        let mut query = Query::from(table.as_str());
+        if let Some(limit) = limit {
+            query = query.limit(limit);
+        }
+        let prepare_started = Instant::now();
+        let prepared = server
+            .prepare_query(&query)
+            .expect("prepare one-shot query");
+        let prepare_us = prepare_started.elapsed().as_micros();
+        total_prepare_us += prepare_us;
+        let read_started = Instant::now();
+        let rows = block_on(server.all_for_identity(
+            &prepared,
+            ReadOpts {
+                tier: jazz::tx::DurabilityTier::Global,
+                ..ReadOpts::default()
+            },
+            config.client_author(seeded),
+        ))
+        .expect("trusted-host one-shot read");
+        let read_us = read_started.elapsed().as_micros();
+        total_read_us += read_us;
+        let allowed = visible.get(&table).expect("selected table has an oracle");
+        let actual = rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            rows.len(),
+            actual.len(),
+            "one-shot returned duplicate roots"
+        );
+        assert_eq!(actual.len(), allowed.len().min(limit.unwrap_or(usize::MAX)));
+        assert!(actual.is_subset(allowed), "one-shot returned a hidden row");
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        actual.hash(&mut digest);
+        let result_wire = if std::env::var_os("JAZZ_CUSTOMER_SIMULATE_RESULT_WIRE").is_some() {
+            let columns = schema
+                .tables
+                .iter()
+                .find(|candidate| candidate.name == table)
+                .expect("selected table has an application schema")
+                .columns
+                .len();
+            let encode_started = Instant::now();
+            let application_rows = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.row_uuid(),
+                        (0..columns)
+                            .map(|index| row.cell_at(index))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let encoded =
+                postcard::to_allocvec(&application_rows).expect("encode application rows");
+            let compressed = zstd::bulk::compress(&encoded, 1).expect("compress application rows");
+            let encode_us = encode_started.elapsed().as_micros();
+            let decode_started = Instant::now();
+            let decompressed = zstd::bulk::decompress(&compressed, encoded.len())
+                .expect("decompress application rows");
+            let roundtrip: Vec<(RowUuid, Vec<Option<Value>>)> =
+                postcard::from_bytes(&decompressed).expect("decode application rows");
+            let decode_us = decode_started.elapsed().as_micros();
+            total_wire_us += encode_us + decode_us;
+            assert_eq!(roundtrip, application_rows);
+            Some(json!({
+                "app_payload_bytes": encoded.len(),
+                "compressed_bytes": compressed.len(),
+                "encode_us": encode_us,
+                "decode_us": decode_us,
+                "read_encode_decode_us": read_us + encode_us + decode_us,
+            }))
+        } else {
+            None
+        };
+        total_rows += rows.len();
+        per_table.push(json!({
+            "benchmark": "permissioned_resources_server_one_shot",
+            "identity": match config.identity {
+                BenchIdentity::Member => "member",
+                BenchIdentity::Spy => "spy",
+                BenchIdentity::Admin => "admin",
+            },
+            "table": table,
+            "query_limit": limit,
+            "visible_source_rows": allowed.len(),
+            "rows": rows.len(),
+            "row_set_hash": digest.finish(),
+            "prepare_us": prepare_us,
+            "read_us": read_us,
+            "result_wire_simulation": result_wire,
+            "storage_mode": "rocks",
+            "seed_cache_hit": seeded.seed_cache_hit,
+        }));
+    }
+    if all_tables {
+        println!(
+            "{}",
+            json!({
+                "benchmark": "permissioned_resources_server_one_shot_all",
+                "identity": match config.identity {
+                    BenchIdentity::Member => "member",
+                    BenchIdentity::Spy => "spy",
+                    BenchIdentity::Admin => "admin",
+                },
+                "tables": per_table.len(),
+                "rows": total_rows,
+                "query_limit": limit,
+                "prepare_us": total_prepare_us,
+                "read_us": total_read_us,
+                "read_encode_decode_us": total_read_us + total_wire_us,
+                "per_table": per_table,
+                "storage_mode": "rocks",
+                "seed_cache_hit": seeded.seed_cache_hit,
+            })
+        );
+    } else {
+        println!("{}", per_table.pop().expect("one table was selected"));
     }
 }
 
@@ -669,7 +1100,7 @@ impl Config {
             }
         };
         Self {
-            diagnostics: true,
+            diagnostics: std::env::var_os("JAZZ_CUSTOMER_NO_DIAGNOSTICS").is_none(),
             seed: env_u64("JAZZ_CUSTOMER_SEED", 0xC057_A271),
             scale: env_f64("JAZZ_CUSTOMER_SCALE", 1.0),
             max_ticks: env_usize("JAZZ_CUSTOMER_MAX_TICKS", 20_000),
@@ -1152,6 +1583,7 @@ impl CodecProbe {
 
 struct DuplexTransport {
     clean_wire: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    session_context: Option<ConnectionSessionContext>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     metrics: Rc<TransportMetrics>,
@@ -1166,6 +1598,9 @@ struct CountedDuplex {
 }
 
 impl Transport for DuplexTransport {
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.session_context
+    }
     #[cfg_attr(
         feature = "cold-settle-attribution",
         tracing::instrument(skip_all, name = "cold.phase.benchmark_transport")
@@ -1251,6 +1686,37 @@ impl Transport for DuplexTransport {
 }
 
 fn duplex_counted(diagnostics: bool) -> CountedDuplex {
+    duplex_counted_with_session(diagnostics, None)
+}
+
+fn duplex_counted_with_session(
+    diagnostics: bool,
+    session: Option<(AuthorSubject, NodeUuid, NodeUuid)>,
+) -> CountedDuplex {
+    let contexts = session.map(|(identity, left, right)| {
+        let left = WireAuthorityEndpoint {
+            node: left,
+            epoch: 1,
+        };
+        let right = WireAuthorityEndpoint {
+            node: right,
+            epoch: 1,
+        };
+        (
+            ConnectionSessionContext {
+                local: left,
+                remote: Some(right),
+                link_identity: identity,
+                negotiated_features: current_wire_features(),
+            },
+            ConnectionSessionContext {
+                local: right,
+                remote: Some(left),
+                link_identity: identity,
+                negotiated_features: current_wire_features(),
+            },
+        )
+    });
     let wire = || {
         (!diagnostics).then(|| {
             (
@@ -1266,12 +1732,14 @@ fn duplex_counted(diagnostics: bool) -> CountedDuplex {
     CountedDuplex {
         left_transport: Box::new(DuplexTransport {
             clean_wire: wire(),
+            session_context: contexts.map(|(left, _)| left),
             outbound: Rc::clone(&left),
             inbound: Rc::clone(&right),
             metrics: Rc::clone(&left_to_right),
         }),
         right_transport: Box::new(DuplexTransport {
             clean_wire: wire(),
+            session_context: contexts.map(|(_, right)| right),
             outbound: Rc::clone(&right),
             inbound: Rc::clone(&left),
             metrics: Rc::clone(&right_to_left),
@@ -2009,25 +2477,55 @@ fn run_connect_and_subscribe(
             });
         }
     }
-    let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
-    // Both hops belong to the same device reader. Core authorizes the scope;
-    // the local persistence relay forwards only its authorized input versions.
-    let _core_sub = seeded.core.accept_scope_isolated_relay_subscriber_for_test(
-        relay_core.right_transport,
-        config.client_author(seeded),
-        BTreeMap::new(),
-        1,
-    );
+    let direct_core = std::env::var_os("JAZZ_CUSTOMER_DIRECT_CORE").is_some();
+    let mut downstream_transport = Some(client_relay.right_transport);
+    let _relay_upstream = if direct_core {
+        None
+    } else {
+        Some(block_on(
+            relay.db.connect_upstream(relay_core.left_transport),
+        ))
+    };
+    let _core_sub = if direct_core {
+        seeded.core.accept_subscriber(
+            downstream_transport.take().expect("client transport"),
+            config.client_author(seeded),
+        )
+    } else {
+        // Both hops belong to the same device reader. Core authorizes the scope;
+        // the local persistence relay forwards only its authorized input versions.
+        seeded.core.accept_scope_isolated_relay_subscriber_for_test(
+            relay_core.right_transport,
+            config.client_author(seeded),
+            BTreeMap::new(),
+            1,
+        )
+    };
     let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
-    let _relay_sub = relay
-        .db
-        .accept_subscriber(client_relay.right_transport, config.client_author(seeded));
+    let _relay_sub = if direct_core {
+        None
+    } else {
+        Some(relay.db.accept_subscriber(
+            downstream_transport.take().expect("relay transport"),
+            config.client_author(seeded),
+        ))
+    };
     let connect_ms = start.elapsed().as_millis();
 
     let subscribe_start = Instant::now();
     let mut subscriptions = Vec::new();
-    for table in subscription_tables() {
-        let query = Query::from(table.as_str());
+    let only_table = std::env::var("JAZZ_CUSTOMER_ONLY_TABLE").ok();
+    let query_limit = std::env::var("JAZZ_CUSTOMER_QUERY_LIMIT")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("valid query limit"));
+    for table in subscription_tables()
+        .into_iter()
+        .filter(|table| only_table.as_ref().is_none_or(|selected| table == selected))
+    {
+        let mut query = Query::from(table.as_str());
+        if let Some(limit) = query_limit {
+            query = query.limit(limit);
+        }
         let prepared = client
             .db
             .prepare_query(&query)
@@ -2038,9 +2536,10 @@ fn run_connect_and_subscribe(
         let subscribe_us = subscribe_call_start.elapsed().as_micros();
         subscriptions.push(OpenSubscription {
             name: table.clone(),
-            expected: *expected
+            expected: (*expected
                 .get(&table)
-                .unwrap_or_else(|| panic!("missing expected count for {table}")),
+                .unwrap_or_else(|| panic!("missing expected count for {table}")))
+            .min(query_limit.unwrap_or(usize::MAX)),
             stream,
             rows: BTreeSet::new(),
             subscribe_us,
@@ -2048,6 +2547,7 @@ fn run_connect_and_subscribe(
             materialized_ms: None,
         });
     }
+    assert!(!subscriptions.is_empty(), "no matching subscription table");
     let subscribe_ms = subscribe_start.elapsed().as_millis();
 
     let settle_start = Instant::now();
@@ -2165,10 +2665,13 @@ fn run_connect_and_subscribe(
     }
     if !config.diagnostics {
         let rows_materialized = subscriptions.iter().map(|s| s.rows.len()).sum();
-        let expected_rows = expected.values().sum();
+        let expected_rows = subscriptions.iter().map(|s| s.expected).sum();
         assert_eq!(rows_materialized, expected_rows);
+        let wall_ms = start.elapsed().as_millis();
+        let alloc_snapshot = alloc_metrics::stop();
+        let _ = work_budget::stop();
         return RunSummary {
-            wall_ms: start.elapsed().as_millis(),
+            wall_ms,
             connect_ms,
             subscribe_ms,
             settle_ms,
@@ -2176,6 +2679,18 @@ fn run_connect_and_subscribe(
             expected_rows,
             subscriptions: subscriptions.len(),
             ticks,
+            allocs: alloc_snapshot.allocs,
+            alloc_bytes: alloc_snapshot.bytes,
+            allocs_per_row: if rows_materialized == 0 {
+                0.0
+            } else {
+                alloc_snapshot.allocs as f64 / rows_materialized as f64
+            },
+            alloc_bytes_per_row: if rows_materialized == 0 {
+                0.0
+            } else {
+                alloc_snapshot.bytes as f64 / rows_materialized as f64
+            },
             actual_rows: subscriptions
                 .iter_mut()
                 .map(|s| (s.name.clone(), std::mem::take(&mut s.rows)))
@@ -2249,10 +2764,11 @@ fn run_connect_and_subscribe(
     }
     let materialize_start = Instant::now();
     for sub in &subscriptions {
-        let prepared = client
-            .db
-            .prepare_query(&Query::from(sub.name.as_str()))
-            .unwrap();
+        let mut query = Query::from(sub.name.as_str());
+        if let Some(limit) = query_limit {
+            query = query.limit(limit);
+        }
+        let prepared = client.db.prepare_query(&query).unwrap();
         let rows = block_on(client.db.all(&prepared, ReadOpts::default())).unwrap();
         assert_eq!(
             rows.len(),
@@ -2271,7 +2787,7 @@ fn run_connect_and_subscribe(
         block_on(relay.db.flush_for_test())
             .expect("warm-prime relay state should flush before reopen");
     }
-    let expected_rows = expected.values().sum::<usize>();
+    let expected_rows = subscriptions.iter().map(|sub| sub.expected).sum::<usize>();
     let dominant_child_metrics = subscriptions
         .iter()
         .find(|sub| sub.name == DOMINANT_CHILD_TABLE)
@@ -2870,7 +3386,11 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert("workload_revision".to_owned(), json!(2));
     fields.insert(
         "topology".to_owned(),
-        json!("core-device-local-relay-client"),
+        json!(if std::env::var_os("JAZZ_CUSTOMER_DIRECT_CORE").is_some() {
+            "core-client"
+        } else {
+            "core-device-local-relay-client"
+        }),
     );
     fields.insert("storage_mode".to_owned(), json!(storage_mode()));
     fields.insert(
@@ -2929,6 +3449,16 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "rows_materialized".to_owned(),
         json!(summary.rows_materialized),
     );
+    if summary.actual_rows.len() == 1 {
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        summary
+            .actual_rows
+            .values()
+            .next()
+            .expect("one subscription has a row set")
+            .hash(&mut digest);
+        fields.insert("row_set_hash".to_owned(), json!(digest.finish()));
+    }
     fields.insert("expected_rows".to_owned(), json!(summary.expected_rows));
     fields.insert(
         "server_to_client_messages".to_owned(),
@@ -3150,7 +3680,23 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
     fields.insert(
         "shape_note".to_owned(),
-        json!("39 subscriptions: org/group/group_access_edges/group_entry/profile, fourteen resource tables, fourteen resource-access tables, and six child tables; child rows inherit read through parent_id"),
+        json!(if let Ok(table) = std::env::var("JAZZ_CUSTOMER_ONLY_TABLE") {
+            format!("one subscription for {table} in the full seeded permissioned-resource fixture")
+        } else {
+            "39 subscriptions: org/group/group_access_edges/group_entry/profile, fourteen resource tables, fourteen resource-access tables, and six child tables; child rows inherit read through parent_id".to_owned()
+        }),
+    );
+    fields.insert(
+        "subscription_filter".to_owned(),
+        json!(std::env::var("JAZZ_CUSTOMER_ONLY_TABLE").ok()),
+    );
+    fields.insert(
+        "query_limit".to_owned(),
+        json!(
+            std::env::var("JAZZ_CUSTOMER_QUERY_LIMIT")
+                .ok()
+                .map(|value| value.parse::<usize>().expect("valid query limit"))
+        ),
     );
     fields.insert(
         "subscription_timeline".to_owned(),

@@ -24,7 +24,11 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::CurrentRowsReceipt(receipt) => {
             version_carriers_bytes(&receipt.version_carriers)
         }
+        SyncMessage::RemoteReadResponse(response) => {
+            response.rows.as_ref().map_or(0, |rows| rows.len() as u64)
+        }
         SyncMessage::CurrentRowsRequest(_) | SyncMessage::CurrentRowsCancel { .. } => 0,
+        SyncMessage::RemoteReadRequest(_) | SyncMessage::RemoteReadCancel { .. } => 0,
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.

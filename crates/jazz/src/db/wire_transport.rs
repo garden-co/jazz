@@ -788,6 +788,7 @@ fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
         | AuthorizationScopeDecision { request_id, .. }
         | PermissionAdviceResponse { request_id, .. } => (1, request_id.0.to_vec()),
         CurrentRowsReceipt(receipt) => (2, receipt.request_id.0.to_vec()),
+        RemoteReadResponse(response) => (2, response.request_id.0.to_vec()),
         ChunkUploadStart(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
         ChunkUploadNodes(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
         ChunkUploadResult(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),

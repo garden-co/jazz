@@ -3216,6 +3216,7 @@ mod node_runtime;
 use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
+mod remote_reads;
 mod row_availability;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
@@ -3693,6 +3694,7 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::RemoteReadResponse(_)
             | SyncMessage::AuthorizationScopeReceipt { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
@@ -5642,6 +5644,8 @@ impl Drop for SubscriptionStream {
 #[doc(hidden)]
 pub enum SerializedReadResult {
     Rows(Vec<CurrentRow>),
+    /// Already encoded with the shared binding row codec by the serving Core.
+    EncodedRows(Vec<u8>),
     Relation(RelationSnapshot),
 }
 

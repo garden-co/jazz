@@ -471,6 +471,7 @@ where
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
+    pub(super) remote_reads: remote_reads::SharedRemoteReads,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) downstream_fates: PendingDownstreamFates,
@@ -595,7 +596,7 @@ impl PendingSubscriberControlResponse {
     }
 }
 
-fn queue_direct_control(
+pub(super) fn queue_direct_control(
     pending: &mut VecDeque<PendingSubscriberControlResponse>,
     message: SyncMessage,
 ) {
@@ -1930,6 +1931,7 @@ where
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
         self.pump_current_rows()?;
+        self.pump_remote_reads()?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -2808,6 +2810,18 @@ where
                                 let expected = *expected_scope_authority;
                                 let selected = *self.admitted_upstream_authority.borrow();
                                 row_availability::receive_current_rows(&self.node, &self.current_rows, selected, expected, authority_receipt_eligible, receipt).await?;
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                applied = true;
+                                continue;
+                            }
+                            SyncMessage::RemoteReadResponse(response) => {
+                                remote_reads::receive_remote_read(
+                                    &self.remote_reads,
+                                    *self.admitted_upstream_authority.borrow(),
+                                    *expected_scope_authority,
+                                    authority_receipt_eligible,
+                                    response,
+                                );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 applied = true;
                                 continue;
@@ -4067,6 +4081,74 @@ where
                         }
                         SyncMessage::CurrentRowsCancel { request_id } => {
                             self.current_rows.borrow_mut().cancel_downstream(connection_epoch, request_id);
+                            continue;
+                        }
+                        SyncMessage::RemoteReadCancel { request_id } => {
+                            self.remote_reads.borrow_mut().cancel_downstream(connection_epoch, request_id);
+                            continue;
+                        }
+                        SyncMessage::RemoteReadRequest(request) => {
+                            let admitted = self.transport.connection_session_context().is_some_and(
+                                |context| context.negotiated_features
+                                    & crate::wire::FEATURE_REMOTE_READ_RESULTS != 0,
+                            );
+                            if !admitted || !remote_reads::valid_request(&request) {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let Some((identity, claims)) = admitted_request_policy_binding(
+                                *ingest_context,
+                                peer,
+                                session_claim_binding.clone(),
+                                request.delegated_session.clone(),
+                            ) else {
+                                drop_peer_request(&self.node);
+                                queue_direct_control(
+                                    &mut self.pending_control_responses,
+                                    SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
+                                        request_id: request.request_id,
+                                        rows: None,
+                                    }),
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
+                                continue;
+                            };
+                            if self.node.borrow().can_mint_current_row_receipts() {
+                                let rows = remote_reads::evaluate_remote_read(
+                                    &self.node, &request, identity, claims,
+                                ).await;
+                                queue_direct_control(&mut self.pending_control_responses,
+                                    SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
+                                        request_id: request.request_id,
+                                        rows,
+                                    }),
+                                );
+                            } else {
+                                let upstream_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                let mut forwarded = request.clone();
+                                forwarded.request_id = upstream_id;
+                                forwarded.delegated_session = None;
+                                let route = remote_reads::RemoteReadRoute {
+                                    request: forwarded,
+                                    context: crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims),
+                                    upstream: None,
+                                    downstream: Some((connection_epoch, request.request_id)),
+                                    sender: None,
+                                };
+                                if self.admitted_upstream_authority.borrow().is_none()
+                                    || !self.remote_reads.borrow_mut().admit(route)
+                                {
+                                    queue_direct_control(&mut self.pending_control_responses,
+                                        SyncMessage::RemoteReadResponse(crate::protocol::RemoteReadResponse {
+                                            request_id: request.request_id,
+                                            rows: None,
+                                        }),
+                                    );
+                                }
+                            }
+                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                            flush_subscriber_controls_or_stop!(self, peer);
                             continue;
                         }
                         SyncMessage::CurrentRowsRequest(request) => {

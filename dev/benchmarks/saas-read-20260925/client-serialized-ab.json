@@ -1,0 +1,204 @@
+{
+  "benchmark": "permissioned_resources_client_one_shot",
+  "benchmark_commit": "a1c20ca86",
+  "binary_sha256": {
+    "baseline": "01ff7eb082ab8abc696a8961f999594a04eb1b6f16cbc2a67267be940fb6ea69",
+    "candidate": "b46c2867bb59dfd17ddac9b0784f5c3d782d73f9221bd779ec03958bee2bd63b"
+  },
+  "candidate_change": "For covered current non-deleted flat serialized reads, use the existing settled_receiver_local_snapshot branch instead of coverage attachment plus Db::all. One condition and comment in crates/jazz/src/db/reads.rs; reverted after measurement.",
+  "engine_main": "fe34ff5537185c27fbf3e83891a32a02cae1e095",
+  "fixture": "public-API anonymized permissioned resources, scale 1.0, member identity, 39 plain Global SELECTs or dominant child LIMIT 100, RocksDB, zstd",
+  "order": "baseline full relay/direct/child100 relay/direct; candidate same; candidate full direct/relay repeat; baseline full direct/relay repeat",
+  "outcome": "rejected: all expected authorized row sets matched, but full-query end-to-end latency regressed because candidate built a receiver maintained subscription graph",
+  "profile": "cargo perf with cold-settle-attribution feature, matching A/B binaries",
+  "runs": {
+    "baseline": {
+      "child_100_direct": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 38428,
+          "connect_ms": 0,
+          "core_tick_us": 641219,
+          "queries": 1,
+          "query_limit": 100,
+          "read_ms": 683,
+          "read_poll_us": 3320,
+          "relay_tick_us": 15,
+          "rows": 100,
+          "ticks": 2,
+          "topology": "core-client"
+        }
+      ],
+      "child_100_relay": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 40742,
+          "connect_ms": 0,
+          "core_tick_us": 652634,
+          "queries": 1,
+          "query_limit": 100,
+          "read_ms": 748,
+          "read_poll_us": 3147,
+          "relay_tick_us": 51537,
+          "rows": 100,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        }
+      ],
+      "full_direct": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 1035797,
+          "connect_ms": 0,
+          "core_tick_us": 2220220,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 3943,
+          "read_poll_us": 682003,
+          "relay_tick_us": 14,
+          "rows": 27518,
+          "ticks": 2,
+          "topology": "core-client"
+        },
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 995835,
+          "connect_ms": 0,
+          "core_tick_us": 2246646,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 3931,
+          "read_poll_us": 684129,
+          "relay_tick_us": 50,
+          "rows": 27518,
+          "ticks": 2,
+          "topology": "core-client"
+        }
+      ],
+      "full_relay": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 1037268,
+          "connect_ms": 0,
+          "core_tick_us": 2193852,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 6684,
+          "read_poll_us": 683469,
+          "relay_tick_us": 2764906,
+          "rows": 27518,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        },
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 996442,
+          "connect_ms": 0,
+          "core_tick_us": 2242345,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 6649,
+          "read_poll_us": 684853,
+          "relay_tick_us": 2720523,
+          "rows": 27518,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        }
+      ]
+    },
+    "candidate": {
+      "child_100_direct": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 47537,
+          "connect_ms": 0,
+          "core_tick_us": 665641,
+          "queries": 1,
+          "query_limit": 100,
+          "read_ms": 718,
+          "read_poll_us": 5371,
+          "relay_tick_us": 19,
+          "rows": 100,
+          "ticks": 2,
+          "topology": "core-client"
+        }
+      ],
+      "child_100_relay": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 47149,
+          "connect_ms": 0,
+          "core_tick_us": 648339,
+          "queries": 1,
+          "query_limit": 100,
+          "read_ms": 749,
+          "read_poll_us": 5412,
+          "relay_tick_us": 48442,
+          "rows": 100,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        }
+      ],
+      "full_direct": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 2518206,
+          "connect_ms": 0,
+          "core_tick_us": 2240040,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 5197,
+          "read_poll_us": 433647,
+          "relay_tick_us": 19,
+          "rows": 27518,
+          "ticks": 2,
+          "topology": "core-client"
+        },
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 2579993,
+          "connect_ms": 0,
+          "core_tick_us": 2313608,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 5330,
+          "read_poll_us": 431324,
+          "relay_tick_us": 17,
+          "rows": 27518,
+          "ticks": 2,
+          "topology": "core-client"
+        }
+      ],
+      "full_relay": [
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 2622525,
+          "connect_ms": 0,
+          "core_tick_us": 2172622,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 7967,
+          "read_poll_us": 391993,
+          "relay_tick_us": 2774116,
+          "rows": 27518,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        },
+        {
+          "benchmark": "permissioned_resources_client_one_shot",
+          "client_tick_us": 2524784,
+          "connect_ms": 0,
+          "core_tick_us": 2193461,
+          "queries": 39,
+          "query_limit": null,
+          "read_ms": 7897,
+          "read_poll_us": 392007,
+          "relay_tick_us": 2782319,
+          "rows": 27518,
+          "ticks": 3,
+          "topology": "core-device-local-relay-client"
+        }
+      ]
+    }
+  }
+}

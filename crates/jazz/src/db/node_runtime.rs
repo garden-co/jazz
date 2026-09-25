@@ -279,6 +279,7 @@ where
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
+    pub(super) remote_reads: remote_reads::SharedRemoteReads,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
@@ -432,6 +433,7 @@ where
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             current_rows: Rc::new(RefCell::new(row_availability::CurrentRowsRouter::default())),
+            remote_reads: Rc::new(RefCell::new(remote_reads::RemoteReadRouter::default())),
             local_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
@@ -930,6 +932,15 @@ where
             .enable_authoritative_scalar_exit_refresh();
     }
 
+    /// Mark a fixture Core as the complete-policy-input serving authority.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn enable_authoritative_serving_for_test(&self) {
+        self.node
+            .borrow_mut()
+            .enable_authoritative_scalar_exit_refresh();
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
     /// values. Groove persists timestamps and performs eviction, but does not
     /// choose these product limits.
@@ -1023,6 +1034,23 @@ where
     /// when there is no publication to advance.
     pub(super) fn has_pending_local_publications(&self) -> bool {
         !self.pending_local_publications.borrow().is_empty()
+    }
+
+    /// Conservative read-after-write guard for an authority-evaluated result.
+    pub(super) async fn has_local_updates_for_remote_read(&self) -> bool {
+        if self.has_pending_local_publications()
+            || !self.queued_mutations.borrow().is_empty()
+            || self.queued_mutation_active_leases.get() != 0
+            || !self.reserved_mutations.borrow().is_empty()
+            || self.outbox.borrow().len() != 0
+        {
+            return true;
+        }
+        self.node.lock().await.has_ahead_current_updates()
+    }
+
+    pub(super) fn session_claim_revision_for_remote_read(&self, identity: AuthorSubject) -> u64 {
+        self.node.borrow().session_claim_revision(identity)
     }
 
     fn poll_local_publication_settlement(
@@ -2376,6 +2404,7 @@ where
                 open_schema_admission: Rc::clone(&self.open_schema_admission),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
                 current_rows: Rc::clone(&self.current_rows),
+                remote_reads: Rc::clone(&self.remote_reads),
                 local_fate_routes: Rc::clone(&self.local_fate_routes),
                 admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
                 downstream_fates: Rc::new(RefCell::new(Vec::new())),
@@ -2773,6 +2802,7 @@ where
             open_schema_admission: Rc::clone(&self.open_schema_admission),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             current_rows: Rc::clone(&self.current_rows),
+            remote_reads: Rc::clone(&self.remote_reads),
             local_fate_routes: Rc::clone(&self.local_fate_routes),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates,
@@ -2925,6 +2955,7 @@ where
             state.deferred_repair_fates.clear();
         }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
+        self.remote_reads.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
         let mut terminal_permission_advice = Vec::new();

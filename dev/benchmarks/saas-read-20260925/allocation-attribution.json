@@ -1,0 +1,433 @@
+{
+  "benchmark": "permissioned_resources_allocation_attribution",
+  "binary_sha256": "6fad4d23473b8ffdc8d1215bd4104c60dfa60f752f77947e48560577a7fa49ae",
+  "features": [
+    "cold-settle-attribution",
+    "bench-alloc-sites"
+  ],
+  "notes": "Allocation totals and phase counters are exact. Caller counts are sampling estimates. Profiled wall times are not comparable to clean latency receipts.",
+  "runs": {
+    "all_39": {
+      "allocation_count": 38426650,
+      "allocation_phases_top_by_bytes": [
+        {
+          "allocations": 3952023,
+          "phase": "query_setup",
+          "requested_bytes": 2201655868,
+          "role": "core"
+        },
+        {
+          "allocations": 5167548,
+          "phase": "storage_apply",
+          "requested_bytes": 1380154047,
+          "role": "client"
+        },
+        {
+          "allocations": 40099,
+          "phase": "benchmark_transport",
+          "requested_bytes": 863306912,
+          "role": "core"
+        },
+        {
+          "allocations": 2423526,
+          "phase": "publish_supporting_rows",
+          "requested_bytes": 538482900,
+          "role": "core"
+        },
+        {
+          "allocations": 894303,
+          "phase": "core",
+          "requested_bytes": 533201626,
+          "role": "core"
+        },
+        {
+          "allocations": 2289832,
+          "phase": "ingest",
+          "requested_bytes": 401091469,
+          "role": "client"
+        },
+        {
+          "allocations": 2912365,
+          "phase": "query_lowering",
+          "requested_bytes": 362151251,
+          "role": "core"
+        },
+        {
+          "allocations": 993625,
+          "phase": "receive_updates",
+          "requested_bytes": 263420209,
+          "role": "client"
+        },
+        {
+          "allocations": 1354693,
+          "phase": "client",
+          "requested_bytes": 253072643,
+          "role": "client"
+        },
+        {
+          "allocations": 2273007,
+          "phase": "query_lowering",
+          "requested_bytes": 237702808,
+          "role": "outside_node_ticks"
+        },
+        {
+          "allocations": 1128047,
+          "phase": "collect_results",
+          "requested_bytes": 192474111,
+          "role": "core"
+        },
+        {
+          "allocations": 265454,
+          "phase": "decode_query_outputs",
+          "requested_bytes": 172127406,
+          "role": "core"
+        }
+      ],
+      "queries": 39,
+      "query_limit": null,
+      "requested_bytes": 9772507729,
+      "rows": 27518,
+      "sample_rate": 65536,
+      "sampled_callers_top_by_count": [
+        {
+          "caller": "groove::ivm::runtime::join::advance_arrangement",
+          "estimated_allocations": 1245184,
+          "rank": 1
+        },
+        {
+          "caller": "<groove::records::FieldIdentity as core::clone::Clone>::clone",
+          "estimated_allocations": 1245184,
+          "rank": 2
+        },
+        {
+          "caller": "groove::records::values::decode_nullable::{{closure}}",
+          "estimated_allocations": 983040,
+          "rank": 3
+        },
+        {
+          "caller": "<jazz::protocol::VersionRecord as core::clone::Clone>::clone",
+          "estimated_allocations": 983040,
+          "rank": 4
+        },
+        {
+          "caller": "groove::ivm::runtime::join::JoinBucket::commit_overlay",
+          "estimated_allocations": 917504,
+          "rank": 5
+        },
+        {
+          "caller": "groove::db::encoding::encode_primary_key_part",
+          "estimated_allocations": 786432,
+          "rank": 6
+        },
+        {
+          "caller": "groove::records::values::assign_record_variant_registries::{{closure}}",
+          "estimated_allocations": 720896,
+          "rank": 7
+        },
+        {
+          "caller": "groove::large_values::decode_primitive_payload",
+          "estimated_allocations": 655360,
+          "rank": 8
+        },
+        {
+          "caller": "jazz::node::physical::<impl jazz::node::NodeState<S>>::authored_column_names_for_ids",
+          "estimated_allocations": 655360,
+          "rank": 9
+        },
+        {
+          "caller": "groove::storage::LayoutStorage::physical_key",
+          "estimated_allocations": 589824,
+          "rank": 10
+        }
+      ],
+      "sampled_stacks": 1122,
+      "timing_phases_top_by_exclusive_ns": [
+        {
+          "entries": 78,
+          "exclusive_ns": 951436572,
+          "phase": "query_setup",
+          "role": "core"
+        },
+        {
+          "entries": 2030,
+          "exclusive_ns": 729144290,
+          "phase": "storage_apply",
+          "role": "client"
+        },
+        {
+          "entries": 2026,
+          "exclusive_ns": 257376582,
+          "phase": "ingest",
+          "role": "client"
+        },
+        {
+          "entries": 78,
+          "exclusive_ns": 248127289,
+          "phase": "publish_supporting_rows",
+          "role": "core"
+        },
+        {
+          "entries": 6,
+          "exclusive_ns": 215021334,
+          "phase": "storage_persist",
+          "role": "client"
+        },
+        {
+          "entries": 244,
+          "exclusive_ns": 186818507,
+          "phase": "query_lowering",
+          "role": "core"
+        },
+        {
+          "entries": 1047,
+          "exclusive_ns": 133547472,
+          "phase": "query_graph_compile",
+          "role": "core"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 127131021,
+          "phase": "client",
+          "role": "client"
+        },
+        {
+          "entries": 39,
+          "exclusive_ns": 116128043,
+          "phase": "collect_results",
+          "role": "core"
+        },
+        {
+          "entries": 78,
+          "exclusive_ns": 114380919,
+          "phase": "collect_results",
+          "role": "client"
+        },
+        {
+          "entries": 156,
+          "exclusive_ns": 113765538,
+          "phase": "query_lowering",
+          "role": "outside_node_ticks"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 101843238,
+          "phase": "core",
+          "role": "core"
+        }
+      ],
+      "topology": "core-client"
+    },
+    "child_limit_100": {
+      "allocation_count": 3597795,
+      "allocation_phases_top_by_bytes": [
+        {
+          "allocations": 2414480,
+          "phase": "query_setup",
+          "requested_bytes": 1478934440,
+          "role": "core"
+        },
+        {
+          "allocations": 698956,
+          "phase": "client",
+          "requested_bytes": 64052768,
+          "role": "client"
+        },
+        {
+          "allocations": 169578,
+          "phase": "query_lowering",
+          "requested_bytes": 20578391,
+          "role": "core"
+        },
+        {
+          "allocations": 26827,
+          "phase": "storage_apply",
+          "requested_bytes": 6270682,
+          "role": "client"
+        },
+        {
+          "allocations": 16736,
+          "phase": "core",
+          "requested_bytes": 5678107,
+          "role": "core"
+        },
+        {
+          "allocations": 44293,
+          "phase": "query_graph_compile",
+          "requested_bytes": 5198536,
+          "role": "core"
+        },
+        {
+          "allocations": 22268,
+          "phase": "publish_supporting_rows",
+          "requested_bytes": 4536114,
+          "role": "core"
+        },
+        {
+          "allocations": 41772,
+          "phase": "query_lowering",
+          "requested_bytes": 4389757,
+          "role": "outside_node_ticks"
+        },
+        {
+          "allocations": 875,
+          "phase": "benchmark_transport",
+          "requested_bytes": 3905844,
+          "role": "core"
+        },
+        {
+          "allocations": 31243,
+          "phase": "query_lowering",
+          "requested_bytes": 3235083,
+          "role": "client"
+        },
+        {
+          "allocations": 17060,
+          "phase": "query_prepare",
+          "requested_bytes": 1949510,
+          "role": "core"
+        },
+        {
+          "allocations": 11743,
+          "phase": "ingest",
+          "requested_bytes": 1771560,
+          "role": "client"
+        }
+      ],
+      "queries": 1,
+      "query_limit": 100,
+      "requested_bytes": 1617606739,
+      "rows": 100,
+      "sample_rate": 16384,
+      "sampled_callers_top_by_count": [
+        {
+          "caller": "groove::ivm::runtime::join::advance_arrangement",
+          "estimated_allocations": 622592,
+          "rank": 1
+        },
+        {
+          "caller": "groove::ivm::runtime::join::JoinBucket::commit_overlay",
+          "estimated_allocations": 294912,
+          "rank": 2
+        },
+        {
+          "caller": "groove::ivm::runtime::windows::encoded_record_key_part",
+          "estimated_allocations": 212992,
+          "rank": 3
+        },
+        {
+          "caller": "groove::ivm::runtime::evaluator::TickEvaluator::update_arg_by",
+          "estimated_allocations": 212992,
+          "rank": 4
+        },
+        {
+          "caller": "groove::ivm::runtime::key_encoding::encode_record_field_key_part",
+          "estimated_allocations": 131072,
+          "rank": 5
+        },
+        {
+          "caller": "groove::ivm::runtime::key_encoding::encode_ordered_bytes",
+          "estimated_allocations": 114688,
+          "rank": 6
+        },
+        {
+          "caller": "groove::ivm::runtime::key_encoding::encode_key_part",
+          "estimated_allocations": 114688,
+          "rank": 7
+        },
+        {
+          "caller": "<jazz_storage_rocksdb::RocksDbCursor as groove::storage::StorageCursor>::next_batch::{{closure}}",
+          "estimated_allocations": 98304,
+          "rank": 8
+        },
+        {
+          "caller": "groove::schema::TableSchema::record_schema::{{closure}}",
+          "estimated_allocations": 81920,
+          "rank": 9
+        },
+        {
+          "caller": "groove::ivm::runtime::evaluator::CollectByGroup::commit_overlay",
+          "estimated_allocations": 81920,
+          "rank": 10
+        }
+      ],
+      "sampled_stacks": 309,
+      "timing_phases_top_by_exclusive_ns": [
+        {
+          "entries": 2,
+          "exclusive_ns": 656750582,
+          "phase": "query_setup",
+          "role": "core"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 39996042,
+          "phase": "client",
+          "role": "client"
+        },
+        {
+          "entries": 10,
+          "exclusive_ns": 10928458,
+          "phase": "query_lowering",
+          "role": "core"
+        },
+        {
+          "entries": 18,
+          "exclusive_ns": 4478083,
+          "phase": "query_graph_compile",
+          "role": "core"
+        },
+        {
+          "entries": 8,
+          "exclusive_ns": 3238830,
+          "phase": "storage_apply",
+          "role": "client"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 2526084,
+          "phase": "core",
+          "role": "core"
+        },
+        {
+          "entries": 4,
+          "exclusive_ns": 2463624,
+          "phase": "query_lowering",
+          "role": "outside_node_ticks"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 1925373,
+          "phase": "publish_supporting_rows",
+          "role": "core"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 1752125,
+          "phase": "query_lowering",
+          "role": "client"
+        },
+        {
+          "entries": 9,
+          "exclusive_ns": 1622374,
+          "phase": "query_graph_compile",
+          "role": "client"
+        },
+        {
+          "entries": 6,
+          "exclusive_ns": 1506873,
+          "phase": "storage_persist",
+          "role": "client"
+        },
+        {
+          "entries": 2,
+          "exclusive_ns": 1492917,
+          "phase": "query_setup",
+          "role": "client"
+        }
+      ],
+      "topology": "core-client"
+    }
+  },
+  "scope": "connect_subscribe_settle",
+  "source_revision": "560d1ce251fdda9f31dc71b01ab5982766efa9cb"
+}
