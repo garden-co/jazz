@@ -979,11 +979,18 @@ impl Database {
         binding_values: &[Value],
         root_indirect_values: RootIndirectValues,
     ) -> Result<MultisinkSubscription, Error> {
+        // Physical root values are only valid for a first result: later
+        // retained updates arrive materialized and could not retract them.
+        let lifetime = if root_indirect_values == RootIndirectValues::Materialize {
+            SubscriptionLifetime::Retained
+        } else {
+            SubscriptionLifetime::FirstResult
+        };
         let subscription = self
             .bind_shape_with_lifetime_and_root_values(
                 shape,
                 binding_values,
-                SubscriptionLifetime::Retained,
+                lifetime,
                 root_indirect_values,
                 None,
             )
