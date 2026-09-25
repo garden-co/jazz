@@ -1,6 +1,9 @@
 import { todoBenchmarks } from "../../../examples/todo-client-localfirst-ts/benchmarks/metadata.ts";
 import { permissionedBenchmarks } from "../../../examples/permissioned-resources/benchmarks/metadata.ts";
 import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metadata.ts";
+import { epicDropBenchmarks } from "../../../examples/epic-drop/benchmarks/metadata.ts";
+import { jamazonBenchmarks } from "../../../examples/jamazon-warehouse/benchmarks/metadata.ts";
+import { musicAgentBenchmarks } from "../../../examples/music-agent/benchmarks/metadata.ts";
 import { w1Benchmarks } from "../../../examples/benchmarks/w1/metadata.ts";
 import { coreBenchmarks } from "../../../crates/jazz/benches/metadata.ts";
 import { policyDocumentBenchmarks } from "../../../examples/policy-scoped-documents/benchmarks/metadata.ts";
@@ -15,6 +18,9 @@ export const benchmarkMetadata = [
   ...todoBenchmarks,
   ...permissionedBenchmarks,
   ...bigLabelBenchmarks,
+  ...epicDropBenchmarks,
+  ...jamazonBenchmarks,
+  ...musicAgentBenchmarks,
   ...w1Benchmarks,
   ...coreBenchmarks,
   ...policyDocumentBenchmarks,

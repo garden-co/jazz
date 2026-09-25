@@ -23,6 +23,9 @@ cargo test -p jazz-example-epic-drop-benchmark
 The browser receipts cover multi-chunk upload plus metadata projection, and a cancelled upload
 that publishes no file before a clean retry. The native fixture uses a deterministic 32 KiB
 `PatternReader`, lists the indexed folder metadata, and validates a 64 KiB middle byte range.
+`benchmarks/benches/walltime.rs` times uploads (4 and 64 MiB), a 100-file folder listing, a
+4 MiB download and a 64 KiB seek into a 64 MiB file on CodSpeed wall time;
+`benchmarks/metadata.ts` documents each case for the examples page.
 
 ## Non-goals
 
