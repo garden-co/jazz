@@ -1996,6 +1996,135 @@ fn advice_after_a_write_reads_only_the_target_row() {
     );
 }
 
+/// `docs` rows inherit read, update and delete from their `group`, and a
+/// group is readable by its member.
+fn group_docs_schema() -> JazzSchema {
+    let inherits = || crate::tools::PolicyExpr::Inherits {
+        operation: crate::tools::public_schema::Operation::Select,
+        via_column: "group".into(),
+        max_depth: None,
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("groups")
+                    .column("member", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_session_eq("member", &["claims", "sub"])),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("group", "groups")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(inherits())
+                            .with_update(Some(inherits()), inherits())
+                            .with_delete(inherits()),
+                    ),
+            ),
+    )
+}
+
+/// Advice support is seeded with the target row (#3468), but only for clauses
+/// evaluated on the stored row. An update's check runs on the patched row, so
+/// moving a doc into another group must still find that group's grant, and a
+/// move into a group the user is not in must still be denied. Delete advice is
+/// per row too. Each ask follows a write, so none reuses a cached scope.
+///
+/// alice ── member ──► g1 ◄── d1, g2 ◄── d2      bob ── member ──► g3 ◄── d3
+#[test]
+fn row_seeded_update_and_delete_advice_follow_the_patched_row() {
+    let schema = group_docs_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let group = |member: AuthorSubject| {
+        server
+            .insert(
+                "groups",
+                BTreeMap::from([("member".to_owned(), Value::Uuid(member.test_uuid()))]),
+            )
+            .unwrap()
+            .row_uuid()
+    };
+    let doc = |title: &str, group: RowUuid| {
+        server
+            .insert(
+                "docs",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                    ("group".to_owned(), Value::Uuid(group.0)),
+                ]),
+            )
+            .unwrap()
+            .row_uuid()
+    };
+    let (g1, g2, g3) = (group(alice), group(alice), group(bob));
+    let (d1, _d2, d3) = (doc("d1", g1), doc("d2", g2), doc("d3", g3));
+    let ask = |action| {
+        // A write first, so the answer is proven by a fresh row-seeded scope.
+        server
+            .insert(
+                "groups",
+                BTreeMap::from([("member".to_owned(), Value::Uuid(bob.test_uuid()))]),
+            )
+            .unwrap();
+        server.tick().unwrap();
+        let advice = client.request_permission_advice(action);
+        for _ in 0..3 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+        }
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    let move_d1 = |to: RowUuid| PermissionAdviceAction::Update {
+        table: "docs".to_owned(),
+        row: d1,
+        patch: BTreeMap::from([("group".to_owned(), Value::Uuid(to.0))]),
+    };
+    let delete = |row| PermissionAdviceAction::Delete {
+        table: "docs".to_owned(),
+        row,
+    };
+
+    assert_eq!(ask(move_d1(g1)), PermissionAdvice::Allowed, "stay in g1");
+    assert_eq!(
+        ask(move_d1(g2)),
+        PermissionAdvice::Allowed,
+        "move into alice's g2"
+    );
+    assert_eq!(
+        ask(move_d1(g3)),
+        PermissionAdvice::Denied,
+        "move into bob's g3"
+    );
+    assert_eq!(
+        ask(delete(d1)),
+        PermissionAdvice::Allowed,
+        "delete a doc in g1"
+    );
+    assert_eq!(
+        ask(delete(d3)),
+        PermissionAdvice::Denied,
+        "delete a doc in bob's g3"
+    );
+}
+
 /// This stays at the peer/transport seam because the public advice future
 /// cannot hold an authority's completed proof between its wire receipt and
 /// the local callback. It proves that the request owns the claims it observed
