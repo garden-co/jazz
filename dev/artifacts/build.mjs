@@ -493,6 +493,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const napiStage =
     kind === "napi" ? mkdtempSync(join(root, "crates", "jazz-napi", ".napi-stage-")) : undefined;
   const napiPath = expectedNapiBinding && join(napiStage, expectedNapiBinding);
+  const compactWasmRelease = kind === "wasm" && profile === "release";
   const args = [
     ...selectedArgs,
     ...(artifactFeatures(kind) === "default,rn-test-bridge"
@@ -501,6 +502,18 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),
+    // Keep the query/storage engine optimized for throughput. The remaining
+    // code uses size optimization and cross-crate LTO in browser releases.
+    // Cargo arguments work with wasm-pack 0.13.1, unlike custom --profile names.
+    ...(compactWasmRelease
+      ? [
+          "--",
+          "--config",
+          "profile.release.package.groove.opt-level=3",
+          "--config",
+          "profile.release.package.jazz.opt-level=3",
+        ]
+      : []),
   ];
   try {
     if (kind === "napi" && process.env.JAZZ_NAPI_BUILD_FAULT === "producer")
@@ -509,7 +522,17 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       cwd: root,
       stdio: "inherit",
       shell: process.platform === "win32",
-      env: { ...process.env, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
+      env: {
+        ...process.env,
+        ...(compactWasmRelease
+          ? {
+              CARGO_PROFILE_RELEASE_LTO: "fat",
+              CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1",
+              CARGO_PROFILE_RELEASE_OPT_LEVEL: "s",
+            }
+          : {}),
+        JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint,
+      },
     });
     if (result.error) throw result.error;
     if (result.status !== 0) {
