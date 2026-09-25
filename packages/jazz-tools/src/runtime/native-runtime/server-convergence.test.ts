@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../../drivers/types.js";
 import { deploy } from "../../dev/catalogue.js";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "../schema-fetch.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "../../dev/catalogue-api.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";

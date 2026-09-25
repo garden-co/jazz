@@ -7,7 +7,7 @@ import type {
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
-import { appScopedUrl } from "./url.js";
+import { appScopedUrl } from "../runtime/url.js";
 
 export interface FetchStoredWasmSchemaOptions {
   appId: string;
@@ -436,4 +436,74 @@ export async function publishStoredMigration(
   }
 
   return (await response.json()) as { objectId: string; fromHash: string; toHash: string };
+}
+
+export interface DeploymentArtifacts {
+  targetSchemaHash: string;
+  schemas: Array<{ hash: string; schema: WasmSchema }>;
+  migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
+  permissions: CompiledPermissionsMap;
+}
+
+export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
+  schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
+}
+
+export interface DeploymentResponse {
+  changed: boolean;
+  published: {
+    schemas: string[];
+    migrations: Array<{ fromHash: string; toHash: string }>;
+  };
+}
+
+export class DeploymentError extends Error {
+  readonly name = "DeploymentError";
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly details?: { target?: string; tips?: string[] },
+  ) {
+    super(message);
+  }
+}
+
+export async function publishDeployment(
+  serverUrl: string,
+  options: { appId: string; adminSecret: string } & DeploymentArtifacts,
+): Promise<DeploymentResponse> {
+  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Jazz-Admin-Secret": options.adminSecret,
+    },
+    body: JSON.stringify(
+      {
+        targetSchemaHash: options.targetSchemaHash,
+        schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
+        migrations: options.migrations,
+        permissions: normalizePermissionsForWasm(options.permissions),
+      },
+      runtimeSchemaJsonReplacer,
+    ),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let body: { error?: string; code?: string; details?: DeploymentError["details"] } = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object") body = parsed;
+    } catch {
+      /* Preserve non-JSON HTTP errors. */
+    }
+    throw new DeploymentError(
+      `Deploy failed: ${body.error ?? `${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`}`,
+      response.status,
+      body.code,
+      body.details,
+    );
+  }
+  return (await response.json()) as DeploymentResponse;
 }

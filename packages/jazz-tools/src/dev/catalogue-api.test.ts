@@ -1,5 +1,5 @@
 import { schema as s } from "../index.js";
-import { wasmSchemasEqual } from "../dev/schema-utils.js";
+import { wasmSchemasEqual } from "./schema-utils.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchSchemaConnectivity,
@@ -8,10 +8,10 @@ import {
   fetchStoredWasmSchema,
   publishStoredSchema,
   publishStoredPermissions,
-} from "./schema-fetch.js";
-import { fetchServerSubscriptions } from "./introspection-fetch.js";
+} from "./catalogue-api.js";
+import { fetchServerSubscriptions } from "../runtime/introspection-fetch.js";
 
-describe("schema-fetch", () => {
+describe("catalogue-api", () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {

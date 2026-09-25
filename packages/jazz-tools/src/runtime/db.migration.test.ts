@@ -13,7 +13,7 @@ import { computeSchemaHash, pushPermissions, pushSchema } from "../dev/catalogue
 import { pushMigration } from "../dev/catalogue-project.js";
 import { renderMigrationStub } from "../dev/migrations.js";
 import { wasmSchemasEqual } from "../dev/schema-utils.js";
-import { fetchSchemaConnectivity, fetchStoredWasmSchema } from "./schema-fetch.js";
+import { fetchSchemaConnectivity, fetchStoredWasmSchema } from "../dev/catalogue-api.js";
 
 const oldSchema = {
   todos: s.table(

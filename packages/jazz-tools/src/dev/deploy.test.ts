@@ -3,134 +3,171 @@ import { schema as s } from "../schema-namespace.js";
 import {
   computeSchemaHash,
   deploy,
-  MissingMigrationError,
   pushSchema,
   SchemaHashMismatchError,
 } from "./catalogue.js";
+import type { DeploymentRequest } from "./catalogue-api.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
 const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
 
-it("publishes an explicit empty permission bundle on first deploy and reuses the schema on retry", async () => {
+it("deploys once per invocation and re-fetches the graph on the next invocation", async () => {
   const hash = await computeSchemaHash(app.wasmSchema);
-  const writes: string[] = [];
+  const calls: string[] = [];
   let stored = false;
-  let failPermissions = true;
-  let head: {
-    schemaHash: string;
-    bundleObjectId: string;
-    version: number;
-    parentBundleObjectId: string | null;
-  } | null = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${server.appId}/schemas`))
-        return reply({ hashes: stored ? [hash] : [] });
-      if (input.endsWith(`/schema/${hash}`))
-        return reply({ schema: { tables: app.wasmSchema }, publishedAt: 0 });
-      if (input.endsWith("/permissions/head")) return reply({ head });
-      const body = JSON.parse(String(init?.body));
-      if (input.endsWith("/admin/schemas")) {
-        writes.push("schema");
-        stored = true;
-        return reply({ hash, objectId: "schema-object" }, 201);
-      }
-      if (input.endsWith("/admin/permissions")) {
-        writes.push("permissions");
-        if (failPermissions) {
-          failPermissions = false;
-          return reply({ error: "temporary publication failure" }, 503);
-        }
-        expect(body.permissions).toEqual({});
-        expect(body.expectedParentBundleObjectId).toBe(head?.bundleObjectId ?? null);
-        head = {
-          schemaHash: hash,
-          version: (head?.version ?? 0) + 1,
-          bundleObjectId: `bundle-${writes.length}`,
-          parentBundleObjectId: head?.bundleObjectId ?? null,
-        };
-        return reply({ head }, 201);
-      }
-      throw new Error(`Unexpected request: ${input}`);
+      calls.push(input.split("/admin/")[1]!);
+      if (input.endsWith("/migrations/graph"))
+        return reply({
+          activeSchemaHash: stored ? hash : null,
+          schemas: stored ? [hash] : [],
+          migrations: [],
+        });
+      expect(input).toBe(`${server.serverUrl}/apps/${server.appId}/admin/deploy`);
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "test" });
+      const body = JSON.parse(String(init?.body)) as DeploymentRequest;
+      expect(body).toEqual({
+        targetSchemaHash: hash,
+        schemas: stored ? [] : [{ hash, schema: { tables: app.wasmSchema } }],
+        migrations: [],
+        permissions: {},
+      });
+      const result = {
+        changed: !stored,
+        published: { schemas: stored ? [] : [hash], migrations: [] },
+      };
+      stored = true;
+      return reply(result);
     }),
   );
-  await expect(deploy({ ...server, schema: app, permissions: {} })).rejects.toThrow();
-  expect(
-    (await deploy({ ...server, schema: app, permissions: {} })).permissions.head,
-  ).not.toBeNull();
-  expect((await deploy({ ...server, schema: app, permissions: {} })).schema.status).toBe(
-    "already-stored",
-  );
-  expect(writes).toEqual(["schema", "permissions", "permissions", "permissions"]);
+  expect((await deploy({ ...server, schema: app, permissions: {} })).changed).toBe(true);
+  expect((await deploy({ ...server, schema: app, permissions: {} })).changed).toBe(false);
+  expect(calls).toEqual(["migrations/graph", "deploy", "migrations/graph", "deploy"]);
 });
 
-it("rejects a missing required migration before publishing a new schema", async () => {
-  const previous = s.defineApp({ notes: s.table({ oldTitle: s.string() }, {}) });
-  const fromHash = await computeSchemaHash(previous.wasmSchema);
-  const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-    expect(init?.method ?? "GET").toBe("GET");
-    if (input.endsWith(`/apps/${server.appId}/schemas`)) return reply({ hashes: [fromHash] });
-    if (input.endsWith(`/schema/${fromHash}`))
-      return reply({ schema: { tables: previous.wasmSchema }, publishedAt: 0 });
-    if (input.endsWith("/permissions/head"))
-      return reply({
-        head: {
-          schemaHash: fromHash,
-          bundleObjectId: "old-bundle",
-          version: 1,
-          parentBundleObjectId: null,
-        },
-      });
-    throw new Error(`Unexpected request: ${input}`);
+it("surfaces server validation failures without retrying or publishing individual artifacts", async () => {
+  const hash = await computeSchemaHash(app.wasmSchema);
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input.endsWith("/migrations/graph"))
+      return reply({ activeSchemaHash: hash, schemas: [hash], migrations: [] });
+    expect(input.endsWith("/admin/deploy")).toBe(true);
+    return reply(
+      { code: "non_convergent_graph", error: "a concurrent deployment added another branch" },
+      422,
+    );
   });
   vi.stubGlobal("fetch", fetchMock);
-  await expect(deploy({ ...server, schema: app, permissions: {} })).rejects.toBeInstanceOf(
-    MissingMigrationError,
+  await expect(deploy({ ...server, schema: app, permissions: {} })).rejects.toThrow(
+    "a concurrent deployment added another branch",
   );
-  expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-it("rejects a concurrent deployment instead of replacing its permissions head", async () => {
-  const hash = await computeSchemaHash(app.wasmSchema);
-  let concurrentHead = false;
+it("includes historical schemas and multiple migrations in a single request", async () => {
+  const middle = s.defineApp({ notes: s.table({ title: s.string(), a: s.string() }, {}) });
+  const target = s.defineApp({
+    notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
+  });
+  const hashes = await Promise.all(
+    [app, middle, target].map((app) => computeSchemaHash(app.wasmSchema)),
+  );
+  const migrations = [
+    s.defineMigration({
+      from: { notes: s.table({ title: s.string() }, {}) },
+      to: { notes: s.table({ title: s.string(), a: s.string() }, {}) },
+      migrate: { notes: { a: s.add.string({ default: "" }) } },
+    }),
+    s.defineMigration({
+      from: { notes: s.table({ title: s.string(), a: s.string() }, {}) },
+      to: { notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}) },
+      migrate: { notes: { b: s.add.string({ default: "" }) } },
+    }),
+  ];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${server.appId}/schemas`)) return reply({ hashes: [] });
-      if (input.endsWith("/permissions/head")) {
-        return reply({
-          head: concurrentHead
-            ? {
-                schemaHash: hash,
-                bundleObjectId: "concurrent-bundle",
-                version: 1,
-                parentBundleObjectId: null,
-              }
-            : null,
-        });
-      }
-      if (input.endsWith("/admin/schemas")) {
-        concurrentHead = true;
-        return reply({ hash, objectId: "schema-object" }, 201);
-      }
-      if (input.endsWith("/admin/permissions")) {
-        expect(JSON.parse(String(init?.body)).expectedParentBundleObjectId).toBeNull();
-        return reply({ error: "permissions head changed" }, 409);
-      }
-      throw new Error(`Unexpected request: ${input}`);
+      if (input.endsWith("/migrations/graph"))
+        return reply({ activeSchemaHash: hashes[0], schemas: [hashes[0]], migrations: [] });
+      expect(input.endsWith("/admin/deploy")).toBe(true);
+      const body = JSON.parse(String(init?.body)) as DeploymentRequest;
+      expect(body.schemas.map((schema) => schema.hash).sort()).toEqual(hashes.slice(1).sort());
+      expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
+        [hashes[0], hashes[1]],
+        [hashes[1], hashes[2]],
+      ]);
+      return reply({
+        changed: true,
+        published: {
+          schemas: hashes.slice(1),
+          migrations: body.migrations.map(({ fromHash, toHash }) => ({ fromHash, toHash })),
+        },
+      });
     }),
   );
-  await expect(deploy({ ...server, schema: app, permissions: {} })).rejects.toThrow(
-    "permissions head changed",
+  const result = await deploy({
+    ...server,
+    schema: target,
+    schemas: [app, middle],
+    migrations,
+    permissions: {},
+  });
+  expect(result.published.migrations).toHaveLength(2);
+});
+
+it("preserves bigint and byte defaults in the deployment JSON", async () => {
+  const to = { notes: s.table({ title: s.string(), count: s.bigint(), data: s.bytes() }, {}) };
+  const target = s.defineApp(to);
+  const fromHash = await computeSchemaHash(app.wasmSchema);
+  const migration = s.defineMigration({
+    from: { notes: s.table({ title: s.string() }, {}) },
+    to,
+    migrate: {
+      notes: {
+        count: s.add.bigint({ default: 9223372036854775807n }),
+        data: s.add.bytes({ default: new Uint8Array([0, 128, 255]) }),
+      },
+    },
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/migrations/graph"))
+        return reply({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
+      expect(input.endsWith("/admin/deploy")).toBe(true);
+      const body = JSON.parse(String(init?.body));
+      expect(body.migrations[0].forward[0].operations).toEqual([
+        {
+          type: "introduce",
+          column: "count",
+          column_type: { type: "BigInt" },
+          value: { type: "BigInt", value: "9223372036854775807" },
+        },
+        {
+          type: "introduce",
+          column: "data",
+          column_type: { type: "Bytea" },
+          value: { type: "Bytea", value: [0, 128, 255] },
+        },
+      ]);
+      return reply({
+        changed: true,
+        published: {
+          schemas: [body.targetSchemaHash],
+          migrations: [{ fromHash, toHash: body.targetSchemaHash }],
+        },
+      });
+    }),
   );
+  await deploy({ ...server, schema: target, migration, permissions: {} });
 });
 
 // An alpha.56 server parses published schemas with serde defaults and drops the
 // unknown `composite_indexes` field, storing (and hashing) the plain schema.
-it("fails deploy and pushSchema when the server stores a different schema than was sent", async () => {
+it("fails pushSchema when the server stores a different schema than was sent", async () => {
   const plain = s.defineApp({
     notes: s.table({ owner: s.string(), rank: s.int() }, {}),
   });
@@ -144,8 +181,6 @@ it("fails deploy and pushSchema when the server stores a different schema than w
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${server.appId}/schemas`)) return reply({ hashes: [] });
-      if (input.endsWith("/permissions/head")) return reply({ head: null });
       if (input.endsWith("/admin/schemas")) {
         writes.push("schema");
         expect(JSON.parse(String(init?.body)).schema.tables.notes.composite_indexes).toEqual([
@@ -158,11 +193,9 @@ it("fails deploy and pushSchema when the server stores a different schema than w
     }),
   );
 
-  const deployed = deploy({ ...server, schema: composite, permissions: {} });
-  await expect(deployed).rejects.toBeInstanceOf(SchemaHashMismatchError);
-  await expect(deployed).rejects.toMatchObject({ localHash: compositeHash, serverHash: plainHash });
-  await expect(pushSchema({ ...server, schema: composite })).rejects.toThrow(
-    /did not store the schema as sent/,
-  );
-  expect(writes).toEqual(["schema", "schema"]);
+  const pushed = pushSchema({ ...server, schema: composite });
+  await expect(pushed).rejects.toBeInstanceOf(SchemaHashMismatchError);
+  await expect(pushed).rejects.toMatchObject({ localHash: compositeHash, serverHash: plainHash });
+  await expect(pushed).rejects.toThrow(/did not store the schema as sent/);
+  expect(writes).toEqual(["schema"]);
 });

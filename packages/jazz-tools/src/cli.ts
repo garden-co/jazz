@@ -15,7 +15,6 @@ import {
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
-import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {
   jazzBin?: string;
@@ -87,7 +86,7 @@ export interface DeployOptions {
   serverUrl: string;
   adminSecret: string;
   schemaDir: string;
-  migrationsDir: string;
+  migrationsDir?: string;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -358,10 +357,6 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   }
 }
 
-function describePermissionsHead(head: StoredPermissionsHead): string {
-  return `v${head.version} on ${shortSchemaHash(head.schemaHash)}`;
-}
-
 function logDeployWarning(message: string): void {
   if (message.startsWith("Warning: table ")) {
     console.warn(`\x1b[33m${message}\x1b[0m`);
@@ -388,7 +383,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
           logDeployWarning(event.message);
           break;
         case "schema-published":
-          console.log(`Published the current schema as ${shortSchemaHash(event.hash)}.`);
+          console.log(`Published schema ${shortSchemaHash(event.hash)}.`);
           break;
         case "schema-skipped":
           console.log(
@@ -405,7 +400,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
             );
           } else {
             console.log(
-              `Pushed migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} without a reviewed migration file because no row transformations are required.`,
+              `Published migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)}.`,
             );
           }
           break;
@@ -415,19 +410,11 @@ export async function deploy(options: DeployOptions): Promise<void> {
     },
   });
 
-  if (!result.permissions) {
-    return;
-  }
-
-  const previousHead = result.permissions.previousHead;
-  const nextHead = result.permissions.head ?? {
-    schemaHash: result.permissions.schemaHash,
-    version: previousHead ? previousHead.version + 1 : 1,
-    parentBundleObjectId: previousHead?.bundleObjectId ?? null,
-    bundleObjectId: previousHead?.bundleObjectId ?? "",
-  };
-
-  console.log(`Published permissions as ${describePermissionsHead(nextHead)}.`);
+  console.log(
+    result.changed
+      ? `Deployed schema ${shortSchemaHash(result.schema.hash)} and its permissions.`
+      : "Deployment is already up to date.",
+  );
 }
 
 function realpathOrSelf(path: string): string {

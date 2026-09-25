@@ -129,104 +129,66 @@ describe("dev catalogue runtime schema identity", () => {
 });
 
 describe("dev catalogue push behavior", () => {
-  it("deploy publishes schema and permissions and returns structured statuses", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), schemaSource());
-    await writeFile(join(root, "permissions.ts"), permissionsSource());
-
-    // Like a real server, the mock stores the schema it was sent and returns
-    // that schema's structural hash; deploy verifies it against its own.
-    let storedHash = "";
-    const permissionsHead = () => ({
-      schemaHash: storedHash,
-      version: 1,
-      parentBundleObjectId: null,
-      bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    });
-    let schemaPublishBody: any;
-    let permissionsPublishBody: any;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
-          schemaPublishBody = JSON.parse(String(init?.body));
-          storedHash = await computeSchemaHash(schemaPublishBody.schema.tables);
+  it.each(["initial", "permissions", "unchanged"])(
+    "deploy reports %s publication without separate push requests",
+    async (kind) => {
+      const { root } = await createWorkspace();
+      await writeFile(join(root, "schema.ts"), schemaSource());
+      await writeFile(join(root, "permissions.ts"), permissionsSource());
+      const { loadCompiledSchema } = await import("../schema-loader.js");
+      const { computeSchemaHash } = await import("./catalogue.js");
+      const hash = await computeSchemaHash((await loadCompiledSchema(root)).wasmSchema);
+      const events: any[] = [];
+      let body: any;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/migrations/graph"))
           return new Response(
             JSON.stringify({
-              objectId: SCHEMA_OBJECT_ID,
-              hash: storedHash,
+              schemas: kind === "initial" ? [] : [hash],
+              migrations: [],
+              activeSchemaHash: kind === "initial" ? null : hash,
             }),
-            { status: 201 },
           );
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-          return new Response(JSON.stringify({ head: null }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
-          permissionsPublishBody = JSON.parse(String(init?.body));
-          return new Response(JSON.stringify({ head: permissionsHead() }), { status: 201 });
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      }),
-    );
-
-    const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
-    const result = await deploy({
-      appId: APP_ID,
-      serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      schemaDir: root,
-      onEvent: (event) => events.push(event),
-    });
-
-    expect(result.schema).toEqual({
-      hash: storedHash,
-      schemaFile: join(root, "schema.ts"),
-      status: "published",
-      objectId: SCHEMA_OBJECT_ID,
-    });
-    expect(result.permissions).toEqual({
-      schemaHash: storedHash,
-      permissionsFile: join(root, "permissions.ts"),
-      previousHead: null,
-      head: permissionsHead(),
-    });
-    expect(result.migration).toBeUndefined();
-    expect(result.warnings).toContain(
-      'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
-    );
-    expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
-      ["title", "ownerId"],
-    );
-    expect(permissionsPublishBody.schemaHash).toBe(storedHash);
-    expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
-    expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
-    expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
-    expect(events).toContainEqual({
-      type: "schema-published",
-      hash: storedHash,
-      objectId: SCHEMA_OBJECT_ID,
-    });
-    expect(events).toContainEqual({
-      type: "warning",
-      message:
-        'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
-    });
-    expect(events).toContainEqual({
-      type: "permissions-loaded",
-      permissionsFile: join(root, "permissions.ts"),
-    });
-    expect(events).toContainEqual({
-      type: "permissions-published",
-      schemaHash: storedHash,
-      version: 1,
-    });
-  });
+        expect(input.endsWith("/admin/deploy")).toBe(true);
+        body = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            changed: kind !== "unchanged",
+            published: { schemas: kind === "initial" ? [hash] : [], migrations: [] },
+          }),
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const { deploy } = await import("./catalogue-project.js");
+      const result = await deploy({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        schemaDir: root,
+        onEvent: (event) => events.push(event),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(body.targetSchemaHash).toBe(hash);
+      expect(body.schemas).toHaveLength(kind === "initial" ? 1 : 0);
+      expect(Object.keys(body.permissions)).toContain("todos");
+      expect(result.changed).toBe(kind !== "unchanged");
+      expect(result.schema).toEqual({
+        hash,
+        schemaFile: join(root, "schema.ts"),
+        status: kind === "initial" ? "published" : "already-stored",
+      });
+      expect(result.warnings.some((warning) => warning.includes("no explicit insert policy"))).toBe(
+        true,
+      );
+      expect(events).toContainEqual({
+        type: "permissions-loaded",
+        permissionsFile: join(root, "permissions.ts"),
+      });
+      expect(events.some((event) => event.type === "permissions-published")).toBe(
+        kind !== "unchanged",
+      );
+    },
+  );
 
   it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
     const { deploy } = await import("./catalogue.js");
@@ -259,96 +221,6 @@ describe("dev catalogue push behavior", () => {
       deploy({ appId: APP_ID, serverUrl: SERVER_URL, adminSecret: ADMIN_SECRET, schemaDir: root }),
     ).rejects.toThrow("Create a permissions.ts file");
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("deploy reports an already-connected migration when retargeting connected schemas", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), schemaSource());
-    await writeFile(join(root, "permissions.ts"), permissionsSource());
-
-    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const storedSchema = s.defineApp({
-      todos: s.table(
-        {
-          title: s.string(),
-          ownerId: s.string(),
-        },
-        {},
-      ),
-    }).wasmSchema;
-    const previousHead = {
-      schemaHash: previousSchemaHash,
-      version: 4,
-      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-      bundleObjectId: "22222222-2222-2222-2222-222222222222",
-    };
-    const nextHead = {
-      schemaHash: nextSchemaHash,
-      version: 5,
-      parentBundleObjectId: previousHead.bundleObjectId,
-      bundleObjectId: "33333333-3333-3333-3333-333333333333",
-    };
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [nextSchemaHash] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-          return new Response(
-            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
-            {
-              status: 200,
-            },
-          );
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-          return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
-        }
-        if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
-          const url = new URL(input);
-          expect(url.searchParams.get("fromHash")).toBe(previousSchemaHash);
-          expect(url.searchParams.get("toHash")).toBe(nextSchemaHash);
-          return new Response(JSON.stringify({ connected: true }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
-          const body = JSON.parse(String(init?.body));
-          expect(body.schemaHash).toBe(nextSchemaHash);
-          expect(body.expectedParentBundleObjectId).toBe(previousHead.bundleObjectId);
-          return new Response(JSON.stringify({ head: nextHead }), { status: 201 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
-          throw new Error("deploy() should not push a migration when schemas are connected.");
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      }),
-    );
-
-    const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
-    const result = await deploy({
-      appId: APP_ID,
-      serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      schemaDir: root,
-      onEvent: (event) => events.push(event),
-    });
-
-    expect(result.migration).toEqual({
-      status: "already-connected",
-      fromHash: previousSchemaHash,
-      toHash: nextSchemaHash,
-    });
-    expect(result.permissions?.previousHead).toEqual(previousHead);
-    expect(result.permissions?.head).toEqual(nextHead);
-    expect(events).toContainEqual({
-      type: "migration-skipped",
-      reason: "already-connected",
-      fromHash: previousSchemaHash,
-      toHash: nextSchemaHash,
-    });
   });
 
   it("pushMigration publishes an inferred empty migration and emits a catalogue event", async () => {
@@ -971,91 +843,5 @@ export default s.defineMigration({
       }),
     ).rejects.toThrow("explicit permissions bundle");
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("deploy publishes permissions when permissions.ts exists", async () => {
-    const { computeSchemaHash } = await import("./catalogue.js");
-    const SCHEMA_HASH = await computeSchemaHash(
-      s.defineApp({ todos: s.table({ title: s.string(), ownerId: s.string() }, {}) }).wasmSchema,
-    );
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), schemaSource());
-    await writeFile(join(root, "permissions.ts"), permissionsSource());
-
-    const previousHead = {
-      schemaHash: SCHEMA_HASH,
-      version: 4,
-      parentBundleObjectId: null,
-      bundleObjectId: "44444444-4444-4444-4444-444444444444",
-    };
-    let schemaBody: any;
-    let permissionsBody: any;
-    const fetchCalls: string[] = [];
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        fetchCalls.push(input);
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
-          schemaBody = JSON.parse(String(init?.body));
-          return new Response(
-            JSON.stringify({
-              objectId: SCHEMA_OBJECT_ID,
-              hash: SCHEMA_HASH,
-            }),
-            { status: 201 },
-          );
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-          return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
-          permissionsBody = JSON.parse(String(init?.body));
-          return new Response(
-            JSON.stringify({
-              head: {
-                schemaHash: SCHEMA_HASH,
-                version: 5,
-                parentBundleObjectId: previousHead.bundleObjectId,
-                bundleObjectId: "55555555-5555-5555-5555-555555555555",
-              },
-            }),
-            { status: 201 },
-          );
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      }),
-    );
-
-    const { deploy } = await import("./catalogue-project.js");
-    const result = await deploy({
-      appId: APP_ID,
-      serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      schemaDir: root,
-    });
-
-    expect(result.schema).toEqual({
-      hash: SCHEMA_HASH,
-      schemaFile: join(root, "schema.ts"),
-      status: "published",
-      objectId: SCHEMA_OBJECT_ID,
-    });
-    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
-      "title",
-      "ownerId",
-    ]);
-    expect(permissionsBody.schemaHash).toBe(SCHEMA_HASH);
-    expect(permissionsBody.expectedParentBundleObjectId).toBe(previousHead.bundleObjectId);
-    expect(Object.keys(permissionsBody.permissions)).toContain("todos");
-    expect(fetchCalls).toEqual([
-      `${SERVER_URL}/apps/${APP_ID}/schemas`,
-      `${SERVER_URL}/apps/${APP_ID}/admin/permissions/head`,
-      `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
-      `${SERVER_URL}/apps/${APP_ID}/admin/permissions`,
-    ]);
   });
 });
