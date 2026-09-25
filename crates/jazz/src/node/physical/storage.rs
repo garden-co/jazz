@@ -322,7 +322,7 @@ where
         let logical_descriptor = match target {
             PhysicalWriteTarget::History => source_table.history_storage_table().record_schema(),
             PhysicalWriteTarget::GlobalCurrent => {
-                source_table.global_current_storage_tables()[0].record_schema()
+                source_table.global_current_content_storage_table().record_schema()
             }
             PhysicalWriteTarget::AheadCurrent => {
                 source_table.ahead_current_storage_tables()[0].record_schema()

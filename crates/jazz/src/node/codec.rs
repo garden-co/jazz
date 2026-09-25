@@ -2847,26 +2847,27 @@ pub(super) fn content_head_indices(
             (tx_id, versions[*idx].parents())
         })
         .collect::<BTreeMap<_, _>>();
-    let dominated = candidate_indices
+    // A candidate is dominated when it is reachable through parent edges from
+    // any candidate. One walk with a shared visited set expands each ancestor
+    // once; a walk per candidate re-walked the whole chain behind every
+    // version, which is quadratic in a row's history.
+    let mut dominated = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = candidate_indices
         .iter()
-        .flat_map(|idx| {
-            let mut dominated = Vec::new();
-            let mut stack = versions[*idx].parents();
-            let mut seen = std::collections::BTreeSet::new();
-            while let Some(parent) = stack.pop() {
-                if !seen.insert(parent) {
-                    continue;
-                }
-                if txs.contains(&parent) {
-                    dominated.push(parent);
-                }
-                if let Some(parents) = parents_by_tx.get(&parent) {
-                    stack.extend(parents.iter().copied());
-                }
-            }
-            dominated
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+        .flat_map(|idx| versions[*idx].parents())
+        .collect::<Vec<_>>();
+    while let Some(parent) = stack.pop() {
+        if !seen.insert(parent) {
+            continue;
+        }
+        if txs.contains(&parent) {
+            dominated.insert(parent);
+        }
+        if let Some(parents) = parents_by_tx.get(&parent) {
+            stack.extend(parents.iter().copied());
+        }
+    }
     candidate_indices
         .iter()
         .copied()

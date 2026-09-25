@@ -399,7 +399,7 @@ where
             ];
             for storage_table in &storage_tables {
                 let logical_output =
-                    target_table.global_current_storage_tables()[0].record_schema();
+                    target_table.global_current_content_storage_table().record_schema();
                 let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -547,7 +547,7 @@ where
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = target_table.global_current_storage_tables()[0].record_schema();
+            let logical_output = target_table.global_current_content_storage_table().record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -1250,9 +1250,10 @@ where
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
-                target_table.global_current_storage_tables()[0].clone()
+                target_table.global_current_content_storage_table()
             }
         };
+        let target_record = target_storage.record_schema();
         let user_cells = match shape {
             ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
             ContentProjectionShape::Current => GlobalCurrentRowRecord::USER_CELLS,
@@ -1287,17 +1288,16 @@ where
                 ContentProjectionShape::History => {
                     authored_history_projection_descriptor(&target_table)
                 }
-                ContentProjectionShape::Current => target_storage.record_schema(),
+                ContentProjectionShape::Current => target_record.clone(),
             }
         } else {
             widened_projection_descriptor(
-                &target_storage.record_schema(),
+                &target_record,
                 &physical_names,
                 self.database.table_schema(&physical_storage)?,
             )?
         };
-        let mut fields = target_storage
-            .record_schema()
+        let mut fields = target_record
             .fields()
             .iter()
             .take(user_cells)

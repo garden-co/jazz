@@ -249,6 +249,12 @@ pub(super) fn current_query_output_request(
                 query,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
+                // Only where `materialize_and_finalize_query_rows` strips the
+                // public projection again after sorting; flat-join and
+                // include rows skip that step and would leak the key.
+                matches!(output, CurrentQueryProgramOutput::AppRows)
+                    && query.flat_join.is_none()
+                    && query.array_subqueries.is_empty(),
             )?,
         })
     } else {
@@ -298,6 +304,7 @@ pub(super) fn storage_backed_maintained_view_eligible(
 fn app_row_payload_projection(
     query: &JazzQuery,
     collect_relations: bool,
+    retain_order_keys: bool,
 ) -> Result<PayloadProjection, Error> {
     // A retained relation projection is the whole public row shape. Validation
     // rejects include/select presentation over it (or drops a full identity
@@ -338,6 +345,20 @@ fn app_row_payload_projection(
             for include in &query.includes {
                 if let Some(root_field) = include.path.split('.').next() {
                     fields.insert(root_field.to_owned());
+                }
+            }
+            // One-shot reads re-sort the emitted rows by `order_by` after
+            // materialization (`apply_query_order_in_schema`), so an order key
+            // must reach that sort even when `select` projects it away. The
+            // public projection drops it again afterwards. Maintained views
+            // carry their order as occurrence indexes instead, and their
+            // terminal payload is delivered as is, so they keep the plain
+            // selection. Include reads still sort without the key (#3503).
+            if retain_order_keys {
+                for order in &query.order_by {
+                    if order.column != "id" {
+                        fields.insert(order.column.clone());
+                    }
                 }
             }
             FieldProjection::Fields(fields)

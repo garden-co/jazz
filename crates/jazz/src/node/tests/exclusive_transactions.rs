@@ -2379,3 +2379,36 @@ fn exclusive_table_read_matches_point_reads_across_seeds() {
         assert_eq!(table, expected, "seed {seed}");
     }
 }
+
+// Internal: the transaction payload decode counter is the only observable of
+// how snapshot coverage is decided; results alone cannot tell a full stored
+// transaction decode from a global-time projection.
+#[test]
+fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
+    fn decodes(edits: u64) -> usize {
+        let (_temp_dir, mut core) = open_node();
+        for edit in 1..=edits {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("todos", row(1), edit).cells(title_cells(format!("edit-{edit}"))),
+            )
+            .unwrap();
+        }
+        let tx_id = OpenTransactionId::new();
+        core.open_exclusive(tx_id).unwrap();
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
+        assert_eq!(
+            core.tx_read(tx_id, "todos", row(1)).unwrap(),
+            Some(title_cells(format!("edit-{edits}")))
+        );
+        core.tx_write(tx_id, "todos", row(1), title_cells("mine"), None)
+            .unwrap();
+        core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 10_000)
+            .unwrap();
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get())
+    }
+    assert_eq!(
+        decodes(8),
+        decodes(64),
+        "snapshot coverage must not decode a stored transaction per row version"
+    );
+}
