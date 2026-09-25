@@ -190,6 +190,11 @@ pub struct IvmRuntime {
     /// A lifecycle operation released retainers while queued work may still
     /// reference the released graph slice.
     ephemeral_graph_gc_pending: bool,
+    /// Nodes whose reachability may have changed since the last graph GC:
+    /// released retainer roots and roots blocked by queued evaluations. New
+    /// nodes are drained from the graph. Every unretained node is an ancestor
+    /// of one of these, so GC never scans the whole graph.
+    gc_candidates: HashSet<NodeId>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
@@ -280,6 +285,7 @@ impl IvmRuntime {
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
             ephemeral_graph_gc_pending: false,
+            gc_candidates: HashSet::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
