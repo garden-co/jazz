@@ -549,7 +549,39 @@ pub(super) fn select_current_access_path(
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
         maintained: false,
+        candidate_filter: None,
         source_limit: None,
+    })
+}
+
+/// Select a declared two-column composite index `[first, covered]` by an
+/// equality on `first` alone, so each index entry also carries `covered`.
+/// This is only a fallback candidate for [`select_current_access_path`]:
+/// callers obtain it through the shared admission guard, and the ordinary
+/// graph still evaluates every filter on the hydrated row.
+pub(super) fn select_composite_leading_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+    covered: &str,
+) -> Option<CurrentAccessPath> {
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        if second != covered || first == "id" {
+            return None;
+        }
+        let value = equalities.get(first)?.clone();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![physical_current_index_value(table, first, value)],
+            intersections: Vec::new(),
+            maintained: false,
+            candidate_filter: None,
+            source_limit: None,
+        })
     })
 }
 

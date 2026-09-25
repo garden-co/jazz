@@ -631,6 +631,9 @@ where
             intersections,
             source_limit,
             maintained,
+            // A covered-key filter is only attached to join paths; a root
+            // path carrying one is not a plain ordered-page candidate.
+            candidate_filter: None,
         }) = access_paths.get_mut(&root)
         else {
             return Ok(None);
