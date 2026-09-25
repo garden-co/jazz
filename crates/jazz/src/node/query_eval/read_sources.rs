@@ -3918,7 +3918,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
     let logical = current_row_descriptor_with_hidden_source_fields(table, metadata);
-    let current = table.global_current_storage_tables()[0].record_schema();
+    let current = table.global_current_content_storage_table().record_schema();
     let current_types = table
         .columns
         .iter()
@@ -4659,7 +4659,7 @@ where
             source_limit,
             candidate_filter,
             projection_target,
-            table.global_current_storage_tables()[0].record_schema(),
+            table.global_current_content_storage_table().record_schema(),
         )
     }
 

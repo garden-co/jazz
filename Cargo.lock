@@ -2173,6 +2173,7 @@ dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2181,6 +2182,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2190,6 +2192,7 @@ dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
