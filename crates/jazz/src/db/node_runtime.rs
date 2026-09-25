@@ -4439,6 +4439,7 @@ where
                             maintained.has_covered_input_sources(),
                         );
                     }
+                    let covered_authority = authoritative_result_key.is_some();
                     match node_ref
                         .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             maintained,
@@ -4448,6 +4449,17 @@ where
                         )
                         .await
                     {
+                        // The receiver's evaluation is still waiting (for
+                        // example on large-value chunks) and nothing was
+                        // drained. Publishing now would report an incomplete
+                        // authority state, so retry on a later turn (#3349).
+                        Ok((None, _))
+                            if covered_authority
+                                && node_ref.covered_receiver_evaluation_pending(maintained) =>
+                        {
+                            retained.push(Rc::downgrade(&state));
+                            continue;
+                        }
                         Ok(update) => update,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();

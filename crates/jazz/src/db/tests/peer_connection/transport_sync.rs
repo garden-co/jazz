@@ -2611,3 +2611,110 @@ fn encoder_trust_is_assigned_by_connection_role() {
         assert_eq!(probe.get(), Some(expected), "{trust:?}");
     }
 }
+
+/// Drive one `Db::tick` to completion, failing instead of spinning when the
+/// tick cannot finish without outside help. Host bindings poll a tick and
+/// then service the network, so a tick that waits for a peer reply which only
+/// a later turn can request never completes there (#3349).
+fn finish_tick_or_report_stall(db: &Db<RocksDbStorage>) -> Result<(), String> {
+    let mut tick = std::pin::pin!(db.tick());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20_000 {
+        if let std::task::Poll::Ready(result) = tick.as_mut().poll(&mut cx) {
+            return result.map_err(|error| error.to_string());
+        }
+    }
+    let resolver = db.node.chunk_resolver.state.borrow();
+    Err(format!(
+        "tick never completed; unsent chunk requests={} pending chunks={}",
+        resolver.outbound.len(),
+        resolver.pending_by_chunk.len()
+    ))
+}
+
+/// Internal test: the public testkit client awaits its tick futures and pumps
+/// chunk traffic concurrently, so it never showed this hang. The NAPI and
+/// WASM bindings poll a tick without awaiting it, which is what this drives.
+///
+/// A receiver that installs the server's covered closure must not hold its
+/// sync turn open for large-value chunks, since that same turn is what sends
+/// their requests. Both a fresh subscriber (reset install) and an open one
+/// (incremental install) must receive spilled rows, and neither may report a
+/// settled result before the spilled row is present.
+#[test]
+fn subscribers_receive_spilled_rows_without_blocking_the_sync_turn() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0x81; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x82; 16]);
+    let server = open_core(0x83, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x84, client_author, &schema);
+    let mut expected = BTreeMap::new();
+    for size in [60_000, 70_000, 800_000] {
+        let title = format!("{size}:{}", "y".repeat(size));
+        let row = seed(&server, "todos", cells(&title, false, owner));
+        expected.insert(row, title);
+    }
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let titles = |snapshot: &RelationSnapshot| {
+        snapshot
+            .rows
+            .iter()
+            .map(|row| (row.row_uuid(), row.cell(&schema.tables[0], "title")))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let wanted = |expected: &BTreeMap<RowUuid, String>| {
+        expected
+            .iter()
+            .map(|(row, title)| (*row, Some(Value::String(title.clone()))))
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    let mut received = RelationSnapshot::default();
+    let mut settled = false;
+    for _ in 0..64 {
+        finish_tick_or_report_stall(&client).unwrap();
+        server.tick().unwrap();
+        finish_tick_or_report_stall(&client).unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if event_settled(&event) {
+                settled = true;
+            }
+            apply_subscription_event(&mut received, event);
+            if settled {
+                assert_eq!(
+                    titles(&received),
+                    wanted(&expected),
+                    "a settled result must include every spilled row"
+                );
+            }
+        }
+        if settled {
+            break;
+        }
+    }
+    assert!(settled, "the fresh subscriber never settled");
+
+    let title = format!("later:{}", "z".repeat(70_000));
+    let row = seed(&server, "todos", cells(&title, false, owner));
+    expected.insert(row, title);
+    for _ in 0..64 {
+        finish_tick_or_report_stall(&client).unwrap();
+        server.tick().unwrap();
+        finish_tick_or_report_stall(&client).unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut received, event);
+        }
+        if titles(&received) == wanted(&expected) {
+            return;
+        }
+    }
+    panic!(
+        "the open subscriber never received the later spilled row; rows={}",
+        received.rows.len()
+    );
+}

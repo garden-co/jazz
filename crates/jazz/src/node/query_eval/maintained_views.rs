@@ -702,6 +702,16 @@ where
     /// opportunity to guess by table or collector name. Replacements are
     /// submitted as one database batch so the graph observes only the old or
     /// new closure, never a cross-source mixture.
+    /// Whether a covered receiver still has admitted runtime work, such as
+    /// an evaluation detached while it waits for large-value chunks.
+    pub(crate) fn covered_receiver_evaluation_pending(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> bool {
+        local.has_covered_input_sources()
+            && self.subscription_has_pending_query_runtime(local.subscription_id())
+    }
+
     pub(crate) async fn replace_local_maintained_covered_inputs(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
@@ -862,7 +872,9 @@ where
             .collect::<Vec<_>>();
         let metrics = self
             .database
-            .apply_input_source_deltas(deltas)
+            // A receiver can need large-value chunks that only this sync
+            // turn can request. Never hold the turn open for them (#3349).
+            .apply_input_source_deltas_detaching_cold(deltas)
             .await
             .map_err(Error::Groove)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -1010,7 +1022,9 @@ where
 
         let replacement_metrics = self
             .database
-            .replace_input_sources(replacements)
+            // A receiver can need large-value chunks that only this sync
+            // turn can request. Never hold the turn open for them (#3349).
+            .replace_input_sources_detaching_cold(replacements)
             .await
             .map_err(Error::Groove)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
@@ -1158,6 +1172,12 @@ where
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
+        // A covered receiver's evaluation may be waiting on large-value
+        // chunks. Its terminal is incomplete until that work finishes, so do
+        // not drain (and let the caller publish) a partial authority state.
+        if authoritative_result_key.is_some() && self.covered_receiver_evaluation_pending(local) {
+            return Ok((None, false));
+        }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut payload_states = BTreeMap::<
             ResultMemberEntry,
