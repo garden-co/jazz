@@ -352,12 +352,60 @@ export class SubscriptionManager<T extends { id: string }> {
     return this.orderedIds;
   }
 
+  /**
+   * Lowest position whose `orderedIdIndex` entry may be stale, while a
+   * sequential delta is being applied; null when the index is exact.
+   * Positions below it are untouched since the index was last exact.
+   */
+  private staleFrom: number | null = null;
+  /**
+   * Splices since the index was last exact. Each moves any id by at most one
+   * position, so a stale entry is within this distance of its true position.
+   */
+  private staleSplices = 0;
+
+  private markStaleFrom(position: number, splices = 1): void {
+    if (this.staleFrom === null || position < this.staleFrom) this.staleFrom = position;
+    this.staleSplices += splices;
+  }
+
+  /** Current position of `id`, correct even while the index is stale. */
+  private positionOf(id: string): number | undefined {
+    const recorded = this.orderedIdIndex.get(id);
+    if (recorded === undefined) return undefined;
+    if (this.staleFrom === null || recorded < this.staleFrom) return recorded;
+    const orderedIds = this.orderedIds;
+    if (orderedIds[recorded] === id) return recorded;
+    // Everything before `staleFrom` is exact, so a stale id lies after it,
+    // within `staleSplices` of where it was recorded.
+    const low = Math.max(this.staleFrom, recorded - this.staleSplices);
+    const high = Math.min(orderedIds.length - 1, recorded + this.staleSplices);
+    for (let distance = 1; recorded - distance >= low || recorded + distance <= high; distance++) {
+      if (recorded + distance <= high && orderedIds[recorded + distance] === id) {
+        return recorded + distance;
+      }
+      if (recorded - distance >= low && orderedIds[recorded - distance] === id) {
+        return recorded - distance;
+      }
+    }
+    return undefined;
+  }
+
+  /** Bring `orderedIdIndex` back in line after a sequential delta. */
+  private refreshOrderedIdIndex(): void {
+    if (this.staleFrom === null) return;
+    const start = this.staleFrom;
+    this.staleFrom = null;
+    this.staleSplices = 0;
+    this.reindexOrderedIds(start);
+  }
+
   private removeId(id: string): void {
-    const index = this.orderedIdIndex.get(id);
+    const index = this.positionOf(id);
     if (index === undefined) return;
     this.writableOrderedIds().splice(index, 1);
     this.orderedIdIndex.delete(id);
-    this.reindexOrderedIds(index);
+    this.markStaleFrom(index);
   }
 
   /** Remove every id in `changes[start, end)` from the result in one pass. */
@@ -366,7 +414,7 @@ export class SubscriptionManager<T extends { id: string }> {
     for (let index = start; index < end; index++) {
       const id = changes[index]!.id;
       this.currentResults.delete(id);
-      const position = this.orderedIdIndex.get(id);
+      const position = this.positionOf(id);
       if (position === undefined) continue;
       this.orderedIdIndex.delete(id);
       if (position < first) first = position;
@@ -378,16 +426,28 @@ export class SubscriptionManager<T extends { id: string }> {
       const id = orderedIds[read]!;
       if (!this.orderedIdIndex.has(id)) continue;
       orderedIds[write] = id;
-      this.orderedIdIndex.set(id, write);
       write++;
     }
+    const removed = orderedIds.length - write;
     orderedIds.length = write;
+    this.markStaleFrom(first, removed);
   }
 
   private insertIdAt(id: string, index: number): void {
     const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
     this.writableOrderedIds().splice(clamped, 0, id);
-    this.reindexOrderedIds(clamped);
+    this.orderedIdIndex.set(id, clamped);
+    this.markStaleFrom(clamped);
+  }
+
+  /**
+   * Whether removing `id` and reinserting it at `index` would put it back
+   * where it is: an in-place change needs no splice or reindex.
+   */
+  private staysInPlace(id: string, index: number): boolean {
+    const position = this.positionOf(id);
+    if (position === undefined) return false;
+    return position === Math.max(0, Math.min(index, this.orderedIds.length - 1));
   }
 
   private reindexOrderedIds(start = 0): void {
@@ -534,6 +594,7 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   private commitTransaction(): void {
+    this.refreshOrderedIdIndex();
     const transaction = this.transaction!;
     this.transaction = null;
     transaction.currentResults.endJournal();
@@ -545,6 +606,8 @@ export class SubscriptionManager<T extends { id: string }> {
   private rollBackTransaction(): void {
     const transaction = this.transaction;
     this.transaction = null;
+    this.staleFrom = null;
+    this.staleSplices = 0;
     if (!transaction) return;
     transaction.currentResults.rollBack();
     transaction.terminalRows.rollBack();
@@ -643,7 +706,7 @@ export class SubscriptionManager<T extends { id: string }> {
     }
 
     const delta = Array.from(affectedRoots).flatMap<RowDelta<T>>((id) => {
-      const index = this.orderedIdIndex.get(id);
+      const index = this.positionOf(id);
       if (index === undefined) return [];
       const row = this.terminalRows.get(id);
       if (row === undefined) return [{ kind: RowChangeKind.Removed, id, index }];
@@ -741,11 +804,12 @@ export class SubscriptionManager<T extends { id: string }> {
       return { delta, all: this.all() } as SubscriptionDelta<T>;
     }
 
+    // Positions are looked up through `positionOf` and the index is rebuilt
+    // once at the end, instead of after every splice.
     for (let position = 0; position < delta.length; position++) {
       const change = delta[position]!;
       if (change.kind === RowChangeKind.Removed) {
-        // Removals by id commute, so a run of them is applied in one pass
-        // instead of splicing and reindexing the order once per removal.
+        // Removals by id commute, so a run of them is applied in one pass.
         const end = removedRunEnd(delta, position);
         if (end - position > 1) {
           this.removeIds(delta, position, end);
@@ -754,27 +818,32 @@ export class SubscriptionManager<T extends { id: string }> {
         }
       }
       switch (change.kind) {
-        case RowChangeKind.Added:
+        case RowChangeKind.Added: {
           const alreadyPresent = this.currentResults.has(change.id);
           this.currentResults.set(change.id, change.item);
+          if (alreadyPresent && this.staysInPlace(change.id, change.index)) break;
           if (alreadyPresent) {
             this.removeId(change.id);
           }
           this.insertIdAt(change.id, change.index);
           break;
+        }
         case RowChangeKind.Removed:
           this.currentResults.delete(change.id);
           this.removeId(change.id);
           break;
         case RowChangeKind.Updated:
-          this.removeId(change.id);
-          this.insertIdAt(change.id, change.index);
+          if (!this.staysInPlace(change.id, change.index)) {
+            this.removeId(change.id);
+            this.insertIdAt(change.id, change.index);
+          }
           if (change.item !== undefined) {
             this.currentResults.set(change.id, change.item);
           }
           break;
       }
     }
+    this.refreshOrderedIdIndex();
 
     return {
       delta,

@@ -1053,6 +1053,52 @@ describe("SubscriptionManager", () => {
     expect(reduceDeltas(...frames.map((frame) => ({ delta: frame.delta })))).toEqual(manager.all());
   });
 
+  it("applies many same-index replacements, updates and moves in one frame", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = Array.from({ length: 40 }, (_, index) => `r${index}`);
+    const initial = handleDecodedDelta(
+      manager,
+      ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, 0) })),
+      transform,
+    );
+    // Changes arrive in ascending final-index order, as the runtime emits them.
+    const expected = [...ids];
+    const frame: DecodedRowDelta = [{ kind: 2, id: "r39", index: 0 }];
+    expected.splice(expected.indexOf("r39"), 1);
+    expected.unshift("r39");
+    for (let index = 1; index < 37; index += 4) {
+      // Replace the row at `index` with a new one at the same position.
+      frame.push({ kind: 1, id: expected[index]!, index });
+      frame.push({ kind: 0, id: `n${index}`, index, row: makeRow(`n${index}`, "new", 1) });
+      expected[index] = `n${index}`;
+      // Update the next row in place.
+      const next = expected[index + 1]!;
+      frame.push({ kind: 2, id: next, index: index + 1, row: makeRow(next, "upd", 2) });
+    }
+    frame.push({ kind: 2, id: "r38", index: 39, row: makeRow("r38", "upd", 3) });
+    const result = handleDecodedDelta(manager, frame, transform);
+
+    expect(manager.all().map((item) => item.id)).toEqual(expected);
+    expect(reduceDeltas(initial, { delta: result.delta })).toEqual(manager.all());
+
+    // The next frame addresses rows by id, so positions must be exact again.
+    const next = handleDecodedDelta(
+      manager,
+      [
+        { kind: 1, id: "r38", index: 39 },
+        { kind: 2, id: "n21", index: 0, row: makeRow("n21", "moved", 4) },
+      ],
+      transform,
+    );
+    expected.splice(expected.indexOf("r38"), 1);
+    expected.splice(expected.indexOf("n21"), 1);
+    expected.unshift("n21");
+    expect(manager.all().map((item) => item.id)).toEqual(expected);
+    expect(reduceDeltas(initial, { delta: result.delta }, { delta: next.delta })).toEqual(
+      manager.all(),
+    );
+  });
+
   it("clears state", () => {
     const manager = new SubscriptionManager<TestItem>();
     handleDecodedDelta(
