@@ -119,6 +119,93 @@ fn a_commit_in_flight_is_invisible_until_it_lands_and_a_failed_one_never_appears
 }
 
 #[test]
+fn a_generation_staged_over_an_in_flight_commit_stays_invisible_after_it_lands() {
+    block_on(async {
+        for succeeds in [true, false] {
+            let store = PausingStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let key = |index: u32| index.to_be_bytes().to_vec();
+            let large = |byte: u8| vec![byte; 3_000];
+            // Generation N-1: durable.
+            for index in 0u32..200 {
+                tree.put(key(index), b"n-1".to_vec()).await.unwrap();
+            }
+            tree.put(b"big".to_vec(), large(1)).await.unwrap();
+            tree.flush().await.unwrap();
+            let committed = tree.read_committed();
+
+            // Generation N: its commit is paused.
+            for index in 0u32..200 {
+                tree.put(key(index), b"n".to_vec()).await.unwrap();
+            }
+            tree.put(b"big".to_vec(), large(2)).await.unwrap();
+            let (release, paused) = futures::channel::oneshot::channel();
+            *store.pause_next_commit.borrow_mut() = Some(paused);
+            let mut flush = Box::pin(tree.flush());
+            assert!(futures::poll!(flush.as_mut()).is_pending());
+
+            // Generation N+1: staged on top of the in-flight commit.
+            for index in (0u32..200).step_by(3) {
+                tree.put(key(index), b"n+1".to_vec()).await.unwrap();
+            }
+            assert!(tree.delete(&key(1)).await.unwrap());
+            tree.put(b"big".to_vec(), large(3)).await.unwrap();
+            tree.put(key(500), large(4)).await.unwrap();
+
+            let expect = |generation: &[u8], big: u8| {
+                let mut rows: Vec<_> = (0u32..200)
+                    .map(|index| (key(index), generation.to_vec()))
+                    .collect();
+                rows.push((b"big".to_vec(), large(big)));
+                rows.sort();
+                rows
+            };
+            assert_eq!(
+                ready(committed.range(b"", b"\xff\xff\xff\xff\xff")).unwrap(),
+                expect(b"n-1", 1)
+            );
+
+            release
+                .send(if succeeds { Ok(()) } else { Err("disk".into()) })
+                .unwrap();
+            assert_eq!(flush.await.is_ok(), succeeds);
+            // Exactly N (or still N-1): never any of N+1's staged writes.
+            let (generation, big): (&[u8], u8) = if succeeds { (b"n", 2) } else { (b"n-1", 1) };
+            assert_eq!(
+                ready(committed.range(b"", b"\xff\xff\xff\xff\xff")).unwrap(),
+                expect(generation, big)
+            );
+            assert_eq!(ready(committed.get(&key(500))).unwrap(), None);
+
+            // The next flush lands everything, and disk agrees with the view.
+            tree.flush().await.unwrap();
+            let mut latest: Vec<_> = (0u32..200)
+                .filter(|index| *index != 1)
+                .map(|index| {
+                    let value: &[u8] = if index % 3 == 0 { b"n+1" } else { b"n" };
+                    (key(index), value.to_vec())
+                })
+                .collect();
+            latest.push((b"big".to_vec(), large(3)));
+            latest.push((key(500), large(4)));
+            latest.sort();
+            let everything = |tree: &IdbTree<PausingStore>| {
+                ready(tree.read_committed().range(b"", b"\xff\xff\xff\xff\xff")).unwrap()
+            };
+            assert_eq!(everything(&tree), latest);
+            drop(committed);
+            drop(tree);
+            let reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(
+                reopened.range(b"", b"\xff\xff\xff\xff\xff").await.unwrap(),
+                latest
+            );
+        }
+    });
+}
+
+#[test]
 fn the_view_never_hydrates_and_cannot_write() {
     block_on(async {
         let store = PausingStore::default();
