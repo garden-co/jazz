@@ -36,7 +36,13 @@ export function applyDelta<T extends { id: string }>(
     reconcileArray(target, all);
     return;
   }
-  applyRowChanges(target, changes, all === undefined);
+  const maxSplices = all === undefined ? Infinity : MAX_STRUCTURAL_SPLICES;
+  if (!applyRowChanges(target, changes, all === undefined, maxSplices)) {
+    // The pre-check under-counted (moves hide behind in-place hints), so
+    // finish with one reconcile instead of more splices.
+    reconcileArray(target, all!);
+    return;
+  }
   if (all !== undefined && !mergeChangedRowsFrom(target, all, changes)) {
     reconcileArray(target, all);
   }
@@ -50,8 +56,9 @@ const MAX_STRUCTURAL_SPLICES = 8;
 
 /**
  * Whether the changes need more than {@link MAX_STRUCTURAL_SPLICES} splices.
- * An update counts unless its row already sits at its index; checking only
- * the hinted slot keeps this O(1) per change, so it may over-count moves.
+ * An update counts unless its row already sits at its index. This is a cheap
+ * pre-check that reads only the hinted slot, so it can misjudge moves;
+ * `applyRowChanges` enforces the cap exactly while it splices.
  */
 function exceedsStructuralSplices<T extends { id: string }>(
   target: T[],
@@ -72,13 +79,16 @@ function exceedsStructuralSplices<T extends { id: string }>(
 /**
  * Apply the changes' structure (inserts, removals, moves) in delta order.
  * Rows that are already present keep their identity; their content is
- * merged here only when `mergeItems` is set.
+ * merged here only when `mergeItems` is set. Returns false, part way
+ * through, as soon as it would make more than `maxSplices` splices.
  */
 function applyRowChanges<T extends { id: string }>(
   target: T[],
   changes: RowDelta<T>[],
   mergeItems: boolean,
-): void {
+  maxSplices: number,
+): boolean {
+  let splices = 0;
   for (const change of changes) {
     const position = locate(target, change.id, change.index);
     switch (change.kind) {
@@ -91,21 +101,26 @@ function applyRowChanges<T extends { id: string }>(
           deepMerge(previous as Record<string, unknown>, change.item as Record<string, unknown>);
         }
         if (position === -1) {
+          if (++splices > maxSplices) return false;
           target.splice(clampIndex(change.index, target.length), 0, next);
           break;
         }
         const index = clampIndex(change.index, target.length - 1);
         if (index !== position) {
+          if (++splices > maxSplices) return false;
           target.splice(position, 1);
           target.splice(index, 0, next);
         }
         break;
       }
       case RowChangeKind.Removed:
-        if (position !== -1) target.splice(position, 1);
+        if (position === -1) break;
+        if (++splices > maxSplices) return false;
+        target.splice(position, 1);
         break;
     }
   }
+  return true;
 }
 
 /**

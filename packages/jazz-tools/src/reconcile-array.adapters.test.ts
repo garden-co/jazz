@@ -47,6 +47,15 @@ function feed(manager: SubscriptionManager<Item>, delta: DecodedRowDelta): Subsc
   ).handleDecodedDelta(delta, transform);
 }
 
+function initialRows(count: number): DecodedRowDelta {
+  return Array.from({ length: count }, (_, i) => ({
+    kind: 0 as const,
+    id: `r${i}`,
+    index: i,
+    row: wasmRow(`r${i}`, "x", i),
+  }));
+}
+
 function plain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
@@ -166,5 +175,67 @@ describe("applyDelta on framework targets", () => {
     // One splice per insert would shift the rows after it every time
     // (about 25,000 writes here); one reconcile writes each index at most once.
     expect(writes).toBeLessThanOrEqual(inserts.all!.length);
+  });
+
+  it("stops splicing a Vue array once removals turn later updates into moves", () => {
+    const manager = new SubscriptionManager<Item>();
+    const initial = feed(manager, initialRows(1000));
+    let writes = 0;
+    const counted = new Proxy([...initial.all!], {
+      set(target, key, value, receiver) {
+        if (typeof key === "string" && key !== "length") writes++;
+        return Reflect.set(target, key, value, receiver);
+      },
+    });
+    const target = reactive(counted) as Item[];
+
+    // Eight removals at the front pass the pre-check, but they shift every
+    // later row, so each following update is really a move.
+    const frame: DecodedRowDelta = Array.from({ length: 8 }, (_, i) => ({
+      kind: 1 as const,
+      id: `r${i}`,
+      index: 0,
+    }));
+    for (let j = 8; j < 108; j++) frame.push({ kind: 2, id: `r${j}`, index: j, row: null });
+    const delta = feed(manager, frame);
+    applyDelta(target, delta);
+
+    expect(plain(target)).toEqual(plain(delta.all));
+    // Splicing every move would shift the whole list each time (about
+    // 200,000 writes); stopping at the cap costs at most eight splices plus
+    // one reconcile.
+    expect(writes).toBeLessThanOrEqual(10 * 1000);
+  });
+
+  it("keeps many in-place updates row by row without a full reconcile", () => {
+    const manager = new SubscriptionManager<Item>();
+    const initial = feed(manager, initialRows(1000));
+    const enumerated = new Set<string>();
+    const target = initial.all!.map(
+      (item) =>
+        new Proxy(item, {
+          ownKeys(row) {
+            enumerated.add(row.id);
+            return Reflect.ownKeys(row);
+          },
+        }),
+    );
+
+    const updated = Array.from({ length: 200 }, (_, i) => i * 5);
+    const delta = feed(
+      manager,
+      updated.map((j) => ({
+        kind: 2 as const,
+        id: `r${j}`,
+        index: j,
+        row: wasmRow(`r${j}`, "z", j + 1),
+      })),
+    );
+    applyDelta(target, delta);
+    const touched = [...enumerated].sort();
+
+    expect(plain(target)).toEqual(plain(delta.all));
+    // A full reconcile would deep-merge, and so enumerate, all 1000 rows.
+    expect(touched).toEqual(updated.map((j) => `r${j}`).sort());
   });
 });
