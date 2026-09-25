@@ -2256,6 +2256,11 @@ where
             .await?;
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        // The historical program keeps unselected order keys for the sort
+        // above (`app_row_payload_projection`); drop them from public rows.
+        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
