@@ -2579,6 +2579,115 @@ fn r14_session_upload(c: &mut Criterion) {
     group.finish();
 }
 
+/// Server cost of one session write while other sessions hold subscriptions
+/// the write cannot change (#3375).
+///
+/// `idle` readers each subscribe to `notes` under the owner policy, so the
+/// writer's rows are invisible to all of them. The timed server tick admits
+/// one upload; any growth with `idle` is fan-out work that produces no
+/// delivery.
+fn r15_idle_subscriber_write(c: &mut Criterion) {
+    use jazz::db::MergeableTxOps as _;
+
+    let mut group = c.benchmark_group("realistic_phase1/r15_idle_subscriber_write");
+
+    for idle in [0usize, 16, 64] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::new("idle_readers", idle), &idle, |b, &idle| {
+            let writer = open_db_with_schema(15_001, author(), false, session_upload_schema());
+            let server =
+                open_db_with_schema(15_002, AuthorSubject::SYSTEM, true, session_upload_schema());
+            let (writer_transport, server_transport) = byte_duplex();
+            let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
+            let _writer_subscriber = server.accept_subscriber(server_transport, author());
+
+            let mut readers = Vec::with_capacity(idle);
+            for reader in 0..idle {
+                let reader_subject = schema_fixture::account_author_uuid(uuid::Uuid::from_u128(
+                    0x15_0000 + reader as u128,
+                ));
+                let db = open_db_with_schema(
+                    15_100 + reader as u64,
+                    reader_subject.clone(),
+                    false,
+                    session_upload_schema(),
+                );
+                let (reader_transport, server_reader_transport) = byte_duplex();
+                let upstream = block_on(db.connect_upstream(reader_transport));
+                let subscriber = server.accept_subscriber(server_reader_transport, reader_subject);
+                let notes = db
+                    .prepare_query(&Query::from("notes"))
+                    .expect("prepare reader notes");
+                let subscription = block_on(db.subscribe(&notes, global_subscribe_opts()))
+                    .expect("subscribe idle reader");
+                readers.push((db, upstream, subscriber, subscription));
+            }
+            for (db, ..) in &readers {
+                db.tick().expect("announce idle reader subscription");
+            }
+            server.tick().expect("serve idle reader subscriptions");
+            for (db, _, _, subscription) in &mut readers {
+                db.tick().expect("apply idle reader opening");
+                assert_eq!(
+                    drain_opened(block_on(subscription.next_event()), "idle reader notes"),
+                    0
+                );
+            }
+
+            let owner = author().principal_parts().1;
+            let mut next_row = 0usize;
+            let mut upload = |writer: &BenchDb| {
+                let tx = block_on(writer.mergeable_tx()).expect("open writer transaction");
+                block_on(tx.insert(
+                    "notes",
+                    BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String(format!("note-{next_row}")),
+                        ),
+                        (
+                            "body".to_owned(),
+                            Value::String(format!("idle fan-out {next_row:08}")),
+                        ),
+                        ("owner".to_owned(), Value::String(owner.clone())),
+                        ("updated_at".to_owned(), Value::U64(next_row as u64)),
+                    ]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row_uuid(15, next_row)),
+                        ..Default::default()
+                    },
+                ))
+                .expect("stage writer row");
+                next_row += 1;
+                block_on(tx.commit()).expect("commit writer transaction")
+            };
+
+            let warm_tx = upload(&writer);
+            writer.tick().expect("ship warm-up write");
+            server.tick().expect("admit warm-up write");
+            writer.tick().expect("apply warm-up fate");
+            block_on(writer.wait_for_transaction(warm_tx, DurabilityTier::Global))
+                .expect("server accepts the writer's row");
+
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    upload(&writer);
+                    writer.tick().expect("ship write");
+                    let started = Instant::now();
+                    server.tick().expect("admit write and serve idle readers");
+                    elapsed += started.elapsed();
+                    writer.tick().expect("apply write fate");
+                }
+                elapsed
+            });
+            black_box(readers.len());
+        });
+    }
+
+    group.finish();
+}
+
 fn guarded_benches(c: &mut Criterion) {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     r1_crud(c);
@@ -2591,6 +2700,7 @@ fn guarded_benches(c: &mut Criterion) {
     r12_recursive_permissions(c);
     r13_permission_filtered_resume(c);
     r14_session_upload(c);
+    r15_idle_subscriber_write(c);
 }
 
 criterion_group! {
