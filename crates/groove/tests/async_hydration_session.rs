@@ -1028,6 +1028,46 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
 }
 
 #[test]
+fn released_subscriptions_return_eval_memo_bytes_to_baseline() {
+    let (storage, _) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    block_on(database.commit_batch(seed)).unwrap();
+    let baseline = database.runtime_stats();
+
+    let titles =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums").project(["title"])))
+            .unwrap();
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    block_on(database.next_subscription(&titles)).unwrap();
+    block_on(database.next_subscription(&reach)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(3), Value::U64(3), Value::U64(4)]);
+    batch.insert("albums", vec![Value::U64(2), Value::String("Juju".into())]);
+    block_on(database.commit_batch(batch)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert!(database.runtime_stats().eval_memo_entries > baseline.eval_memo_entries);
+
+    // The byte total is reported from a maintained counter. Collecting the
+    // released graphs removes their memo entries, so it must drop by exactly
+    // their bytes rather than keep counting them.
+    assert!(database.unsubscribe(titles.id()));
+    assert!(database.unsubscribe(reach.id()));
+    drop((titles, reach));
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, baseline.graph_nodes);
+    assert_eq!(after.eval_memo_entries, baseline.eval_memo_entries);
+    assert_eq!(after.eval_memo_bytes, baseline.eval_memo_bytes);
+}
+
+#[test]
 fn unsubscribing_while_incremental_work_is_queued_releases_its_graph_after_drain() {
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
     let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
