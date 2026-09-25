@@ -195,9 +195,7 @@ where
     }
 
     fn node_for_alias(&self, alias: NodeAlias) -> Option<NodeUuid> {
-        self.node_aliases
-            .iter()
-            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+        self.node_aliases.node_for_alias(alias)
     }
 
     pub(super) async fn resolve_node_alias(

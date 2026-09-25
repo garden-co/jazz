@@ -177,35 +177,117 @@ impl IvmRuntime {
     }
 
     pub(super) fn remove_retainer(&mut self, id: NodeId, retainer: &Retainer) -> bool {
+        // Conservatively a GC candidate even when nothing was removed: the
+        // sweep re-checks reachability, and a spare candidate costs only its
+        // ancestor closure.
+        self.gc_candidates.insert(id);
         self.node_meta
             .get_mut(&id)
             .map(|meta| meta.retainers.remove(retainer))
             .unwrap_or(false)
     }
 
-    pub(super) fn gc_ephemeral_nodes(&mut self, ttl_ticks: u64) -> Vec<NodeId> {
-        let retained = self.retained_node_ids();
-        let remove_before_tick = self.current_tick.saturating_sub(ttl_ticks);
-        let removable = self
-            .graph
-            .nodes()
-            .values()
-            .filter(|node| {
-                !node.is_durable()
-                    && !retained.contains(&node.id)
-                    && self
-                        .node_meta
-                        .get(&node.id)
-                        .is_none_or(|meta| meta.last_used_tick <= remove_before_tick)
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+    fn is_gc_root(&self, node: &crate::ivm::GraphNode, queued: &HashSet<NodeId>) -> bool {
+        node.is_durable()
+            || queued.contains(&node.id)
+            || self
+                .node_meta
+                .get(&node.id)
+                .is_some_and(|meta| !meta.retainers.is_empty())
+    }
 
+    /// Remove every node that no durable node, retained node or queued
+    /// evaluation node reaches through its inputs.
+    ///
+    /// Only candidates and their ancestors can have become unreachable since
+    /// the previous sweep: new nodes, and roots that lost retainers or queued
+    /// work. A node in that ancestor closure stays when it is a root itself or
+    /// any consumer stays; consumers outside the closure are still reachable
+    /// from their unchanged roots. Returns the removed nodes and whether some
+    /// candidate was only kept alive by queued evaluation work.
+    fn gc_ephemeral_nodes(&mut self) -> (Vec<NodeId>, bool) {
+        let mut candidates = std::mem::take(&mut self.gc_candidates);
+        candidates.extend(self.graph.take_added_nodes());
+        let mut closure = HashSet::new();
+        for &candidate in &candidates {
+            self.graph.mark_ancestors(candidate, &mut closure);
+        }
+        closure.retain(|id| self.graph.node(*id).is_some());
+        if closure.is_empty() {
+            return (Vec::new(), false);
+        }
+        let queued = if self.pending_incremental.is_pending() {
+            self.pending_incremental.registered_nodes()
+        } else {
+            HashSet::new()
+        };
+
+        // Decide consumers before their inputs: an iterative post-order over
+        // `children`, restricted to the closure (the graph is acyclic).
+        let mut kept = HashMap::<NodeId, bool>::default();
+        let mut blocked_by_queue = false;
+        for &start in &closure {
+            if kept.contains_key(&start) {
+                continue;
+            }
+            let mut stack = vec![(start, false)];
+            while let Some((id, children_done)) = stack.pop() {
+                if kept.contains_key(&id) {
+                    continue;
+                }
+                let node = self.graph.node(id).expect("closure holds live nodes");
+                if !children_done {
+                    stack.push((id, true));
+                    for child in &node.children {
+                        if closure.contains(child) && !kept.contains_key(child) {
+                            stack.push((*child, false));
+                        }
+                    }
+                    continue;
+                }
+                let root = self.is_gc_root(node, &queued);
+                blocked_by_queue |= queued.contains(&id);
+                let keep = root
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| !closure.contains(child) || kept[child]);
+                kept.insert(id, keep);
+            }
+        }
+
+        let removable = kept
+            .into_iter()
+            .filter_map(|(id, keep)| (!keep).then_some(id))
+            .collect::<Vec<_>>();
         for id in &removable {
             self.graph.remove_node(*id);
         }
+        if blocked_by_queue {
+            // Queued work releases its nodes without a lifecycle event, so
+            // revisit these candidates on the next sweep.
+            candidates.retain(|id| self.graph.node(*id).is_some());
+            self.gc_candidates.extend(candidates);
+        }
+        (removable, blocked_by_queue)
+    }
 
-        removable
+    /// Debug builds check the incremental sweep against a full reachability
+    /// pass: no unreachable node may survive a sweep that nothing blocked.
+    #[cfg(debug_assertions)]
+    fn debug_assert_no_unreachable_nodes(&self) {
+        let retained = self.retained_node_ids();
+        let leaked = self
+            .graph
+            .nodes()
+            .values()
+            .filter(|node| !node.is_durable() && !retained.contains(&node.id))
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        debug_assert!(
+            leaked.is_empty(),
+            "incremental graph GC left unreachable nodes: {leaked:?}"
+        );
     }
 
     /// Reclaim unretained nodes only while all pending evaluator queues are
@@ -217,7 +299,7 @@ impl IvmRuntime {
         if self.pending_incremental_polling {
             return;
         }
-        let removed = self.gc_ephemeral_nodes(0);
+        let (removed, blocked_by_queue) = self.gc_ephemeral_nodes();
         if !removed.is_empty() {
             let removed: HashSet<_> = removed.into_iter().collect();
             // Reclaim a batch with one pass per state map, not one full scan
@@ -233,7 +315,9 @@ impl IvmRuntime {
                 self.node_meta.remove(&node);
             }
         }
-        if !self.pending_incremental.is_pending() {
+        if !blocked_by_queue {
+            #[cfg(debug_assertions)]
+            self.debug_assert_no_unreachable_nodes();
             self.ephemeral_graph_gc_pending = false;
         }
     }

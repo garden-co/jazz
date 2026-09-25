@@ -40,12 +40,16 @@ pub struct ReceivedSyncMessage {
     /// The decoded canonical message.
     pub message: SyncMessage,
     pub(crate) lease: Option<BufferLease>,
+    /// The checked (untrusted-encoder) wire decoder produced this message, so
+    /// every version receipt it carries has already been validated.
+    pub(crate) receipts_validated: bool,
 }
 impl ReceivedSyncMessage {
     pub(crate) fn unleased(message: SyncMessage) -> Self {
         Self {
             message,
             lease: None,
+            receipts_validated: false,
         }
     }
 }
@@ -56,6 +60,7 @@ struct Pending {
     predecessors: Option<Vec<(u16, u64)>>,
     message: SyncMessage,
     lease: BufferLease,
+    receipts_validated: bool,
 }
 
 pub(super) struct RoutedMessages {
@@ -194,6 +199,7 @@ impl RoutedMessages {
             predecessors: envelope.predecessors,
             message,
             lease,
+            receipts_validated: context.validates_receipts(),
         });
         loop {
             let eligible = self.pending.iter().position(|pending| {
@@ -217,6 +223,7 @@ impl RoutedMessages {
             self.ready.push_back(ReceivedSyncMessage {
                 message: pending.message,
                 lease: Some(pending.lease),
+                receipts_validated: pending.receipts_validated,
             });
         }
         Ok(())

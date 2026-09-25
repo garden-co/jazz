@@ -369,10 +369,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.get_or_default(group_key.clone());
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
-        let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
         group.set(state_key.clone(), after_weight);
         if !emit || (before_weight > 0) == (after_weight > 0) {
+            continue;
+        }
+        // A group that enters the terminal in this batch is rendered whole as
+        // a root insert below, which drops its child edits. Don't build them.
+        if root_groups_before
+            .as_ref()
+            .is_some_and(|before| !before.contains(&group_key))
+        {
             continue;
         }
         let source_input = BorrowedRecord::new(delta.raw(), &input_desc);
@@ -417,7 +424,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 path,
                 edit: TerminalEdit::Remove { key: child_key },
             });
-            debug_assert!(before_index.is_some());
+            debug_assert!(before_weight > 0);
         }
     }
     state
@@ -443,7 +450,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 },
             });
         }
-        for root_key in root_groups_after.difference(&root_groups_before) {
+        let inserted_roots = root_groups_after
+            .difference(&root_groups_before)
+            .collect::<Vec<_>>();
+        // Rank against the complete merged group index: untouched parents
+        // remain in the immutable base and still determine terminal insertion
+        // position. Ascending inserts ranked against the final index apply
+        // correctly in order, and one merged walk ranks them all.
+        let root_ranks = state
+            .groups
+            .count_before_each(inserted_roots.iter().map(|key| key.as_slice()));
+        for (root_key, index) in inserted_roots.into_iter().zip(root_ranks) {
             let group = state
                 .groups
                 .get(root_key)
@@ -459,10 +476,6 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                             "new collect root did not render a terminal row".to_owned(),
                         )
                     })?;
-            // Rank against the complete merged group index: untouched parents
-            // remain in the immutable base and still determine terminal
-            // insertion position.
-            let index = state.groups.count_before(root_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
