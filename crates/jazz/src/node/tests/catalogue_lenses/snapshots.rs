@@ -2647,3 +2647,27 @@ fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
         "forget must release the replacement without waiting for another runtime tick"
     );
 }
+
+/// Internal: snapshot replay/recovery must retain immutable lineage records
+/// while refreshing compatible metadata on the selected runtime schema.
+#[test]
+fn compatible_metadata_snapshot_replays_and_reopens() {
+    let mut snapshot = catalogue_snapshot_fixture();
+    let updated = JazzSchema::new(&crate::tools::SchemaBuilder::new()
+        .table(crate::tools::TableSchema::builder("todos")
+            .column_with_default("title", crate::tools::ColumnType::Text, crate::tools::Value::Text("new default".into()))
+            .column("body", crate::tools::ColumnType::Text).index_only(["body"]))
+        .build()).unwrap();
+    assert_eq!(snapshot.schemas[1].id, updated.version_id());
+    let original = snapshot.lineages.clone();
+    snapshot.schemas[1] = SchemaVersion::new(updated.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xcb)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    drop(edge);
+    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xcb)).unwrap();
+    assert_eq!(reopened.catalogue.active_schema.compiled.public_schema(), updated.public_schema());
+    assert_eq!(reopened.catalogue_snapshot().unwrap().lineages, original);
+    reopened.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+}

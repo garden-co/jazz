@@ -235,3 +235,17 @@ describe("migration graph", () => {
     await expect(fetchMigrationGraph(options)).rejects.toThrow("Invalid migration graph response");
   });
 });
+
+it("labels inferred identity connections without suggesting a missing local migration", () => {
+  const merged = combineMigrationGraphs(
+    {
+      schemas: [a, b],
+      activeSchemaHash: b,
+      migrations: [{ fromHash: a, toHash: b, automatic: true }],
+    },
+    { schemas: [a, b], currentSchemaHash: b, migrations: [] },
+  );
+  expect(renderMigrationGraph(merged)).toBe(
+    ["● aaaaaaaaaaaa", "│ [automatic]", "▼", "● bbbbbbbbbbbb (current) (schema.ts)"].join("\n"),
+  );
+});

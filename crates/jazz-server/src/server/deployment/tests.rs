@@ -380,3 +380,185 @@ async fn deploy_runtime_predecessor_validation_precedes_storage_writes() {
     assert_eq!(graph(&router).await, before);
     server.shutdown().await;
 }
+
+/// An administrator deploys compatible revisions without migration files, then
+/// adds a column with an explicit migration and uploads an older compatible snapshot.
+/// Reopening and repeating the deployment must preserve the same graph.
+#[tokio::test]
+async fn compatible_deployment_preserves_hashes_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = builder(Some(dir.path())).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let a = schema(&["body"]);
+    let b = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("body", ColumnType::Text)
+                .column_with_default(
+                    "title",
+                    ColumnType::Text,
+                    jazz::tools::Value::Text("draft".into()),
+                )
+                .index_only(["title"]),
+        )
+        .build();
+    deploy_ok(&router, request(&a, &[&a], vec![])).await;
+    deploy_ok(&router, request(&b, &[&b], vec![])).await;
+    let c = schema(&["body", "extra"]);
+    deploy_ok(
+        &router,
+        request(&c, &[&c], vec![migration(&b, &c, &["extra"])]),
+    )
+    .await;
+    let historical = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column_with_default(
+                    "title",
+                    ColumnType::Text,
+                    jazz::tools::Value::Text("historical".into()),
+                )
+                .column("body", ColumnType::Text),
+        )
+        .build();
+    deploy_ok(&router, request(&c, &[&historical], vec![])).await;
+    let inventory = graph(&router).await;
+    assert_eq!(
+        inventory["activeSchemaHash"],
+        SchemaHash::compute(&c).to_string()
+    );
+    assert_eq!(inventory["schemas"].as_array().unwrap().len(), 4);
+    let edges = inventory["migrations"].as_array().unwrap();
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge["automatic"] == true)
+            .count(),
+        2
+    );
+    assert!(edges.iter().any(
+        |edge| edge["fromHash"] == SchemaHash::compute(&a).to_string()
+            && edge["toHash"] == SchemaHash::compute(&b).to_string()
+            && edge["automatic"] == true
+    ));
+    assert_eq!(
+        deploy_ok(&router, request(&c, &[], vec![])).await["changed"],
+        false
+    );
+    server.shutdown().await;
+    drop(router);
+    drop(server);
+    let reopened = builder(Some(dir.path())).build().await.unwrap();
+    assert_eq!(
+        graph(&create_router(reopened.state.clone())).await,
+        inventory
+    );
+    reopened.shutdown().await;
+}
+
+/// An administrator changes defaults and indexes on both genesis and descendant
+/// schemas; metadata that shares a runtime ID must not create a self-lineage.
+#[tokio::test]
+async fn compatible_defaults_and_indexes_share_runtime_identity() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let a = schema(&[]);
+    let b = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column_with_default(
+                    "title",
+                    ColumnType::Text,
+                    jazz::tools::Value::Text("draft".into()),
+                )
+                .index_only(std::iter::empty::<&str>()),
+        )
+        .build();
+    deploy_ok(&router, request(&a, &[&a], vec![])).await;
+    deploy_ok(&router, request(&b, &[&b], vec![])).await;
+    let snapshot = server
+        .state
+        .runtime()
+        .unwrap()
+        .trusted_catalogue_snapshot()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.schemas.len(), 1);
+    assert!(snapshot.lineages.is_empty());
+    let c = schema(&["extra"]);
+    let before = graph(&router).await;
+    assert_eq!(
+        http(&router, "POST", "/deploy", request(&c, &[&c], vec![]))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(graph(&router).await, before);
+    server.shutdown().await;
+}
+
+/// The administrator cannot bypass immutable branch defaults or publish
+/// incompatible parallel projections through compatible target definitions.
+#[tokio::test]
+async fn compatible_connections_preserve_branch_and_convergence_validation() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let branch = |byte| {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("notes")
+                    .column_with_default(
+                        "branch",
+                        ColumnType::Uuid,
+                        jazz::tools::Value::Uuid(jazz::tools::ObjectId::from_uuid(
+                            uuid::Uuid::from_bytes([byte; 16]),
+                        )),
+                    )
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build()
+    };
+    let a = branch(1);
+    let b = branch(2);
+    deploy_ok(&router, request(&a, &[&a], vec![])).await;
+    let before = graph(&router).await;
+    assert_eq!(
+        http(&router, "POST", "/deploy", request(&b, &[&b], vec![]))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(graph(&router).await, before);
+    server.shutdown().await;
+
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let a = schema(&[]);
+    let b = schema(&["body"]);
+    let c = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("body", ColumnType::Text)
+                .column("title", ColumnType::Text),
+        )
+        .build();
+    let mut conflicting = migration(&a, &c, &["body"]);
+    conflicting["forward"][0]["operations"][0]["value"] =
+        json!(jazz::tools::Value::Text("different".into()));
+    let (status, error) = http(
+        &router,
+        "POST",
+        "/deploy",
+        request(
+            &c,
+            &[&a, &b, &c],
+            vec![migration(&a, &b, &["body"]), conflicting],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error["code"], "conflicting_paths");
+    assert_eq!(graph(&router).await["schemas"], json!([]));
+    server.shutdown().await;
+}

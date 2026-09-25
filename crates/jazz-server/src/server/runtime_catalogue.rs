@@ -224,6 +224,10 @@ async fn publish_runtime_lens(
         .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
     let target_runtime = JazzSchema::new(&target_schema)
         .map_err(|error| format!("convert lens target schema: {error}"))?;
+    // Same-version metadata is installed by active-schema selection, not a self-lens.
+    if initial_schema.version_id() == target_runtime.version_id() {
+        return Ok(());
+    }
     let runtime_shell = runtime_shell(state, shell, initial_schema)?;
     runtime_shell
         .publish_schema_with_lens(target_runtime, runtime_lens, new_tables, dropped_tables)

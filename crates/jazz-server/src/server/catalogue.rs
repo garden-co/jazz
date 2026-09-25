@@ -69,6 +69,9 @@ pub(crate) struct MigrationGraph {
 struct MigrationGraphEdge {
     from_hash: String,
     to_hash: String,
+    /// Derived capability, not persisted provenance: no migration file is needed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    automatic: bool,
 }
 
 /// Errors from server-local catalogue operations.
@@ -652,6 +655,16 @@ impl CatalogueStore for StoredCatalogue {
             .map(|lens| MigrationGraphEdge {
                 from_hash: lens.source_hash.to_string(),
                 to_hash: lens.target_hash.to_string(),
+                automatic: lens.forward.ops.is_empty()
+                    && lens.backward.ops.is_empty()
+                    && !lens.is_draft()
+                    && index
+                        .schemas
+                        .get(&lens.source_hash)
+                        .zip(index.schemas.get(&lens.target_hash))
+                        .is_some_and(|(from, to)| {
+                            jazz::tools::deployment::schemas_are_compatible(from, to)
+                        }),
             })
             .collect();
         migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));

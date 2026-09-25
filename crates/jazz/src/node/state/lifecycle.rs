@@ -394,12 +394,11 @@ where
                     Self::validate_durable_staged_lineage(staged, &schemas)?;
                     match active_lineages.remove(&staged.publication.id) {
                         Some(sequence) if sequence == staged.catalogue_seq => {
-                            // Legacy receipts retain their original grants, while
-                            // activation stores permissions separately. Compare all
-                            // remaining schema metadata without reviving those grants.
+                            // The original publication retains its metadata. Later
+                            // deployments may refresh defaults, indexes and grants,
+                            // but must still belong to the same row structure.
                             if schemas.get(&staged.publication.schema.id).is_none_or(|schema| {
-                                schema.schema.without_permissions()
-                                    != staged.publication.schema.schema.without_permissions()
+                                !schema.schema.has_same_lineage_structure(&staged.publication.schema.schema)
                             }) || !active_lineage_targets.insert(staged.publication.schema.id)
                             {
                                 return Err(Error::InvalidStoredValue(

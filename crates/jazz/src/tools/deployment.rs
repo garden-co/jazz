@@ -2,6 +2,8 @@
 //! current stored state under the same serialization boundary as the eventual
 //! commit. A prepared value is not a concurrency token or a publication receipt.
 
+mod compatible;
+pub use compatible::schemas_are_compatible;
 mod runtime;
 pub use runtime::prepare_runtime_snapshot;
 
@@ -169,22 +171,20 @@ pub fn prepare_deployment(
             migrations.insert(edge, lens.clone());
         }
     }
+    let representatives = compatible::connect_compatible_schemas(
+        stored,
+        &schemas,
+        &compiled,
+        &mut migrations,
+        request.target_schema_hash.0,
+    )?;
     let order = topological_order(&schemas, &migrations)?;
-    let tips = schemas
-        .keys()
-        .filter(|hash| !migrations.keys().any(|(from, _)| from == *hash))
-        .copied()
-        .map(SchemaHash)
-        .collect::<Vec<_>>();
-    if tips != [request.target_schema_hash] {
-        return Err(DeploymentError::NonConvergent {
-            target: request.target_schema_hash,
-            tips: tips
-                .into_iter()
-                .filter(|hash| *hash != request.target_schema_hash)
-                .collect(),
-        });
-    }
+    compatible::validate_compatible_graph(
+        &schemas,
+        &migrations,
+        &representatives,
+        request.target_schema_hash,
+    )?;
     for ((from, to), lens) in &migrations {
         let check = || -> Result<(), String> {
             if lens.is_draft() {

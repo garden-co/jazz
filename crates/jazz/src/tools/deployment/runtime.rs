@@ -13,7 +13,7 @@ pub fn prepare_runtime_snapshot(
     current: Option<CatalogueSnapshot>,
     revision: u64,
 ) -> Result<CatalogueSnapshot, String> {
-    let versions = prepared
+    let all_versions = prepared
         .schemas
         .iter()
         .map(|schema| {
@@ -22,17 +22,28 @@ pub fn prepare_runtime_snapshot(
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Defaults and indexes share runtime identity, while public content hashes
+    // retain the exact definition. They must not create duplicate runtime entries.
+    let mut seen = BTreeSet::new();
+    let versions = all_versions
+        .iter()
+        .filter(|v| seen.insert(v.id))
+        .cloned()
+        .collect::<Vec<_>>();
     let root = versions.first().ok_or("deployment has no schema")?;
     let hashes = prepared
         .schemas
         .iter()
         .map(SchemaHash::compute)
-        .zip(versions.iter())
+        .zip(all_versions.iter())
         .collect::<HashMap<_, _>>();
     let mut incoming = BTreeMap::<_, Vec<SchemaPredecessor>>::new();
     for migration in &prepared.migrations {
         let source = hashes[&migration.source_hash];
         let target = hashes[&migration.target_hash];
+        if source.id == target.id {
+            continue;
+        }
         let lens = compile_lens(
             migration,
             source.schema.public_schema(),
@@ -127,6 +138,7 @@ pub fn prepare_runtime_snapshot(
             .remove(&schema.id)
             .ok_or("missing schema predecessors")?;
         predecessors.sort_by_key(|p| p.lens.source());
+        predecessors.dedup();
         let identities = if let Some((_, existing)) = snapshot
             .lineages
             .iter()

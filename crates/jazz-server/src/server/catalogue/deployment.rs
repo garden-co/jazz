@@ -98,7 +98,7 @@ impl StoredCatalogue {
         let permissions = source
             .iter()
             .filter(|(_, table)| table.policies != TablePolicies::default())
-            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
         let current = expected.active_schema();
         let same_active = current.as_ref().is_some_and(|active| {
@@ -107,7 +107,7 @@ impl StoredCatalogue {
                     .permissions
                     .iter()
                     .filter(|(_, policy)| **policy != TablePolicies::default())
-                    .map(|(name, policy)| (name.clone(), policy.clone()))
+                    .map(|(name, policy)| (*name, policy.clone()))
                     .collect::<HashMap<_, _>>()
                     == permissions
         });

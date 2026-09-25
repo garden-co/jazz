@@ -5,7 +5,12 @@ export type GraphPresence = "local" | "server" | "both";
 export interface MigrationGraph {
   activeSchemaHash: string | null;
   schemas: string[];
-  migrations: Array<{ fromHash: string; toHash: string; presence?: GraphPresence }>;
+  migrations: Array<{
+    fromHash: string;
+    toHash: string;
+    presence?: GraphPresence;
+    automatic?: boolean;
+  }>;
   schemaPresence?: Map<string, GraphPresence>;
   localSchemaHash?: string | null;
 }
@@ -30,6 +35,7 @@ export function combineMigrationGraphs(
   const serverEdges = new Map(server.migrations.map((edge) => [key(edge), edge]));
   const migrations = [...new Map([...serverEdges, ...localEdges]).entries()].map(([id, edge]) => ({
     ...edge,
+    ...(serverEdges.get(id)?.automatic ? { automatic: true } : {}),
     presence: presence(localEdges.has(id), serverEdges.has(id)),
   }));
   return {
@@ -76,7 +82,10 @@ export async function fetchMigrationGraph(options: MigrationGraphOptions): Promi
     !Array.isArray(graph.migrations) ||
     !graph.migrations.every(
       (edge) =>
-        edge && graph.schemas.includes(edge.fromHash) && graph.schemas.includes(edge.toHash),
+        edge &&
+        graph.schemas.includes(edge.fromHash) &&
+        graph.schemas.includes(edge.toHash) &&
+        (edge.automatic === undefined || typeof edge.automatic === "boolean"),
     )
   ) {
     throw new Error("Invalid migration graph response from server.");
@@ -90,11 +99,14 @@ export function renderMigrationGraph(graph: MigrationGraph, color = false): stri
 
   const schemas = [...graph.schemas].sort();
   const children = new Map(
-    schemas.map((hash) => [hash, new Map<string, GraphPresence | undefined>()]),
+    schemas.map((hash) => [
+      hash,
+      new Map<string, { presence?: GraphPresence; automatic?: boolean }>(),
+    ]),
   );
   const incoming = new Set<string>();
-  for (const { fromHash, toHash, presence } of graph.migrations) {
-    children.get(fromHash)!.set(toHash, presence);
+  for (const { fromHash, toHash, presence, automatic } of graph.migrations) {
+    children.get(fromHash)!.set(toHash, { presence, automatic });
     incoming.add(toHash);
   }
   // Expand colliding prefixes so every displayed schema remains unambiguous.
@@ -128,7 +140,10 @@ export function renderMigrationGraph(graph: MigrationGraph, color = false): stri
       }
       visited.add(hash);
       const next = [...children.get(hash)!.keys()].sort();
-      const edgeLabel = (target: string) => presenceLabel(children.get(hash)!.get(target));
+      const edgeLabel = (target: string) => {
+        const edge = children.get(hash)!.get(target);
+        return edge?.automatic ? " [automatic]" : presenceLabel(edge?.presence);
+      };
       const childPrefix = prefix + continuation;
       if (next.length === 1) {
         lines.push(`${childPrefix}│${edgeLabel(next[0]!)}`, `${childPrefix}▼`);

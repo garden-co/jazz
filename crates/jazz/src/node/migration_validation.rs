@@ -171,6 +171,18 @@ pub(crate) fn validate_migration_lens_between(
                 ));
             }
         }
+        // Ordinary defaults affect future inserts, not existing-row projection.
+        // Branch defaults were checked above because they determine row identity.
+        for column in columns.values_mut() {
+            column.default = None;
+        }
+        let target_columns = target_columns
+            .into_iter()
+            .map(|(name, mut column)| {
+                column.default = None;
+                (name, column)
+            })
+            .collect::<BTreeMap<_, _>>();
         if columns != target_columns {
             return Err(Error::InvalidCatalogueUpdate(
                 "lens operations do not reproduce target columns",
