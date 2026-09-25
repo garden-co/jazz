@@ -797,8 +797,9 @@ impl CoreTickScheduler for NapiTickScheduler {
     }
 
     fn drops_pending_ticks(&self) -> bool {
-        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
-        // if it is still pending.
+        // `tick` drives `Db::tick` through `core_poll_once`, which drops it
+        // while it still waits on outside progress (cooperative yields are
+        // polled again in the same turn).
         true
     }
 
@@ -3919,13 +3920,35 @@ where
     Ok(stats.subscription_events as u32)
 }
 
+/// Drive `future` for one host turn and drop it if it is still waiting.
+///
+/// A future that yields cooperatively wakes itself before returning
+/// `Pending` (Groove evaluation yields between bounded operator turns). It
+/// expects to be polled again, and dropping it loses the work it holds, such as
+/// a received view update that was mid-apply. Such yields are polled again
+/// here in the same turn. Only a future waiting on outside progress, which
+/// has not woken itself, is dropped as before.
 fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
     let mut future = Box::pin(future);
-    let waker = futures::task::noop_waker();
+    let yielded = std::sync::Arc::new(SelfWake::default());
+    let waker = waker(yielded.clone());
     let mut context = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return Some(output),
+            Poll::Pending if yielded.0.swap(false, Ordering::AcqRel) => continue,
+            Poll::Pending => return None,
+        }
+    }
+}
+
+/// Records whether a polled future woke itself.
+#[derive(Default)]
+struct SelfWake(std::sync::atomic::AtomicBool);
+
+impl ArcWake for SelfWake {
+    fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+        arc_self.0.store(true, Ordering::Release);
     }
 }
 
