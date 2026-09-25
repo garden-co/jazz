@@ -7,6 +7,9 @@ These are native, instrumented local medians, with three samples per arm.
 ## Workload and source
 
 - Main: `7a113ff8b`; parent: UUID-page PR #3534, `49e8f9721`.
+- Measured implementation: `b2527e601`. The follow-up avoids preparing an unused
+  projector for a single-row result; the saved timing/binary receipt is for the
+  measured implementation.
 - 39 unbounded `Db::all_for_identity` queries at Global durability, member
   identity, RocksDB, 27,518 returned rows. No deleted rows in this fixture.
 - One query sweep per freshly reopened copy of the same seeded authority.

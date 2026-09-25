@@ -4951,6 +4951,10 @@ fn normalize_public_current_rows(
             return Ok(());
         };
         let projected = first.project(table, &columns)?;
+        if remaining.is_empty() {
+            *first = projected;
+            return Ok(());
+        }
         let prepared = PreparedPublicRowProjection::new(first, &projected);
         *first = projected;
         for row in remaining {
