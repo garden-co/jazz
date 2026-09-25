@@ -1114,6 +1114,29 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "native row has no read-schema physical mapping",
             ))?;
+        // Rows of one batch share their unbound metadata allocation. Reuse the
+        // bound result when every column identity it resolved still matches
+        // this row's mapping, so the batch shares one bound allocation too.
+        let reused = BOUND_PUBLICATION_FIELDS.with_borrow(|cache| {
+            cache.iter().rev().find_map(|(unbound, bound)| {
+                (std::sync::Arc::ptr_eq(unbound, &row.publication_fields)
+                    && unbound.iter().zip(bound.iter()).all(|(unbound, bound)| {
+                        match (unbound, bound) {
+                            (
+                                CurrentRowPublicationField::UnresolvedSourceCell { output_name },
+                                CurrentRowPublicationField::StoredColumn { id, .. },
+                            ) => mapping.columns.get(output_name) == Some(id),
+                            _ => true,
+                        }
+                    }))
+                .then(|| bound.clone())
+            })
+        });
+        if let Some(bound) = reused {
+            row.publication_fields = bound;
+            return Ok(());
+        }
+        let unbound = row.publication_fields.clone();
         for field in std::sync::Arc::make_mut(&mut row.publication_fields) {
             if let CurrentRowPublicationField::UnresolvedSourceCell { output_name } = field {
                 let id = *mapping
@@ -1128,6 +1151,12 @@ where
                 };
             }
         }
+        BOUND_PUBLICATION_FIELDS.with_borrow_mut(|cache| {
+            if cache.len() == BOUND_PUBLICATION_FIELDS_CAPACITY {
+                cache.remove(0);
+            }
+            cache.push((unbound, row.publication_fields.clone()));
+        });
         Ok(())
     }
 
@@ -1507,4 +1536,17 @@ where
             root_occurrence_ids,
         })
     }
+}
+
+const BOUND_PUBLICATION_FIELDS_CAPACITY: usize = 64;
+
+type SharedPublicationFields = std::sync::Arc<Vec<CurrentRowPublicationField>>;
+
+thread_local! {
+    /// Recently bound publication metadata, keyed by the unbound allocation it
+    /// was derived from. Holding the unbound `Arc` keeps its address from being
+    /// reused while the entry lives.
+    static BOUND_PUBLICATION_FIELDS: std::cell::RefCell<
+        Vec<(SharedPublicationFields, SharedPublicationFields)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
 }

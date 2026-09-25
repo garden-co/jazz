@@ -349,6 +349,7 @@ pub(crate) use views::MaintainedViewBundleInputs;
 pub(crate) use views::simple_scalar_exit_query;
 
 use codec::*;
+pub(crate) use codec::{descriptor_is_register, prepared_wire_record_descriptor};
 use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
@@ -1847,14 +1848,88 @@ pub struct RelationSnapshot {
     pub edges: Vec<RelationEdge>,
 }
 
+/// Bounded per-thread memo of publication metadata derived purely from a
+/// record descriptor and its binding roles. Descriptors are interned, so the
+/// key compares by pointer; the bound keeps a long-lived thread from growing
+/// it without limit.
+struct CurrentRowPublicationCache {
+    entries: Vec<(
+        records::RecordDescriptor,
+        Vec<CurrentRowBindingRole>,
+        std::sync::Arc<Vec<CurrentRowPublicationField>>,
+    )>,
+}
+
+impl CurrentRowPublicationCache {
+    const CAPACITY: usize = 64;
+
+    fn get_or_insert(
+        &mut self,
+        descriptor: records::RecordDescriptor,
+        binding_fields: Vec<CurrentRowBindingRole>,
+        build: impl FnOnce(
+            &records::RecordDescriptor,
+            &[CurrentRowBindingRole],
+        ) -> Vec<CurrentRowPublicationField>,
+    ) -> std::sync::Arc<Vec<CurrentRowPublicationField>> {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .rposition(|(cached, roles, _)| *cached == descriptor && *roles == binding_fields)
+        {
+            let fields = self.entries[position].2.clone();
+            if position + 1 != self.entries.len() {
+                let entry = self.entries.remove(position);
+                self.entries.push(entry);
+            }
+            return fields;
+        }
+        let fields = std::sync::Arc::new(build(&descriptor, &binding_fields));
+        if self.entries.len() == Self::CAPACITY {
+            self.entries.remove(0);
+        }
+        self.entries
+            .push((descriptor, binding_fields, fields.clone()));
+        fields
+    }
+}
+
+/// Intern a row's table name without taking the global interner lock or
+/// allocating when this thread interned it recently.
+fn intern_current_row_table(table: &str) -> groove::Intern<String> {
+    const CAPACITY: usize = 16;
+    CURRENT_ROW_TABLE_NAMES.with_borrow_mut(|names| {
+        if let Some(interned) = names
+            .iter()
+            .rev()
+            .find(|interned| interned.as_str() == table)
+        {
+            return *interned;
+        }
+        let interned = groove::Intern::new(table.to_owned());
+        if names.len() == CAPACITY {
+            names.remove(0);
+        }
+        names.push(interned);
+        interned
+    })
+}
+
+thread_local! {
+    static CURRENT_ROW_TABLE_NAMES: std::cell::RefCell<Vec<groove::Intern<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static CURRENT_ROW_PUBLICATION_CACHE: std::cell::RefCell<CurrentRowPublicationCache> =
+        const { std::cell::RefCell::new(CurrentRowPublicationCache { entries: Vec::new() }) };
+}
+
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
-    pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
+    pub(crate) fn new(table: impl AsRef<str>, record: OwnedRecord) -> Self {
         Self::new_with_binding_fields(table, record, CurrentRowBindingRole::PhysicalColumn)
     }
 
     pub(crate) fn new_with_binding_fields(
-        table: impl Into<String>,
+        table: impl AsRef<str>,
         record: OwnedRecord,
         default_field: CurrentRowBindingRole,
     ) -> Self {
@@ -1863,34 +1938,45 @@ impl CurrentRow {
     }
 
     pub(crate) fn new_with_explicit_binding_fields(
-        table: impl Into<String>,
+        table: impl AsRef<str>,
         record: OwnedRecord,
         binding_fields: Vec<CurrentRowBindingRole>,
     ) -> Self {
-        let binding_field_names = record
-            .descriptor()
-            .fields()
-            .iter()
-            .zip(&binding_fields)
-            .map(|(field, binding)| match binding {
-                CurrentRowBindingRole::PhysicalColumn => None,
-                CurrentRowBindingRole::LogicalField => {
-                    self::query_engine::descriptor_public_name(field).map(str::to_owned)
-                }
+        assert_eq!(
+            binding_fields.len(),
+            record.descriptor().fields().len(),
+            "native binding fields must align with their record descriptor"
+        );
+        // Publication metadata depends only on (descriptor, roles) here, so
+        // rows of one batch share a single allocation.
+        let descriptor = record.descriptor().clone();
+        let publication_fields = CURRENT_ROW_PUBLICATION_CACHE.with_borrow_mut(|cache| {
+            cache.get_or_insert(descriptor, binding_fields, |descriptor, binding_fields| {
+                let binding_field_names = descriptor
+                    .fields()
+                    .iter()
+                    .zip(binding_fields)
+                    .map(|(field, binding)| match binding {
+                        CurrentRowBindingRole::PhysicalColumn => None,
+                        CurrentRowBindingRole::LogicalField => {
+                            self::query_engine::descriptor_public_name(field).map(str::to_owned)
+                        }
+                    })
+                    .collect();
+                Self::publication_fields_for(
+                    descriptor,
+                    binding_fields.to_vec(),
+                    binding_field_names,
+                )
             })
-            .collect();
-        Self::new_with_explicit_binding_fields_and_names(
-            table,
-            record,
-            binding_fields,
-            binding_field_names,
-        )
+        });
+        Self::new_with_shared_publication_fields(table, record, publication_fields)
     }
 
     /// Construct a row with explicit binding provenance and any logical
     /// descriptor-name overrides supplied by its producer.
     pub(crate) fn new_with_explicit_binding_fields_and_names(
-        table: impl Into<String>,
+        table: impl AsRef<str>,
         record: OwnedRecord,
         binding_fields: Vec<CurrentRowBindingRole>,
         binding_field_names: Vec<Option<String>>,
@@ -1905,8 +1991,17 @@ impl CurrentRow {
             binding_fields.len(),
             "native binding field names must align with their record descriptor"
         );
-        let publication_fields = record
-            .descriptor()
+        let publication_fields =
+            Self::publication_fields_for(record.descriptor(), binding_fields, binding_field_names);
+        Self::new_with_publication_fields(table, record, publication_fields)
+    }
+
+    fn publication_fields_for(
+        descriptor: &records::RecordDescriptor,
+        binding_fields: Vec<CurrentRowBindingRole>,
+        binding_field_names: Vec<Option<String>>,
+    ) -> Vec<CurrentRowPublicationField> {
+        descriptor
             .fields()
             .iter()
             .zip(binding_fields)
@@ -1939,14 +2034,25 @@ impl CurrentRow {
                     }
                 }
             })
-            .collect();
-        Self::new_with_publication_fields(table, record, publication_fields)
+            .collect()
     }
 
     pub(crate) fn new_with_publication_fields(
-        table: impl Into<String>,
+        table: impl AsRef<str>,
         record: OwnedRecord,
         publication_fields: Vec<CurrentRowPublicationField>,
+    ) -> Self {
+        Self::new_with_shared_publication_fields(
+            table,
+            record,
+            std::sync::Arc::new(publication_fields),
+        )
+    }
+
+    fn new_with_shared_publication_fields(
+        table: impl AsRef<str>,
+        record: OwnedRecord,
+        publication_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
     ) -> Self {
         assert_eq!(
             publication_fields.len(),
@@ -1954,11 +2060,17 @@ impl CurrentRow {
             "publication fields must align with record slots"
         );
         Self {
-            table: groove::Intern::new(table.into()),
+            table: intern_current_row_table(table.as_ref()),
             record: std::sync::Arc::new(record),
             deleted: false,
-            publication_fields: std::sync::Arc::new(publication_fields),
+            publication_fields,
         }
+    }
+
+    /// Whether two rows share one publication-metadata allocation, which
+    /// implies equal publication fields.
+    pub(crate) fn shares_publication_fields(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.publication_fields, &other.publication_fields)
     }
 
     pub(crate) fn into_deleted(mut self) -> Self {

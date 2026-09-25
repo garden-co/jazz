@@ -234,8 +234,24 @@ pub fn encode_subscription_delta(
 /// Group only adjacent rows with equal table and tagged descriptor.
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
+    let mut previous: Option<&CurrentRow> = None;
     for row in rows {
         let (descriptor, raw) = row.encoded_record();
+        // A row sharing its predecessor's table, interned record descriptor
+        // and publication allocation has an identical binding descriptor.
+        if let (Some(previous), Some(batch)) = (previous, batches.last_mut())
+            && previous.table() == row.table()
+            && previous.encoded_record().0 == descriptor
+            && previous.shares_publication_fields(row)
+        {
+            batch.rows.push(Row {
+                row_id: row.row_uuid(),
+                deleted: row.is_deleted(),
+                raw,
+            });
+            continue;
+        }
+        previous = Some(row);
         let binding_descriptor = descriptor
             .fields()
             .iter()

@@ -1498,7 +1498,9 @@ impl VersionRecord {
         // strict TxId order, never author insertion order.
         parents.sort();
         parents.dedup();
-        let descriptor = table.wire_record_descriptor();
+        // Reuse the per-table prepared descriptor instead of rebuilding and
+        // re-interning it for every written row. Same inputs, same bytes.
+        let descriptor = crate::node::prepared_wire_record_descriptor(table);
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),

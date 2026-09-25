@@ -724,7 +724,7 @@ impl HistoryEntry {
     }
 
     fn is_register_record(&self) -> bool {
-        self.version.descriptor().field_index("_deletion").is_some()
+        crate::node::descriptor_is_register(self.version.descriptor())
     }
 }
 

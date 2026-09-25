@@ -2207,7 +2207,7 @@ thread_local! {
     static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+pub(crate) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     version_record_descriptors(table).1
 }
 
@@ -2650,7 +2650,7 @@ impl VersionRow {
     }
 
     pub(super) fn is_register_record(&self) -> bool {
-        self.record.descriptor().field_index("_deletion").is_some()
+        descriptor_is_register(self.record.descriptor())
     }
 
     pub(super) fn to_history_entry(
@@ -4547,6 +4547,28 @@ pub(super) fn current_row_column_type(column: &crate::schema::ColumnSchema) -> r
     }
 }
 
+/// Whether a history descriptor is a deletion register (it carries
+/// `_deletion`). Descriptors are interned, so a bounded per-thread memo keyed
+/// by descriptor identity replaces a by-name field scan on every call.
+pub(crate) fn descriptor_is_register(descriptor: &records::RecordDescriptor) -> bool {
+    const CAPACITY: usize = 32;
+    thread_local! {
+        static REGISTER_DESCRIPTORS: std::cell::RefCell<Vec<(records::RecordDescriptor, bool)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    REGISTER_DESCRIPTORS.with_borrow_mut(|memo| {
+        if let Some((_, is_register)) = memo.iter().rev().find(|(cached, _)| cached == descriptor) {
+            return *is_register;
+        }
+        let is_register = descriptor.field_index("_deletion").is_some();
+        if memo.len() == CAPACITY {
+            memo.remove(0);
+        }
+        memo.push((descriptor.clone(), is_register));
+        is_register
+    })
+}
+
 fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<CurrentRowDescriptorCacheEntry>>> =
         std::sync::OnceLock::new();
@@ -4560,9 +4582,16 @@ fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
         return descriptor;
     }
     let descriptor = build_current_row_descriptor(table);
+    // Bound the process-wide cache: a long-lived server sees an open-ended
+    // set of table shapes. Evicting the oldest only costs a rebuild.
+    if cache.len() == CURRENT_ROW_DESCRIPTOR_CACHE_CAPACITY {
+        cache.remove(0);
+    }
     cache.push(CurrentRowDescriptorCacheEntry::new(table, descriptor));
     descriptor
 }
+
+const CURRENT_ROW_DESCRIPTOR_CACHE_CAPACITY: usize = 1024;
 
 struct CurrentRowDescriptorCacheEntry {
     table_name: String,

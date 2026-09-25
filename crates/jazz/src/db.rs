@@ -6687,7 +6687,7 @@ fn terminal_subscription_output_row(
     Ok(SubscriptionOutputRow {
         occurrence_id,
         row: CurrentRow::new_with_publication_fields(
-            table.to_owned(),
+            table,
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
             terminal_root_publication_fields(layout),
         ),
