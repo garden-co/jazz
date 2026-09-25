@@ -235,3 +235,25 @@ const legacyBenchmarks = w1Benchmarks
     description: `${current.description} Retired unsuffixed memory-series name; consult the measured commit for historical timing boundaries.`,
   }));
 w1Benchmarks.push(...legacyBenchmarks);
+
+for (const depth of [100, 1000, 10000]) {
+  w1Benchmarks.push({
+    name: `w1_local_ahead_current_history[${depth}]`,
+    title: "W1 current row after a long edit history",
+    description:
+      "Read the current value of one row that has a chain of locally settled edits, each built on the last.",
+    fixture: `One status row edited ${depth.toLocaleString("en-US")} times; every candidate is retained.`,
+    storage: "RocksDB; WAL without fsync",
+    includes: ["One current-row read that scans the retained candidate history"],
+    excludes: [
+      "Writing and settling the edit history",
+      "The untimed receipt that checks the winner and read counts",
+    ],
+    work: {
+      count: 1,
+      unit: "reads/s",
+      explanation: "One current-row read per iteration; the history depth is load context.",
+    },
+    source: "examples/benchmarks/w1/benches/ahead_current.rs",
+  });
+}

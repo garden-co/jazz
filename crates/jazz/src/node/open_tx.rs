@@ -324,13 +324,10 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let mut rows = BTreeSet::new();
-        for version in self
-            .query_versions_in_schema(schema_version, table, None)
-            .await?
-        {
-            rows.insert(version.row_uuid());
-        }
+        let mut snapshot_rows = self
+            .snapshot_rows_in_schema(schema_version, table, &snapshot)
+            .await?;
+        let mut rows = snapshot_rows.keys().copied().collect::<BTreeSet<_>>();
         rows.extend(
             self.open_tx(tx_id)?
                 .writes
@@ -340,9 +337,11 @@ where
         );
         let mut current = Vec::new();
         for row_uuid in rows {
-            let snapshot_row = self
-                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
-                .await?;
+            let snapshot_row = match snapshot_rows.remove(&row_uuid) {
+                Some(snapshot_row) => snapshot_row,
+                // A row staged by this transaction with no history at all.
+                None => self.snapshot_row_from_winners(schema_version, table, None, None)?,
+            };
             let snapshot_provenance = snapshot_row.provenance.clone();
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
@@ -1679,6 +1678,76 @@ where
                 snapshot,
             )
             .await;
+        self.snapshot_row_from_winners(schema_version, table, content, deletion)
+    }
+
+    /// Derive every row's snapshot state from one scan of the table's history.
+    ///
+    /// Equivalent to calling [`Self::snapshot_row_in_schema`] for each row
+    /// with history: the row-prefixed scans that call performs select exactly
+    /// the row's slice of this table-wide scan, and the winner is chosen by
+    /// the same rule over the same snapshot-covered candidates. Coverage is
+    /// decided once per transaction rather than once per version.
+    async fn snapshot_rows_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        snapshot: &Snapshot,
+    ) -> Result<BTreeMap<RowUuid, SnapshotRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, None)
+            .await?;
+        let mut covered = std::collections::HashMap::<TxId, bool>::new();
+        let mut rows = BTreeMap::new();
+        for group in versions.chunk_by(|left, right| left.row_uuid() == right.row_uuid()) {
+            let row_uuid = group[0].row_uuid();
+            let mut winners = [None, None];
+            'layers: for (slot, layer) in [VersionLayer::Content, VersionLayer::Deletion]
+                .into_iter()
+                .enumerate()
+            {
+                let mut candidate_indices = Vec::new();
+                for (idx, version) in group.iter().enumerate() {
+                    // A per-row read treats an undecodable identity as "no
+                    // winner" for that layer; keep that outcome.
+                    let Ok(tx_id) = self.version_tx_id(version) else {
+                        continue 'layers;
+                    };
+                    if version.layer() != layer {
+                        continue;
+                    }
+                    let is_covered = match covered.get(&tx_id) {
+                        Some(is_covered) => *is_covered,
+                        None => {
+                            let is_covered = self.snapshot_covers(tx_id, snapshot).await;
+                            covered.insert(tx_id, is_covered);
+                            is_covered
+                        }
+                    };
+                    if is_covered {
+                        candidate_indices.push(idx);
+                    }
+                }
+                winners[slot] =
+                    current_version_index(group, &candidate_indices, layer, &self.node_aliases)
+                        .map(|idx| group[idx].clone());
+            }
+            let [content, deletion] = winners;
+            rows.insert(
+                row_uuid,
+                self.snapshot_row_from_winners(schema_version, table, content, deletion)?,
+            );
+        }
+        Ok(rows)
+    }
+
+    fn snapshot_row_from_winners(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        content: Option<VersionRow>,
+        deletion: Option<VersionRow>,
+    ) -> Result<SnapshotRow, Error> {
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
             Some(DeletionEvent::Deleted)

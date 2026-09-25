@@ -597,6 +597,20 @@ where
             .await
     }
 
+    /// Whether `row_uuid` is a live local row of `table`, by point lookup of
+    /// its content and deletion winners (the lookup delete advice uses).
+    pub(crate) async fn local_current_row_exists(
+        &mut self,
+        table_name: &str,
+        row_uuid: RowUuid,
+    ) -> Result<bool, Error> {
+        let table = self.table(table_name)?.clone();
+        Ok(self
+            .policy_local_current_subject_row(&table, row_uuid)
+            .await?
+            .is_some())
+    }
+
     async fn policy_local_current_subject_row(
         &mut self,
         table: &TableSchema,
