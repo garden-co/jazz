@@ -163,6 +163,47 @@ fn authorization_policy_queries(
     }
 }
 
+/// Policy clauses for one advice action, seeded with the target row where the
+/// clause is evaluated on the stored row. Such a clause only needs that row and
+/// the dependencies reachable from it, not every row the policy matches
+/// (#3468). `update_check` stays unseeded: it runs on the patched row, whose
+/// dependencies (for example a new parent) the stored row cannot reach.
+fn authorization_row_policy_queries(
+    table: &crate::schema::TableSchema,
+    action: &PermissionAdviceAction,
+) -> Vec<JazzQuery> {
+    let seed =
+        |policy: JazzQuery, row: RowUuid| policy.filter(eq(col("id"), lit(Value::Uuid(row.0))));
+    match action {
+        PermissionAdviceAction::Read { row, .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Read)
+                .into_iter()
+                .map(|policy| seed(policy, *row))
+                .collect()
+        }
+        PermissionAdviceAction::Insert { .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Insert)
+        }
+        PermissionAdviceAction::Update { row, .. } => [
+            table
+                .write_policies
+                .update_using
+                .clone()
+                .map(|policy| seed(policy, *row)),
+            table.write_policies.update_check.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        PermissionAdviceAction::Delete { row, .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Delete)
+                .into_iter()
+                .map(|policy| seed(policy, *row))
+                .collect()
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn authorization_operation_key(
     operation: AuthorizationScopeOperation,
@@ -1466,9 +1507,9 @@ where
                 ))?
                 .schema
         };
-        let policies = authorization_policy_queries(
+        let policies = authorization_row_policy_queries(
             &self.table_in_schema(table_name, policy_schema_version)?,
-            operation,
+            action,
         );
         let claim_values = permission_scope_claim_values(writer, claims);
         // Authorization support is authority-current: historic/branch views
