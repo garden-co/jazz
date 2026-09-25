@@ -131,6 +131,8 @@ const mocks = vi.hoisted(() => {
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
           onServerTransportError: vi.fn(),
+          onRemoteLinkStateChange: vi.fn(),
+          remoteLinkState: vi.fn(() => "connected"),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async (transport: Transport) => {

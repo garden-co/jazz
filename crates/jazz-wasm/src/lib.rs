@@ -19,11 +19,12 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RowCells, SeededRowIdSource, SerializedReadResult,
-    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
-    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
+    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
+    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
+    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -2250,6 +2251,25 @@ impl WasmDb {
         Ok(())
     }
 
+    /// Report what the host knows about the path to the authoritative server
+    /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
+    /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
+    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// `"attempting"` report as the start of a new attempt; until this is
+    /// first called, reachability is derived from this runtime's own upstream.
+    #[wasm_bindgen(js_name = setRemoteLinkHint)]
+    pub fn set_remote_link_hint(&self, state: String) -> Result<(), JsValue> {
+        let hint = RemoteLinkHint::from_host_str(&state)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown remote link state {state}")))?;
+        match &self.open_inner()? {
+            WasmDbInner::Memory(db) => db.set_remote_link_hint(hint),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_remote_link_hint(hint),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     /// Internal foreground-lease handoff boundary. Values cross the JS ABI as
     /// BigInt, never lossy IEEE-754 numbers.
     #[wasm_bindgen(js_name = foregroundTxTimeHighWater)]
@@ -3208,7 +3228,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        opts.tier = read_tier_from_str(&tier)?;
+        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -3243,17 +3263,26 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
-    match tier {
-        "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
-        // The host connection manager applies the explicit-offline decision
-        // before invoking this ABI. A direct WASM caller therefore gets the
-        // strict remote behavior for RemoteIfPossible.
-        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
-            Ok(DurabilityTier::Global)
-        }
-        _ => durability_tier_from_str(tier),
+fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
+    if let Some(message) = removed_read_tier(tier) {
+        return Err(JsValue::from_str(message));
     }
+    match tier {
+        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
+        }
+        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
+        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+    }
+}
+
+/// Error message for a read tier name that was removed, if `tier` is one.
+fn removed_read_tier(tier: &str) -> Option<&'static str> {
+    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
+        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -3953,12 +3982,22 @@ mod dynamic_schema_view_tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            DurabilityTier::Local
+            (DurabilityTier::Local, EmptyOpening::Deliver)
         );
         assert_eq!(
-            read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            DurabilityTier::Global
+            read_tier_from_str("remote").expect("strict remote read tier"),
+            (DurabilityTier::Global, EmptyOpening::Deliver)
         );
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(removed_read_tier(name).is_some(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+            assert_eq!(
+                read_tier_from_str(name).expect("local-first-unless-empty read tier"),
+                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
+                "{name} reads local-first with the core empty-opening gate"
+            );
+        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,

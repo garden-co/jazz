@@ -267,6 +267,8 @@ where
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
+    pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
@@ -370,6 +372,7 @@ where
                     .map(|rejected| (tx_id, mutation_error_event(rejected)))
             })
             .collect();
+        let scheduler: SharedTickScheduler = Rc::new(RefCell::new(None));
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
             owner_release_wait: RefCell::new(None),
@@ -407,7 +410,8 @@ where
             relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
-            scheduler: Rc::new(RefCell::new(None)),
+            scheduler: Rc::clone(&scheduler),
+            remote_link: Rc::new(RemoteLinkTracker::new(scheduler)),
             query_runtime_wake_pending: Arc::new(AtomicBool::new(false)),
             query_runtime_waker: Rc::new(RefCell::new(None)),
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
@@ -1481,11 +1485,9 @@ where
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
                 state.scalar_reconciliation = ScalarReconciliation::default();
-                (
-                    state.local_subscription_cleanup.take(),
-                    std::mem::take(&mut state.upstream_subscription_handles),
-                    owner,
-                )
+                let mut upstream = std::mem::take(&mut state.upstream_subscription_handles);
+                upstream.append(&mut state.authority_witness);
+                (state.local_subscription_cleanup.take(), upstream, owner)
             } else {
                 (
                     command.opening_local.take(),
@@ -2399,6 +2401,7 @@ where
                 .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
             }));
             self.connections.borrow_mut().push(Rc::clone(&connection));
+            self.remote_link.upstream_attached();
             self.schedule_tick(TickUrgency::Immediate);
             return Ok(connection);
         }
@@ -3050,6 +3053,10 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        if upstream_epoch.is_some() {
+            // Releases empty openings that were waiting on this link.
+            self.remote_link.upstream_detached();
+        }
         for request_id in terminal_permission_advice {
             if let Some(waiter) = self
                 .permission_advice_waiters
@@ -3168,6 +3175,7 @@ where
         // thread-affine. Consume the cross-thread marker only at this owner
         // boundary, before any connection tick can observe stale readiness.
         self.mark_subscriber_connections_dirty_after_query_runtime_wake();
+        self.remote_link.on_tick();
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         let mut stats = DbTickStats::default();
@@ -3290,7 +3298,39 @@ where
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
+        self.resolve_authority_witnesses().await;
         Ok(stats)
+    }
+
+    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// inputs were folded into every stream, and retire the witness coverage
+    /// of every gate that has released.
+    async fn resolve_authority_witnesses(&self) {
+        if !self.remote_link.has_witnesses() {
+            return;
+        }
+        let retired = {
+            let owner = self.node.lock().await;
+            self.remote_link.resolve_witnesses(|handles| {
+                !handles.is_empty()
+                    && handles.iter().all(|handle| {
+                        owner
+                            .authority_result_key_for_subscription(handle.subscription)
+                            .is_ok_and(|key| {
+                                owner.has_settled_authority_result(&key)
+                                    && !owner.opening_pending_for_authority_result(&key)
+                            })
+                    })
+            })
+        };
+        if !retired.is_empty() {
+            self.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                state: None,
+                opening_upstream: retired,
+                opening_local: None,
+                acknowledgement: None,
+            });
+        }
     }
 
     /// Both public local-first queries and relay-owned upstream scopes use

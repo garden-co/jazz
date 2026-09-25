@@ -173,6 +173,13 @@ impl<T> Attempt<T> {
     }
 }
 
+/// A range scan reports every missing page it can prove it needs, so one
+/// batched read replaces a restart from the root per cold page.
+enum ScanAttempt<T> {
+    Ready(T),
+    Missing(Vec<PageId>),
+}
+
 /// Cloneable, single-threaded handle used by Groove. No `RefCell` borrow is
 /// held across page I/O: operations attempt synchronously against resident
 /// pages, hydrate one precise miss, then retry.
@@ -320,8 +327,8 @@ impl<S: PageStore + Clone> IdbTree<S> {
             self.ensure_live()?;
             let attempt = self.inner.borrow().try_range(start, end, limit)?;
             match attempt {
-                Attempt::Ready(rows) => return Ok(rows),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+                ScanAttempt::Ready(rows) => return Ok(rows),
+                ScanAttempt::Missing(page_ids) => self.hydrate_many(page_ids).await?,
             }
         }
     }
@@ -336,8 +343,8 @@ impl<S: PageStore + Clone> IdbTree<S> {
             self.ensure_live()?;
             let attempt = self.inner.borrow().try_range_reverse(start, end, limit)?;
             match attempt {
-                Attempt::Ready(rows) => return Ok(rows),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+                ScanAttempt::Ready(rows) => return Ok(rows),
+                ScanAttempt::Missing(page_ids) => self.hydrate_many(page_ids).await?,
             }
         }
     }
@@ -353,6 +360,56 @@ impl<S: PageStore + Clone> IdbTree<S> {
         };
         let outcome = store.commit(prepared.commit()).await;
         self.inner.borrow_mut().complete_commit(prepared, outcome)
+    }
+
+    /// Hydrate a scan's whole missing frontier with one store read. The same
+    /// publication/reset fence as [`hydrate`](Self::hydrate) applies to the
+    /// batch as a unit: a stale completion imports none of its pages.
+    async fn hydrate_many(&self, page_ids: Vec<PageId>) -> Result<(), Error> {
+        let (store, page_ids) = {
+            let tree = self.inner.borrow();
+            let page_ids: Vec<PageId> = page_ids
+                .into_iter()
+                .filter(|page_id| !tree.pages.contains_key(page_id))
+                .collect();
+            (tree.store.clone(), page_ids)
+        };
+        match page_ids.as_slice() {
+            [] => return Ok(()),
+            [page_id] => return self.hydrate(*page_id).await,
+            _ => {}
+        }
+        let root_before = self.inner.borrow().metadata.root_page_id;
+        let reload_before = self.reload_epoch.get();
+        let result = store.read_pages(&page_ids).await;
+        self.ensure_live()?;
+        if self.reload_epoch.get() != reload_before
+            || self.inner.borrow().metadata.root_page_id != root_before
+        {
+            return Ok(());
+        }
+        let pages = result.map_err(Error::Store)?;
+        if pages.len() != page_ids.len() {
+            return Err(Error::Store(format!(
+                "read {} pages for {} requested ids",
+                pages.len(),
+                page_ids.len()
+            )));
+        }
+        let page_size = self.inner.borrow().options.page_size;
+        let mut decoded = Vec::with_capacity(pages.len());
+        for (page_id, bytes) in page_ids.into_iter().zip(pages) {
+            let bytes = bytes.ok_or(Error::MissingPage(page_id))?;
+            if bytes.len() > page_size {
+                return Err(Error::PageTooLarge { page_id, page_size });
+            }
+            decoded.push((page_id, decode_page(&bytes).map_err(Error::InvalidPage)?));
+        }
+        let mut tree = self.inner.borrow_mut();
+        for (page_id, page) in decoded {
+            tree.pages.entry(page_id).or_insert(page);
+        }
+        Ok(())
     }
 
     async fn hydrate(&self, page_id: PageId) -> Result<(), Error> {
@@ -618,27 +675,23 @@ impl<S: PageStore> TreeCore<S> {
         start: &[u8],
         end: &[u8],
         limit: usize,
-    ) -> Result<Attempt<Vec<KeyValue>>, Error> {
+    ) -> Result<ScanAttempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
+        let mut missing = Vec::new();
         let mut visited = HashSet::new();
-        if let Some(page_id) = self.collect_range_resident(
+        self.collect_range_resident(
             self.root_page_id(),
             start,
             end,
             limit,
             &mut cells,
+            &mut missing,
             &mut visited,
-        )? {
-            return Ok(Attempt::Missing(page_id));
+        )?;
+        if !missing.is_empty() {
+            return Ok(ScanAttempt::Missing(missing));
         }
-        let mut rows = Vec::with_capacity(cells.len());
-        for (key, value) in cells {
-            match self.read_value_resident(&value, &mut visited)? {
-                Attempt::Ready(value) => rows.push((key, value)),
-                Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
-            }
-        }
-        Ok(Attempt::Ready(rows))
+        self.materialize_range_values(cells, visited)
     }
 
     fn try_range_reverse(
@@ -646,27 +699,23 @@ impl<S: PageStore> TreeCore<S> {
         start: &[u8],
         end: &[u8],
         limit: usize,
-    ) -> Result<Attempt<Vec<KeyValue>>, Error> {
+    ) -> Result<ScanAttempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
+        let mut missing = Vec::new();
         let mut visited = HashSet::new();
-        if let Some(page_id) = self.collect_range_reverse_resident(
+        self.collect_range_reverse_resident(
             self.root_page_id(),
             start,
             end,
             limit,
             &mut cells,
+            &mut missing,
             &mut visited,
-        )? {
-            return Ok(Attempt::Missing(page_id));
+        )?;
+        if !missing.is_empty() {
+            return Ok(ScanAttempt::Missing(missing));
         }
-        let mut rows = Vec::with_capacity(cells.len());
-        for (key, value) in cells {
-            match self.read_value_resident(&value, &mut visited)? {
-                Attempt::Ready(value) => rows.push((key, value)),
-                Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
-            }
-        }
-        Ok(Attempt::Ready(rows))
+        self.materialize_range_values(cells, visited)
     }
 
     /// Swap the active dirty generation without awaiting persistence. New
@@ -833,17 +882,54 @@ impl<S: PageStore> TreeCore<S> {
         }
     }
 
+    /// Resolve the scanned cells' values. Every overflow chain which reaches a
+    /// cold page contributes that page to one batched miss rather than
+    /// restarting the scan once per chain.
+    fn materialize_range_values(
+        &self,
+        cells: Vec<LeafEntry>,
+        mut visited: HashSet<PageId>,
+    ) -> Result<ScanAttempt<Vec<KeyValue>>, Error> {
+        let mut rows = Vec::with_capacity(cells.len());
+        let mut missing = Vec::new();
+        for (key, value) in cells {
+            match self.read_value_resident(&value, &mut visited)? {
+                Attempt::Ready(value) if missing.is_empty() => rows.push((key, value)),
+                Attempt::Ready(_) => {}
+                Attempt::Missing(page_id) => missing.push(page_id),
+            }
+        }
+        if missing.is_empty() {
+            Ok(ScanAttempt::Ready(rows))
+        } else {
+            Ok(ScanAttempt::Missing(missing))
+        }
+    }
+
+    /// Whether a scan should stop descending after `missing` became non-empty.
+    /// An unbounded scan needs every page in range, so it keeps walking the
+    /// resident structure to gather the whole missing frontier. A bounded scan
+    /// cannot know how many rows a cold subtree holds, so it stops at the
+    /// first miss rather than hydrate pages past its limit.
+    fn scan_stops_at_miss(limit: usize, missing: &[PageId]) -> bool {
+        limit != usize::MAX && !missing.is_empty()
+    }
+
+    // Once a page is known missing the retry recollects every row, so leaves
+    // visited afterwards are only walked for further misses, not cloned.
+    #[allow(clippy::too_many_arguments)]
     fn collect_range_resident(
         &self,
         page_id: PageId,
         start: &[u8],
         end: &[u8],
         limit: usize,
-        output: &mut Vec<(Vec<u8>, ValueCell)>,
+        output: &mut Vec<LeafEntry>,
+        missing: &mut Vec<PageId>,
         visited: &mut HashSet<PageId>,
-    ) -> Result<Option<PageId>, Error> {
-        if output.len() == limit {
-            return Ok(None);
+    ) -> Result<(), Error> {
+        if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
+            return Ok(());
         }
         if !visited.insert(page_id) {
             return Err(Error::InvalidPage(
@@ -851,9 +937,11 @@ impl<S: PageStore> TreeCore<S> {
             ));
         }
         let Some(page) = self.pages.get(&page_id) else {
-            return Ok(Some(page_id));
+            missing.push(page_id);
+            return Ok(());
         };
         match page {
+            Page::Leaf { .. } if !missing.is_empty() => {}
             Page::Leaf { entries } => output.extend(
                 entries
                     .iter()
@@ -865,14 +953,12 @@ impl<S: PageStore> TreeCore<S> {
                 for (index, child) in children.iter().copied().enumerate() {
                     let below_end = index == 0 || keys[index - 1].as_slice() < end;
                     let above_start = index == keys.len() || keys[index].as_slice() > start;
-                    if below_end
-                        && above_start
-                        && let Some(missing) =
-                            self.collect_range_resident(child, start, end, limit, output, visited)?
-                    {
-                        return Ok(Some(missing));
+                    if below_end && above_start {
+                        self.collect_range_resident(
+                            child, start, end, limit, output, missing, visited,
+                        )?;
                     }
-                    if output.len() == limit {
+                    if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
                         break;
                     }
                 }
@@ -883,9 +969,10 @@ impl<S: PageStore> TreeCore<S> {
                 ));
             }
         }
-        Ok(None)
+        Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_range_reverse_resident(
         &self,
         page_id: PageId,
@@ -893,10 +980,11 @@ impl<S: PageStore> TreeCore<S> {
         end: &[u8],
         limit: usize,
         output: &mut Vec<LeafEntry>,
+        missing: &mut Vec<PageId>,
         visited: &mut HashSet<PageId>,
-    ) -> Result<Option<PageId>, Error> {
-        if output.len() == limit {
-            return Ok(None);
+    ) -> Result<(), Error> {
+        if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
+            return Ok(());
         }
         if !visited.insert(page_id) {
             return Err(Error::InvalidPage(
@@ -904,9 +992,11 @@ impl<S: PageStore> TreeCore<S> {
             ));
         }
         let Some(page) = self.pages.get(&page_id) else {
-            return Ok(Some(page_id));
+            missing.push(page_id);
+            return Ok(());
         };
         match page {
+            Page::Leaf { .. } if !missing.is_empty() => {}
             Page::Leaf { entries } => output.extend(
                 entries
                     .iter()
@@ -919,20 +1009,18 @@ impl<S: PageStore> TreeCore<S> {
                 for index in (0..children.len()).rev() {
                     let below_end = index == 0 || keys[index - 1].as_slice() < end;
                     let above_start = index == keys.len() || keys[index].as_slice() > start;
-                    if below_end
-                        && above_start
-                        && let Some(missing) = self.collect_range_reverse_resident(
+                    if below_end && above_start {
+                        self.collect_range_reverse_resident(
                             children[index],
                             start,
                             end,
                             limit,
                             output,
+                            missing,
                             visited,
-                        )?
-                    {
-                        return Ok(Some(missing));
+                        )?;
                     }
-                    if output.len() == limit {
+                    if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
                         break;
                     }
                 }
@@ -943,7 +1031,7 @@ impl<S: PageStore> TreeCore<S> {
                 ));
             }
         }
-        Ok(None)
+        Ok(())
     }
 
     fn allocate_page(&mut self, page: Page) -> Result<PageId, Error> {
