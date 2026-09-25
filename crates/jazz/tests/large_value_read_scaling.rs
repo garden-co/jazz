@@ -344,3 +344,52 @@ fn large_column_read_policy_still_gates_range_and_projected_reads() {
         Some(Value::Bytes(visible_bytes))
     );
 }
+
+/// A selected column whose public name equals another column's storage name
+/// is still returned in full when that other column is projected away.
+///
+/// alice ──insert notes = "dropped…", _app_notes = "selected…"──► db
+/// alice ──read select(_app_notes)──► the full "selected…" string
+#[test]
+fn projected_listing_does_not_confuse_public_and_storage_names() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(FILES)
+                    .column("notes", ColumnType::Text)
+                    .column("_app_notes", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let table = table(&schema);
+    let db = open_db(schema, 0x71, alice());
+    let id = row(0x72);
+    let write = block_on(db.insert(
+        FILES,
+        BTreeMap::from([
+            ("notes".to_owned(), Value::String(large_notes("dropped"))),
+            (
+                "_app_notes".to_owned(),
+                Value::String(large_notes("selected")),
+            ),
+        ]),
+        InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
+    ))
+    .expect("insert file");
+    block_on(write.wait(DurabilityTier::Local)).expect("local durability");
+
+    let query = db
+        .prepare_query(&Query::from(FILES).select(["_app_notes"]))
+        .expect("prepare listing");
+    let rows = db.read(&query).expect("listing");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&table, "_app_notes"),
+        Some(Value::String(large_notes("selected")))
+    );
+    assert_eq!(rows[0].cell(&table, "notes"), None);
+}

@@ -59,13 +59,28 @@ impl RootIndirectValues {
                     .fields()
                     .iter()
                     .enumerate()
+                    // Match the storage name only: a public name can collide
+                    // with another column's storage name.
                     .filter(|(_, field)| {
-                        let named = |name: Option<&str>| name.is_some_and(|n| physical.contains(n));
-                        !named(field.name.as_deref()) && !named(field.logical_name())
+                        !field
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| physical.contains(name))
                     })
                     .map(|(index, _)| index)
                     .collect(),
             ),
+        }
+    }
+}
+
+impl RootIndirectValues {
+    /// Retained subscriptions always deliver materialized updates, so a
+    /// physical first snapshot could never be retracted by them.
+    fn check_lifetime(&self, lifetime: SubscriptionLifetime) -> Result<(), IvmRuntimeError> {
+        match (self, lifetime) {
+            (Self::Materialize, _) | (_, SubscriptionLifetime::FirstResult) => Ok(()),
+            _ => Err(IvmRuntimeError::PhysicalRootValuesRequireFirstResult),
         }
     }
 }
@@ -3372,6 +3387,7 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
+        root_indirect_values.check_lifetime(lifetime)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -3645,6 +3661,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        root_indirect_values.check_lifetime(lifetime)?;
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,

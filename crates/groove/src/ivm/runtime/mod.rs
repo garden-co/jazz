@@ -493,6 +493,8 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
+    #[error("physical root values are only supported for first-result subscriptions")]
+    PhysicalRootValuesRequireFirstResult,
     #[error("multisink subscription must have at least one sink")]
     EmptyMultisinkSubscription,
     #[error("multisink sink already exists: {0}")]
