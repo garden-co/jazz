@@ -1443,7 +1443,7 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  assert.deepEqual(document.on.schedule, [{ cron: "17 3 * * *" }]);
+  assert.equal(document.on.schedule, undefined, "per-merge runs replace the nightly baseline");
   assert.equal(document.on.workflow_dispatch, null);
   assert.equal(
     document.jobs.examples.if,

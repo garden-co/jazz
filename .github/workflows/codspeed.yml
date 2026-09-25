@@ -6,12 +6,11 @@ on:
   # Every main merge gets its own baseline. Without it CodSpeed compares PRs
   # against the newest older main run and attributes intervening merges to the
   # PR (#3488).
+  # No nightly schedule: it would only re-measure the last merge. Use a manual
+  # dispatch on main if a push was made with the Actions token (which does not
+  # trigger push workflows) or a main run failed.
   push:
     branches: [main]
-  schedule:
-    # Nightly default-branch baseline. The non-round minute avoids the busiest
-    # part of GitHub's scheduler window.
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
