@@ -1,4 +1,4 @@
-use jazz_example_wequencer_benchmark::{Fixture, STEPS};
+use jazz_example_wequencer_benchmark::{Fixture, STEPS, TRACKS};
 
 #[test]
 fn ordered_track_window_is_complete_and_stable() {
@@ -68,4 +68,25 @@ fn one_write_reaches_every_subscribed_pattern_listener() {
 #[test]
 fn playback_receipt_is_available_through_the_ordered_session_query() {
     assert_eq!(Fixture::new().playback_receipt(), (true, 7));
+}
+
+#[test]
+fn opening_the_pattern_delivers_every_track_and_step() {
+    let fixture = Fixture::new();
+    let (_live, rows) = fixture.open_pattern();
+    assert_eq!(rows, TRACKS + TRACKS * STEPS);
+}
+
+#[test]
+fn a_pad_toggle_reaches_only_its_own_live_track() {
+    let fixture = Fixture::new();
+    let (mut live, _) = fixture.open_pattern();
+    // Walk every track once, then a second step on track 0.
+    for toggle in 0..=TRACKS {
+        assert_eq!(fixture.toggle_pad(&mut live), 1);
+        assert!(!Fixture::other_tracks_pending(&mut live, toggle % TRACKS));
+    }
+    // Track 0's steps 0 (started enabled) and 1 (started disabled) each
+    // flipped once.
+    assert_eq!(fixture.playhead_window(0, 2), [(0, false), (1, true)]);
 }
