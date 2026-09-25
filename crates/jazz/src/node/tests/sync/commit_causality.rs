@@ -455,7 +455,7 @@ fn parked_commit_unit_resent_over_another_transport_is_not_conflicting() {
     };
 
     for validated in [true, false] {
-        core.apply_sync_message_with_ingest_context(child_unit.clone(), context(validated))
+        let _ = core.apply_sync_message_with_ingest_context(child_unit.clone(), context(validated))
             .resolve()
             .expect("a resent parked unit is a duplicate, not a conflict");
     }

@@ -1540,18 +1540,19 @@ impl CommitUnitIngestContext {
     ///
     /// A parked unit resent over a different transport (checked wire vs. an
     /// in-process semantic link) carries identical versions under the same
-    /// identity and trust, so it must not read as a conflicting unit.
-    pub(crate) fn same_authority_as(&self, other: &Self) -> bool {
-        Self {
-            version_receipts_validated: other.version_receipts_validated,
-            ..*self
-        } == *other
-    }
-
-    /// Keep "receipts already validated" only if both deliveries established
-    /// it, so a merged parked unit never skips a validation it still owes.
-    pub(crate) fn keep_receipt_validation_common_to(&mut self, other: &Self) {
-        self.version_receipts_validated &= other.version_receipts_validated;
+    /// identity and trust, so it must not read as a conflicting unit. When
+    /// both deliveries are merged, "receipts already validated" is kept only
+    /// if both established it, so the unit never skips a validation it owes.
+    pub(crate) fn same_parked_authority(existing: Option<Self>, resent: Option<Self>) -> bool {
+        match (existing, resent) {
+            (Some(existing), Some(resent)) => {
+                Self {
+                    version_receipts_validated: resent.version_receipts_validated,
+                    ..existing
+                } == resent
+            }
+            (existing, resent) => existing == resent,
+        }
     }
 }
 
