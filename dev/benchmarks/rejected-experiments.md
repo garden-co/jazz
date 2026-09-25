@@ -59,6 +59,32 @@ rejection concerns the additional certificate machinery. Source, binaries and
 receipts are preserved in the [#2913](https://github.com/garden-co/jazz/issues/2913)
 log. Do not infer a win from fewer compiled nodes alone.
 
+## Browser WASM profiles, 2026-09-25
+
+Receipts and retained changes are tracked in
+[#3536](https://github.com/garden-co/jazz/issues/3536). These trials use main
+`7a113ff8b6` plus shared WASM storage type erasure. The changed premise versus
+[#783](https://github.com/garden-co/jazz/pull/783) is removal of duplicate engine
+instantiations, cross-crate fat LTO, and package-specific optimization of hot
+engine crates. Function names and all default features remain enabled.
+
+- Global Rust `opt-level=s`, fat LTO, one codegen unit: 15.17 MB raw / 5.29 MB
+  gzip, but ten repeated 2,000-row reads slowed 16–18% versus main. Excluded.
+- Global `opt-level=z` with Groove at level 3: 15.00 MB raw / 5.12 MB gzip,
+  but repeated memory/IndexedDB reads slowed about 23%/21%. Excluded.
+- Global `s` with Groove at level 3: 15.83 MB raw / 5.58 MB gzip, with about
+  4%/6% slower repeated memory/IndexedDB reads. The retained profile also keeps
+  Jazz at level 3 to avoid the observed memory-read regression; that costs
+  1.66 MB raw / 0.56 MB gzip. Read these as bounded fixture receipts, not
+  general guarantees for every query.
+- Additional wasm-opt `--merge-similar-functions -O2`, `--code-folding -O2`,
+  and `-Oz` passes over the fat-LTO level-3 output saved at most 0.7% gzip.
+  No additional pass is retained. The existing `-O -g` setting stays in place.
+
+The retained profile and runtime tradeoffs are documented in
+[`browser-wasm-size/RELEASE_PROFILE.md`](browser-wasm-size/RELEASE_PROFILE.md).
+Raw size and compressed transfer savings must be reported separately.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.

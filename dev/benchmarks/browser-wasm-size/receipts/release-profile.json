@@ -1,0 +1,621 @@
+{
+  "date": "2026-09-25",
+  "base_commit": "7a113ff8b673c702ceb75dead96bd7a985965c81",
+  "shared_engine_commit": "480a604ae",
+  "change": "Shared WASM storage type erasure plus browser-only release profile: fat LTO, one codegen unit, opt-level=s, Jazz/Groove opt-level=3.",
+  "workload_sha256": "e7a09ff74f4a3343781569c0afeb0a95b0ec4f7e7abda07413c5073f11e58e52",
+  "artifacts": {
+    "baseline": {
+      "sha256": "703b9e1015ebe8793d0968cb6f8d75e2bdecb97d77544f392dcfe9e0cd862711",
+      "bytes": 32968262,
+      "gzip9": 9450614,
+      "brotli11": 5522937,
+      "imports": 106,
+      "function_count": 19244
+    },
+    "boxed": {
+      "sha256": "74980b387e883866564d2c172e961e70af2c6e4660cc73cb01d9560114348915",
+      "bytes": 27470536,
+      "gzip9": 8657377,
+      "brotli11": 5398696,
+      "imports": 106,
+      "function_count": 17431
+    },
+    "lto": {
+      "sha256": "f02f579a76f75957279bad75bea78696e6475a630dfc51b517ea227d98fdd57d",
+      "bytes": 20177092,
+      "gzip9": 6851692,
+      "brotli11": 4525516,
+      "imports": 106,
+      "function_count": 13162
+    },
+    "size-s-hot": {
+      "sha256": "ece54f8df2ba27ce523097a69b9b17610131f125500b47f1c4a9ab24bfacceaf",
+      "bytes": 15834179,
+      "gzip9": 5579991,
+      "brotli11": 3810485,
+      "imports": 106,
+      "function_count": 18925
+    },
+    "size-s-engine": {
+      "sha256": "e3a669f64525424aa97c56392f1375ec7ba03af9e349f476d7a3b26cc9f2e8e7",
+      "bytes": 17489427,
+      "gzip9": 6143050,
+      "brotli11": 4168376,
+      "imports": 106,
+      "function_count": 16801
+    },
+    "release-profile": {
+      "sha256": "a1d9f2a764f3aac1a9b5108637b2cce271e2f5db10b214831da8ad10609d1a23",
+      "bytes": 17489408,
+      "gzip9": 6143105,
+      "brotli11": 4168614,
+      "imports": 106,
+      "function_count": 16801
+    }
+  },
+  "public_api": {
+    "declarations": {
+      "publicApiIdentical": true,
+      "initOutputEqualIgnoringOrderAndInternalClosureHashes": true,
+      "rawExportsEqualIgnoringOrderAndInternalClosureHashes": true
+    },
+    "glue": {
+      "baseline": {
+        "bytes": 89036,
+        "gzip9": 13496,
+        "brotli11": 11360
+      },
+      "release_profile": {
+        "bytes": 89032,
+        "gzip9": 13492,
+        "brotli11": 11356
+      }
+    }
+  },
+  "browser_runs": [
+    {
+      "rows": 2000,
+      "order": [
+        "baseline",
+        "release_profile",
+        "release_profile",
+        "baseline",
+        "baseline",
+        "release_profile",
+        "release_profile",
+        "baseline"
+      ],
+      "samples": [
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.7999999970197678,
+            "compile": 23.200000002980232,
+            "instantiate": 2
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 55.399999998509884,
+                "seed": 194.10000000149012,
+                "first_all": 106.5,
+                "first_page": 19.5,
+                "repeat_all_10": 464.80000000447035
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 24.899999998509884,
+                "seed": 2786.8000000044703,
+                "first_all": 47,
+                "first_page": 11.700000002980232,
+                "repeat_all_10": 433,
+                "close": 2.899999998509884,
+                "reopen": 12.700000002980232,
+                "reopen_all": 41.69999999552965
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 12.299999997019768,
+            "instantiate": 1
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 47.30000000447035,
+                "seed": 193.69999999552965,
+                "first_all": 99.39999999850988,
+                "first_page": 20.80000000447035,
+                "repeat_all_10": 463.29999999701977
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 10.399999998509884,
+                "seed": 2875.39999999851,
+                "first_all": 44.100000001490116,
+                "first_page": 12.599999994039536,
+                "repeat_all_10": 452.80000000447035,
+                "close": 2.0999999940395355,
+                "reopen": 12.400000005960464,
+                "reopen_all": 41.29999999701977
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 11.800000004470348,
+            "instantiate": 0.7999999970197678
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 45.5,
+                "seed": 190.29999999701977,
+                "first_all": 98.5,
+                "first_page": 20,
+                "repeat_all_10": 471.20000000298023
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 9.799999997019768,
+                "seed": 2845.60000000149,
+                "first_all": 45.5,
+                "first_page": 12.699999995529652,
+                "repeat_all_10": 455.70000000298023,
+                "close": 2.100000001490116,
+                "reopen": 12.5,
+                "reopen_all": 41.399999998509884
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 19.899999998509884,
+            "instantiate": 1.1000000014901161
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 55.79999999701977,
+                "seed": 189.39999999850988,
+                "first_all": 104.30000000447035,
+                "first_page": 20.100000001490116,
+                "repeat_all_10": 465.40000000596046
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 21.299999997019768,
+                "seed": 2817.7000000029802,
+                "first_all": 49.399999998509884,
+                "first_page": 11.5,
+                "repeat_all_10": 443.80000000447035,
+                "close": 2.899999998509884,
+                "reopen": 12.100000001490116,
+                "reopen_all": 42.69999999552965
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        },
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5999999940395355,
+            "compile": 20.799999997019768,
+            "instantiate": 0.8999999985098839
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 53.399999998509884,
+                "seed": 188.89999999850988,
+                "first_all": 105.70000000298023,
+                "first_page": 19.899999998509884,
+                "repeat_all_10": 470.80000000447035
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 21.799999997019768,
+                "seed": 2853.4000000059605,
+                "first_all": 47.29999999701977,
+                "first_page": 11.800000004470348,
+                "repeat_all_10": 435.29999999701977,
+                "close": 3.2000000029802322,
+                "reopen": 13.199999995529652,
+                "reopen_all": 41.70000000298023
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 11.5,
+            "instantiate": 0.8999999985098839
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 46.80000000447035,
+                "seed": 189.10000000149012,
+                "first_all": 97.59999999403954,
+                "first_page": 19.299999997019768,
+                "repeat_all_10": 467.30000000447035
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 9.800000004470348,
+                "seed": 2860.39999999851,
+                "first_all": 44,
+                "first_page": 12.700000002980232,
+                "repeat_all_10": 451.29999999701977,
+                "close": 2,
+                "reopen": 12.400000005960464,
+                "reopen_all": 41.399999998509884
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 11.5,
+            "instantiate": 1
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 46.899999998509884,
+                "seed": 191.5,
+                "first_all": 100.60000000149012,
+                "first_page": 20.5,
+                "repeat_all_10": 463.69999999552965
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 9.699999995529652,
+                "seed": 2855,
+                "first_all": 45,
+                "first_page": 12.600000001490116,
+                "repeat_all_10": 447.70000000298023,
+                "close": 2.2000000029802322,
+                "reopen": 12.400000005960464,
+                "reopen_all": 41.899999998509884
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.399999998509884,
+            "compile": 20.100000001490116,
+            "instantiate": 1.3999999985098839
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 54.899999998509884,
+                "seed": 194.39999999850988,
+                "first_all": 104.89999999850988,
+                "first_page": 20.799999997019768,
+                "repeat_all_10": 467.3999999985099
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 21.299999997019768,
+                "seed": 2861.8000000044703,
+                "first_all": 48.399999998509884,
+                "first_page": 12.100000001490116,
+                "repeat_all_10": 445.30000000447035,
+                "close": 5.899999998509884,
+                "reopen": 13.5,
+                "reopen_all": 41.19999999552965
+              },
+              "rowCount": 2000,
+              "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        }
+      ]
+    },
+    {
+      "rows": 10000,
+      "order": ["baseline", "release_profile", "release_profile", "baseline"],
+      "samples": [
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 19.69999999552965,
+            "instantiate": 1
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 54.30000000447035,
+                "seed": 1127.0999999940395,
+                "first_all": 304.20000000298023,
+                "first_page": 54,
+                "repeat_all_10": 2318.39999999851
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 24,
+                "seed": 16440.80000000447,
+                "first_all": 253.5,
+                "first_page": 53.100000001490116,
+                "repeat_all_10": 2224.2000000029802,
+                "close": 7.199999995529652,
+                "reopen": 32.600000001490116,
+                "reopen_all": 211
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 14.700000002980232,
+            "instantiate": 0.8999999985098839
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 46.19999999552965,
+                "seed": 1123.2000000029802,
+                "first_all": 302.79999999701977,
+                "first_page": 57.899999998509884,
+                "repeat_all_10": 2362
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 9.899999998509884,
+                "seed": 16330.60000000149,
+                "first_all": 243.89999999850988,
+                "first_page": 54.100000001490116,
+                "repeat_all_10": 2304.39999999851,
+                "close": 6.600000001490116,
+                "reopen": 36.5,
+                "reopen_all": 210.90000000596046
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "release_profile",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.5,
+            "compile": 13,
+            "instantiate": 1
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 47.79999999701977,
+                "seed": 1121.8999999985099,
+                "first_all": 306.1000000014901,
+                "first_page": 59.70000000298023,
+                "repeat_all_10": 2357.1999999955297
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 9.799999997019768,
+                "seed": 17361.70000000298,
+                "first_all": 237.29999999701977,
+                "first_page": 50.899999998509884,
+                "repeat_all_10": 2340.60000000149,
+                "close": 6.800000004470348,
+                "reopen": 34.899999998509884,
+                "reopen_all": 213
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            }
+          ],
+          "wasm_bytes": 17489408,
+          "artifact_fingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+        },
+        {
+          "label": "baseline",
+          "browser": "145.0.7632.6",
+          "phases": {
+            "js_import": 2.399999998509884,
+            "compile": 20,
+            "instantiate": 0.8999999985098839
+          },
+          "scenarios": [
+            {
+              "storage": "memory",
+              "timing": {
+                "open": 54,
+                "seed": 1090.8000000044703,
+                "first_all": 307.69999999552965,
+                "first_page": 52,
+                "repeat_all_10": 2345.1999999955297
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            },
+            {
+              "storage": "indexeddb",
+              "timing": {
+                "open": 24.5,
+                "seed": 17299.29999999702,
+                "first_all": 221.79999999701977,
+                "first_page": 45.100000001490116,
+                "repeat_all_10": 2174.10000000149,
+                "close": 7.199999995529652,
+                "reopen": 33.100000001490116,
+                "reopen_all": 212.20000000298023
+              },
+              "rowCount": 10000,
+              "signature_sha256": "a92385307c601c052c821420a11172d4e2711b0087b3d251443504b489f087c1"
+            }
+          ],
+          "wasm_bytes": 32968262,
+          "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+        }
+      ]
+    }
+  ],
+  "candidate_manifest": {
+    "schema": 1,
+    "kind": "wasm",
+    "profile": "release",
+    "git": {
+      "head": "480a604aebef606878b460b91cdcb3dbc3d64e5a",
+      "tree": "dc3f9be6568c5c0cc9430a97720f26d505b2b082",
+      "dirtyDiff": "8b192573ee5e0fee4a1825e5b8c44c448e57c40804a236ff7034ef2b3b6e6f05"
+    },
+    "cargoLock": "d0082646aa017c7257c1ebf449b2e1bed09aea9941b0df6d8fd848bb63c4b55b",
+    "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+    "tools": {
+      "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+      "wasmPack": "wasm-pack 0.14.0",
+      "wasmBindgen": "wasm-bindgen 0.2.117",
+      "wasmOpt": "wasm-opt version 117 (version_117)",
+      "napi": "not-applicable"
+    },
+    "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+    "target": "wasm32-unknown-unknown",
+    "features": "default",
+    "packageInputs": "9b7839317f62fd3ebfde7a23732a8e0226816240930a6f6e2e2712de7877fe4b",
+    "artifacts": [
+      {
+        "file": "jazz_wasm.d.ts",
+        "sha256": "90a4ba1d86ef7f21c23d5d48772b9fce0d687c838fb8b1643bfe2d29f7521f6f"
+      },
+      {
+        "file": "jazz_wasm.js",
+        "sha256": "42fac8b50f4ac95d4d4c9354f390d635aa85d4ef48794c678d4dc77bcb9521d7"
+      },
+      {
+        "file": "jazz_wasm_bg.wasm",
+        "sha256": "a1d9f2a764f3aac1a9b5108637b2cce271e2f5db10b214831da8ad10609d1a23"
+      },
+      {
+        "file": "jazz_wasm_bg.wasm.d.ts",
+        "sha256": "a30eae7fbfeb74363d6822ef99b0de6188a19ddeea45217e288fedc2a5136c64"
+      }
+    ],
+    "nativeArtifactFingerprint": "c528cf2c877d4a5506f299f37362db5ace1277cc7dfe7af04ad1f55383a46166"
+  }
+}

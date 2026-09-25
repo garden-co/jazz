@@ -240,7 +240,16 @@ async fn next_stream_chunk(reader: &JsValue) -> JsValue {
         .expect("call reader.read")
         .dyn_into::<js_sys::Promise>()
         .expect("reader.read returns promise");
-    await_promise(promise).await
+    let result = await_promise(promise).await;
+    assert_eq!(
+        js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+            .expect("ReadableStream read result has done")
+            .as_bool(),
+        Some(false),
+        "subscription stream must remain open"
+    );
+    js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+        .expect("ReadableStream read result has value")
 }
 
 fn stream_reader(stream: JsValue) -> JsValue {
