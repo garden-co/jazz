@@ -1,9 +1,9 @@
 # CodSpeed native benchmark build handoff
 
 Every CodSpeed walltime workload compiles on Blacksmith ARM64 Ubuntu 22.04,
-then runs on the existing `codspeed-macro` machines. The ten workloads are the
-five native examples (todo, permissioned resources, policy-scoped documents,
-BandChat, WorldTour), BigLabel (ingest and loads), W1 (memory, RocksDB and
+then runs on the existing `codspeed-macro` machines. The thirteen workloads are the
+eight native examples (todo, permissioned resources, policy-scoped documents,
+BandChat, WorldTour, PosterShop, RecordPlayer, Wequencer), BigLabel (ingest and loads), W1 (memory, RocksDB and
 ahead-current), route subscription, the Groove IVM experiment and maintained
 selective hydration. `workloadSpecs` in `codspeed-artifact.mjs` is the one
 table of each workload's package, benches, build-time features, measurement
@@ -78,7 +78,7 @@ consumer can reuse a successful producer's bundle in a later attempt of the
 same run. A new source revision gets a different artifact name. A build failure
 prevents measurement; consumers must not fall back to the previous commit's
 binary. As initially configured, the consumer matrix waits for the whole build
-matrix, so the slowest producer gates all ten consumers. Account for that
+matrix, so the slowest producer gates all thirteen consumers. Account for that
 barrier, artifact transfer, cache upload and Cargo metadata dependency fetching
 when comparing end-to-end latency, not just the compiler step. One workload's build failure
 skips no other workload's measurement: the consumer matrix runs unless the

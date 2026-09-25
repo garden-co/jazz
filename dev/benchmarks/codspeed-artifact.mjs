@@ -29,6 +29,9 @@ const workloadSpecs = {
   "policy-scoped-documents": nativeExample("policy-scoped-documents"),
   "band-chat": nativeExample("band-chat"),
   "world-tour": nativeExample("world-tour"),
+  "poster-shop": nativeExample("poster-shop"),
+  "record-player": nativeExample("record-player"),
+  wequencer: nativeExample("wequencer"),
   "big-label": {
     package: "jazz-example-big-label-benchmark",
     benches: ["ingest_walltime", "loads"],

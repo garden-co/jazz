@@ -3545,12 +3545,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                jazz::binding_codec::terminal_operations_to_json(&terminal_operations)
-                    .map_err(to_js_error)?
-                    .serialize(
-                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
-                    )
-                    .map_err(to_js_error)?,
+                terminal_operations_to_js(&terminal_operations)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -3605,6 +3600,71 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Build terminal operations in the JavaScript object shape, with every key and
+/// payload as one `Uint8Array` rather than a JSON number per byte (#3369). The
+/// producer-only root descriptor is omitted, as on every binding.
+fn terminal_operations_to_js(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> Result<JsValue, JsValue> {
+    use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    fn bytes(value: &[u8]) -> JsValue {
+        js_sys::Uint8Array::from(value).into()
+    }
+    fn object(fields: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
+        let object = js_sys::Object::new();
+        for (name, value) in fields {
+            set_prop(&object, name, value.clone())?;
+        }
+        Ok(object.into())
+    }
+
+    let encoded = js_sys::Array::new_with_length(operations.len() as u32);
+    for (index, operation) in operations.iter().enumerate() {
+        let path = js_sys::Array::new_with_length(operation.path.len() as u32);
+        for (segment_index, segment) in operation.path.iter().enumerate() {
+            let segment = match segment {
+                TerminalPathSegment::Collection(collection) => {
+                    object(&[("Collection", JsValue::from_str(collection))])?
+                }
+                TerminalPathSegment::Key(key) => object(&[("Key", bytes(key))])?,
+            };
+            path.set(segment_index as u32, segment);
+        }
+        let edit = match &operation.edit {
+            TerminalEdit::Insert { index, key, value } => object(&[(
+                "Insert",
+                object(&[
+                    ("index", JsValue::from_f64(*index as f64)),
+                    ("key", bytes(key)),
+                    ("value", bytes(value)),
+                ])?,
+            )])?,
+            TerminalEdit::Update { key, value } => object(&[(
+                "Update",
+                object(&[("key", bytes(key)), ("value", bytes(value))])?,
+            )])?,
+            TerminalEdit::Remove { key } => object(&[("Remove", object(&[("key", bytes(key))])?)])?,
+            TerminalEdit::Move { key, index } => object(&[(
+                "Move",
+                object(&[
+                    ("key", bytes(key)),
+                    ("index", JsValue::from_f64(*index as f64)),
+                ])?,
+            )])?,
+        };
+        encoded.set(
+            index as u32,
+            object(&[
+                ("root_key", bytes(&operation.root_key)),
+                ("path", path.into()),
+                ("edit", edit),
+            ])?,
+        );
+    }
+    Ok(encoded.into())
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
