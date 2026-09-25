@@ -523,3 +523,73 @@ fn composite_index_logical_names_cannot_collide_with_single_column_indexes() {
         "duplicate index name: {names:?}"
     );
 }
+
+/// Global-current counterpart of [`physical_composite_index_entry_keys_are_pinned`].
+///
+/// A history-complete authority can seed an already-settled row (the
+/// server bootstrap/import path), so alice's row reaches
+/// `jazz_physical_1_global_current` without a client/server topology. A
+/// client write settled through a server lands in the same physical table and
+/// index; that path is not exercised here.
+/// Its composite index uses the same name and key columns as the
+/// ahead-current one: `by_physical_composite_v1_1_2`, keyed by branch key,
+/// `_app_1` (owner), `_app_2` (rank), then the global row's primary key.
+#[test]
+fn physical_global_current_composite_index_entry_keys_are_pinned() {
+    let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let families = schema.column_families();
+        let storage = RocksDbStorage::open(
+            directory.path(),
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xc1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "tasks",
+            row(0x0a),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("owner".to_owned(), Value::String("alice".to_owned())),
+                ("rank".to_owned(), Value::I32(7)),
+                ("title".to_owned(), Value::String("ship".to_owned())),
+            ]),
+        )
+        .unwrap();
+        block_on(db.close()).unwrap();
+    }
+    let families = schema.column_families();
+    let storage = RocksDbStorage::open(
+        directory.path(),
+        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
+    let keys = block_on(storage.prefix("indices".into(), Vec::new()))
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| key.starts_with(b"jazz_physical_1_global_current\0by_physical_composite_"))
+        .map(hex::encode)
+        .collect::<Vec<_>>();
+    // `jazz_physical_1_global_current\0by_physical_composite_v1_1_2\0`, the
+    // persisted-index tag 7, then the escaped logical key: branch key bytes,
+    // text "alice", order-preserving i32 7, and the global row's primary key
+    // (branch key, row uuid 0x0a..; unlike ahead-current, no transaction
+    // coordinate).
+    assert_eq!(
+        keys,
+        [
+            "6a617a7a5f706879736963616c5f315f676c6f62616c5f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000"
+        ]
+    );
+}
