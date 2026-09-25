@@ -399,7 +399,7 @@ impl Database {
             .assign_resident_publication(resident_tick, publication);
         self.resident_writes
             .borrow_mut()
-            .extend_shared(staged_state.borrow().snapshot());
+            .extend(staged_state.borrow().operations().iter().cloned());
         self.resident_publications
             .insert(publication, Rc::clone(&staged_state));
         if !roots.is_empty() {
@@ -510,7 +510,7 @@ impl Database {
     pub(super) fn refresh_resident_writes(&mut self) {
         let mut resident_writes = StagedWriteState::default();
         for operations in self.resident_publications.values() {
-            resident_writes.extend_shared(operations.borrow().snapshot());
+            resident_writes.extend(operations.borrow().operations().iter().cloned());
         }
         *self.resident_writes.borrow_mut() = resident_writes;
     }

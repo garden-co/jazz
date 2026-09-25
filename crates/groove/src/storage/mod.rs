@@ -1697,10 +1697,7 @@ pub(crate) enum StagedPointValue {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
-    // Immutable once shared. Appends use the unique tail or start a new block;
-    // a persistence snapshot never needs to hold a RefCell borrow across await.
-    operations: Vec<Rc<Vec<OwnedWriteOperation>>>,
-    operation_ends: Vec<usize>,
+    operations: Vec<OwnedWriteOperation>,
     latest_by_cf_key: Option<BTreeMap<String, BTreeMap<Vec<u8>, usize>>>,
     point_reads_without_index: usize,
 }
@@ -1712,38 +1709,18 @@ impl StagedWriteState {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.operation_count()
-    }
-
-    fn operation_count(&self) -> usize {
-        self.operation_ends.last().copied().unwrap_or(0)
-    }
-
-    fn operation(&self, index: usize) -> &OwnedWriteOperation {
-        let block = self.operation_ends.partition_point(|end| *end <= index);
-        let start = if block == 0 {
-            0
-        } else {
-            self.operation_ends[block - 1]
-        };
-        &self.operations[block][index - start]
+        self.operations.len()
     }
 
     pub(crate) fn stage(&mut self, operation: OwnedWriteOperation) {
-        let index = self.operation_count();
+        let index = self.operations.len();
         if let Some(latest_by_cf_key) = &mut self.latest_by_cf_key {
             latest_by_cf_key
                 .entry(operation.cf().to_owned())
                 .or_default()
                 .insert(operation.key().to_vec(), index);
         }
-        if let Some(tail) = self.operations.last_mut().and_then(Rc::get_mut) {
-            tail.push(operation);
-            *self.operation_ends.last_mut().expect("tail end") = index + 1;
-        } else {
-            self.operations.push(Rc::new(vec![operation]));
-            self.operation_ends.push(index + 1);
-        }
+        self.operations.push(operation);
     }
 
     pub(crate) fn extend(&mut self, operations: impl IntoIterator<Item = OwnedWriteOperation>) {
@@ -1752,51 +1729,28 @@ impl StagedWriteState {
         }
     }
 
-    pub(crate) fn operations(&self) -> impl DoubleEndedIterator<Item = &OwnedWriteOperation> {
-        self.operations.iter().flat_map(|block| block.iter())
-    }
-
-    pub(crate) fn snapshot(&self) -> Vec<Rc<Vec<OwnedWriteOperation>>> {
-        self.operations.clone()
-    }
-
-    pub(crate) fn extend_shared(&mut self, snapshot: Vec<Rc<Vec<OwnedWriteOperation>>>) {
-        for block in snapshot {
-            if block.is_empty() {
-                continue;
-            }
-            let start = self.operation_count();
-            if let Some(index) = &mut self.latest_by_cf_key {
-                for (offset, operation) in block.iter().enumerate() {
-                    index
-                        .entry(operation.cf().to_owned())
-                        .or_default()
-                        .insert(operation.key().to_vec(), start + offset);
-                }
-            }
-            self.operation_ends.push(start + block.len());
-            self.operations.push(block);
-        }
+    pub(crate) fn operations(&self) -> &[OwnedWriteOperation] {
+        &self.operations
     }
 
     pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
         self.operations
-            .into_iter()
-            .flat_map(|block| Rc::try_unwrap(block).unwrap_or_else(|block| (*block).clone()))
-            .collect()
     }
 
     fn latest_index(&mut self, cf: &ColumnFamilyName, key: &Key) -> Option<usize> {
         if self.latest_by_cf_key.is_none() {
-            if self.operation_count() < STAGED_OPS_BEFORE_POINT_INDEX
+            if self.operations.len() < STAGED_OPS_BEFORE_POINT_INDEX
                 && self.point_reads_without_index < STAGED_POINT_READS_BEFORE_INDEX
             {
                 self.point_reads_without_index += 1;
                 return self
-                    .operations()
+                    .operations
+                    .iter()
+                    .enumerate()
                     .rev()
-                    .position(|operation| operation.cf() == cf && operation.key() == key)
-                    .map(|reverse_index| self.operation_count() - reverse_index - 1);
+                    .find_map(|(index, operation)| {
+                        (operation.cf() == cf && operation.key() == key).then_some(index)
+                    });
             }
 
             self.ensure_key_index();
@@ -1813,7 +1767,7 @@ impl StagedWriteState {
             return;
         }
         let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
-        for (index, operation) in self.operations().enumerate() {
+        for (index, operation) in self.operations.iter().enumerate() {
             latest_by_cf_key
                 .entry(operation.cf().to_owned())
                 .or_default()
@@ -1847,7 +1801,7 @@ impl StagedWriteState {
         by_key
             .range::<[u8], _>((Included(start), upper))
             .map(|(key, index)| {
-                let value = match self.operation(*index) {
+                let value = match &self.operations[*index] {
                     OwnedWriteOperation::Set { value, .. } => Some(value.clone()),
                     OwnedWriteOperation::Delete { .. } => None,
                 };
@@ -1936,7 +1890,7 @@ impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
         let Some(index) = staged_writes.latest_index(cf, key) else {
             return StagedPointValue::Miss;
         };
-        match staged_writes.operation(index) {
+        match &staged_writes.operations[index] {
             OwnedWriteOperation::Set { value, .. } => StagedPointValue::Set(value.clone()),
             OwnedWriteOperation::Delete { .. } => StagedPointValue::Delete,
         }
@@ -2093,7 +2047,7 @@ where
             {
                 let mut staged = self.staged_writes.borrow_mut();
                 if let Some(index) = staged.latest_index(&cf, &key) {
-                    return Ok(match staged.operation(index) {
+                    return Ok(match &staged.operations[index] {
                         OwnedWriteOperation::Delete { .. } => ValueComparison::Absent,
                         OwnedWriteOperation::Set { value, .. } if value == &expected => {
                             ValueComparison::Identical
@@ -4127,49 +4081,6 @@ mod tests {
                 .unwrap();
             assert!(collect_scan(empty).await.unwrap().is_empty());
         }
-    }
-
-    /// Internal ownership proof: public storage results cannot distinguish
-    /// shared immutable payloads from identical deep copies. Appending Bob's
-    /// later write must not alter Alice's earlier publication snapshot.
-    #[test]
-    fn publication_snapshots_share_blocks_without_sharing_future_appends() {
-        let mut alice = StagedWriteState::from(
-            (0..100)
-                .map(|id| OwnedWriteOperation::set("records", vec![id], vec![id; 1024]))
-                .collect::<Vec<_>>(),
-        );
-        let snapshot = alice.snapshot();
-        let mut resident = StagedWriteState::default();
-        resident.extend_shared(snapshot.clone());
-        assert_eq!(snapshot.len(), 1);
-        assert!(Rc::ptr_eq(&snapshot[0], &resident.snapshot()[0]));
-        assert!(Rc::ptr_eq(&snapshot[0], &alice.snapshot()[0]));
-        assert_eq!(resident.latest_index("records", &[50]), Some(50));
-
-        alice.stage(OwnedWriteOperation::set(
-            "records",
-            vec![50],
-            b"Bob".to_vec(),
-        ));
-        assert_eq!(snapshot[0].len(), 100);
-        assert_eq!(alice.operation_count(), 101);
-        assert_eq!(resident.operation_count(), 100);
-        let bob = alice.snapshot();
-        assert_eq!(bob.len(), 2);
-        assert!(Rc::ptr_eq(&snapshot[0], &bob[0]));
-        resident.extend_shared(vec![Rc::clone(&bob[1])]);
-        assert_eq!(resident.latest_index("records", &[50]), Some(100));
-        assert_eq!(
-            resident.operation(100),
-            &OwnedWriteOperation::set("records", vec![50], b"Bob".to_vec())
-        );
-        let mut independent = resident.clone();
-        independent.stage(OwnedWriteOperation::delete("records", vec![50]));
-        assert_eq!(resident.operation_count(), 101);
-        assert_eq!(independent.operation_count(), 102);
-        assert_eq!(independent.into_operations().len(), 102);
-        assert_eq!(alice.into_operations(), resident.into_operations());
     }
 
     // Internal receipt: the regression is work performed inside the storage overlay and is not
