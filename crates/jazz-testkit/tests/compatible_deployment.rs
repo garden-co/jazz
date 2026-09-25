@@ -6,7 +6,7 @@ use jazz::{
     },
 };
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_user, wait_for_edge_txs, wait_for_visible_row};
+use jazz_testkit::{connect_ready_user, wait_for_global_txs, wait_for_visible_row};
 use std::{collections::HashMap, time::Duration};
 
 fn schema(counter: bool) -> Schema {
@@ -69,7 +69,7 @@ async fn automatic_lens_preserves_authored_values() {
                     jazz::row_input!("title" => "authored", "count" => 7),
                 )
                 .unwrap();
-            wait_for_edge_txs(&alice, &[tx.unwrap()]).await;
+            wait_for_global_txs(&alice, &[tx.unwrap()]).await;
             alice.shutdown().await.unwrap();
             let new = schema(true);
             deploy(&server, &new).await;
@@ -91,7 +91,7 @@ async fn automatic_lens_preserves_authored_values() {
             )
             .await;
             let (new_row, _, tx) = bob.insert("notes", jazz::row_input!("count" => 9)).unwrap();
-            wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+            wait_for_global_txs(&bob, &[tx.unwrap()]).await;
             wait_for_visible_row(
                 &bob,
                 query,

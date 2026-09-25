@@ -43,7 +43,7 @@ describe("migration graph", () => {
     );
   });
 
-  it("shows forks and converging edges with each schema appearing once", () => {
+  it("shows forks and marks repeated references to a converging schema", () => {
     expect(
       renderMigrationGraph(
         graph(
@@ -59,19 +59,17 @@ describe("migration graph", () => {
       ),
     ).toBe(
       [
-        "●   aaaaaaaaaaaa",
-        "├─╮",
-        "│ │",
-        "▼ │",
-        "│ ▼",
-        "● │ bbbbbbbbbbbb",
-        "│ │",
-        "▼ │",
-        "│ ● cccccccccccc",
-        "│ │",
-        "│ ▼",
-        "├─╯",
-        "●   dddddddddddd (current)",
+        "● aaaaaaaaaaaa",
+        "├─▶ ● bbbbbbbbbbbb",
+        "│   │",
+        "│   ▼",
+        "│   ● dddddddddddd (current)",
+        "└─▶ ● cccccccccccc",
+        "    │",
+        "    ▼",
+        "    ● dddddddddddd (current) (shown above)",
+        "",
+        "Repeated labels refer to the same schema.",
       ].join("\n"),
     );
   });
@@ -87,9 +85,9 @@ describe("migration graph", () => {
       ),
     );
     expect(text).toContain("● cccccccccccc");
-    expect(text.match(/aaaaaaaaaaaa/g)).toHaveLength(1);
+    expect(text.match(/aaaaaaaaaaaa/g)).toHaveLength(2);
     expect(text.match(/bbbbbbbbbbbb/g)).toHaveLength(1);
-    expect(text).toContain("▲");
+    expect(text).toContain("● aaaaaaaaaaaa (shown above)");
     expect(text).toContain("No schema is currently active.");
     expect(text.split("\n").length).toBeLessThan(20);
   });
@@ -97,6 +95,7 @@ describe("migration graph", () => {
   it.each([
     {
       name: "three branches",
+      references: [],
       pairs: [
         [a, b],
         [a, c],
@@ -105,6 +104,7 @@ describe("migration graph", () => {
     },
     {
       name: "multiple roots converging",
+      references: [c],
       pairs: [
         [a, c],
         [b, c],
@@ -113,6 +113,7 @@ describe("migration graph", () => {
     },
     {
       name: "a direct path alongside a longer path",
+      references: [c],
       pairs: [
         [a, b],
         [b, c],
@@ -121,6 +122,7 @@ describe("migration graph", () => {
     },
     {
       name: "a self migration alongside a forward migration",
+      references: [a],
       pairs: [
         [a, a],
         [a, b],
@@ -128,19 +130,24 @@ describe("migration graph", () => {
     },
     {
       name: "a longer cycle",
+      references: [a],
       pairs: [
         [a, b],
         [b, c],
         [c, a],
       ],
     },
-  ])("renders every schema and directed edge once for $name", ({ pairs }) => {
+  ])("expands every schema once and renders every edge for $name", ({ pairs, references }) => {
     const history = graph([...new Set(pairs.flat())], pairs as [string, string][], b);
     const text = renderMigrationGraph(history);
     for (const hash of history.schemas) {
-      expect(text.split(hash.slice(0, 12))).toHaveLength(2);
+      const rows = text.split("\n").filter((line) => line.includes(hash.slice(0, 12)));
+      expect(rows.filter((line) => !line.endsWith("(shown above)"))).toHaveLength(1);
+      expect(rows.filter((line) => line.endsWith("(shown above)"))).toHaveLength(
+        references.includes(hash) ? 1 : 0,
+      );
     }
-    expect(text.match(/[▼▲◀]/g)).toHaveLength(pairs.length);
+    expect(text.match(/[▼▶]/g)).toHaveLength(pairs.length);
     expect(
       renderMigrationGraph({
         ...history,
@@ -198,9 +205,11 @@ describe("migration graph", () => {
     expect(text).toContain("bbbbbbbbbbbb (current)");
     expect(text).toContain("cccccccccccc [server only]");
     expect(text).toContain("dddddddddddd (schema.ts) [local only]");
-    expect(text).toContain("▼ │ [server only]");
-    expect(text).toContain("│ ▼ [local only]");
-    expect(text).toContain("▼ │ [local only]");
+    expect(text).toContain("├─▶ [server only] ● cccccccccccc [server only]");
+    expect(text).toContain(
+      "└─▶ [local only] ● dddddddddddd (schema.ts) [local only] (shown above)",
+    );
+    expect(text).toContain("│ [local only]");
   });
 
   it("fetches the app-scoped graph with admin authentication, preserving a server URL prefix", async () => {

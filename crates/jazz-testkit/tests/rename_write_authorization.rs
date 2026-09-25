@@ -674,7 +674,7 @@ async fn merged_schema_via_sibling_path_defaults_reintroduced_column_without_era
                     row_input!("title" => "original", "a" => "authored-a"),
                 )
                 .unwrap();
-            support::wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+            support::wait_for_global_txs(&writer, &[tx.unwrap()]).await;
 
             // Only 0 -> 1, 0 -> 2, and 2 -> 3 exist: reading 1 as 3 must
             // traverse 1 -> 0 -> 2 -> 3, with no direct value-preserving edge.

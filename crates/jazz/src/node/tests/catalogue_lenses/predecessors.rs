@@ -182,7 +182,7 @@ fn check_merged_predecessors(enum_columns: bool) {
     let snapshot = authority.catalogue_snapshot().unwrap();
     assert_eq!(snapshot.lineages[2].1, publication);
     let edge_dir = tempfile::tempdir().unwrap();
-    let mut edge = fresh_dynamic_edge_open(edge_dir.path(), node(0xdd)).unwrap();
+    let mut edge = fresh_dynamic_catalogue_open(edge_dir.path(), node(0xdd)).unwrap();
     let mut incomplete = snapshot.clone();
     let record = &mut incomplete.lineages[2].1;
     record.predecessors.pop();
@@ -206,7 +206,7 @@ fn check_merged_predecessors(enum_columns: bool) {
     edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     drop(edge);
-    let mut edge = fresh_dynamic_edge_open(edge_dir.path(), node(0xdd)).unwrap();
+    let mut edge = fresh_dynamic_catalogue_open(edge_dir.path(), node(0xdd)).unwrap();
     assert_rows(&mut edge);
     assert_eq!(
         edge.catalogue_snapshot().unwrap().lineages[2].1,
@@ -239,7 +239,7 @@ fn check_merged_predecessors(enum_columns: bool) {
         schema: left.version_id(),
     };
     let parked_dir = tempfile::tempdir().unwrap();
-    let mut parked = fresh_dynamic_edge_open(parked_dir.path(), node(0xdf)).unwrap();
+    let mut parked = fresh_dynamic_catalogue_open(parked_dir.path(), node(0xdf)).unwrap();
     parked
         .apply_trusted_catalogue_snapshot_settled(prefix)
         .unwrap();
@@ -252,7 +252,7 @@ fn check_merged_predecessors(enum_columns: bool) {
         .unwrap();
     assert_eq!(parked.active_catalogue_seq(), 1);
     drop(parked);
-    let mut parked = fresh_dynamic_edge_open(parked_dir.path(), node(0xdf)).unwrap();
+    let mut parked = fresh_dynamic_catalogue_open(parked_dir.path(), node(0xdf)).unwrap();
     parked
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,

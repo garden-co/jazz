@@ -816,7 +816,7 @@ describe("cli validate", () => {
 
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
-    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded schema from ${join(root, "schema.ts")}.`);
     expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
     expect(logs).toContain(
       "Permission-only changes do not create schema hashes or require migrations.",
@@ -832,7 +832,7 @@ describe("cli validate", () => {
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded schema from ${join(srcDir, "schema.ts")}.`);
     expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
   });
 
@@ -1090,9 +1090,7 @@ describe("cli migrations", () => {
     expect(
       results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
     ).toHaveLength(1);
-    expect(
-      results.filter((result) => result.stdout.includes("No structural schema changes")),
-    ).toHaveLength(3);
+    expect(results.filter((result) => result.stdout.includes("No schema changes"))).toHaveLength(3);
     expect(
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
@@ -1417,7 +1415,7 @@ describe("cli migrations", () => {
 
       expect(noopResult).toBeNull();
       expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
-      expect(noopLogs).toContain("No structural schema changes detected.");
+      expect(noopLogs).toContain("No schema changes detected.");
     } finally {
       vi.useRealTimers();
     }
@@ -1764,7 +1762,7 @@ describe("cli migrations", () => {
         (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
       ),
     ).toBe(true);
-    expect(logs).toContain("Migration stubs are only for structural schema changes.");
+    expect(logs).toContain("Migration stubs are only for schema changes.");
     expect(logs).toContain(
       "Permission-only changes do not create schema hashes or require migrations.",
     );
@@ -3045,7 +3043,7 @@ describe("bin integration", () => {
     const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(result.stdout).toContain(`Loaded schema from ${join(srcDir, "schema.ts")}.`);
     expect(result.stdout).toContain(
       `Loaded current permissions from ${join(srcDir, "permissions.ts")}.`,
     );
