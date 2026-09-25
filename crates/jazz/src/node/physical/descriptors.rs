@@ -1152,7 +1152,7 @@ fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let logical_descriptor = table.global_current_content_storage_table().record_schema();
     let physical_names = physical_current_field_names(table, mapping)?;
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(
