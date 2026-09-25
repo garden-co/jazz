@@ -24,24 +24,19 @@ where
     ) -> std::collections::HashSet<String> {
         let shared_deletion_history =
             changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
+        // Parse each changed name back to its table id once, instead of
+        // formatting seven candidate names for every table of every schema.
+        let changed_table_ids = changed_tables
+            .iter()
+            .filter_map(|name| physical_table_id_for_publication_name(name))
+            .collect::<std::collections::HashSet<_>>();
         self.catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
-                    let table_id = table.table_id;
-                    let changed = shared_deletion_history
-                        || [
-                            physical_history_table_name(table_id),
-                            physical_register_table_name(table_id),
-                            physical_global_current_table_name(table_id),
-                            physical_register_global_current_table_name(table_id),
-                            physical_ahead_current_table_name(table_id),
-                            physical_register_ahead_current_table_name(table_id),
-                            physical_rejected_versions_table_name(table_id),
-                        ]
-                        .iter()
-                        .any(|name| changed_tables.contains(name));
+                    let changed =
+                        shared_deletion_history || changed_table_ids.contains(&table.table_id.0);
                     changed.then_some(logical_table.clone())
                 })
             })
@@ -1478,5 +1473,64 @@ fn branch_scan(
             start: prepend(start),
             end: prepend(end),
         },
+    }
+}
+
+/// The table id of a per-table physical publication name, exactly the inverse
+/// of the `physical_*_table_name` spellings consulted by targeted refresh.
+fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
+    const SUFFIXES: [&str; 7] = [
+        "history",
+        "register",
+        "global_current",
+        "register_global_current",
+        "ahead_current",
+        "register_ahead_current",
+        "rejected_versions",
+    ];
+    let (table_id, suffix) = split_physical_table_name(name)?;
+    SUFFIXES.contains(&suffix).then_some(table_id.0)
+}
+
+// Internal test: targeted refresh only works if parsing is the exact inverse of
+// the private name formatters, and a mismatch would silently skip refreshes
+// rather than fail visibly through the public API.
+#[cfg(test)]
+mod publication_name_tests {
+    use super::*;
+
+    #[test]
+    fn publication_name_parsing_inverts_every_physical_name_formatter() {
+        for id in [0, 1, 9, 10, 42, u64::MAX] {
+            let table_id = PhysicalTableId(id);
+            for name in [
+                physical_history_table_name(table_id),
+                physical_register_table_name(table_id),
+                physical_global_current_table_name(table_id),
+                physical_register_global_current_table_name(table_id),
+                physical_ahead_current_table_name(table_id),
+                physical_register_ahead_current_table_name(table_id),
+                physical_rejected_versions_table_name(table_id),
+            ] {
+                assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
+            }
+            let history = physical_history_table_name(table_id);
+            let register = physical_register_table_name(table_id);
+            assert_eq!(physical_version_table_id(&history, false), Some(table_id));
+            assert_eq!(physical_version_table_id(&register, true), Some(table_id));
+            assert_eq!(physical_version_table_id(&history, true), None);
+            assert_eq!(physical_version_table_id(&register, false), None);
+        }
+        for name in [
+            SHARED_DELETION_HISTORY_TABLE,
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_1_histories",
+            "jazz_physical__history",
+            "jazz_physical_1",
+            "other_physical_1_history",
+        ] {
+            assert_eq!(physical_table_id_for_publication_name(name), None, "{name}");
+        }
     }
 }
