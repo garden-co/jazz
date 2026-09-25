@@ -43,5 +43,5 @@ Run the native checks with:
 
 ```sh
 cargo test -p jazz-example-wequencer-benchmark
-cargo bench -p jazz-example-wequencer-benchmark --bench loads
+cargo bench -p jazz-example-wequencer-benchmark --bench walltime
 ```

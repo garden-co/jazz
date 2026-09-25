@@ -1544,21 +1544,17 @@ trait LocalMutexBorrow<T> {
 impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
     #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 
     #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 }
@@ -6004,7 +6000,7 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         let update_kind = match &update {
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
@@ -6196,7 +6192,7 @@ fn apply_maintained_membership_update_to_snapshot(
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             let equivalent = snapshot.rows[position].subscription_equivalent(row);
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=flat_snapshot_replace occurrence={key:?} position={position} equivalent={equivalent} old={:?} new={:?}",
                     snapshot.rows[position], row,

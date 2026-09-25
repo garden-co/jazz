@@ -539,7 +539,10 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let runtime = IvmRuntime::new(schema)?;
+        let mut runtime = IvmRuntime::new(schema)?;
+        runtime.set_plain_output_root_positions_enabled(
+            self.ivm_runtime.plain_output_root_positions_enabled(),
+        );
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -591,6 +594,15 @@ impl Database {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Enable or disable generic root positions (insert indices and moves in
+    /// terminal deltas) for plain ordered outputs. On by default. A consumer
+    /// that ignores those positions should turn them off: collecting them
+    /// makes every write to an ordered result proportional to its size.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime
+            .set_plain_output_root_positions_enabled(enabled);
     }
 
     /// Install the immutable-chunk provider used by indirect scalar evaluation.
@@ -2027,6 +2039,12 @@ impl Database {
 
     pub fn open_batch(&self) -> DatabaseBatch {
         DatabaseBatch::default()
+    }
+
+    /// Whether any binding currently holds the prepared binding source named
+    /// `shape` (see [`crate::ivm::IvmRuntime::prepared_binding_source_is_bound`]).
+    pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
+        self.ivm_runtime.prepared_binding_source_is_bound(shape)
     }
 
     /// Test helper: bindings admitted onto a live prepared shape without a
