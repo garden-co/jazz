@@ -2472,6 +2472,113 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
     group.finish();
 }
 
+fn session_upload_schema() -> JazzSchema {
+    let owner = schema_fixture::session_subject_column("owner");
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .column("body", ColumnType::Text)
+                .column("owner", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .policies(schema_fixture::all_operations(owner)),
+        ),
+    )
+}
+
+/// Server-side cost of admitting one checked session upload.
+///
+/// A writer on a byte wire commits one mergeable transaction of `rows` inserts
+/// under an owner write policy. Only the server tick that decodes, validates,
+/// authorizes and persists the upload is timed; the writer's commit and its
+/// fate application stay outside the measurement.
+fn r14_session_upload(c: &mut Criterion) {
+    use jazz::db::MergeableTxOps as _;
+
+    let mut group = c.benchmark_group("realistic_phase1/r14_session_upload");
+
+    for rows in [1usize, 100] {
+        group.throughput(Throughput::Elements(rows as u64));
+        group.bench_with_input(
+            BenchmarkId::new("owner_policy_rows", rows),
+            &rows,
+            |b, &rows| {
+                let writer = open_db_with_schema(14_001, author(), false, session_upload_schema());
+                let server = open_db_with_schema(
+                    14_002,
+                    AuthorSubject::SYSTEM,
+                    true,
+                    session_upload_schema(),
+                );
+                let (writer_transport, server_transport) = byte_duplex();
+                let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
+                let _writer_subscriber = server.accept_subscriber(server_transport, author());
+                let owner = author().principal_parts().1;
+                let mut next_row = 0usize;
+                let mut upload_batch = |writer: &BenchDb| {
+                    let tx =
+                        block_on(writer.mergeable_tx()).expect("open session upload transaction");
+                    for _ in 0..rows {
+                        block_on(tx.insert(
+                            "notes",
+                            BTreeMap::from([
+                                (
+                                    "title".to_owned(),
+                                    Value::String(format!("note-{next_row}")),
+                                ),
+                                (
+                                    "body".to_owned(),
+                                    Value::String(format!("session upload body {next_row:08}")),
+                                ),
+                                ("owner".to_owned(), Value::String(owner.clone())),
+                                ("updated_at".to_owned(), Value::U64(next_row as u64)),
+                            ]),
+                            jazz::db::InsertOptions {
+                                row_id: Some(row_uuid(14, next_row)),
+                                ..Default::default()
+                            },
+                        ))
+                        .expect("stage session upload row");
+                        next_row += 1;
+                    }
+                    block_on(tx.commit()).expect("commit session upload transaction")
+                };
+
+                let warm_tx = upload_batch(&writer);
+                writer.tick().expect("ship warm-up upload");
+                server.tick().expect("admit warm-up upload");
+                writer.tick().expect("apply warm-up fate");
+                block_on(writer.wait_for_transaction(warm_tx, DurabilityTier::Global))
+                    .expect("server accepts the owner-policy upload");
+                let notes = server
+                    .prepare_query(&Query::from("notes"))
+                    .expect("prepare server notes query");
+                assert_eq!(
+                    block_on(server.all(&notes, ReadOpts::default()))
+                        .expect("read admitted notes")
+                        .len(),
+                    rows
+                );
+
+                b.iter_custom(|iterations| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        upload_batch(&writer);
+                        writer.tick().expect("ship session upload");
+                        let started = Instant::now();
+                        server.tick().expect("admit session upload");
+                        elapsed += started.elapsed();
+                        writer.tick().expect("apply session upload fate");
+                    }
+                    elapsed
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn guarded_benches(c: &mut Criterion) {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     r1_crud(c);
@@ -2483,6 +2590,7 @@ fn guarded_benches(c: &mut Criterion) {
     r11_byte_wire_resume(c);
     r12_recursive_permissions(c);
     r13_permission_filtered_resume(c);
+    r14_session_upload(c);
 }
 
 criterion_group! {

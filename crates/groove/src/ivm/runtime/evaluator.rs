@@ -301,6 +301,37 @@ mod collect_by_state_tests {
         assert_eq!(staged.get(&second), Some(&1));
     }
 
+    // Internal: the batched rank walk must agree with per-key ranking over a
+    // staged index mixing base keys, staged insertions and staged removals.
+    // Public queries only see the resulting terminal order.
+    #[test]
+    fn sparse_groups_batched_ranks_match_per_key_ranks() {
+        let order = (Vec::new(), Bytes::from_static(b"record"));
+        let key = |value: u8| vec![value];
+        let mut groups = SparseGroups::default();
+        for value in [2, 4, 6, 8, 10] {
+            groups.get_or_default(key(value)).set(order.clone(), 1);
+        }
+        groups.commit_overlay();
+        let mut staged = groups.clone();
+        for value in [1, 5, 9, 11] {
+            staged.get_or_default(key(value)).set(order.clone(), 1);
+        }
+        for value in [4, 8] {
+            staged.get_or_default(key(value)).set(order.clone(), 0);
+        }
+        staged.remove_empty_touched_groups([key(4), key(8)]);
+
+        let probes = (0..=12).map(key).collect::<Vec<_>>();
+        let batched = staged.count_before_each(probes.iter().map(Vec::as_slice));
+        let per_key = probes
+            .iter()
+            .map(|probe| staged.count_before(probe))
+            .collect::<Vec<_>>();
+        assert_eq!(batched, per_key);
+        assert_eq!(staged.count_before_each([key(12).as_slice()]), vec![7]);
+    }
+
     #[test]
     fn sparse_groups_stage_one_group_without_cloning_the_outer_index() {
         let first = b"first".to_vec();
@@ -404,8 +435,66 @@ impl SparseGroups {
         self.overlay = Rc::default();
     }
 
+    /// Present group keys in ascending order: untouched base keys merged
+    /// with staged insertions, skipping staged removals.
+    fn present_keys(&self) -> impl Iterator<Item = &[u8]> {
+        let mut base = self.base.keys().peekable();
+        let mut overlay = self.overlay.iter().peekable();
+        std::iter::from_fn(move || {
+            loop {
+                match (base.peek(), overlay.peek()) {
+                    (Some(base_key), Some((overlay_key, _))) if *base_key < *overlay_key => {
+                        return base.next().map(Vec::as_slice);
+                    }
+                    (Some(base_key), Some((overlay_key, group))) => {
+                        if *base_key == *overlay_key {
+                            base.next();
+                        }
+                        let present = group.is_some();
+                        let (key, _) = overlay.next().expect("peeked");
+                        if present {
+                            return Some(key.as_slice());
+                        }
+                    }
+                    (None, Some((_, group))) => {
+                        let present = group.is_some();
+                        let (key, _) = overlay.next().expect("peeked");
+                        if present {
+                            return Some(key.as_slice());
+                        }
+                    }
+                    (Some(_), None) => return base.next().map(Vec::as_slice),
+                    (None, None) => return None,
+                }
+            }
+        })
+    }
+
+    /// Rank each of `keys` (ascending) among the present groups in one merged
+    /// walk, instead of one range scan per key. Inserting many new groups in
+    /// one batch is then linear in the group count, not quadratic.
+    pub(super) fn count_before_each<'k>(
+        &self,
+        keys: impl IntoIterator<Item = &'k [u8]>,
+    ) -> Vec<usize> {
+        let mut present = self.present_keys().peekable();
+        let mut before = 0usize;
+        let mut ranks = Vec::new();
+        let mut previous: Option<&[u8]> = None;
+        for key in keys {
+            debug_assert!(previous.is_none_or(|previous| previous <= key));
+            previous = Some(key);
+            while present.next_if(|candidate| *candidate < key).is_some() {
+                before += 1;
+            }
+            ranks.push(before);
+        }
+        ranks
+    }
+
     /// Rank a present group in the merged ordered map without constructing a
     /// combined snapshot of all groups.
+    #[cfg(test)]
     pub(super) fn count_before(&self, key: &[u8]) -> usize {
         let retained_base = self
             .base
@@ -802,7 +891,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    pub(super) binding_snapshots: &'a BindingSnapshots,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -832,7 +921,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    pub(super) binding_snapshots: &'a BindingSnapshots,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -856,7 +945,7 @@ fn graph_runtime_view<'a>(
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
-    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: &'a BindingSnapshots,
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,

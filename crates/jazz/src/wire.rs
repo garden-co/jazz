@@ -423,6 +423,12 @@ impl WireInboundContext {
         self.trusted_encoder = trusted;
     }
 
+    /// Whether semantic payloads admitted through this context pass the
+    /// checked decoder, which validates every carried version receipt.
+    pub(crate) fn validates_receipts(&self) -> bool {
+        !self.trusted_encoder
+    }
+
     pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
         if self.trusted_encoder {
             let message = decode_sync_message_trusted(bytes).map_err(|error| {
@@ -748,16 +754,13 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     if validate_logical_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
+    // Wire receipts and replay fixtures name bytes, not only deserialized
+    // values. `decode_postcard_exact` already rejects any alternate postcard
+    // representation of the same transaction/version message.
     let message: SyncMessage = decode_postcard_exact(bytes)?;
     message
         .validate_wire_contract()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
-    // Wire receipts and replay fixtures name bytes, not only deserialized
-    // values.  Do not accept an alternate postcard representation for the
-    // same transaction/version message.
-    if to_allocvec(&message)? != bytes {
-        return Err(postcard::Error::DeserializeBadOption);
-    }
     Ok(message)
 }
 
@@ -785,10 +788,47 @@ where
     T: Deserialize<'a> + Serialize,
 {
     let (value, remainder) = take_from_bytes(bytes)?;
-    if !remainder.is_empty() || to_allocvec(&value)? != bytes {
+    if !remainder.is_empty() || !encodes_exactly(&value, bytes) {
         Err(postcard::Error::DeserializeBadEncoding)
     } else {
         Ok(value)
+    }
+}
+
+/// Whether the canonical postcard encoding of `value` is exactly `expected`.
+///
+/// Equivalent to `to_allocvec(value)? == expected`, but compares while
+/// serializing: it allocates nothing and stops at the first differing byte.
+fn encodes_exactly<T: Serialize + ?Sized>(value: &T, expected: &[u8]) -> bool {
+    postcard::serialize_with_flavor(value, CanonicalBytesMatch { expected })
+        .is_ok_and(|remaining: &[u8]| remaining.is_empty())
+}
+
+/// Postcard output flavor that consumes `expected` instead of writing bytes.
+struct CanonicalBytesMatch<'a> {
+    expected: &'a [u8],
+}
+
+impl<'a> postcard::ser_flavors::Flavor for CanonicalBytesMatch<'a> {
+    /// The expected bytes the encoding did not reach.
+    type Output = &'a [u8];
+
+    fn try_push(&mut self, byte: u8) -> postcard::Result<()> {
+        self.try_extend(&[byte])
+    }
+
+    fn try_extend(&mut self, bytes: &[u8]) -> postcard::Result<()> {
+        match self.expected.split_at_checked(bytes.len()) {
+            Some((head, tail)) if head == bytes => {
+                self.expected = tail;
+                Ok(())
+            }
+            _ => Err(postcard::Error::SerializeBufferFull),
+        }
+    }
+
+    fn finalize(self) -> postcard::Result<Self::Output> {
+        Ok(self.expected)
     }
 }
 
@@ -860,7 +900,7 @@ fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::E
     let source = *bytes;
     let (value, remaining) = take_from_bytes::<usize>(source)?;
     let consumed = source.len() - remaining.len();
-    if to_allocvec(&value)? != source[..consumed] {
+    if !encodes_exactly(&value, &source[..consumed]) {
         return Err(postcard::Error::DeserializeBadEncoding);
     }
     *bytes = remaining;
@@ -2320,8 +2360,7 @@ mod tests {
         assert!(streaming_zstd < per_message_zstd);
     }
 
-    #[test]
-    fn message_frame_round_trips_sync_message_payload_variants() {
+    fn sync_message_payload_variants() -> Vec<SyncMessage> {
         let node = NodeUuid::from_bytes([0x11; 16]);
         let tx_id = TxId::new(TxTime(12), node);
         let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
@@ -2332,7 +2371,7 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let messages = vec![
+        vec![
             SyncMessage::RegisterShape {
                 shape_id,
                 ast: ShapeAst::new(Query::from("todos"), schema_version),
@@ -2401,7 +2440,12 @@ mod tests {
             SyncMessage::RowVersionPayloads {
                 version_bundles: Vec::new(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn message_frame_round_trips_sync_message_payload_variants() {
+        let messages = sync_message_payload_variants();
 
         for message in messages {
             let payload = encode_sync_message(&message).unwrap();
@@ -2418,6 +2462,76 @@ mod tests {
 
             assert_eq!(decode_sync_message(&envelope.payload).unwrap(), message);
         }
+    }
+
+    /// `decode_postcard_exact` compares while serializing instead of
+    /// allocating a re-encode (#3376). Pin that it accepts exactly what the
+    /// old decode-then-`to_allocvec` equality accepted, across truncations,
+    /// insertions, substitutions, overlong varints and deletions of every
+    /// payload variant and of canonical maps and sets. This is a white-box
+    /// differential test because the equivalence is a property of one
+    /// internal function that no public path can enumerate.
+    #[test]
+    fn canonical_postcard_check_matches_allocating_re_encode() {
+        fn allocating_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            match postcard::take_from_bytes::<T>(bytes) {
+                Ok((value, rest)) => {
+                    rest.is_empty()
+                        && postcard::to_allocvec(&value).is_ok_and(|encoded| encoded == bytes)
+                }
+                Err(_) => false,
+            }
+        }
+        fn streaming_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            decode_postcard_exact::<T>(bytes).is_ok()
+        }
+        fn mutations_agree<T: serde::de::DeserializeOwned + Serialize>(canonical: &[u8]) {
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    allocating_exact::<T>(bytes),
+                    streaming_exact::<T>(bytes),
+                    "canonical check diverges on {bytes:02x?}"
+                );
+            };
+            assert!(streaming_exact::<T>(canonical));
+            for i in 0..=canonical.len() {
+                check(&canonical[..i]);
+                for byte in 0..=u8::MAX {
+                    let mut inserted = canonical.to_vec();
+                    inserted.insert(i, byte);
+                    check(&inserted);
+                    if i < canonical.len() {
+                        let mut substituted = canonical.to_vec();
+                        substituted[i] = byte;
+                        check(&substituted);
+                    }
+                    if i + 1 < canonical.len() {
+                        let mut overlong = canonical.to_vec();
+                        overlong[i] = byte | 0x80;
+                        overlong.insert(i + 1, 0);
+                        check(&overlong);
+                    }
+                }
+                if i < canonical.len() {
+                    let mut removed = canonical.to_vec();
+                    removed.remove(i);
+                    check(&removed);
+                }
+            }
+        }
+
+        for message in sync_message_payload_variants() {
+            mutations_agree::<SyncMessage>(&encode_sync_message(&message).unwrap());
+        }
+        type Map = std::collections::BTreeMap<u32, String>;
+        let map: Map = [(1, "a".to_owned()), (2, "b".to_owned())].into();
+        mutations_agree::<Map>(&postcard::to_allocvec(&map).unwrap());
+        let duplicate_key = [vec![2u8], vec![1, 1, b'a'], vec![1, 1, b'b']].concat();
+        let unsorted_keys = [vec![2u8], vec![2, 1, b'b'], vec![1, 1, b'a']].concat();
+        assert!(!streaming_exact::<Map>(&duplicate_key));
+        assert!(!streaming_exact::<Map>(&unsorted_keys));
+        let set: std::collections::BTreeSet<u64> = [1, 300, 70_000].into();
+        mutations_agree::<std::collections::BTreeSet<u64>>(&postcard::to_allocvec(&set).unwrap());
     }
 
     #[test]

@@ -262,6 +262,7 @@ where
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
                     admitted_write_authorization: false,
+                    version_receipts_validated: false,
                 }),
             )
             .await?;
@@ -312,7 +313,8 @@ where
                     .ingest_relay_commit_unit_with_encoder_trust(
                         tx.clone(),
                         versions.clone(),
-                        ingest_context.trust.is_trusted(),
+                        ingest_context.trust.is_trusted()
+                            || ingest_context.version_receipts_validated,
                     )
                     .await?;
                 if same_scope_author {
@@ -380,16 +382,31 @@ where
                         ));
                     }
                 }
+                // Only a relay's terminal ingest consumes this receipt. Every
+                // other trust evaluates the write policies itself at ingest, so
+                // it needs the support proof but not a discarded evaluation.
                 let admitted_write_authorization = {
                     let mut node = node.lock().await;
-                    peer.prove_terminal_commit_authorization(
-                        &mut node,
-                        permission_subject,
-                        session_claim_binding.1,
-                        &versions,
-                        tx.tx_id,
-                    )
-                    .await?
+                    if ingest_context.trust == CommitUnitTrust::Relay {
+                        peer.prove_terminal_commit_authorization(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?
+                    } else {
+                        peer.prove_terminal_commit_support(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?;
+                        false
+                    }
                 };
                 Ok(node
                     .lock()
@@ -1784,6 +1801,7 @@ where
                     message: message.message,
                     lease: message.lease,
                     authority_receipt_eligible: false,
+                    receipts_validated: message.receipts_validated,
                 }),
                 Ok(None) => {
                     self.inbound_authority_receipt_quarantine = false;
@@ -2551,6 +2569,7 @@ where
                                     lease: message.lease,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
+                                    receipts_validated: message.receipts_validated,
                                 }),
                                 Ok(None) => {
                                     self.inbound_authority_receipt_quarantine = false;
@@ -2573,6 +2592,7 @@ where
                             message,
                             lease,
                             authority_receipt_eligible,
+                            receipts_validated,
                         }) = next
                         else {
                             break;
@@ -2585,7 +2605,7 @@ where
                                 return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
                             }
                             deferred_repair_fates.push_back(StagedInboundMessage {
-                                message, lease, authority_receipt_eligible,
+                                message, lease, authority_receipt_eligible, receipts_validated,
                             });
                             continue;
                         }
@@ -2697,6 +2717,7 @@ where
                                                 },
                                                 authority_receipt_eligible: false,
                                                 lease: None,
+                                                receipts_validated: false,
                                             });
                                         }
                                     }
@@ -2733,6 +2754,7 @@ where
                                         message: SyncMessage::CatalogueSnapshot(snapshot),
                                         lease: lease.clone(),
                                         authority_receipt_eligible,
+                                        receipts_validated,
                                     });
                                     break;
                                 }
@@ -3600,19 +3622,9 @@ where
                                     _ => None,
                                 };
                                 let released_outbox_tx_id = match &message {
-                                    SyncMessage::FateUpdate {
-                                        tx_id,
-                                        fate,
-                                        global_time,
-                                        durability,
-                                        ..
-                                    } if outbox_release_receipt_eligible
-                                        && (matches!(fate, Fate::Rejected(_))
-                                            || (matches!(fate, Fate::Accepted)
-                                                && global_time.is_some()
-                                                && durability.is_some_and(|tier| {
-                                                    tier >= DurabilityTier::Global
-                                                }))) =>
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if outbox_release_receipt_eligible
+                                            && fate_update_settles_upload(&message, *tx_id) =>
                                     {
                                         Some(*tx_id)
                                     }
@@ -3642,7 +3654,7 @@ where
                                     && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
                                 {
                                     drop(ingress_owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible, receipts_validated });
                                     break;
                                 }
                                 if *local_receiver {
@@ -3928,12 +3940,17 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding, lease) =
+                    let (message, parked_policy_binding, lease, receipts_validated) =
                         if let Some(staged) = self.staged_inbound.pop_front() {
-                            (Box::new(staged.message), None, staged.lease)
+                            (Box::new(staged.message), None, staged.lease, staged.receipts_validated)
                         } else {
                             match self.transport.try_recv_owned_result() {
-                                Ok(Some(message)) => (Box::new(message.message), None, message.lease),
+                                Ok(Some(message)) => (
+                                    Box::new(message.message),
+                                    None,
+                                    message.lease,
+                                    message.receipts_validated,
+                                ),
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
@@ -3964,6 +3981,7 @@ where
                                         Box::new(SyncMessage::Subscribe(pending.subscribe)),
                                         Some(pending.policy_binding),
                                         None,
+                                        false,
                                     )
                                 }
                             }
@@ -5305,7 +5323,7 @@ where
                                 let mut owner = self.node.lock().await;
                                 if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
                                     drop(owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false, receipts_validated });
                                     catalogue_deferred = true;
                                     return Ok::<bool, Error>(false);
                                 }
@@ -5315,7 +5333,10 @@ where
                                 &self.node,
                                 peer,
                                 *local_receiver,
-                                *ingest_context,
+                                CommitUnitIngestContext {
+                                    version_receipts_validated: receipts_validated,
+                                    ..*ingest_context
+                                },
                                 session_claim_binding.clone().expect(
                                     "subscriber dispatch has an admitted immutable session binding",
                                 ),
@@ -5346,6 +5367,18 @@ where
                                     tx_id,
                                 );
                             }
+                            // A declared root with no upstream that settled this
+                            // upload terminally (the same predicate an upstream
+                            // fate must meet to release an outbox entry) has
+                            // nobody left to ask. Queueing it would retain the
+                            // unit forever. Any node with an upstream must still
+                            // relay, even though its own ingest says Global.
+                            let settled_here = outbox.borrow().settles_uploads_locally()
+                                && local_upload.as_ref().is_some_and(|(tx_id, _)| {
+                                responses
+                                    .iter()
+                                    .any(|response| fate_update_settles_upload(response, *tx_id))
+                            });
                             for response in responses {
                                 if matches!(response, SyncMessage::FateUpdate { .. }) {
                                     self.downstream_fates.borrow_mut().push(response);
@@ -5358,10 +5391,16 @@ where
                                     )?;
                                 }
                             }
-                            if let Some((tx_id, unit)) = local_upload
-                                && queue_pending_upload_in(&outbox, tx_id, Some(unit))
-                            {
-                                schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                            if let Some((tx_id, unit)) = local_upload {
+                                if settled_here {
+                                    // A reconnect may have reconstructed this
+                                    // upload before the unit arrived here.
+                                    if outbox.borrow().contains(tx_id) {
+                                        self.released_outbox_tx_ids.push(tx_id);
+                                    }
+                                } else if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                }
                             }
                             Ok::<bool, Error>(false)
                             })
@@ -7400,6 +7439,28 @@ where
     Ok(())
 }
 
+/// Whether `message` is a terminal fate for `tx_id` that no upstream can
+/// revise: a rejection, or a Global-durable acceptance carrying its global
+/// time. Only such a fate retires an upload-outbox entry.
+fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
+    match message {
+        SyncMessage::FateUpdate {
+            tx_id: fate_tx_id,
+            fate,
+            global_time,
+            durability,
+            ..
+        } => {
+            *fate_tx_id == tx_id
+                && (matches!(fate, Fate::Rejected(_))
+                    || (matches!(fate, Fate::Accepted)
+                        && global_time.is_some()
+                        && durability.is_some_and(|tier| tier >= DurabilityTier::Global)))
+        }
+        _ => false,
+    }
+}
+
 /// Deliver terminal/local fate updates in FIFO order without letting a bounded
 /// byte transport turn an already-produced settlement into a dropped message.
 ///
@@ -7419,21 +7480,29 @@ fn flush_downstream_fates<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    loop {
-        let Some(fate) = fates.borrow().first().cloned() else {
-            return Ok(true);
+    // Send from a detached batch so draining K queued fates is O(K), not the
+    // O(K²) of removing each sent fate from the front of the `Vec`. Whatever
+    // was not sent goes back ahead of anything queued meanwhile.
+    let mut pending = std::mem::take(&mut *fates.borrow_mut());
+    let mut sent = 0;
+    let result = loop {
+        let Some(fate) = pending.get(sent).cloned() else {
+            break Ok(true);
         };
         match send_with_sync_context(node, peer, transport, fate) {
-            Ok(()) => {
-                fates.borrow_mut().remove(0);
-            }
+            Ok(()) => sent += 1,
             Err(error) if error.code == ErrorCode::Backpressure => {
                 schedule_tick_in(scheduler, TickUrgency::Deferred);
-                return Ok(false);
+                break Ok(false);
             }
-            Err(error) => return Err(error),
+            Err(error) => break Err(error),
         }
-    }
+    };
+    pending.drain(..sent);
+    let mut queue = fates.borrow_mut();
+    pending.append(&mut queue);
+    *queue = pending;
+    result
 }
 
 /// Retry the one ordinary-wire chunk response whose byte admission was refused.
