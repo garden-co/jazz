@@ -91,6 +91,23 @@ pub trait PageStore {
 
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
     fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
+
+    /// Read several pages, returning one slot per requested id in request
+    /// order. A cold scan asks for every missing page it can see at once, so a
+    /// store with per-read overhead (an IndexedDB transaction) should override
+    /// this with one batched read. The default preserves per-page semantics.
+    fn read_pages<'a>(
+        &'a self,
+        page_ids: &'a [PageId],
+    ) -> BoxFuture<'a, Result<Vec<Option<Vec<u8>>>, String>> {
+        Box::pin(async move {
+            let mut pages = Vec::with_capacity(page_ids.len());
+            for &page_id in page_ids {
+                pages.push(self.read_page(page_id).await?);
+            }
+            Ok(pages)
+        })
+    }
     fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;
 }
 
@@ -106,6 +123,19 @@ pub struct MemoryPageStore {
 struct MemoryPageStoreState {
     metadata: Option<Metadata>,
     pages: BTreeMap<PageId, Vec<u8>>,
+}
+
+#[cfg(test)]
+impl MemoryPageStore {
+    /// Every stored page and the durable root, for page-level contract tests.
+    pub(crate) fn stored(&self) -> (Option<PageId>, BTreeMap<PageId, Vec<u8>>) {
+        let state = self.inner.borrow();
+        let root = state
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.root_page_id);
+        (root, state.pages.clone())
+    }
 }
 
 impl PageStore for MemoryPageStore {

@@ -531,7 +531,7 @@ impl NodeState {
         input: &BindingSourceOp,
         output_desc: &RecordDescriptor,
         binding_deltas: &[BindingDelta],
-        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
+        binding_snapshots: &BindingSnapshots,
         mode: ArrangementUpdateMode,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if mode == ArrangementUpdateMode::Replace {

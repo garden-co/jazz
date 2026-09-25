@@ -1337,6 +1337,96 @@ struct AutoDirectFamilyPlan {
     pub(super) public_fields: Vec<String>,
 }
 
+/// Point-in-time binding multisets, one shared snapshot per binding source.
+///
+/// Replace-mode evaluation reads one key; holders such as pending hydrations
+/// keep the `Arc` they were handed, so later binds never change what they see.
+pub(super) type BindingSnapshots = HashMap<BindingSourceKey, Arc<RecordDeltas>>;
+
+/// Binding source states plus a lazily maintained snapshot of their bindings.
+///
+/// Every mutable access marks its key dirty, so a snapshot request only
+/// rebuilds the sources that changed since the previous request. Ticks that
+/// don't bind or unbind therefore share one snapshot instead of copying every
+/// binding of every prepared shape.
+#[derive(Clone, Debug, Default)]
+pub(super) struct BindingSources {
+    states: HashMap<BindingSourceKey, BindingSourceState>,
+    snapshot: Arc<BindingSnapshots>,
+    dirty: HashSet<BindingSourceKey>,
+}
+
+impl BindingSources {
+    pub(super) fn get(&self, key: &BindingSourceKey) -> Option<&BindingSourceState> {
+        self.states.get(key)
+    }
+
+    pub(super) fn contains_key(&self, key: &BindingSourceKey) -> bool {
+        self.states.contains_key(key)
+    }
+
+    #[cfg(test)]
+    pub(super) fn keys(&self) -> impl Iterator<Item = &BindingSourceKey> {
+        self.states.keys()
+    }
+
+    pub(super) fn values(&self) -> impl Iterator<Item = &BindingSourceState> {
+        self.states.values()
+    }
+
+    pub(super) fn get_mut(&mut self, key: &BindingSourceKey) -> Option<&mut BindingSourceState> {
+        let state = self.states.get_mut(key)?;
+        self.dirty.insert(key.clone());
+        Some(state)
+    }
+
+    pub(super) fn entry(
+        &mut self,
+        key: BindingSourceKey,
+    ) -> std::collections::hash_map::Entry<'_, BindingSourceKey, BindingSourceState> {
+        self.dirty.insert(key.clone());
+        self.states.entry(key)
+    }
+
+    pub(super) fn remove(&mut self, key: &BindingSourceKey) -> Option<BindingSourceState> {
+        let removed = self.states.remove(key)?;
+        self.dirty.insert(key.clone());
+        Some(removed)
+    }
+
+    /// Current bindings of every source, as positive-weight record deltas.
+    pub(super) fn snapshot(&mut self) -> Arc<BindingSnapshots> {
+        if !self.dirty.is_empty() {
+            let snapshot = Arc::make_mut(&mut self.snapshot);
+            for key in self.dirty.drain() {
+                match self.states.get(&key) {
+                    Some(source) => {
+                        snapshot.insert(key, Arc::new(Self::source_snapshot(source)));
+                    }
+                    None => {
+                        snapshot.remove(&key);
+                    }
+                }
+            }
+        }
+        Arc::clone(&self.snapshot)
+    }
+
+    fn source_snapshot(source: &BindingSourceState) -> RecordDeltas {
+        RecordDeltas {
+            descriptor: source.descriptor,
+            deltas: source
+                .refcounts
+                .keys()
+                .map(|binding| RecordDelta {
+                    record: binding.0.clone().into(),
+                    weight: 1,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct BindingSourceState {
     pub(super) descriptor: RecordDescriptor,
@@ -3597,12 +3687,16 @@ impl IvmRuntime {
                 && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
             let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
             let mut binding_snapshots = runtime.binding_snapshot_deltas();
-            let snapshot = binding_snapshots
-                .entry(binding_delta.key.clone())
-                .or_insert_with(|| RecordDeltas {
-                    descriptor: binding_delta.descriptor,
-                    deltas: Vec::new(),
-                });
+            let snapshot = Arc::make_mut(
+                Arc::make_mut(&mut binding_snapshots)
+                    .entry(binding_delta.key.clone())
+                    .or_insert_with(|| {
+                        Arc::new(RecordDeltas {
+                            descriptor: binding_delta.descriptor,
+                            deltas: Vec::new(),
+                        })
+                    }),
+            );
             for delta in &binding_delta.deltas {
                 if delta.weight > 0
                     && !snapshot
@@ -4593,26 +4687,8 @@ impl IvmRuntime {
         Err(IvmRuntimeError::PreparedShapeNotFound(shape_id))
     }
 
-    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<BindingSourceKey, RecordDeltas> {
-        self.binding_sources
-            .iter()
-            .map(|(shape, source)| {
-                (
-                    shape.clone(),
-                    RecordDeltas {
-                        descriptor: source.descriptor,
-                        deltas: source
-                            .refcounts
-                            .keys()
-                            .map(|binding| RecordDelta {
-                                record: binding.0.clone().into(),
-                                weight: 1,
-                            })
-                            .collect(),
-                    },
-                )
-            })
-            .collect()
+    pub(super) fn binding_snapshot_deltas(&mut self) -> Arc<BindingSnapshots> {
+        self.binding_sources.snapshot()
     }
 
     fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {

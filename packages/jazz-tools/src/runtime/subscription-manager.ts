@@ -1,3 +1,4 @@
+import { bytesToHex, formatUuidAt } from "./hex.js";
 import { Utf8Decoder } from "./utf8.js";
 /**
  * Manage subscription state and compute deltas.
@@ -88,7 +89,18 @@ function applySubscriptionDeltaSequentially<T extends { id: string }>(
   current: T[],
   delta: RowDelta<T>[],
 ): T[] {
-  for (const change of normalizeRowDelta(delta)) {
+  const changes = normalizeRowDelta(delta);
+  for (let position = 0; position < changes.length; position++) {
+    const change = changes[position]!;
+    if (change.kind === RowChangeKind.Removed) {
+      // Removals by id commute, so a run of them is applied in one pass.
+      const end = removedRunEnd(changes, position);
+      if (end - position > 1) {
+        removeIdsOnce(current, changes, position, end);
+        position = end - 1;
+        continue;
+      }
+    }
     switch (change.kind) {
       case RowChangeKind.Added:
         removeById(current, change.id);
@@ -200,6 +212,43 @@ function mergeIndexedPlacements<T>(base: T[], placements: Array<{ index: number;
   return next;
 }
 
+/** Index just past the run of consecutive removals starting at `start`. */
+function removedRunEnd(changes: readonly RowDelta<unknown>[], start: number): number {
+  let end = start;
+  while (end < changes.length && changes[end]!.kind === RowChangeKind.Removed) end++;
+  return end;
+}
+
+/**
+ * Apply `removeById` for each removal in `changes[start, end)` in one pass:
+ * each removal drops the first remaining item with its identity.
+ */
+function removeIdsOnce<T extends { id: string }>(
+  current: T[],
+  changes: readonly RowDelta<T>[],
+  start: number,
+  end: number,
+): void {
+  const pending = new Map<string, number>();
+  for (let index = start; index < end; index++) {
+    const id = changes[index]!.id;
+    pending.set(id, (pending.get(id) ?? 0) + 1);
+  }
+  let write = 0;
+  for (let read = 0; read < current.length; read++) {
+    const item = current[read]!;
+    const id = resultIdentity(item);
+    const remaining = pending.get(id);
+    if (remaining !== undefined && remaining > 0) {
+      pending.set(id, remaining - 1);
+      continue;
+    }
+    if (write !== read) current[write] = item;
+    write++;
+  }
+  if (write !== current.length) current.splice(write);
+}
+
 function removeById<T extends { id: string }>(current: T[], id: string): void {
   const index = current.findIndex((item) => resultIdentity(item) === id);
   if (index !== -1) current.splice(index, 1);
@@ -247,6 +296,29 @@ export class SubscriptionManager<T extends { id: string }> {
     this.reindexOrderedIds(index);
   }
 
+  /** Remove every id in `changes[start, end)` from the result in one pass. */
+  private removeIds(changes: readonly RowDelta<T>[], start: number, end: number): void {
+    let first = this.orderedIds.length;
+    for (let index = start; index < end; index++) {
+      const id = changes[index]!.id;
+      this.currentResults.delete(id);
+      const position = this.orderedIdIndex.get(id);
+      if (position === undefined) continue;
+      this.orderedIdIndex.delete(id);
+      if (position < first) first = position;
+    }
+    if (first === this.orderedIds.length) return;
+    let write = first;
+    for (let read = first; read < this.orderedIds.length; read++) {
+      const id = this.orderedIds[read]!;
+      if (!this.orderedIdIndex.has(id)) continue;
+      this.orderedIds[write] = id;
+      this.orderedIdIndex.set(id, write);
+      write++;
+    }
+    this.orderedIds.length = write;
+  }
+
   private insertIdAt(id: string, index: number): void {
     const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
     this.orderedIds.splice(clamped, 0, id);
@@ -277,58 +349,63 @@ export class SubscriptionManager<T extends { id: string }> {
         this.clearRows();
         this.deferredTerminalOperations = [];
       }
-      for (const key of [...delta.added, ...delta.updated, ...delta.removed].map(
-        (change) => change.occurrenceKey,
-      )) {
-        const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
-        if (orderedKey) {
-          this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
-        } else {
+      // Validate and register each occurrence once, keeping its public result
+      // key and exact ordered-root address for the rest of this frame.
+      const registerOccurrence = (sidecar: Uint8Array) => {
+        const orderedKey = orderedTerminalKeyForTypedOccurrence(sidecar);
+        if (!orderedKey) {
           throw new Error("malformed or noncanonical ResultKey V1 terminal occurrence key");
         }
-      }
+        const id = publicResultKey(sidecar);
+        return { id, address: this.registerTerminalOccurrenceAddress(orderedKey, id) };
+      };
+      const addedKeys = delta.added.map((change) => registerOccurrence(change.occurrenceKey));
+      const updatedKeys = delta.updated.map((change) => registerOccurrence(change.occurrenceKey));
+      const removedKeys = delta.removed.map((change) => registerOccurrence(change.occurrenceKey));
       const decoded: DecodedRowDelta[] = [
-        ...delta.updated.map((change) => ({
+        ...delta.updated.map((change, index) => ({
           kind: RowChangeKind.Updated,
-          id: publicResultKey(change.occurrenceKey),
+          id: updatedKeys[index]!.id,
           index: change.index,
           row: change.row,
         })),
-        ...delta.added.map((change) => ({
+        ...delta.added.map((change, index) => ({
           kind: RowChangeKind.Added,
-          id: publicResultKey(change.occurrenceKey),
+          id: addedKeys[index]!.id,
           index: change.index,
           row: change.row,
         })),
-        ...delta.removed.map((change) => ({
+        ...delta.removed.map((change, index) => ({
           kind: RowChangeKind.Removed,
-          id: publicResultKey(change.occurrenceKey),
+          id: removedKeys[index]!.id,
           index: change.index,
         })),
       ];
+      // A root that this frame both removes and adds or updates stays in the
+      // result (see normalizeRowDelta), so it keeps its retained terminal row.
+      const materializedRoots = new Set(
+        decoded
+          .filter((change) => change.kind !== RowChangeKind.Removed)
+          .map((change) => change.id),
+      );
       // Root removals are applied before terminal operations. Keep their
       // full public occurrence identities so a later descendant teardown in
-      // this frame can be recognized as subsumed by its root removal.
+      // this frame can be recognized as subsumed by its root removal. The
+      // registered address of a removed root is its public result key.
       const removedRoots = new Set<string>();
-      for (const [index, change] of decoded
-        .filter((change) => change.kind === RowChangeKind.Removed)
-        .entries()) {
-        removedRoots.add(change.id);
-        const terminalKey = terminalKeyForOccurrence(delta.removed[index]?.occurrenceKey);
-        if (!terminalKey) continue;
-        const rootId = this.terminalAddress(Array.from(terminalKey));
-        removedRoots.add(rootId);
-        change.id = rootId;
+      for (const key of removedKeys) {
+        if (!materializedRoots.has(key.id)) removedRoots.add(key.id);
       }
       for (const change of decoded) {
-        if (change.kind === RowChangeKind.Removed) {
-          for (const rootId of removedRoots) this.terminalRows.delete(rootId);
-        } else if (change.row) {
+        if (change.kind !== RowChangeKind.Removed && change.row) {
           // Retained roots are immutable. The first descendant edit in a
           // later frame makes a private writable copy of the whole root.
           this.terminalRows.set(change.id, change.row);
         }
       }
+      // Removals follow every set in `decoded`, so dropping the removed roots
+      // once afterwards is equivalent to dropping them at each removal.
+      for (const rootId of removedRoots) this.terminalRows.delete(rootId);
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
       // Complete roots already include this frame's descendant edits. Replaying
       // those edits would remove children twice or apply moves to the new order.
@@ -346,14 +423,21 @@ export class SubscriptionManager<T extends { id: string }> {
         ),
         removedRoots,
       );
+      let result = wireResult;
       if (terminalOperations.length > 0) {
         const terminalResult = this.handleTerminalOperations(terminalOperations, transform);
         const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
-        return reset
+        result = reset
           ? { delta: combined, all: this.all(), reset: true }
           : { delta: combined, all: this.all() };
       }
-      return wireResult;
+      // A removed root's ordered-key address is only needed while the root is
+      // part of the result; re-adding it registers the address again. Pruning
+      // keeps the map bounded by the live result instead of every key seen.
+      for (const { id, address } of removedKeys) {
+        if (!this.currentResults.has(id)) this.terminalOccurrenceAddresses.delete(address);
+      }
+      return result;
     } catch (error) {
       this.restore(snapshot);
       throw error;
@@ -496,19 +580,21 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   private terminalAddress(encoded: readonly number[]): string {
-    return this.terminalOccurrenceAddresses.get(bytesKey(encoded)) ?? terminalKeyId(encoded);
+    return this.terminalOccurrenceAddresses.get(bytesToHex(encoded)) ?? terminalKeyId(encoded);
   }
 
+  /** Register an ordered root key's occurrence and return its address key. */
   private registerTerminalOccurrenceAddress(
     orderedKey: Uint8Array,
     occurrenceAddress: string,
-  ): void {
-    const address = bytesKey(orderedKey);
+  ): string {
+    const address = bytesToHex(orderedKey);
     const existing = this.terminalOccurrenceAddresses.get(address);
     if (existing !== undefined && existing !== occurrenceAddress) {
       throw new Error("conflicting typed terminal occurrence keys share an ordered root key");
     }
     this.terminalOccurrenceAddresses.set(address, occurrenceAddress);
+    return address;
   }
 
   seed(rows: T[]): SubscriptionDelta<T> {
@@ -569,7 +655,18 @@ export class SubscriptionManager<T extends { id: string }> {
       return { delta, all: this.all() } as SubscriptionDelta<T>;
     }
 
-    for (const change of delta) {
+    for (let position = 0; position < delta.length; position++) {
+      const change = delta[position]!;
+      if (change.kind === RowChangeKind.Removed) {
+        // Removals by id commute, so a run of them is applied in one pass
+        // instead of splicing and reindexing the order once per removal.
+        const end = removedRunEnd(delta, position);
+        if (end - position > 1) {
+          this.removeIds(delta, position, end);
+          position = end - 1;
+          continue;
+        }
+      }
       switch (change.kind) {
         case RowChangeKind.Added:
           const alreadyPresent = this.currentResults.has(change.id);
@@ -747,12 +844,6 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   return Uint8Array.from(ordered);
 }
 
-/** Reconstruct a terminal key from the sole ResultKey V1 carrier. */
-function terminalKeyForOccurrence(sidecar: Uint8Array | undefined): Uint8Array | undefined {
-  if (!sidecar) return undefined;
-  return orderedTerminalKeyForTypedOccurrence(sidecar);
-}
-
 function readU32Be(bytes: Uint8Array, offset: number): number {
   return (
     (((bytes[offset] ?? 0) << 24) |
@@ -782,10 +873,6 @@ function isValidUtf8(bytes: Uint8Array): boolean {
   }
 }
 
-function bytesKey(bytes: ArrayLike<number>): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 function terminalKeyId(encoded: readonly number[]): string {
   const bytes = Uint8Array.from(encoded);
   if (bytes.length === 17 && bytes[0] === 10) {
@@ -801,7 +888,7 @@ function terminalKeyId(encoded: readonly number[]): string {
     const uuids: number[][] = [];
     for (let offset = 0; offset < bytes.length; offset += 17) {
       if (bytes[offset] !== 10) {
-        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+        return bytesToHex(bytes);
       }
       uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
@@ -816,7 +903,7 @@ function terminalKeyId(encoded: readonly number[]): string {
     }
     return publicResultKey(occurrence);
   }
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return bytesToHex(bytes);
 }
 
 function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
@@ -971,17 +1058,17 @@ function terminalCollection(
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {
-  const hex = Array.from(bytes.subarray(offset, offset + 16), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
-    16,
-    20,
-  )}-${hex.slice(20)}`;
+  return formatUuidAt(bytes, offset);
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0))
-    return readUuid(bytes, 1);
-  return `result:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  if (bytes.length === 25 && bytes[0] === 1 && isZeroFrom(bytes, 17)) return readUuid(bytes, 1);
+  return `result:${bytesToHex(bytes)}`;
+}
+
+function isZeroFrom(bytes: Uint8Array, start: number): boolean {
+  for (let index = start; index < bytes.length; index++) {
+    if (bytes[index] !== 0) return false;
+  }
+  return true;
 }
