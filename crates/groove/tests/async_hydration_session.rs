@@ -353,6 +353,65 @@ fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
 }
 
 #[test]
+fn subscription_released_during_a_shared_hydration_is_not_resurrected_by_its_install() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(seed)).unwrap();
+    let before = database.runtime_stats();
+    let shared = || GraphBuilder::table("albums").project(["title"]);
+
+    let earlier = block_on(database.subscribe_one_sink(shared())).unwrap();
+    assert_eq!(
+        block_on(database.next_subscription(&earlier))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
+
+    // A later subscription shares that output and also needs a cold scan, so
+    // its hydration suspends. The earlier one is released meanwhile.
+    storage.evict_scans("edges");
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let later = database
+        .subscribe([
+            ("shared", shared()),
+            ("edges", GraphBuilder::table("edges")),
+        ])
+        .unwrap();
+    let mut progress = Box::pin(database.drive_progress());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(progress);
+    assert!(database.unsubscribe(earlier.id()));
+    drop(earlier);
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(database.drive_progress()).unwrap();
+    let rows = block_on(database.next_multisink_subscription(&later)).unwrap();
+    assert_eq!(rows.sinks["shared"].deltas.len(), 1);
+    assert_eq!(rows.sinks["edges"].deltas.len(), 1);
+
+    // Graph size is only observable through runtime stats: once both
+    // subscriptions are gone, nothing may keep their nodes alive.
+    assert!(database.unsubscribe(later.id()));
+    drop(later);
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+}
+
+#[test]
 fn hash_equal_hydration_roots_share_one_in_flight_storage_request() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
