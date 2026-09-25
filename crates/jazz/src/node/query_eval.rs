@@ -108,6 +108,8 @@ const ORDERED_PAGE_PROBE_ATTEMPTS: usize = 3;
 /// Largest prefix a retried ordered page probe reads, unless the requested
 /// page alone is larger.
 const ORDERED_PAGE_PROBE_MAX_CAP: usize = 4_096;
+const UUID_PAGE_PROBE_ATTEMPTS: usize = 3;
+const UUID_PAGE_PROBE_MAX_CAP: usize = 4_096;
 
 #[cfg(test)]
 thread_local! {
@@ -582,6 +584,219 @@ where
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
+    }
+
+    /// One-shot Global listings have a deterministic UUID order. Cap the
+    /// physical current source before policy evaluation, then prove the page
+    /// against the same permission and deletion graph as the complete read.
+    async fn compile_uuid_page_probe_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        cap: usize,
+    ) -> Result<Option<(QueryProgram, bool)>, Error> {
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::TrustedServing,
+        )?;
+        let root = root_source_id(&shape.query().table);
+        if request.reads.primary.source_current_tier(&root) != Some(DurabilityTier::Global) {
+            return Ok(None);
+        }
+        let mut access_paths = self.current_query_hydration_access_paths(
+            &request,
+            shape,
+            binding,
+            HydrationLifetime::FirstResult,
+        )?;
+        if access_paths.contains_key(&root) {
+            return Ok(None);
+        }
+        access_paths.insert(root.clone(), CurrentAccessPath::PrimaryKeyPage { cap });
+        let (register, exhausted) = self
+            .bounded_deletion_register_for_uuid_page(shape, cap)
+            .await?;
+        let program = self
+            .compile_query_program_request_with_bounded_deletion_register(
+                request,
+                access_paths,
+                (root, register),
+            )
+            .await?;
+        Ok(Some((program, exhausted)))
+    }
+
+    /// Match the content scan's raw UUID prefix. Looking up deletion winners
+    /// for just these candidates preserves the anti-join after the cap.
+    async fn bounded_deletion_register_for_uuid_page(
+        &mut self,
+        shape: &ValidatedQuery,
+        cap: usize,
+    ) -> Result<(GraphBuilder, bool), Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .and_then(|mapping| mapping.tables.get(&shape.query().table))
+            .ok_or(Error::InvalidStoredValue(
+                "UUID page probe has no physical table mapping",
+            ))?;
+        let content_table = physical_global_current_table_name(mapping.table_id);
+        let register_table = physical_register_global_current_table_name(mapping.table_id);
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let scan = StaticScanSpec::PrefixLimit {
+            prefix: vec![LiteralValue::from(branch.clone())],
+            max_items: cap,
+        };
+        let projection = self.ensure_physical_current_projection_for_enum_columns(
+            shape.schema_version(),
+            &shape.query().table,
+            &BTreeSet::new(),
+        )?;
+        let candidates = self
+            .database
+            .query_graph(
+                GraphBuilder::variant_source_scan(content_table.clone(), projection, scan)
+                    .project(["row_uuid"]),
+            )
+            .await
+            .map_err(Error::Groove)?;
+        let row_uuids = candidates
+            .iter()
+            .map(|(row, _)| row.get_uuid(0))
+            .collect::<Result<Vec<_>, _>>()?;
+        // A short projected prefix does not by itself prove physical
+        // exhaustion: an incompatible schema variant may be omitted. A
+        // reverse point seek proves it only when the last raw UUID was among
+        // the projected candidates. Otherwise the probe may widen or fall
+        // back to the complete source.
+        let exhausted = if row_uuids.len() < cap {
+            let last_raw = self
+                .database
+                .primary_key_last_raw(&content_table, std::slice::from_ref(&branch))
+                .await
+                .map_err(Error::Groove)?;
+            let row_uuid_index = self
+                .database
+                .table_schema(&content_table)
+                .map_err(Error::Groove)?
+                .record_schema()
+                .field_index("row_uuid")
+                .ok_or(Error::InvalidStoredValue(
+                    "UUID page probe physical row ID is missing",
+                ))?;
+            let last_raw_uuid = last_raw
+                .as_ref()
+                .map(|raw| raw.record().get_uuid(row_uuid_index))
+                .transpose()?;
+            last_raw_uuid == row_uuids.iter().copied().max()
+        } else {
+            false
+        };
+        let mut registers = Vec::with_capacity(candidates.deltas.len());
+        for row_uuid in row_uuids {
+            if let Some(register) = self
+                .database
+                .primary_key_get_raw(&register_table, &[branch.clone(), Value::Uuid(row_uuid)])
+                .await
+                .map_err(Error::Groove)?
+            {
+                registers.push(register.raw().to_vec());
+            }
+        }
+        let descriptor = self
+            .database
+            .table_schema(&register_table)
+            .map_err(Error::Groove)?
+            .record_schema();
+        Ok((
+            GraphBuilder::inline_records(descriptor, registers),
+            exhausted,
+        ))
+    }
+
+    /// A UUID beyond the requested page, or an exhausted physical prefix,
+    /// proves that later source rows cannot enter this page. Sparse policy
+    /// visibility widens twice before using the complete source.
+    async fn try_uuid_page_probe(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<Vec<CurrentRow>>, Error> {
+        let query = shape.query();
+        let Some(limit) = query.limit.filter(|limit| *limit > 0 && *limit <= 1_000) else {
+            return Ok(None);
+        };
+        if query.offset != 0
+            || !query.order_by.is_empty()
+            || query.select.is_some()
+            || !query.filters.is_empty()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(None);
+        }
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+            .schema
+            .clone();
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let mut cap = limit.saturating_add(1);
+        let max_cap = cap.max(UUID_PAGE_PROBE_MAX_CAP);
+        for attempt in 0..UUID_PAGE_PROBE_ATTEMPTS {
+            let mut probe_query = query.clone();
+            probe_query.limit = Some(cap);
+            let probe_shape =
+                probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
+            let probe_binding = probe_shape.bind(binding.values().clone())?;
+            let Some((program, exhausted)) = self
+                .compile_uuid_page_probe_program(&probe_shape, &probe_binding, identity, cap)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let app_output = materialization_app_row_schema(None, Some(&program))?;
+            let root_indirect_values =
+                self.projection_dropped_root_values(&probe_query, shape.schema_version())?;
+            let deltas = self
+                .hydrate_lowered_program_once(program, &probe_binding, root_indirect_values)
+                .await?;
+            let mut rows = self.materialize_and_finalize_query_rows(
+                &probe_query,
+                shape.schema_version(),
+                &table,
+                &app_output,
+                &deltas,
+                None,
+            )?;
+            if rows.len() > limit || exhausted {
+                rows.truncate(limit);
+                return Ok(Some(rows));
+            }
+            if attempt + 1 == UUID_PAGE_PROBE_ATTEMPTS || cap >= max_cap {
+                break;
+            }
+            cap = cap.saturating_mul(4).min(max_cap);
+        }
+        Ok(None)
     }
 
     /// Compile one bounded ordered-page probe at the Global tier.
@@ -1801,6 +2016,12 @@ where
             let query = shape.query();
             self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            return Ok(rows);
+        }
+        if authorization_mode == QueryAuthorizationMode::TrustedServing
+            && tier == DurabilityTier::Global
+            && let Some(rows) = self.try_uuid_page_probe(shape, binding, identity).await?
+        {
             return Ok(rows);
         }
         if authorization_mode == QueryAuthorizationMode::TrustedServing
