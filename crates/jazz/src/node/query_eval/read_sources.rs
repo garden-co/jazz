@@ -32,6 +32,9 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// A one-shot ordered page can restrict deletion checks to its bounded
+    /// content candidates. Other sources retain the complete register.
+    pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
     /// same deduplicated physical source node, so only the outer fragment owns
@@ -55,6 +58,18 @@ pub(super) enum HydrationLifetime {
     Retained,
 }
 
+/// Which selector `guarded_current_access_path` runs inside its
+/// admission checks. Every selector goes through the same guard.
+#[derive(Clone, Copy)]
+pub(super) enum AccessPathSelector {
+    /// `select_current_access_path`: a primary-key point read, or
+    /// single-column equality probes intersected together.
+    Ordinary,
+    /// `select_composite_equality_access_path`: both equalities of a
+    /// declared two-column composite index as one prefix.
+    CompositeEquality,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
@@ -64,6 +79,9 @@ pub(super) enum CurrentAccessPath {
         /// When set, `prefix` addresses that composite index rather than the
         /// single-column index on `column`.
         order_column: Option<String>,
+        /// Scan the (composite) index prefix from its last key. Only a bounded
+        /// one-shot ordered-page probe sets this, together with `source_limit`.
+        reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
         /// A maintained source keeps every equality probe as an ordinary IVM
@@ -2408,6 +2426,7 @@ where
             CurrentAccessPath::Index {
                 column,
                 order_column,
+                reverse,
                 prefix,
                 intersections,
                 source_limit,
@@ -2416,7 +2435,8 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
-                let source_limit = (request.visibility == RowVisibility::IncludeDeleted)
+                let source_limit = (order_column.is_some()
+                    || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
@@ -2427,6 +2447,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         order_column.as_deref(),
+                        reverse,
                         &prefix,
                         &intersections,
                         false,
@@ -2763,12 +2784,17 @@ where
                     Some(CurrentAccessPath::Index {
                         column,
                         order_column,
+                        reverse,
                         prefix,
                         intersections,
                         source_limit,
                         maintained,
                     }) => {
-                        let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                        // An ordered-page probe re-proves its page after the
+                        // deletion anti-join, so its cap survives it.
+                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                            .then_some(source_limit)
+                            .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
                             1 + intersections.len() as u64;
                         self.node
@@ -2777,6 +2803,7 @@ where
                                 self.read_view.read_schema,
                                 &column,
                                 order_column.as_deref(),
+                                reverse,
                                 &prefix,
                                 &intersections,
                                 maintained,
@@ -2862,6 +2889,7 @@ where
                 Some(CurrentAccessPath::Index {
                     column,
                     order_column,
+                    reverse,
                     prefix,
                     intersections,
                     source_limit,
@@ -2878,6 +2906,7 @@ where
                             self.read_view.read_schema,
                             column,
                             order_column.as_deref(),
+                            *reverse,
                             prefix,
                             intersections,
                             *maintained,
@@ -2973,6 +3002,12 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        if tier == DurabilityTier::Global
+            && let Some((source, graph)) = &self.bounded_deletion_register
+            && *source == request.source
+        {
+            return Ok(graph.clone());
+        }
         let table_id = self
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
@@ -4103,6 +4138,7 @@ where
                 &equalities,
                 allow_local,
                 allow_secondary_indexes,
+                AccessPathSelector::Ordinary,
             )? {
                 paths.insert(source, path);
             }
@@ -4121,6 +4157,7 @@ where
         equalities: &BTreeMap<String, Value>,
         allow_local: bool,
         allow_secondary_indexes: bool,
+        selector: AccessPathSelector,
     ) -> Result<Option<CurrentAccessPath>, Error> {
         let Some(tier) = read_view.source_current_tier(source) else {
             return Ok(None);
@@ -4133,7 +4170,13 @@ where
             return Ok(None);
         }
         let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-        let Some(mut path) = select_current_access_path(&table, equalities) else {
+        let selected = match selector {
+            AccessPathSelector::Ordinary => select_current_access_path(&table, equalities),
+            AccessPathSelector::CompositeEquality => {
+                select_composite_equality_access_path(&table, equalities)
+            }
+        };
+        let Some(mut path) = selected else {
             return Ok(None);
         };
         // Authorization dependencies are cached by policy shape and claim
@@ -4293,9 +4336,65 @@ where
                             &equalities,
                             true,
                             true,
+                            AccessPathSelector::Ordinary,
                         )?
                     {
                         paths.insert(root.clone(), path);
+                    }
+                }
+                // An unordered, unbounded first result may address a
+                // declared `(a, b)` composite index with both equalities as
+                // one prefix. It is admitted by the same guard, and replaces
+                // only a plain equality probe (never a primary-key point
+                // read, an ordered path, or a capped source), whose candidate
+                // set it narrows. Local reads keep the guard's settled
+                // candidates plus complete ahead overlay; the pre-existing
+                // stale Local index read (#3340) is unchanged by this.
+                let replaceable = match paths.get(&root) {
+                    None => true,
+                    Some(CurrentAccessPath::Index {
+                        order_column,
+                        source_limit,
+                        ..
+                    }) => order_column.is_none() && source_limit.is_none(),
+                    Some(_) => false,
+                };
+                if replaceable && query.limit.is_none() && query.order_by.is_empty() {
+                    let equalities = root_literal_equalities(query, binding)?;
+                    if let Some(CurrentAccessPath::Index {
+                        column,
+                        order_column,
+                        reverse,
+                        prefix,
+                        intersections,
+                        maintained,
+                        source_limit,
+                    }) = self.guarded_current_access_path(
+                        &request.reads.primary,
+                        &root,
+                        &equalities,
+                        true,
+                        true,
+                        AccessPathSelector::CompositeEquality,
+                    )? {
+                        let maintained = match paths.get(&root) {
+                            Some(CurrentAccessPath::Index {
+                                maintained: kept, ..
+                            }) => *kept || maintained,
+                            _ => maintained,
+                        };
+                        paths.insert(
+                            root.clone(),
+                            CurrentAccessPath::Index {
+                                column,
+                                order_column,
+                                reverse,
+                                prefix,
+                                intersections,
+                                maintained,
+                                source_limit,
+                            },
+                        );
                     }
                 }
             }
@@ -4362,6 +4461,7 @@ where
                                 &equalities,
                                 true,
                                 true,
+                                AccessPathSelector::Ordinary,
                             )?
                     {
                         paths.insert(join_source.clone(), path);
@@ -4464,6 +4564,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4475,6 +4576,7 @@ where
             schema_version,
             column,
             order_column,
+            reverse,
             prefix,
             intersections,
             maintained,
@@ -4490,6 +4592,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
@@ -4523,6 +4626,14 @@ where
         };
         let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
+            Some(max_items) if reverse => StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+                max_items,
+            },
             Some(max_items) => StaticScanSpec::PrefixLimit {
                 prefix: scan_prefix
                     .iter()
@@ -5499,6 +5610,55 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
     fields
 }
 
+/// A first-result equality conjunction can use both columns of an explicitly
+/// declared two-column composite index as one prefix. The ordinary selector
+/// above keeps its single-column probes for live sources and ordered-page
+/// planning. Other indexed equalities stay as intersections, so a query that
+/// previously intersected three or more single indexes is never widened. An
+/// `id` equality keeps the primary-key probe instead.
+///
+/// Private to this file so that, outside it, the compiler rejects any call
+/// that skips `guarded_current_access_path`'s tier and secondary-index
+/// admission. Within this file only the guard (and the unit test) call it.
+fn select_composite_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+) -> Option<CurrentAccessPath> {
+    if equalities.contains_key("id") {
+        return None;
+    }
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        let first_value = equalities.get(first)?.clone();
+        let second_value = equalities.get(second)?.clone();
+        let intersections = table
+            .global_current_indexed_columns()
+            .into_iter()
+            .filter(|column| column != first && column != second)
+            .filter_map(|column| {
+                equalities.get(&column).cloned().map(|value| {
+                    let prefix = vec![physical_current_index_value(table, &column, value)];
+                    (column, prefix)
+                })
+            })
+            .collect();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![
+                physical_current_index_value(table, first, first_value),
+                physical_current_index_value(table, second, second_value),
+            ],
+            intersections,
+            maintained: false,
+            source_limit: None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5514,6 +5674,69 @@ mod tests {
             select_current_access_path(&table, &equalities),
             Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
+    }
+
+    /// Internal planner assertion: which composite prefix is chosen is only
+    /// observable as read work. Both equalities of a declared two-column
+    /// composite become one prefix, other indexed equalities stay
+    /// intersections, an `id` equality keeps the primary-key probe, and a
+    /// longer composite or a missing equality declines.
+    #[test]
+    fn composite_equality_selector_keeps_other_probes_and_declines_otherwise() {
+        let mut table = TableSchema::new(
+            "issues",
+            ["group", "state", "assignee"].map(|name| ColumnSchema::new(name, ColumnType::String)),
+        );
+        table.indexed_columns = BTreeSet::from(["group".to_owned(), "assignee".to_owned()]);
+        table.composite_indexes = BTreeSet::from([
+            vec![
+                "group".to_owned(),
+                "state".to_owned(),
+                "assignee".to_owned(),
+            ],
+            vec!["group".to_owned(), "state".to_owned()],
+        ]);
+        let text = |value: &str| Value::String(value.to_owned());
+        let equalities = BTreeMap::from([
+            ("group".to_owned(), text("wanted")),
+            ("state".to_owned(), text("open")),
+            ("assignee".to_owned(), text("ann")),
+        ]);
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            prefix,
+            intersections,
+            source_limit,
+            ..
+        }) = select_composite_equality_access_path(&table, &equalities)
+        else {
+            panic!("the (group, state) composite should be selected");
+        };
+        assert_eq!(column, "group");
+        assert_eq!(order_column.as_deref(), Some("state"));
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(
+            intersections
+                .iter()
+                .map(|(column, _)| column.as_str())
+                .collect::<Vec<_>>(),
+            ["assignee"]
+        );
+        assert_eq!(source_limit, None);
+
+        let mut with_id = equalities.clone();
+        with_id.insert("id".to_owned(), Value::Uuid(uuid::Uuid::from_u128(1)));
+        assert_eq!(
+            select_composite_equality_access_path(&table, &with_id),
+            None
+        );
+        let mut group_only = equalities.clone();
+        group_only.remove("state");
+        assert_eq!(
+            select_composite_equality_access_path(&table, &group_only),
+            None
+        );
     }
 
     /// This is an internal planner assertion because the fallback is only
