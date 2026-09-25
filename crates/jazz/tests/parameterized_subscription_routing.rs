@@ -740,3 +740,60 @@ fn local_bindings_keep_request_and_session_claim_scopes_apart() {
     drop(live);
     block_on(db.close()).expect("close claim-scope fixture");
 }
+
+/// Two live subscriptions of the same binding on the shared shape: each sees
+/// writes, and closing one leaves the other delivering.
+///
+/// ```text
+/// documents ──> team = $team
+///                 ├── team 0 (lone, literal)
+///                 ├── team 1 ─┐ one binding, two subscribers
+///                 └── team 1 ─┘ on the shared shape
+/// ```
+#[test]
+fn local_duplicate_bindings_on_a_shared_shape_each_deliver() {
+    let db = open_db();
+    insert_document(&db, row(1), row(1_000), 1);
+    insert_document(&db, row(2), row(1_001), 2);
+    let query = Query::from("documents").filter(eq(col("team"), param("team")));
+    let open = |team: u64, label: &str| {
+        let prepared = team_binding(&db, &query, row(1_000 + team));
+        let mut stream =
+            block_on(db.subscribe(&prepared, local_read_opts())).expect("subscribe team binding");
+        let rows = take_initial_reset(label, &mut stream);
+        (label.to_owned(), prepared, stream, rows)
+    };
+    let check = |live: &mut [(String, PreparedQuery, SubscriptionStream, BTreeSet<RowUuid>)],
+                 expected: &[&[u64]]| {
+        for ((label, prepared, stream, rows), expected) in live.iter_mut().zip(expected) {
+            apply_pending_events(label, stream, rows);
+            let expected = expected.iter().copied().map(row).collect::<BTreeSet<_>>();
+            let one_shot = block_on(db.all(prepared, local_read_opts()))
+                .expect("one-shot team read")
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(one_shot, expected, "{label} one-shot read");
+            assert_eq!(*rows, expected, "{label} maintained subscription");
+        }
+    };
+
+    let mut live = vec![
+        open(0, "team 0"),
+        open(1, "team 1 first"),
+        open(1, "team 1 second"),
+    ];
+    check(&mut live, &[&[1], &[2], &[2]]);
+
+    insert_document(&db, row(3), row(1_001), 3);
+    check(&mut live, &[&[1], &[2, 3], &[2, 3]]);
+
+    let dropped = live.remove(1);
+    drop(dropped);
+    block_on(db.tick()).expect("tick after closing one duplicate");
+    insert_document(&db, row(4), row(1_001), 4);
+    check(&mut live, &[&[1], &[2, 3, 4]]);
+
+    drop(live);
+    block_on(db.close()).expect("close duplicate-binding fixture");
+}

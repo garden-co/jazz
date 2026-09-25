@@ -1399,10 +1399,12 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        // Retained subscribers of identical terminals share one prepared
-        // shape, which retires itself with its last retained binding. A
+        // Retained client-local subscribers of identical terminals share one
+        // prepared shape, which retires itself with its last retained
+        // binding. Serving installs keep a shape per subscriber for now. A
         // first-result read owns a private shape and retires it on return.
-        let shared_shape = lifetime == SubscriptionLifetime::Retained;
+        let shared_shape = lifetime == SubscriptionLifetime::Retained
+            && binding_source_shape.ends_with(":client-local");
         let prepared = if shared_shape {
             self.database
                 .prepare_shared(terminals, binding_source_shape, binding_descriptor)
