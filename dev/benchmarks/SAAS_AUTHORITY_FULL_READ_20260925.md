@@ -139,7 +139,12 @@ without result-only delivery, still settled 39 subscriptions and 27,518 rows
 in **6,452 ms**. Core/relay/Client tick wall times were 2,096/2,406/1,948 ms.
 The largest measured exclusive phases included Core query setup (884 ms),
 relay own work (686 ms), and Client storage apply (675 ms). It peaked at
-3.37 GB RSS. This no-deletion path remains the next architectural target: it
+3.37 GB RSS. Core processed 835,203 map/projection inputs and 601,822
+keyed-join left records. Across Core, relay, and Client, the run processed
+1,340,421 projection inputs and requested 818 MB of new projection-buffer
+capacity for 27,518 output rows. Relay and Client each bulk-ingested 27,518
+bundles. These are cumulative work counters, not peak live bytes.
+This no-deletion path remains the next architectural target: it
 still builds the receiver's supporting-row closure and maintained graph. The
 sanitized summary receipt is `main-c5e405f-live-summary.json`; the full raw
 diagnostic stays outside the public repository because it includes host
