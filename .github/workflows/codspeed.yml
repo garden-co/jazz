@@ -3,9 +3,9 @@ name: CodSpeed Example Benchmarks
 on:
   pull_request:
     types: [labeled, synchronize, reopened]
-  # Every main merge gets its own baseline. Without it CodSpeed compares PRs
-  # against the newest older main run and attributes intervening merges to the
-  # PR (#3488).
+  # Every main merge queues a baseline (bursts coalesce, see concurrency).
+  # Without it CodSpeed compares PRs against the newest older main run and
+  # attributes intervening merges to the PR (#3488).
   # No nightly schedule: it would only re-measure the last merge. Use a manual
   # dispatch on main if a push was made with the Actions token (which does not
   # trigger push workflows) or a main run failed.
@@ -17,10 +17,13 @@ permissions:
   contents: read
   id-token: write
 
-# PR runs cancel superseded pushes. Main runs are keyed by commit and never
-# cancelled, so consecutive merges cannot leave a commit without a baseline.
+# PR runs cancel superseded pushes. Main runs share one group and are never
+# cancelled mid-run: GitHub keeps one running plus one pending, and each newer
+# merge replaces the pending one. A burst of merges measures the commit already
+# running and the latest one; a PR based on a skipped commit compares against
+# the nearest earlier main run (footnoted by CodSpeed), at most one burst old.
 concurrency:
-  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.sha }}
+  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

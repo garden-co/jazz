@@ -1435,9 +1435,9 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
 });
 
 test("CodSpeed baselines every main merge and runs only for benchmark-labeled PRs", () => {
-  // Every main commit needs its own CodSpeed run. Otherwise PR reports compare
-  // against the newest older main run and attribute intervening merges to the
-  // PR (#3488).
+  // Every main merge queues a CodSpeed run. Otherwise PR reports compare
+  // against a stale main run and attribute intervening merges to the PR
+  // (#3488).
   const document = parse(codspeedWorkflow);
   assert.deepEqual(document.on.push, { branches: ["main"] });
   assert.deepEqual(document.on.pull_request, {
@@ -1449,12 +1449,18 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
     document.jobs.examples.if,
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
-  // Main runs are keyed by commit and never cancelled; PR runs cancel
+  // Main runs share one group and are never cancelled mid-run, so a burst of
+  // merges coalesces to the running commit plus the latest. PR runs cancel
   // superseded pushes.
   assert.deepEqual(document.concurrency, {
-    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.sha }}",
+    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
   });
+  assert.throws(() => {
+    // Keying main runs by commit would run every merge of a burst in parallel.
+    const thrash = parse(codspeedWorkflow.replace("|| github.ref }}", "|| github.sha }}"));
+    assert.match(thrash.concurrency.group, /github\.ref \}\}$/);
+  }, /match/);
 
   assert.throws(() => {
     const unsafe = parse(codspeedWorkflow.replace("  push:\n    branches: [main]\n", ""));

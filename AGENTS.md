@@ -194,9 +194,10 @@ Benchmark work has three deliberately separate gates:
   in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it runs on every
-  default-branch merge, so each PR has an exact main baseline.
-  A report footnoted "No successful run was found on `main`" compared against
-  an older commit and is not attributable to the PR (#3488). Native `jazz` and `jazz-sim` timing remains in the
+  default-branch merge (a burst of merges measures the running and the latest
+  commit). A report footnoted "No successful run was found on `main`" compared
+  against an older main run; any change between that run and the PR's base is
+  not attributable to the PR (#3488). Native `jazz` and `jazz-sim` timing remains in the
   realistic benchmark workflow (same-repository benchmark-labeled PRs,
   non-bot default-branch pushes, manual runs, and nightly) until those suites
   are ported to CodSpeed. Do not run a repository-wide benchmark suite before
