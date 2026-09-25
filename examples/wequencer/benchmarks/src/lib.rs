@@ -3,11 +3,12 @@
 //! The native model deliberately duplicates the application schema and query
 //! shapes. It does not import a shared application helper.
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, SubscriptionEvent,
-    UpdateOptions, block_on,
+    SubscriptionStream, UpdateOptions, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -35,6 +36,17 @@ pub struct Fixture {
     session_presence: PreparedQuery,
     track_window: PreparedQuery,
     transport_receipts: PreparedQuery,
+    /// One ordered step subscription per track, as the pattern grid renders.
+    pattern_tracks: Vec<PreparedQuery>,
+    pad_enabled: RefCell<Vec<bool>>,
+    pad_toggles: Cell<usize>,
+}
+
+/// The session grid a bandmate keeps subscribed: the ordered track list and
+/// one ordered step subscription per track.
+pub struct LivePattern {
+    _tracks: SubscriptionStream,
+    steps: Vec<SubscriptionStream>,
 }
 
 impl Default for Fixture {
@@ -173,6 +185,19 @@ impl Fixture {
                     .limit(1),
             )
             .expect("prepare Wequencer transport receipt query");
+        let pattern_tracks = (0..TRACKS)
+            .map(|track| {
+                db.prepare_query(
+                    &Query::from("steps")
+                        .filter(eq(col("track_id"), lit(row_id(4, track).0)))
+                        .order_by("position", OrderDirection::Asc),
+                )
+                .expect("prepare Wequencer pattern-track query")
+            })
+            .collect();
+        let pad_enabled = (0..TRACKS * STEPS)
+            .map(|pad| (pad / STEPS + pad % STEPS).is_multiple_of(3))
+            .collect();
         Self {
             db,
             session_table,
@@ -186,7 +211,77 @@ impl Fixture {
             session_presence,
             track_window,
             transport_receipts,
+            pattern_tracks,
+            pad_enabled: RefCell::new(pad_enabled),
+            pad_toggles: Cell::new(0),
         }
+    }
+
+    /// Opening a session's pattern grid: subscribe to the ordered track list
+    /// and each track's ordered steps, and receive every first result.
+    /// Returns the live grid and the number of rows delivered.
+    pub fn open_pattern(&self) -> (LivePattern, usize) {
+        let mut tracks = self.subscribe(&self.session_tracks);
+        let mut rows = initial_rows(&mut tracks);
+        let steps = self
+            .pattern_tracks
+            .iter()
+            .map(|query| {
+                let mut stream = self.subscribe(query);
+                rows += initial_rows(&mut stream);
+                stream
+            })
+            .collect();
+        (
+            LivePattern {
+                _tracks: tracks,
+                steps,
+            },
+            rows,
+        )
+    }
+
+    /// Toggles one pad of the live grid and waits until that track's
+    /// subscription shows it. Successive calls walk across tracks and steps.
+    /// Returns the number of step rows the subscription updated.
+    pub fn toggle_pad(&self, live: &mut LivePattern) -> usize {
+        let toggle = self.pad_toggles.get();
+        self.pad_toggles.set(toggle + 1);
+        let track = toggle % TRACKS;
+        let step = (toggle / TRACKS) % STEPS;
+        let enabled = {
+            let mut pads = self.pad_enabled.borrow_mut();
+            let pad = &mut pads[track * STEPS + step];
+            *pad = !*pad;
+            *pad
+        };
+        let write = block_on(self.db.update(
+            "steps",
+            row_id(32 + track as u8, step),
+            BTreeMap::from([("enabled".into(), Value::Bool(enabled))]),
+            UpdateOptions::default(),
+        ))
+        .expect("toggle Wequencer pad");
+        block_on(write.wait(DurabilityTier::Local)).expect("pad toggle reaches local durability");
+        match block_on(live.steps[track].next_event()).expect("track observes the pad toggle") {
+            SubscriptionEvent::Delta { updated, .. } => updated.len(),
+            event => panic!("unexpected pattern event: {event:?}"),
+        }
+    }
+
+    /// Whether any track subscription other than `track` has an undelivered
+    /// event. A pad toggle must only wake its own track.
+    pub fn other_tracks_pending(live: &mut LivePattern, track: usize) -> bool {
+        live.steps
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| *index != track)
+            .any(|(_, stream)| stream.try_next_event().is_some())
+    }
+
+    fn subscribe(&self, query: &PreparedQuery) -> SubscriptionStream {
+        block_on(self.db.subscribe(query, ReadOpts::default()))
+            .expect("open Wequencer subscription")
     }
 
     /// Reads the parent-scoped browser query shapes. The values make their
@@ -393,6 +488,15 @@ impl Fixture {
             })
             .filter(|delivered| *delivered)
             .count()
+    }
+}
+
+fn initial_rows(stream: &mut SubscriptionStream) -> usize {
+    match block_on(stream.next_event()).expect("subscription has an initial result") {
+        SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } => added.len(),
+        event => panic!("unexpected initial Wequencer event: {event:?}"),
     }
 }
 

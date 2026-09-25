@@ -185,7 +185,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        self.table_in_schema(table, schema_version)?;
+        self.table_in_schema_ref(table, schema_version)?;
         self.tx_read_unchecked(tx_id, schema_version, table, row_uuid)
             .await
     }
@@ -487,7 +487,7 @@ where
                 "open transaction is not exclusive",
             ));
         }
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        self.table_in_schema_ref(table, write_schema_version)?;
         let cells = cells
             .into_iter()
             .map(|(column, value)| (column, value.into()))
@@ -513,7 +513,10 @@ where
             Some(_) => snapshot_row.deletion_version,
             None => snapshot_row.content_version,
         };
-        positional_cells_from_map(&table_schema, &cells)?;
+        positional_cells_from_map(
+            self.table_in_schema_ref(table, write_schema_version)?,
+            &cells,
+        )?;
         let pending = PendingWrite {
             table: table.to_owned(),
             row_uuid,
@@ -665,7 +668,7 @@ where
             ));
         }
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &cells)?;
         self.stage_mergeable_write(
             tx_id,
@@ -755,7 +758,7 @@ where
             .unwrap_or_default();
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &patch)?;
         self.stage_mergeable_write(
             tx_id,
@@ -1049,7 +1052,7 @@ where
                     &provenance_snapshot,
                 )
                 .await;
-            let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
+            self.table_in_schema_ref(&write.table, write.schema_version)?;
             let PendingCells::Replace(mut cells) = write.cells else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
@@ -1063,6 +1066,7 @@ where
                     &provenance_snapshot,
                 )
                 .await?;
+            let table_schema = self.table_in_schema_ref(&write.table, write.schema_version)?;
             let inherited = table_schema
                 .columns
                 .iter()
@@ -1077,17 +1081,23 @@ where
                     ));
                 }
             }
-            for (column, value) in &mut cells {
-                let semantic_kind = table_schema
-                    .columns
-                    .iter()
-                    .find(|candidate| candidate.name == *column)
-                    .map(|column| column.large_value_kind)
-                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+            let semantic_kinds = cells
+                .keys()
+                .map(|column| {
+                    table_schema
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == *column)
+                        .map(|column| column.large_value_kind)
+                        .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge)
+                })
+                .collect::<Vec<_>>();
+            for ((_, value), semantic_kind) in cells.iter_mut().zip(semantic_kinds) {
                 self.prepare_and_stage_large_scalar(value, semantic_kind)
                     .await?;
             }
-            let cells = positional_cells_from_map(&table_schema, &cells)?;
+            let table_schema = self.table_in_schema_ref(&write.table, write.schema_version)?;
+            let cells = positional_cells_from_map(table_schema, &cells)?;
             let provenance_at =
                 TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
                     Error::InvalidMergeableCommit(
@@ -1099,7 +1109,7 @@ where
                 .map(|version| (version.created_by(), version.created_at()))
                 .unwrap_or((made_by, provenance_at));
             versions.push(VersionRecord::encode(
-                &table_schema,
+                table_schema,
                 write.schema_version,
                 write.row_uuid,
                 write.parents,
@@ -1309,7 +1319,7 @@ where
                     .ok_or(Error::InvalidStoredValue("write schema is missing"))?
                     .schema
                     .clone();
-                let table = self.table_in_schema(&write.table, write.schema_version)?;
+                let table = self.table_in_schema_ref(&write.table, write.schema_version)?;
                 let (head, _) = schema
                     .project_branch_view_selector(&table, &write.branch)
                     .map_err(Error::InvalidBranchKey)?;
@@ -1742,20 +1752,20 @@ where
             deletion.as_ref().and_then(|version| version.deletion()),
             Some(DeletionEvent::Deleted)
         );
-        let target_table = self.table_in_schema(table, schema_version)?;
+        self.table_in_schema_ref(table, schema_version)?;
         let content_cells = if let Some(version) = content.as_ref() {
             let source_schema = self
                 .schema_version_for_alias(version.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, version)?;
+            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, version)?;
             let projected_table =
                 self.translate_cells(source_schema, schema_version, version.table(), &mut cells)?;
             if projected_table.as_deref() == Some(table) {
                 Some(
-                    target_table
+                    self.table_in_schema_ref(table, schema_version)?
                         .columns
                         .iter()
                         .map(|column| cells.get(&column.name).cloned())
@@ -1861,7 +1871,7 @@ where
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let table_schema = self.table_in_schema(table, schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, schema_version)?;
         self.overlay_pending_writes_with_table(tx_id, &table_schema, table, row_uuid, snapshot_row)
     }
 

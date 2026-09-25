@@ -884,6 +884,7 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
+            client_local_literal_shapes: std::collections::HashMap::new(),
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),
@@ -1001,9 +1002,14 @@ where
         )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
-        Database::new_with_storage_layout(lowered, storage, layout)
-            .await
-            .map_err(Error::from)
+        let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
+        // Jazz publishes plain ordered results from membership and version
+        // deltas and never reads their generic root positions; only root
+        // collectors' own positional edits reach its views. Collecting the
+        // positions would make every write to an ordered subscription
+        // proportional to its result size (#2086).
+        database.set_plain_output_root_positions_enabled(false);
+        Ok(database)
     }
 
     pub(crate) fn committed_global_time(&self) -> GlobalTime {

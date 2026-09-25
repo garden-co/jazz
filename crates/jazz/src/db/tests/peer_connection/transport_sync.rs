@@ -2925,3 +2925,108 @@ fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
         drop(first);
     }
 }
+
+/// Restores the protocol routed-payload limit when a test that lowered it ends,
+/// including by panic, so later tests on a reused thread see the real limit.
+struct RoutedPayloadLimitGuard;
+
+impl RoutedPayloadLimitGuard {
+    fn lower_to(limit: usize) -> Self {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(Some(limit));
+        Self
+    }
+}
+
+impl Drop for RoutedPayloadLimitGuard {
+    fn drop(&mut self) {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(None);
+    }
+}
+
+/// #3477: a whole-table subscription whose initial snapshot (supporting-row
+/// manifest plus every row's inline version body) exceeds the routed
+/// per-message payload limit still hydrates completely, and so does a later
+/// oversized delta.
+///
+/// Before the fix the server's publication failed with "semantic message
+/// exceeds routed payload limit" and alice never saw a row. The server now
+/// sends the complete manifest with only as many inline bodies as fit; alice
+/// holds that update, repairs the remaining bodies over the existing
+/// row-version repair lane, and then publishes it in one step.
+///
+/// This is a crate-internal test because reproducing the real 256 MiB limit
+/// needs ~110k rows; the thread-local test hook lowers the routed limit (the
+/// same limit the channel endpoint enforces) instead. Everything else is the
+/// public subscription surface over a real byte transport.
+///
+/// ```text
+/// server ──ViewUpdate(manifest: all rows, bodies: prefix)──► alice (holds it)
+///        ◄──FetchRowVersions(missing refs)────────────────── alice
+///        ──RowVersionPayloads(missing bodies)──────────────► alice ──► publishes all rows
+/// ```
+#[test]
+fn oversized_view_updates_hydrate_through_body_repair() {
+    const BATCH: u16 = 200;
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x34; 16]);
+    let server = open_core(0x35, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x36, alice, &schema);
+    let bulky_row = |id: u16| {
+        let mut bytes = [0x77; 16];
+        bytes[..2].copy_from_slice(&id.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    };
+    // Bulky titles make each inline body ~3.4 KiB (~670 KiB per batch),
+    // well above the lowered limit, while the manifest and the repair reply
+    // for the omitted remainder each fit below it.
+    let insert_batch = |ids: std::ops::RangeInclusive<u16>| {
+        for id in ids {
+            let title = format!("{id:04}-{}", "x".repeat(1500));
+            server
+                .insert_with_id("todos", bulky_row(id), cells(&title, id % 2 == 0, alice))
+                .unwrap();
+        }
+    };
+    insert_batch(1..=BATCH);
+    let _limit = RoutedPayloadLimitGuard::lower_to(512 * 1024);
+    let (client_transport, server_transport) = byte_duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for (before, expected) in [(0, BATCH), (BATCH, 2 * BATCH)] {
+        if before > 0 {
+            insert_batch(before + 1..=expected);
+        }
+        for _ in 0..64 {
+            client.tick().unwrap();
+            subscriber
+                .borrow_mut()
+                .tick()
+                .expect("an oversized view update must not fail the subscriber link");
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+                // A held update is published whole, never as a body prefix.
+                assert!(
+                    [usize::from(before), usize::from(expected)].contains(&snapshot.root_count),
+                    "partial update published: {} rows",
+                    snapshot.root_count
+                );
+            }
+            if snapshot.root_count == usize::from(expected) {
+                break;
+            }
+        }
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|r| r.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            (1..=expected).map(bulky_row).collect(),
+        );
+        assert_eq!(snapshot.root_count, usize::from(expected));
+    }
+}

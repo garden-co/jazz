@@ -60,7 +60,7 @@ where
         let Some(version_ref) = version_ref else {
             // A fact without a concrete version is already required to name
             // the read view. Never relabel it optimistically.
-            self.table_in_schema(canonical_table, read_schema)?;
+            self.table_in_schema_ref(canonical_table, read_schema)?;
             return Ok(canonical_table.to_owned());
         };
         let version = self
@@ -675,17 +675,15 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "relation edge witness schema version alias must exist",
             ))?;
-        let authored_table = self
-            .table_in_schema(version.table(), authored_schema)?
-            .clone();
-        let mut cells = self.materialized_cells_for_version(&authored_table, version)?;
+        let authored_table = self.table_in_schema_ref(version.table(), authored_schema)?;
+        let mut cells = self.materialized_cells_for_version(authored_table, version)?;
         let Some(projected_table) =
             self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
         else {
             return Ok(None);
         };
-        let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
-        let mut row = current_row_from_materialized_cells(&read_table, version, &cells)?;
+        let read_table = self.table_in_schema_ref(&projected_table, read_schema)?;
+        let mut row = current_row_from_materialized_cells(read_table, version, &cells)?;
         self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
         Ok(Some(row))
     }
@@ -1025,7 +1023,7 @@ where
             return Ok(rows);
         }
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let mut rows = Vec::new();
         for (record, weight) in app_rows.iter() {
@@ -1285,7 +1283,7 @@ where
             )?;
             return Ok(());
         }
-        let table = self.table_in_schema(&query.table, schema_version)?;
+        let table = self.table_in_schema_ref(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
@@ -1314,7 +1312,7 @@ where
         let Some(columns) = &query.select else {
             return Ok(());
         };
-        let table = self.table_in_schema(&query.table, schema_version)?;
+        let table = self.table_in_schema_ref(&query.table, schema_version)?;
         for row in rows {
             *row = row.project(&table, columns)?;
         }

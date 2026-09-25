@@ -527,11 +527,14 @@ where
         &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
     ) -> Result<VersionRow, Error> {
         let author_schema = version.schema_version();
-        let table = self.table_in_schema(version.table(), author_schema)?;
+        // Fail with TableNotFound before allocating aliases or resolving authored
+        // columns, matching the error ordering in commit_bundles.
+        self.table_in_schema_ref(version.table(), author_schema)?;
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
+        let table = self.table_in_schema_ref(version.table(), author_schema)?;
         VersionRow::from_wire_with_schema_version(
-            &table, version, authored, tx_node_alias, schema_alias, tx_time,
+            table, version, authored, tx_node_alias, schema_alias, tx_time,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
         )
     }
@@ -710,16 +713,17 @@ where
         let mut stored_versions = Vec::new();
         for version in versions {
             let author_schema = version.schema_version();
-            let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let table_schema = source_table_schema;
+            // Fail with TableNotFound first, matching the error ordering in commit_bundles.
+            self.table_in_schema_ref(version.table(), author_schema)?;
             let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
             let authored_column_ids = self.authored_column_ids_for_names(
                 author_schema,
                 version.table(),
                 version.authored_columns(),
             )?;
+            let table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
             let stored = VersionRow::from_wire_with_schema_version(
-                &table_schema,
+                table_schema,
                 &version,
                 authored_column_ids,
                 tx_node_alias,
@@ -728,7 +732,7 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
-            let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
+            let table_id = self.physical_table_id_for_schema(author_schema, version.table())?;
             let layer = VersionLayer::for_record(&version);
             let parent_coordinate = ParentCoordinate {
                 physical_table_id: table_id,
@@ -762,7 +766,7 @@ where
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
                         author_schema,
-                        &table_schema.name,
+                        version.table(),
                         stored.branch_key(),
                         stored.row_uuid(),
                         stored.layer(),
