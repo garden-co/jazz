@@ -793,6 +793,93 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("rolls back a failed reset or bulk frame to the exact prior state", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const id = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    const insertChild = (root: number, name: string) => ({
+      root_key: [10, ...uuidBytes(id(root))],
+      path: [{ Collection: 1 }],
+      edit: { Insert: { index: 0, key: childKey, row: terminalTextChild(childId, name) } },
+    });
+    const removeMissingChild = (root: number) => ({
+      root_key: [10, ...uuidBytes(id(root))],
+      path: [{ Collection: 1 }],
+      edit: { Remove: { key: [10, ...uuidBytes("00000000-0000-4000-9000-0000000000ff")] } },
+    });
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: Array.from({ length: 40 }, (_, n) => runtimeAddedRoot(id(n), n, `r${n}`)),
+      }),
+      transformIncluded,
+    );
+    manager.handleDelta(
+      emptyRuntimeDelta({ terminalOperations: [insertChild(3, "kept")] }),
+      transformIncluded,
+    );
+    const before = manager.all();
+    const addresses = () =>
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size;
+
+    // A reset replaces all state before it meets a malformed occurrence key.
+    const malformed = typedResultKey(
+      uuidBytes(id(101)),
+      [uuidBytes(id(102)), uuidBytes(id(103))],
+      [
+        [1, "second"],
+        [0, "first"],
+      ],
+    );
+    expect(() =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          reset: true,
+          added: [
+            runtimeAddedRoot(id(100), 0, "fresh"),
+            { ...runtimeAddedRoot(id(101), 1, "bad"), occurrenceKey: malformed },
+          ],
+        }),
+        transformIncluded,
+      ),
+    ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+    expect(manager.all()).toEqual(before);
+
+    // A bulk frame (32+ changes) that removes, moves and adds, then fails.
+    expect(() =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          removed: Array.from({ length: 20 }, (_, n) => runtimeRemovedRecord(id(n + 10), n + 10)),
+          added: Array.from({ length: 20 }, (_, n) => runtimeAddedRoot(id(n + 200), n, `new${n}`)),
+          terminalOperations: [removeMissingChild(5)],
+        }),
+        transformIncluded,
+      ),
+    ).toThrow(/terminal child removal addressed missing key/);
+    expect(manager.all()).toEqual(before);
+    expect(manager.size).toBe(40);
+    expect(addresses()).toBe(40);
+
+    // Rolled-back state is fully live: removed roots are addressable again and
+    // the failed frame's roots are not.
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [runtimeRemovedRecord(id(0), 0)],
+        terminalOperations: [insertChild(15, "after")],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all).toHaveLength(39);
+    expect(edited.all?.find((root) => root.id === id(15))?.children).toEqual([
+      { id: childId, name: "after" },
+    ]);
+    expect(edited.all?.find((root) => root.id === id(3))?.children).toEqual([
+      { id: childId, name: "kept" },
+    ]);
+    expect(edited.all?.some((root) => root.id === id(200))).toBe(false);
+  });
+
   it("keeps a joined root that one frame removes and re-adds addressable by descendant edits", () => {
     // A typed occurrence's ordered key is not derivable from its public id, so
     // a pruned address would leave descendant edits for it unresolvable.
