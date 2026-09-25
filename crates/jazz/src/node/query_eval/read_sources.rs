@@ -251,9 +251,7 @@ where
         // that source also contains Global rows previously received from the
         // authority, which would keep a retracted covered row alive.
         let receiver_local_overlay = covered_input_source.is_some() && pending_overlay;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-            && !self.covered_input_sources.is_empty()
-        {
+        if crate::debug_env::covered_input_trace() && !self.covered_input_sources.is_empty() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=covered_input_lookup request={:?} matched={} candidates={:?}",
                 request.source,
@@ -1673,7 +1671,7 @@ where
             // the graph can observe it. A locally pending successor wins;
             // rejection retracts that ahead record and deterministically
             // reveals the covered authority version again.
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=union_covered_input request={:?} descriptor={descriptor:?}",
                     request.source,
@@ -4205,17 +4203,17 @@ where
         if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
             return Ok(None);
         }
-        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
+        let table = self.table_in_schema_ref(&source.table, read_view.read_schema)?;
         let selected = match selector {
             AccessPathSelector::Ordinary => {
-                select_current_access_path(&table, equalities).or_else(|| {
+                select_current_access_path(table, equalities).or_else(|| {
                     covered_column.and_then(|covered| {
-                        select_composite_leading_equality_access_path(&table, equalities, covered)
+                        select_composite_leading_equality_access_path(table, equalities, covered)
                     })
                 })
             }
             AccessPathSelector::CompositeEquality => {
-                select_composite_equality_access_path(&table, equalities)
+                select_composite_equality_access_path(table, equalities)
             }
         };
         let Some(mut path) = selected else {
@@ -4298,7 +4296,7 @@ where
             return Ok(paths);
         }
         let root = root_source_id(&query.table);
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
         if table.has_any_policy() {
             return Ok(paths);
         }
@@ -4561,7 +4559,7 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
         // A maintained authorization scope reacts to both the content winner
         // and its deletion register. The point source is only incrementally
         // complete for an unscoped row: inside a policy graph, its content cap
@@ -4629,7 +4627,7 @@ where
         binding: &Binding,
         access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<(), Error> {
-        let table = self.table_in_schema(table_name, schema_version)?;
+        let table = self.table_in_schema_ref(table_name, schema_version)?;
         let equalities = literal_equalities_for_filters(filters, binding)?;
         if let Some(access_path) = select_current_access_path(&table, &equalities)
             && matches!(access_path, CurrentAccessPath::PrimaryKey(_))
