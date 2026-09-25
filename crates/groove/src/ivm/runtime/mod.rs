@@ -239,6 +239,10 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether plain ordered outputs receive generic root positions (insert
+    /// indices and moves). A consumer that never reads them turns this off,
+    /// so an unbounded TopBy keeps its delta-only path.
+    plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
 }
 
@@ -305,6 +309,7 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
@@ -389,6 +394,16 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Enable or disable generic root positions for plain ordered outputs.
+    /// Structured collectors are unaffected: they own their positional edits.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.plain_output_root_positions = enabled;
+    }
+
+    pub fn plain_output_root_positions_enabled(&self) -> bool {
+        self.plain_output_root_positions
     }
 
     pub fn schema(&self) -> &DatabaseSchema {

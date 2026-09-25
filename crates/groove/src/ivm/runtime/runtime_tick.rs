@@ -3034,37 +3034,40 @@ impl IvmRuntime {
             subscriptions_considered: affected_subscriptions.len(),
             ..TickMetrics::default()
         };
-        // Structured collectors own their positional edits. Only plain outputs
-        // consume the generic before/after maps. Union demand across consumers
-        // because a TopBy node can be shared by both kinds of output. Preserve
-        // root_ordering_node metadata: hydration and scheduling still need it.
+        // Only plain outputs that carry the TopBy's row identity consume the
+        // generic before/after windows (`output_consumes_root_positions`).
+        // Union demand across consumers because a TopBy node can be shared by
+        // several kinds of output. Preserve root_ordering_node metadata:
+        // hydration and scheduling still need it.
         let mut root_ordering_windows = HashMap::default();
-        for subscription in affected_subscriptions
-            .iter()
-            .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
-        {
-            for output in subscription
-                .outputs
-                .values()
-                .filter(|output| affected_nodes.contains(&output.node))
+        if self.plain_output_root_positions {
+            for subscription in affected_subscriptions
+                .iter()
+                .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
             {
-                if let Some(ordering_node) = output.root_ordering_node
-                    && !output_is_structured_collect_by(&self.graph, output.node)?
+                for output in subscription
+                    .outputs
+                    .values()
+                    .filter(|output| affected_nodes.contains(&output.node))
                 {
-                    root_ordering_windows
-                        .entry(ordering_node)
-                        .or_insert_with(RootOrderingWindows::default);
+                    if let Some(ordering_node) = output.root_ordering_node
+                        && output_consumes_root_positions(&self.graph, output.node, ordering_node)?
+                    {
+                        root_ordering_windows
+                            .entry(ordering_node)
+                            .or_insert_with(RootOrderingWindows::default);
+                    }
                 }
             }
-        }
-        // A routed TopBy runs before its barriers are known to be touched, so
-        // it must collect positions for any bound output it may reach.
-        for terminal in &activation.routed {
-            if let Some(table) = self.graph.routes().table(*terminal) {
-                for node in &table.root_ordering_nodes {
-                    root_ordering_windows
-                        .entry(*node)
-                        .or_insert_with(RootOrderingWindows::default);
+            // A routed TopBy runs before its barriers are known to be touched, so
+            // it must collect positions for any bound output it may reach.
+            for terminal in &activation.routed {
+                if let Some(table) = self.graph.routes().table(*terminal) {
+                    for node in &table.root_ordering_nodes {
+                        root_ordering_windows
+                            .entry(*node)
+                            .or_insert_with(RootOrderingWindows::default);
+                    }
                 }
             }
         }

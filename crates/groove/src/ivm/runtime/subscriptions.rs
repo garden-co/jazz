@@ -4126,13 +4126,18 @@ impl IvmRuntime {
         {
             return None;
         }
+        // A routed TopBy collects windows for its bound outputs before they
+        // are known to be touched; register only an output that applies them.
+        let root_ordering_node = bound.root_ordering_node.filter(|ordering| {
+            output_consumes_root_positions(&self.graph, bound.node, *ordering).unwrap_or(true)
+        });
         self.graph.add_route_barrier(
             shared_node,
             barrier,
             field_indices,
             field_types,
             key,
-            bound.root_ordering_node,
+            root_ordering_node,
         );
         Some(barrier)
     }
