@@ -3888,7 +3888,11 @@ fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_poli
     };
 
     assert_eq!(ask(live), PermissionAdvice::Allowed);
-    assert_eq!(ask(deleted), PermissionAdvice::Allowed, "live before deletion");
+    assert_eq!(
+        ask(deleted),
+        PermissionAdvice::Allowed,
+        "live before deletion"
+    );
     assert_eq!(ask(row(0xee)), PermissionAdvice::Denied, "never existed");
 
     let _ = client.delete("todos", deleted, Default::default()).unwrap();
@@ -3897,7 +3901,11 @@ fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_poli
         server.tick().unwrap();
     }
     assert_eq!(ask(deleted), PermissionAdvice::Denied, "deleted");
-    assert_eq!(ask(live), PermissionAdvice::Allowed, "unrelated row stays live");
+    assert_eq!(
+        ask(live),
+        PermissionAdvice::Allowed,
+        "unrelated row stays live"
+    );
 }
 
 #[test]
