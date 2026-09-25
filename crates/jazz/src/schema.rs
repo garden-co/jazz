@@ -1217,6 +1217,15 @@ impl TableSchema {
 
     /// Return per-layer global-current tables for content and register winners.
     pub fn global_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
+        vec![
+            self.global_current_content_storage_table(),
+            self.global_current_register_storage_table(),
+        ]
+    }
+
+    /// The content-winner table of [`Self::global_current_storage_tables`],
+    /// without building the register table alongside it.
+    pub fn global_current_content_storage_table(&self) -> GrooveTableSchema {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1260,30 +1269,31 @@ impl TableSchema {
                 ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
-        vec![
-            content_table,
-            GrooveTableSchema::new(
-                format!("jazz_{}_register_global_current", self.name),
-                [
-                    column("branch_key", GrooveColumnType::Bytes),
-                    column("row_uuid", GrooveColumnType::Uuid),
-                    column("tx_time", GrooveColumnType::U64),
-                    column("tx_node_id", GrooveColumnType::U64),
-                    column("schema_version", GrooveColumnType::U64),
-                    column("parents", tx_id_column().array_of()),
-                    column("created_by", crate::ids::RowAuthor::value_type()),
-                    column("created_at", GrooveColumnType::U64),
-                    column("updated_by", crate::ids::RowAuthor::value_type()),
-                    column("updated_at", GrooveColumnType::U64),
-                    column("global_time", GrooveColumnType::U64.nullable()),
-                    column("_deletion", deletion_column()),
-                ],
-            )
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-            ])),
-        ]
+        content_table
+    }
+
+    fn global_current_register_storage_table(&self) -> GrooveTableSchema {
+        GrooveTableSchema::new(
+            format!("jazz_{}_register_global_current", self.name),
+            [
+                column("branch_key", GrooveColumnType::Bytes),
+                column("row_uuid", GrooveColumnType::Uuid),
+                column("tx_time", GrooveColumnType::U64),
+                column("tx_node_id", GrooveColumnType::U64),
+                column("schema_version", GrooveColumnType::U64),
+                column("parents", tx_id_column().array_of()),
+                column("created_by", crate::ids::RowAuthor::value_type()),
+                column("created_at", GrooveColumnType::U64),
+                column("updated_by", crate::ids::RowAuthor::value_type()),
+                column("updated_at", GrooveColumnType::U64),
+                column("global_time", GrooveColumnType::U64.nullable()),
+                column("_deletion", deletion_column()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+        ]))
     }
 
     /// Return per-layer ahead-of-global candidate tables.
