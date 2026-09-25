@@ -3951,7 +3951,7 @@ where
         // Recompile only after real runtime/plan invalidation; initial owner
         // settlement below fences the retained graph's pending evaluation.
         if state.borrow().groove_runtime_token != groove_runtime_token {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
                     state.borrow().groove_runtime_token,
@@ -4369,7 +4369,7 @@ where
             }
             let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
             let authoritative_reset = authoritative_reset_pending;
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=refresh terminal_rows={terminal_rows} covered={} reset_pending={authoritative_reset_pending} authoritative_reset={authoritative_reset} delivered={delivered_authority_result:?} settled={settled_authority_result:?}",
                     refresh
@@ -4473,7 +4473,7 @@ where
                         && maintained.has_covered_input_sources())
                     .then(|| settled_authority_result.clone())
                     .flatten();
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=runtime_drain sources={} authority={authoritative_result_key:?}",
                             maintained.has_covered_input_sources(),
@@ -4670,7 +4670,7 @@ where
                                         )
                                     })?;
                                 let terminal_operation_count = terminal_operations.len();
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=terminal_ops count={terminal_operation_count} reset={authoritative_reset}"
                                     );
@@ -4724,7 +4724,7 @@ where
                                 } else {
                                     event
                                 };
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=publish_terminal ops={} roots={}",
                                         terminal_operation_count, refresh.snapshot.root_count,
@@ -4916,7 +4916,7 @@ where
                         true,
                         terminal_rows,
                     );
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=publish_covered_reset roots={} settled={settled}",
                             snapshot.root_count,
@@ -4936,7 +4936,7 @@ where
                         &refresh.snapshot_index,
                         materialized,
                     )?;
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=covered_reset_delivery delivered={delivered}"
                         );

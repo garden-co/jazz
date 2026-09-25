@@ -7287,7 +7287,7 @@ where
         "transport send {}",
         summarize_sync_message(&message)
     ));
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+    if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
         eprintln!(

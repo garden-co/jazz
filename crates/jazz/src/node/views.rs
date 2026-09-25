@@ -2268,7 +2268,7 @@ where
                 state.source_closure = crate::node::AuthoritySourceClosure::Claimed { generation };
             }
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_input_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
                 self.node_uuid,

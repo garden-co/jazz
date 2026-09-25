@@ -863,9 +863,7 @@ where
             );
         }
         self.restore_expired_policy_compilation_state();
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-            && !covered_input_sources.is_empty()
-        {
+        if crate::debug_env::covered_input_trace() && !covered_input_sources.is_empty() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
                 request.reads.primary.sources.keys().collect::<Vec<_>>(),
@@ -1304,7 +1302,7 @@ where
                 .subscribe_with_lifetime(sinks, lifetime, progress_waker)
                 .map(|subscription| (subscription, None))
                 .map_err(|error| {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receiver_error error={error:?}"
                         );
@@ -1352,7 +1350,7 @@ where
             .prepare(terminals, binding_source_shape, binding_descriptor)
             .await
             .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
                     );
@@ -1371,7 +1369,7 @@ where
             .bind_shape_with_lifetime(prepared.id(), &values, lifetime, progress_waker)
             .await
             .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
                 }
                 Error::Groove(error)

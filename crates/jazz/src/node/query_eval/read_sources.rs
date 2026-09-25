@@ -208,9 +208,7 @@ where
         // that source also contains Global rows previously received from the
         // authority, which would keep a retracted covered row alive.
         let receiver_local_overlay = covered_input_source.is_some() && pending_overlay;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-            && !self.covered_input_sources.is_empty()
-        {
+        if crate::debug_env::covered_input_trace() && !self.covered_input_sources.is_empty() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=covered_input_lookup request={:?} matched={} candidates={:?}",
                 request.source,
@@ -1630,7 +1628,7 @@ where
             // the graph can observe it. A locally pending successor wins;
             // rejection retracts that ahead record and deterministically
             // reveals the covered authority version again.
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=union_covered_input request={:?} descriptor={descriptor:?}",
                     request.source,

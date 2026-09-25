@@ -1017,7 +1017,7 @@ where
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
         });
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
                 shape.query().policy_branches.len(),
@@ -3704,7 +3704,7 @@ where
                 }
             }
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=opened_program table={} node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
                 shape.query().table,
@@ -3773,7 +3773,7 @@ where
                 return Err(error);
             }
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
@@ -3833,7 +3833,7 @@ where
         let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
             std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
                 let snapshot = update.deltas;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
                 }
                 let snapshot_transitions = match maintained.apply_multisink_deltas(
@@ -3931,7 +3931,7 @@ where
                 }
             }
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
         }
         Ok((
