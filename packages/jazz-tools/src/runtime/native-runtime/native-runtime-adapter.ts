@@ -109,7 +109,12 @@ const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
-const NETWORK_RETRY_LIMIT = 10;
+// An established upstream is retried until it reconnects or the runtime is
+// explicitly disconnected/closed: a local-first client must survive an outage
+// of any length. Backoff doubles to a cap and is jittered so a fleet of
+// clients does not reconnect in lockstep after a server restart.
+const NETWORK_RETRY_INITIAL_DELAY_MS = 100;
+const NETWORK_RETRY_MAX_DELAY_MS = 5_000;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 /** Runtime read tier whose empty opening the core Db may hold for the server. */
@@ -121,6 +126,15 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   unavailable: "failed",
 };
 const NATIVE_LINK_POLL_MS = 250;
+
+/** Capped exponential backoff with equal jitter: [cap/2, cap] of each step. */
+function networkRetryDelay(retry: number): number {
+  const ceiling = Math.min(
+    NETWORK_RETRY_INITIAL_DELAY_MS * 2 ** Math.min(retry, 16),
+    NETWORK_RETRY_MAX_DELAY_MS,
+  );
+  return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+}
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -3661,8 +3675,7 @@ export class NativeRuntimeAdapter implements Runtime {
       (error.code === "websocket_closed" ||
         error.code === "websocket_error" ||
         error.code === "not_ready") &&
-      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0) &&
-      this.networkRetryCount < NETWORK_RETRY_LIMIT
+      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0)
     );
   }
 
@@ -3674,7 +3687,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
     const url = this.serverEndpointUrl;
     const authJson = this.serverAuthJson;
-    const delay = Math.min(100 * 2 ** this.networkRetryCount++, 1_000);
+    const delay = networkRetryDelay(this.networkRetryCount++);
     this.remoteLink.changed();
     // Retire this generation before any suspended pump or handshake can report
     // its close as a terminal failure. Native subscriptions survive the detach.
