@@ -102,6 +102,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    /// Counts key comparisons made while scanning `structured_root_key_order`
+    /// for membership. Any such scan on an insert path must bump it, so tests
+    /// can pin that opening N fresh rows stays linear.
     #[cfg(test)]
     root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
@@ -1023,6 +1026,11 @@ impl MaintainedSubscriptionView {
                         if first_occurrence {
                             self.structured_root_key_order.push(terminal_key);
                         }
+                        debug_assert_eq!(
+                            self.structured_root_keys.len(),
+                            self.structured_root_key_order.len(),
+                            "direct app-row key map and order must hold the same keys"
+                        );
                     }
                 }
             }
@@ -4053,6 +4061,55 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // Internal mechanism test, like the collector one above: the public
+    // result cannot reveal a scan of the order for each direct app row.
+    #[test]
+    fn fresh_direct_app_rows_skip_order_scans_and_keep_first_occurrence_order() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = |i: u16| {
+            let mut bytes = [0_u8; 16];
+            bytes[..2].copy_from_slice(&i.to_be_bytes());
+            RowUuid::from_bytes(bytes)
+        };
+        let event = |i: u16, weight| {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: root(i),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(root(i).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                weight,
+            )
+        };
+        let mut maintained = test_maintained();
+        for i in 0..2000 {
+            maintained
+                .apply_decoded_deltas([event(i, 1)], &aliases())
+                .unwrap();
+        }
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+
+        // A root that leaves and returns keeps its first-occurrence slot and
+        // is never ordered twice.
+        maintained
+            .apply_decoded_deltas([event(7, -1)], &aliases())
+            .unwrap();
+        maintained
+            .apply_decoded_deltas([event(7, 1)], &aliases())
+            .unwrap();
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+        let roots: Vec<RowUuid> = maintained
+            .structured_app_rows()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect();
+        assert_eq!(roots, (0..2000).map(root).collect::<Vec<_>>());
     }
 
     #[test]
