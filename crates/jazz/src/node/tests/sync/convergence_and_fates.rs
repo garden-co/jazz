@@ -696,9 +696,19 @@ fn duplicate_commit_units_must_match_original_payload() {
     core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let mut conflicting = versions;
-    conflicting[0] = version_record(row, Vec::new(), title_cells("changed"), None);
+    // Core stores its post-image, not the authored patch, so a redelivery of
+    // an accepted unit is deduplicated by tx id and cannot rewrite the row.
+    let stored = crate::db::block_on(core.query_versions_for_tx(tx.tx_id)).unwrap();
+    let mut rewritten = versions.clone();
+    rewritten[0] = version_record(row, Vec::new(), title_cells("changed"), None);
+    core.ingest_commit_unit_settled(tx.clone(), rewritten, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert_eq!(crate::db::block_on(core.query_versions_for_tx(tx.tx_id)).unwrap(), stored);
 
+    // A payload that addresses a different row is still a conflict.
+    let row_uuid_8 = RowUuid::from_bytes([8; 16]);
+    let mut conflicting = versions;
+    conflicting[0] = version_record(row_uuid_8, Vec::new(), title_cells("first"), None);
     assert!(matches!(
         core.ingest_commit_unit_settled(tx, conflicting, u64::MAX - SKEW_TOLERANCE_MS),
         Err(Error::ConflictingCommitUnit(_))

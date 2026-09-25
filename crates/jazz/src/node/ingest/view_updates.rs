@@ -78,8 +78,24 @@ where
             keep(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
         }
         for (index, column) in table_schema.columns.iter().enumerate() {
-            if !wins(&column.name) {
-                keep(&mut merged, HistoryRowRecord::USER_CELLS + index);
+            let index = HistoryRowRecord::USER_CELLS + index;
+            let strategy = table_schema.merge_strategy(&column.name);
+            if strategy != crate::schema::MergeStrategy::Lww {
+                // Merge columns are ops: they apply in seq order whatever
+                // their stamps.
+                merged[index] = if authors(&column.name) {
+                    // History cells are stored nullable.
+                    Value::Nullable(Some(Box::new(crate::node::merge_ops::apply_merge_op(
+                        strategy,
+                        &column.column_type,
+                        &previous_values[index],
+                        &merged[index],
+                    )?)))
+                } else {
+                    previous_values[index].clone()
+                };
+            } else if !wins(&column.name) {
+                keep(&mut merged, index);
             }
         }
         if !incoming_is_newest {

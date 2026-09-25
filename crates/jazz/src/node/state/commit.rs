@@ -388,6 +388,7 @@ where
                 }
                 None => previous_current.as_ref().and_then(VersionRow::deletion),
             };
+            let mut base_cells = BTreeMap::new();
             if let Some(previous) = previous_current.as_ref() {
                 let previous_schema = self
                     .schema_version_for_alias(previous.schema_version_alias())
@@ -407,6 +408,7 @@ where
                     )?
                 };
                 if projected.as_deref() == Some(table_schema.name.as_str()) {
+                    base_cells = inherited.clone();
                     for (column, value) in inherited {
                         if !authored_columns.contains(&column) && !cells.contains_key(&column) {
                             cells.insert(column, value);
@@ -414,6 +416,14 @@ where
                     }
                 }
             }
+            // Merge columns travel as ops over the image this write saw; the
+            // local overlay shows the resulting image.
+            let image_cells = merge_ops::split_merge_ops(
+                &table_schema,
+                &authored_columns,
+                &base_cells,
+                &mut cells,
+            )?;
             let authored_column_ids = self.authored_column_ids_for_names(
                 write_schema_version,
                 &table_schema.name,
@@ -427,34 +437,38 @@ where
                 )?
                 .logical_descriptor,
             );
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: commit.table,
-                    branch_key,
-                    row_uuid: commit.row_uuid,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: made_at,
-                    created_by,
-                    created_at,
-                    updated_by: commit.made_by,
-                    updated_at: provenance_at,
-                    cells,
-                    authored_columns: authored_column_ids,
-                    deletion,
-                },
-                (write_schema_version != self.catalogue.local_schema_version_id)
-                    .then_some(write_schema_version),
-                history_descriptor,
-            )?;
+            let row_version = |cells| {
+                VersionRow::from_parts_with_schema_version(
+                    &table_schema,
+                    VersionRowParts {
+                        table: commit.table.clone(),
+                        branch_key: branch_key.clone(),
+                        row_uuid: commit.row_uuid,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx_time: made_at,
+                        created_by,
+                        created_at,
+                        updated_by: commit.made_by,
+                        updated_at: provenance_at,
+                        cells,
+                        authored_columns: authored_column_ids.clone(),
+                        deletion,
+                    },
+                    (write_schema_version != self.catalogue.local_schema_version_id)
+                        .then_some(write_schema_version),
+                    history_descriptor.clone(),
+                )
+            };
+            let overlay = image_cells.map(&row_version).transpose()?;
+            let stored = row_version(cells)?;
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.write_ahead_current_insert(&mut batch, &stored)?;
+            self.write_ahead_current_insert(&mut batch, overlay.as_ref().unwrap_or(&stored))?;
             stored_versions.push(stored);
         }
         let persistence = self.database.apply_batch(batch).await?;

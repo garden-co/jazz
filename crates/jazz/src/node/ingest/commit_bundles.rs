@@ -431,7 +431,33 @@ where
             } else {
                 known_transaction_payload_matches(&existing.tx, &tx)
             };
-            if !matches || existing_versions != versions {
+            // Once Core has accepted a unit with a seq, its stored versions are
+            // Core's post-images, not the authored patch; tx identity alone
+            // then decides whether a redelivery is the same unit.
+            let stored_post_images =
+                matches!(existing.fate, Fate::Accepted) && existing.global_time.is_some();
+            let same_payload = if stored_post_images {
+                // Cells of the authored patch are no longer stored, so a
+                // redelivery is deduplicated by tx id; it must still address
+                // the same rows with the same deletion intent.
+                let rows = |records: &[VersionRecord]| {
+                    records
+                        .iter()
+                        .map(|record| {
+                            (
+                                record.table().to_owned(),
+                                record.branch_key().clone(),
+                                record.row_uuid(),
+                                record.deletes_row(),
+                            )
+                        })
+                        .collect::<BTreeSet<_>>()
+                };
+                rows(&existing_versions) == rows(&versions)
+            } else {
+                existing_versions == versions
+            };
+            if !matches || !same_payload {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if tx.kind == TxKind::Mergeable && matches!(existing.fate, Fate::Pending) {

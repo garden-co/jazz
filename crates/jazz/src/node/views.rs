@@ -377,9 +377,15 @@ where
                 .cloned()
                 .map(|version| (version_bundle_record_key(&version), version))
                 .collect::<BTreeMap<_, _>>();
+            // An accepted bundle for this node's own write carries Core's
+            // post-images, which replace the locally stored patches.
+            let carries_post_images = tx_id.node == self.node_uuid
+                && matches!(bundle.fate, Fate::Accepted)
+                && bundle.global_time.is_some();
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming
+                    && !carries_post_images
                 {
                     return Err(Error::ConflictingCommitUnit(*tx_id));
                 }
