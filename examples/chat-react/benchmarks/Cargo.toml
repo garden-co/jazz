@@ -1,5 +1,5 @@
 [package]
-name = "jazz-example-jamazon-warehouse-benchmark"
+name = "jazz-example-chat-benchmark"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 jazz = { workspace = true }
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+uuid = "1.18.1"
 
 [dev-dependencies]
 divan = { workspace = true }
