@@ -22,8 +22,10 @@ identity, no deleted rows. Each result is an independently opened trusted
 host over the same seeded store. All readings are microseconds inside the
 one-shot read; preparation and fixture loading are excluded. The control and
 candidate were run alternately, three times each, from the same instrumented
-binary. A temporary measurement-only environment guard disabled the probe
-for control runs; it is not in the change being shipped.
+binary (`SHA-256 f172112c493f824e252ed9332615f98a67f26c30e6b4092be48da37ada4db5c3`).
+It was built from #3489 commit `92810e091` with this PR's source change and
+measurement-only spans. A temporary environment guard disabled the probe for
+control runs; neither the guard nor spans are shipped in this PR.
 
 | Query set                         |      Control read (µs) |      Bounded read (µs) | Median gain | Rows |
 | --------------------------------- | ---------------------: | ---------------------: | ----------: | ---: |
@@ -50,7 +52,8 @@ The relay total is limited by work outside the Core after this change.
 
 ## Reproduction
 
-Build the native harness on the parent and candidate commits:
+The direct trusted-host benchmark runner is on #3489, not this PR's `main`
+parent. Build that native harness with and without this PR's source change:
 
 ```sh
 cargo build -p jazz-example-permissioned-resources-benchmark \
