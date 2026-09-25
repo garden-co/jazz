@@ -238,12 +238,12 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema
         } else {
-            self.table_in_schema(table, self.catalogue.local_schema_version_id)?;
+            self.table_in_schema_ref(table, self.catalogue.local_schema_version_id)?;
             self.catalogue.local_schema_version_id
         };
         self.query_global_layer_winner_in_schema(schema_version, table, row_uuid, layer)
@@ -471,7 +471,7 @@ where
             self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
         {
             let schema_version = if self
-                .table_in_schema(table, self.catalogue.active_schema.schema)
+                .table_in_schema_ref(table, self.catalogue.active_schema.schema)
                 .is_ok()
             {
                 self.catalogue.active_schema.schema
@@ -766,7 +766,7 @@ where
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema
@@ -1339,7 +1339,7 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema

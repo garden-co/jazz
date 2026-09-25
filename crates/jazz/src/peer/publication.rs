@@ -398,7 +398,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) {
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} identity={:?} claims={:?}",
                 self, self.publication_owner, self.role, binding.0, binding.1,
@@ -473,7 +473,7 @@ impl PeerState {
         subscription: SubscriptionKey,
     ) -> Result<(AuthorSubject, BTreeMap<String, groove::records::Value>), Error> {
         self.subscription_policy_binding(subscription).ok_or_else(|| {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=missing_served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} states={:?} caller={}",
                     self,
@@ -1119,7 +1119,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
+        let trace_rehydrate = crate::debug_env::rehydrate_trace();
         let trace_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -1549,7 +1549,7 @@ impl PeerState {
                             requires_authoritative_membership_reconcile |=
                                 transitions.requires_authoritative_membership_reconcile;
                         }
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+                        if crate::debug_env::covered_input_trace()
                             && (!transitions.adds.is_empty()
                                 || !transitions.program_fact_adds.is_empty())
                         {
@@ -1677,7 +1677,7 @@ impl PeerState {
             read_view,
             purpose,
         } = request;
-        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
+        let trace_rehydrate = crate::debug_env::rehydrate_trace();
         let open_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -1712,7 +1712,7 @@ impl PeerState {
         };
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(subscription)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate peer={:p} owner={} subscription={subscription:?} identity={policy_identity:?} source={source_authority_result_key:?} purpose={purpose:?}",
                 self, self.publication_owner,
@@ -1841,7 +1841,7 @@ impl PeerState {
         // folded the same terminal batch it returns here. Repeating that work
         // used to create a second opening path that could publish a different
         // reset from the generic late-opener path.
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
                 self.publication_owner, transitions.adds, transitions.program_fact_adds,

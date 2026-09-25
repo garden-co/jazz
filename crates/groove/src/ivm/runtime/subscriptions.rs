@@ -714,7 +714,15 @@ pub(super) struct RoutedMultisinkShapeState {
     pub(super) binding_descriptor: RecordDescriptor,
     pub(super) terminals: BTreeMap<String, RoutedMultisinkTerminalState>,
     pub(super) auto_family_key: Option<AutoDirectFamilyKey>,
+    /// Set for a shape handed out by [`IvmRuntime::prepare_shared`]: callers
+    /// with identical terminals reuse it, and it retires itself once its
+    /// last retained binding unsubscribes.
+    pub(super) shared_key: Option<SharedShapeKey>,
 }
+
+/// Identity of a shared prepared shape: its binding source plus its
+/// terminals in sink order.
+pub(super) type SharedShapeKey = (String, Vec<RoutedMultisinkTerminal>);
 
 #[derive(Clone, Debug)]
 pub(super) struct RoutedMultisinkTerminalState {
@@ -3648,10 +3656,57 @@ impl IvmRuntime {
                 binding_descriptor,
                 terminals: terminal_states,
                 auto_family_key: None,
+                shared_key: None,
             },
         );
         install.commit();
         Ok(PreparedShape { id: shape_id })
+    }
+
+    /// Like [`Self::prepare`], but a caller preparing terminals identical to
+    /// a live shared shape of the same binding source gets that shape back
+    /// instead of a new one. The shape is owned by its retained bindings: it
+    /// retires itself when the last one unsubscribes, so callers never retire
+    /// it themselves (see [`Self::release_shared_prepared_shape`]).
+    pub async fn prepare_shared<I, S>(
+        &mut self,
+        terminals: I,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        storage: &S,
+    ) -> Result<PreparedShape, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = RoutedMultisinkTerminal>,
+        S: OrderedKvStorage,
+    {
+        let shape = binding_source_shape.into();
+        let mut terminals = terminals.into_iter().collect::<Vec<_>>();
+        terminals.sort_by(|left, right| left.sink.cmp(&right.sink));
+        let key: SharedShapeKey = (shape.clone(), terminals.clone());
+        if let Some(shape_id) = self.shared_prepared_shapes.get(&key).copied()
+            && self
+                .prepared_shapes
+                .get(&shape_id)
+                .is_some_and(|state| state.binding_descriptor == binding_descriptor)
+        {
+            self.flush_pending_binding_retractions(storage).await?;
+            return Ok(PreparedShape { id: shape_id });
+        }
+        let prepared = self
+            .prepare(terminals, shape, binding_descriptor, storage)
+            .await?;
+        if let Some(state) = self.prepared_shapes.get_mut(&prepared.id) {
+            state.shared_key = Some(key.clone());
+        }
+        self.shared_prepared_shapes.insert(key, prepared.id);
+        Ok(prepared)
+    }
+
+    /// Retire a shared prepared shape that no retained binding holds, for a
+    /// caller whose bind failed or was cancelled. A shape other bindings
+    /// still hold is left alone.
+    pub fn release_shared_prepared_shape(&mut self, shape_id: PreparedShapeId) {
+        self.remove_unreferenced_shared_shape(shape_id);
     }
 
     pub fn bind_shape<S>(
@@ -4239,11 +4294,14 @@ impl IvmRuntime {
                 binding_key,
                 ..
             } = subscription.target
-                && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
-                && !param_delta.deltas.is_empty()
             {
-                self.pending_binding_retractions.push(param_delta);
-                self.remove_unreferenced_auto_family(shape_id);
+                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                    && !param_delta.deltas.is_empty()
+                {
+                    self.pending_binding_retractions.push(param_delta);
+                    self.remove_unreferenced_auto_family(shape_id);
+                }
+                self.remove_unreferenced_shared_shape(shape_id);
             }
             return removed;
         }
@@ -4275,17 +4333,20 @@ impl IvmRuntime {
                 binding_key,
                 ..
             } = subscription.target
-                && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
-                && !param_delta.deltas.is_empty()
             {
-                self.tick_with_params(
-                    Vec::new(),
-                    vec![param_delta],
-                    OwnedStorage::new(Rc::new(storage)),
-                    None,
-                )
-                .await?;
-                self.remove_unreferenced_auto_family(shape_id);
+                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                    && !param_delta.deltas.is_empty()
+                {
+                    self.tick_with_params(
+                        Vec::new(),
+                        vec![param_delta],
+                        OwnedStorage::new(Rc::new(storage)),
+                        None,
+                    )
+                    .await?;
+                    self.remove_unreferenced_auto_family(shape_id);
+                }
+                self.remove_unreferenced_shared_shape(shape_id);
             }
             return Ok(removed);
         }
@@ -4313,6 +4374,11 @@ impl IvmRuntime {
             .prepared_shapes
             .remove(&shape_id)
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        if let Some(key) = &shape.shared_key
+            && self.shared_prepared_shapes.get(key) == Some(&shape_id)
+        {
+            self.shared_prepared_shapes.remove(key);
+        }
         for output_node in shape
             .terminals
             .values()
@@ -4851,6 +4917,15 @@ impl IvmRuntime {
         self.live_attaches
     }
 
+    /// Whether any binding currently holds the prepared binding source named
+    /// `shape`. A caller can use this to keep a lone subscription on its own
+    /// literal graph and share a prepared shape only once a sibling exists.
+    pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
+        self.binding_sources
+            .get(&BindingSourceKey::prepared(shape.to_owned()))
+            .is_some_and(|source| !source.refcounts.is_empty())
+    }
+
     /// The shared nodes a live attach may borrow, or `None` when the shape is
     /// not certainly maintained for a sibling binding.
     fn live_attach_borrowed_nodes(
@@ -5007,6 +5082,28 @@ impl IvmRuntime {
 
     pub(super) fn binding_snapshot_deltas(&mut self) -> Arc<BindingSnapshots> {
         self.binding_sources.snapshot()
+    }
+
+    /// Retire a shared prepared shape once no retained binding targets it.
+    /// Its binding source stays: a queued retraction may still name it, and
+    /// the next preparation of the same source reuses the entry.
+    fn remove_unreferenced_shared_shape(&mut self, shape_id: PreparedShapeId) {
+        if self
+            .prepared_shapes
+            .get(&shape_id)
+            .is_none_or(|shape| shape.shared_key.is_none())
+        {
+            return;
+        }
+        if self.multisink_subscriptions.values().any(|subscription| {
+            matches!(
+                subscription.target,
+                MultisinkSubscriptionTarget::RoutedShape { shape_id: active, .. } if active == shape_id
+            )
+        }) {
+            return;
+        }
+        let _ = self.retire_prepared_shape(shape_id);
     }
 
     fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {

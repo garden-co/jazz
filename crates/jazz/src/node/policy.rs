@@ -424,7 +424,7 @@ where
     ) -> Result<bool, Error> {
         let write_schema_version = self.catalogue.active_schema.schema;
         let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
-        let table = self.table_in_schema(&commit.table, write_schema_version)?;
+        let table = self.table_in_schema_ref(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, permission_subject, None, &[])
             .await
@@ -446,7 +446,7 @@ where
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
         let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
-        let table = self.table_in_schema(&commit.table, write_schema_version)?;
+        let table = self.table_in_schema_ref(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, permission_subject, None, &[])
             .await
@@ -646,13 +646,8 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "history schema version alias must exist",
             ))?;
-        let source_table = self.table_in_schema(version.table(), source_schema)?;
-        self.translate_policy_cells(
-            source_schema,
-            version.table(),
-            &source_table,
-            version.cells(&source_table)?,
-        )
+        let cells = version.cells(self.table_in_schema_ref(version.table(), source_schema)?)?;
+        self.translate_policy_cells(source_schema, version.table(), cells)
     }
 
     fn policy_projection_for_version_record(
@@ -660,7 +655,7 @@ where
         version: &VersionRecord,
     ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
         let source_schema = version.schema_version();
-        let source_table = self.table_in_schema(version.table(), source_schema)?;
+        let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
         let cells = source_table
             .columns
             .iter()
@@ -671,14 +666,13 @@ where
                     .map(|value| (column.name.clone(), value))
             })
             .collect::<BTreeMap<_, _>>();
-        self.translate_policy_cells(source_schema, version.table(), &source_table, cells)
+        self.translate_policy_cells(source_schema, version.table(), cells)
     }
 
     fn translate_policy_cells(
         &mut self,
         source: SchemaVersionId,
         table: &str,
-        _source_table: &TableSchema,
         mut cells: BTreeMap<String, Value>,
     ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
         // Resolve the schema that owns the policy bundle, then project data
@@ -694,9 +688,12 @@ where
             return Ok((target, table, cells));
         }
 
-        let target_table = self.table_in_schema(table, target)?;
-        if policy_tables_are_directly_compatible(_source_table, &target_table) {
-            return Ok((target, target_table, cells));
+        let target_table = self.table_in_schema_ref(table, target)?;
+        if policy_tables_are_directly_compatible(
+            self.table_in_schema_ref(table, source)?,
+            target_table,
+        ) {
+            return Ok((target, target_table.clone(), cells));
         }
 
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
@@ -704,7 +701,7 @@ where
 
     pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
         let write_schema = self.catalogue.active_schema.schema;
-        if self.table_in_schema(table, write_schema).is_ok() {
+        if self.table_in_schema_ref(table, write_schema).is_ok() {
             write_schema
         } else {
             self.catalogue.local_schema_version_id
@@ -719,7 +716,7 @@ where
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.active_schema.schema;
         let current_schema = self.catalogue.local_schema_version_id;
-        if self.table_in_schema(table, write_schema).is_ok()
+        if self.table_in_schema_ref(table, write_schema).is_ok()
             && self.policy_schema_resolves_query_sources(write_schema, shape)
         {
             write_schema
@@ -745,7 +742,7 @@ where
                 _ => None,
             })
             .chain(shape.auxiliary_sources.iter().map(|source| &source.table))
-            .all(|table| self.table_in_schema(table, schema).is_ok())
+            .all(|table| self.table_in_schema_ref(table, schema).is_ok())
     }
 
     fn policy_target_schema_for_source(
@@ -761,7 +758,7 @@ where
             self.catalogue.local_schema_version_id,
             table,
         )? || self
-            .table_in_schema(table, self.catalogue.local_schema_version_id)
+            .table_in_schema_ref(table, self.catalogue.local_schema_version_id)
             .is_ok()
         {
             Ok(self.catalogue.local_schema_version_id)
@@ -777,16 +774,16 @@ where
         table: &str,
     ) -> Result<bool, Error> {
         if source == target {
-            return Ok(self.table_in_schema(table, target).is_ok());
+            return Ok(self.table_in_schema_ref(table, target).is_ok());
         }
 
         if let Some(path) = self.compiled_lens_path(source, target, table)? {
             let mut cells = BTreeMap::new();
             let target_table = apply_compiled_lens_path(&path, &mut cells);
-            return Ok(self.table_in_schema(&target_table, target).is_ok());
+            return Ok(self.table_in_schema_ref(&target_table, target).is_ok());
         }
 
-        Ok(self.table_in_schema(table, target).is_ok())
+        Ok(self.table_in_schema_ref(table, target).is_ok())
     }
 
     async fn policy_delete_subject_row(
@@ -842,7 +839,7 @@ where
         candidate_tx_id: Option<TxId>,
     ) -> Result<Option<CurrentRow>, Error> {
         let subject_table = if self
-            .table_in_schema(version.table(), self.catalogue.active_schema.schema)
+            .table_in_schema_ref(version.table(), self.catalogue.active_schema.schema)
             .is_ok()
         {
             version.table()
@@ -866,7 +863,7 @@ where
                                     "history schema version alias must exist",
                                 ))?;
                             let source_table =
-                                self.table_in_schema(parent_version.table(), source_schema)?;
+                                self.table_in_schema_ref(parent_version.table(), source_schema)?;
                             if !policy_tables_are_directly_compatible(&source_table, table) {
                                 return Err(Error::InvalidCatalogueUpdate("lens chain is unknown"));
                             }
