@@ -2118,6 +2118,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2144,6 +2154,16 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+]
+
+[[package]]
+name = "jazz-example-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
 ]
 
 [[package]]
