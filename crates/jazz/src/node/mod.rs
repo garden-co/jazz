@@ -1533,6 +1533,26 @@ pub struct CommitUnitIngestContext {
     pub(crate) version_receipts_validated: bool,
 }
 
+impl CommitUnitIngestContext {
+    /// Same authenticated authority, ignoring how the receipts were checked.
+    ///
+    /// A parked unit resent over a different transport (checked wire vs. an
+    /// in-process semantic link) carries identical versions under the same
+    /// identity and trust, so it must not read as a conflicting unit.
+    pub(crate) fn same_authority_as(&self, other: &Self) -> bool {
+        Self {
+            version_receipts_validated: other.version_receipts_validated,
+            ..*self
+        } == *other
+    }
+
+    /// Keep "receipts already validated" only if both deliveries established
+    /// it, so a merged parked unit never skips a validation it still owes.
+    pub(crate) fn keep_receipt_validation_common_to(&mut self, other: &Self) {
+        self.version_receipts_validated &= other.version_receipts_validated;
+    }
+}
+
 /// Trust mode for an inbound commit-unit upload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitUnitTrust {

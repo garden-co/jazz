@@ -2360,8 +2360,7 @@ mod tests {
         assert!(streaming_zstd < per_message_zstd);
     }
 
-    #[test]
-    fn message_frame_round_trips_sync_message_payload_variants() {
+    fn sync_message_payload_variants() -> Vec<SyncMessage> {
         let node = NodeUuid::from_bytes([0x11; 16]);
         let tx_id = TxId::new(TxTime(12), node);
         let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
@@ -2372,7 +2371,7 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let messages = vec![
+        vec![
             SyncMessage::RegisterShape {
                 shape_id,
                 ast: ShapeAst::new(Query::from("todos"), schema_version),
@@ -2441,7 +2440,12 @@ mod tests {
             SyncMessage::RowVersionPayloads {
                 version_bundles: Vec::new(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn message_frame_round_trips_sync_message_payload_variants() {
+        let messages = sync_message_payload_variants();
 
         for message in messages {
             let payload = encode_sync_message(&message).unwrap();
@@ -2458,6 +2462,76 @@ mod tests {
 
             assert_eq!(decode_sync_message(&envelope.payload).unwrap(), message);
         }
+    }
+
+    /// `decode_postcard_exact` compares while serializing instead of
+    /// allocating a re-encode (#3376). Pin that it accepts exactly what the
+    /// old decode-then-`to_allocvec` equality accepted, across truncations,
+    /// insertions, substitutions, overlong varints and deletions of every
+    /// payload variant and of canonical maps and sets. This is a white-box
+    /// differential test because the equivalence is a property of one
+    /// internal function that no public path can enumerate.
+    #[test]
+    fn canonical_postcard_check_matches_allocating_re_encode() {
+        fn allocating_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            match postcard::take_from_bytes::<T>(bytes) {
+                Ok((value, rest)) => {
+                    rest.is_empty()
+                        && postcard::to_allocvec(&value).is_ok_and(|encoded| encoded == bytes)
+                }
+                Err(_) => false,
+            }
+        }
+        fn streaming_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            decode_postcard_exact::<T>(bytes).is_ok()
+        }
+        fn mutations_agree<T: serde::de::DeserializeOwned + Serialize>(canonical: &[u8]) {
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    allocating_exact::<T>(bytes),
+                    streaming_exact::<T>(bytes),
+                    "canonical check diverges on {bytes:02x?}"
+                );
+            };
+            assert!(streaming_exact::<T>(canonical));
+            for i in 0..=canonical.len() {
+                check(&canonical[..i]);
+                for byte in 0..=u8::MAX {
+                    let mut inserted = canonical.to_vec();
+                    inserted.insert(i, byte);
+                    check(&inserted);
+                    if i < canonical.len() {
+                        let mut substituted = canonical.to_vec();
+                        substituted[i] = byte;
+                        check(&substituted);
+                    }
+                    if i + 1 < canonical.len() {
+                        let mut overlong = canonical.to_vec();
+                        overlong[i] = byte | 0x80;
+                        overlong.insert(i + 1, 0);
+                        check(&overlong);
+                    }
+                }
+                if i < canonical.len() {
+                    let mut removed = canonical.to_vec();
+                    removed.remove(i);
+                    check(&removed);
+                }
+            }
+        }
+
+        for message in sync_message_payload_variants() {
+            mutations_agree::<SyncMessage>(&encode_sync_message(&message).unwrap());
+        }
+        type Map = std::collections::BTreeMap<u32, String>;
+        let map: Map = [(1, "a".to_owned()), (2, "b".to_owned())].into();
+        mutations_agree::<Map>(&postcard::to_allocvec(&map).unwrap());
+        let duplicate_key = [vec![2u8], vec![1, 1, b'a'], vec![1, 1, b'b']].concat();
+        let unsorted_keys = [vec![2u8], vec![2, 1, b'b'], vec![1, 1, b'a']].concat();
+        assert!(!streaming_exact::<Map>(&duplicate_key));
+        assert!(!streaming_exact::<Map>(&unsorted_keys));
+        let set: std::collections::BTreeSet<u64> = [1, 300, 70_000].into();
+        mutations_agree::<std::collections::BTreeSet<u64>>(&postcard::to_allocvec(&set).unwrap());
     }
 
     #[test]

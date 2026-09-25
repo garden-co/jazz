@@ -751,9 +751,15 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !existing
+                .ingest_context
+                .same_authority_as(&mode.ingest_context)
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            existing
+                .ingest_context
+                .keep_receipt_validation_common_to(&mode.ingest_context);
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
@@ -789,9 +795,15 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !existing
+                .ingest_context
+                .same_authority_as(&mode.ingest_context)
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            existing
+                .ingest_context
+                .keep_receipt_validation_common_to(&mode.ingest_context);
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }

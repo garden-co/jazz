@@ -428,6 +428,41 @@ fn duplicate_unknown_parent_commit_unit_parks_once() {
     assert_eq!(core.sync_metrics().parked_orphans, 1);
     assert_eq!(core.sync_metrics().parked_orphans_resolved, 0);
 }
+/// A parked commit unit may be resent over a different transport: first
+/// from a checked wire decoder (receipts already validated), then over an
+/// in-process link (not validated). The versions, identity and trust are
+/// identical, so the resend is a duplicate of the parked unit, not a
+/// conflicting one (#3376 review).
+#[test]
+fn parked_commit_unit_resent_over_another_transport_is_not_conflicting() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let missing = TxId::new(TxTime::from(99), node(1));
+    let (_child, child_unit) = client
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(7), 2)
+                .parents(vec![missing])
+                .cells(title_cells("child")),
+        )
+        .unwrap();
+    let context = |version_receipts_validated| {
+        Some(crate::node::CommitUnitIngestContext {
+            identity: AuthorSubject::SYSTEM,
+            trust: crate::node::CommitUnitTrust::TrustedBackend,
+            admitted_write_authorization: false,
+            version_receipts_validated,
+        })
+    };
+
+    for validated in [true, false] {
+        core.apply_sync_message_with_ingest_context(child_unit.clone(), context(validated))
+            .resolve()
+            .expect("a resent parked unit is a duplicate, not a conflict");
+    }
+
+    assert_eq!(core.sync_metrics().parked_orphans, 1);
+    assert_eq!(core.sync_metrics().parked_orphans_resolved, 0);
+}
 #[test]
 fn m2_writer_core_reader_converges_against_oracle() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
