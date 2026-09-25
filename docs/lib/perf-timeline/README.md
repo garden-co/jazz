@@ -102,9 +102,12 @@ cold instance returns HTTP 502 with a retry UI.
 
 ## Docs route and deployment
 
-The dashboard lives at `/perf-timeline` in the docs app and is intentionally absent
-from site navigation and search content. It uses the shared Fumadocs home layout,
-fonts, and theme. Its stylesheet is scoped to `.perf-timeline`.
+The explorer (`components/perf-timeline/dashboard.tsx`) is the "Full history"
+section at the bottom of the examples & benchmarks page, `/examples`
+(`components/showcase/`). `/perf-timeline` redirects there and keeps its
+`?benchmark=` query. The page's example metric cards and "More benchmarks" rows
+share the same `/api/timeline` response; see `lib/showcase/summary.ts` for how a
+card picks its released number. Its stylesheet is scoped to `.perf-timeline`.
 
 Deploy through the existing docs project; no separate app or Vercel project is
 required. The public API remains `/api/timeline`. Set the optional server-only

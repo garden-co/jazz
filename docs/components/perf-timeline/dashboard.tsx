@@ -19,6 +19,7 @@ import {
   type Stage,
   type Timeline,
 } from "@/lib/perf-timeline/model";
+import { fetchTimeline } from "@/lib/perf-timeline/client";
 
 const repo = "https://github.com/garden-co/jazz";
 const codspeed = "https://app.codspeed.io/garden-co/jazz";
@@ -263,6 +264,10 @@ function Chart({
   );
 }
 
+/**
+ * The full CodSpeed history explorer. It lives at the bottom of the examples &
+ * benchmarks page; /perf-timeline redirects there.
+ */
 export function Dashboard() {
   const [data, setData] = useState<Timeline | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -277,14 +282,11 @@ export function Dashboard() {
   const [spread, setSpread] = useState(false);
   const [estimated, setEstimated] = useState(true);
 
-  async function refresh() {
+  async function refresh(force = false) {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/timeline");
-      if (!response.ok)
-        throw new Error("CodSpeed history is temporarily unavailable. Please try again.");
-      const incoming: Timeline = await response.json();
+      const incoming: Timeline = await fetchTimeline(force);
       setData(incoming);
       const requested = new URLSearchParams(window.location.search).get("benchmark");
       setBenchmarkId(
@@ -303,6 +305,15 @@ export function Dashboard() {
   }
   useEffect(() => {
     void refresh();
+  }, []);
+  // Metric popovers elsewhere on the page link here for one benchmark's history.
+  useEffect(() => {
+    const onSelect = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (typeof id === "string") selectBenchmark(id);
+    };
+    window.addEventListener("perf-timeline:select", onSelect);
+    return () => window.removeEventListener("perf-timeline:select", onSelect);
   }, []);
   const benchmarks = useMemo(
     () =>
@@ -346,27 +357,25 @@ export function Dashboard() {
   }
   return (
     <div className="perf-timeline">
-      <header className="topbar">
-        <span className="brand-caption">Performance lab</span>
-        <nav>
-          <a href={`${repo}/issues/2913`} target="_blank" rel="noreferrer">
-            Research log ↗
-          </a>
-          <a href={codspeed} target="_blank" rel="noreferrer">
-            CodSpeed ↗
-          </a>
-        </nav>
-      </header>
       <div className="page-shell">
         <section className="intro">
           <div>
             <div className="eyebrow">
               <span className="status-dot" /> ENGINEERING / MEASUREMENTS
             </div>
-            <h1>A little faster, every commit.</h1>
-            <p>Wallclock performance across releases, main, and work in progress.</p>
+            <h2 className="intro-title">Full benchmark history</h2>
+            <p>
+              Wallclock performance across releases, main, and work in progress ·{" "}
+              <a href={`${repo}/issues/2913`} target="_blank" rel="noreferrer">
+                Research log ↗
+              </a>{" "}
+              ·{" "}
+              <a href={codspeed} target="_blank" rel="noreferrer">
+                CodSpeed ↗
+              </a>
+            </p>
           </div>
-          <button className="refresh" onClick={() => void refresh()} disabled={loading}>
+          <button className="refresh" onClick={() => void refresh(true)} disabled={loading}>
             {loading ? "Fetching…" : "↻ Refresh data"}
           </button>
         </section>
@@ -429,7 +438,7 @@ export function Dashboard() {
           <main>
             {error && (
               <div className="notice error" role="alert">
-                {error} <button onClick={() => void refresh()}>Retry</button>
+                {error} <button onClick={() => void refresh(true)}>Retry</button>
                 {data && " Showing the previously loaded data."}
               </div>
             )}
@@ -909,12 +918,6 @@ export function Dashboard() {
             )}
           </main>
         </div>
-        <footer>
-          <span>
-            jazz <span className="footer-muted">/ performance lab</span>
-          </span>
-          <span>Measure. Understand. Improve.</span>
-        </footer>
       </div>
     </div>
   );

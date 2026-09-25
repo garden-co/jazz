@@ -118,8 +118,10 @@ try {
       p.forEach((v, j) => assert.ok(Math.abs(v - positions.small[i][j]) < 0.000001)),
     );
   }
-  assert.match(await page.locator('meta[name="robots"]').getAttribute("content"), /noindex/);
+  // The old route redirects into the examples & benchmarks page, which hosts the explorer.
+  assert.equal(new URL(page.url()).pathname, "/examples");
   assert.equal(await page.locator('nav a[href="/perf-timeline"]').count(), 0);
+  assert.ok((await page.locator('a[href="/examples"]').count()) > 0);
   assert.equal(await page.getByRole("link", { name: "Jazz home" }).count(), 1);
   const desktopReceipt = await page.locator(".receipt-body").evaluate((el) => {
     const details = el.firstElementChild.getBoundingClientRect();

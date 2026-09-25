@@ -1,4 +1,4 @@
-/* Scoped to this hidden route; reuse the documentation site's theme and fonts. */
+/* Scoped to the history explorer on the examples & benchmarks page; reuse the documentation site's theme and fonts. */
 .perf-timeline {
   --paper: var(--color-fd-background);
   --ink: var(--color-fd-foreground);
@@ -216,7 +216,8 @@
     border-radius: 50%;
     box-shadow: 0 0 0 3px #16796812;
   }
-  h1 {
+  h1,
+  .intro-title {
     font-size: clamp(28px, 3vw, 42px);
     font-weight: 500;
     letter-spacing: -1.8px;
@@ -807,7 +808,8 @@
       align-items: flex-start;
       margin-bottom: 25px;
     }
-    .intro h1 {
+    .intro h1,
+    .intro-title {
       font-size: 29px;
       letter-spacing: -1px;
     }
