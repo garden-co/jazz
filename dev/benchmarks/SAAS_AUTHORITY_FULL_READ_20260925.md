@@ -1,23 +1,26 @@
 # Authority-served unbounded SaaS reads (2026-09-25)
 
-On the refreshed main `67316cb7f`, the complete relay workload falls from a
-median **6,602 ms to 899 ms (7.34×)**. All 27,518 rows match the independent
+On main `5b6417fe5`, the complete opt-in relay workload falls from a median
+**6,378 ms to 858 ms (7.43×)**. All 27,518 rows match the independent
 authorized result, including exact binding bytes on the candidate.
 
 ## Why ship this separately
 
-The first-page authority route in #3456 does not cover an unbounded query.
+The opt-in first-page authority route in #3456 does not cover an unbounded query.
 The same no-deletion SaaS workload still takes over six seconds to return
 27,518 authorized rows through Core, a device relay, and Client. This change
 extends that result-first route to flat current Global one-shot queries with
-no limit. The authority evaluates under the admitted identity and claims;
+no limit when `resultOnly: true` is requested. The authority evaluates under
+the admitted identity and claims;
 the receiver gets exact binding-encoded rows without building a transient
 maintained graph and receiving its supporting version closure.
 
 Limited pages retain their 1 MiB result cap. Unbounded results have a 16 MiB
 cap, and oversized results use the existing coverage path. The 32 KiB query
 envelope, 64 pending-route cap, authorization checks, claim revision check,
-local-write fallback, and legacy-peer fallback remain in force. Live
+local-write fallback, and legacy-peer fallback remain in force. Ordinary
+Global reads continue to populate local offline data. A successful result-only
+read does not fill that cache. Live
 subscriptions, history, deleted-row semantics, and source replication are
 unchanged. A result over 16 MiB currently pays for authority evaluation
 before falling back; streaming or an early size estimate is future work.
@@ -76,6 +79,22 @@ The **7.34×** median gain retains the same 27,518 authorized rows and
 `c8462e4fe36a236a23f696c7df61d035fd876b4896752e16fc5f05b856550994` /
 `d6c9b81feba2d672bcd8a9c255f51eba3174f7587aa4ce3d327c32da70905f84`.
 The `latest-main-` receipts contain the complete phase and payload counts.
+
+After #3451 (ordered pages), #3354 (incremental attach), and the bulk ingest
+changes merged, the corrected opt-in stack was rebased onto main `5b6417fe5`.
+Both arms request `resultOnly: true`; the matched control differs only by
+disabling its authority route in the read eligibility condition:
+
+| 39 unbounded Global reads | Run 1 | Run 2 | Run 3 | Median |
+| ------------------------- | ----: | ----: | ----: | -----: |
+| Receiver coverage         | 6,378 | 6,460 | 6,292 |  6,378 |
+| Authority result          |   861 |   856 |   858 |    858 |
+
+The **7.43×** median gain retains all 27,518 authorized rows and 13,408,002
+binding bytes. Candidate/control binary SHA-256 values are
+`d4fd758d2fe2de036ec7ed77b57d250d6d70273fe90153e5ea5a64d2fca4f19a` /
+`32e41a046b5cfe0f39386c96353d7a9376e69d925f61a87628908fab419f0c91`.
+The six `main-5b6417-` receipts record row counts and phase timings.
 
 To reproduce, build `permissioned-resources-profile` with
 `cargo build -p jazz-example-permissioned-resources-benchmark --bin

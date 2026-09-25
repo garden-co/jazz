@@ -121,6 +121,7 @@ fn unbounded_global_read_proxies_authorized_rows_through_relay() {
         ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Deferred,
+            result_only: true,
             ..ReadOpts::default()
         },
         None,
