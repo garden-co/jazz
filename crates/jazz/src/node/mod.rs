@@ -923,6 +923,15 @@ struct ScopedPolicyAuthorizationGraphReplacement {
 
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
+    /// Durable watermarks are consulted once per result per process, before
+    /// this process holds any receipt for it; in-process state wins after.
+    watermark_restore_seen: BTreeSet<AuthorityResultKey>,
+    /// Last watermark written per result, so an unchanged confirmation
+    /// stays entirely in memory.
+    persisted_watermarks: BTreeMap<AuthorityResultKey, (GlobalTime, [u8; 16])>,
+    /// Set once scopes are invalidated (eviction, catalogue or rebuild): the
+    /// local rows can no longer stand in for a stored watermark's held set.
+    watermarks_invalidated: bool,
     local_availability_records: BTreeMap<
         (PolicyBindingKey, crate::ids::GlobalPhysicalTableId, RowUuid),
         query_eval::LocalAvailabilityRecord,

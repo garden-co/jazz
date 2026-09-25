@@ -1094,7 +1094,7 @@ where
         binding: &Binding,
         subscription: SubscriptionKey,
         _values: &[Value],
-        _identity: AuthorSubject,
+        identity: AuthorSubject,
         policy_binding: Option<&(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
         let binding_view_key = BindingViewKey {
@@ -1125,6 +1125,17 @@ where
             .contains_key(&authority_result_key)
         {
             return Ok(None);
+        }
+        // A reopened receiver restores a row-local view's watermark from its
+        // durable record and rebuilds the held set from synced rows.
+        if self
+            .query
+            .authority_results
+            .get(&authority_result_key)
+            .is_none_or(|state| state.settled_through.is_none())
+        {
+            self.restore_subscription_watermark(shape, binding, &authority_result_key, identity)
+                .await?;
         }
         // This process's unevicted receipt may deduplicate bodies on reconnect;
         // restart restores neither this cursor nor scope. The serving peer

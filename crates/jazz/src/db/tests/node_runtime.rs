@@ -2232,6 +2232,106 @@ fn warm_reconnect_catches_up_from_the_watermark_with_only_changed_rows() {
 }
 
 #[test]
+fn reopened_client_catches_up_from_its_stored_watermark() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client_path = tempfile::tempdir().unwrap().keep();
+    let families = schema.column_families();
+    let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open_client = || {
+        block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage: RocksDbStorage::open(&client_path, &families).unwrap(),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xc4; 16]),
+                author: client_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xc4))),
+        }))
+        .unwrap()
+    };
+    let rows = (0..40)
+        .map(|index| {
+            seed(
+                &server,
+                "todos",
+                cells(&format!("todo {index}"), false, owner),
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(false))));
+
+    let full_bytes = {
+        let client = open_client();
+        let (client_transport, server_transport) = duplex();
+        let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let subscriber = server.accept_subscriber(server_transport, client_author);
+        let mut subscription =
+            prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        for _ in 0..3 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            client.tick().unwrap();
+        }
+        assert_eq!(
+            delta_rows(next_settled_opening(&mut subscription)).0.len(),
+            40
+        );
+        let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+        drop(subscription);
+        drop(upstream);
+        drop(subscriber);
+        block_on(client.close()).unwrap();
+        full_bytes
+    };
+
+    block_on(
+        server
+            .update("todos", rows[3], cells("todo 3 renamed", false, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    block_on(
+        server
+            .update("todos", rows[7], cells("todo 7", true, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    seed(&server, "todos", cells("todo 40", false, owner));
+
+    let client = open_client();
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let resumed = server.accept_subscriber(server_transport, client_author);
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+    let titles = prepared_read(&client, &query)
+        .into_iter()
+        .map(|row| match row.cell(&schema.tables[0], "title") {
+            Some(Value::String(title)) => title,
+            other => panic!("unexpected title {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(titles.len(), 40);
+    assert!(titles.contains("todo 3 renamed"));
+    assert!(titles.contains("todo 40"));
+    assert!(!titles.contains("todo 7"));
+    let catch_up_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    assert!(
+        catch_up_bytes * 4 < full_bytes,
+        "a reopened client resumes from its stored watermark: full={full_bytes}, catch_up={catch_up_bytes}"
+    );
+}
+
+#[test]
 fn warm_reconnect_under_a_claims_policy_resends_and_drops_rows_that_left() {
     // A fresh link cannot prove the reader's authorization is unchanged, so
     // a claims-scoped view gets a full set. Rows that left the result while

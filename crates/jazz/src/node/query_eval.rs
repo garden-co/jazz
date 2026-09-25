@@ -74,6 +74,7 @@ mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
+mod subscription_watermarks;
 mod unavailable_inputs;
 
 pub(crate) use local_availability_receipts::{
@@ -2361,7 +2362,6 @@ where
         Ok((shape, binding))
     }
 
-    #[cfg(test)]
     pub(crate) async fn query_rows_for_link(
         &mut self,
         shape: &ValidatedQuery,

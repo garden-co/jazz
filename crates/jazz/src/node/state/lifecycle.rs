@@ -751,6 +751,9 @@ where
             },
             parking: Parking::default(),
             query: QueryServing {
+                watermark_restore_seen: BTreeSet::new(),
+                persisted_watermarks: BTreeMap::new(),
+                watermarks_invalidated: false,
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
                 local_unavailable_inputs: BTreeMap::new(),

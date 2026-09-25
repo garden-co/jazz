@@ -670,6 +670,7 @@ where
             };
         }
         self.query.retained_root_window_sources.clear();
+        self.query.watermarks_invalidated = true;
     }
 
     async fn persist_policy_binding_directory(

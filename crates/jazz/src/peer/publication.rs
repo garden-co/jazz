@@ -2999,7 +2999,7 @@ pub(crate) fn read_policy_admits_every_row(policy: &crate::query::Query) -> bool
 }
 
 /// Membership of a row in this query depends only on the row's own image.
-fn row_local_membership(query: &crate::query::Query) -> bool {
+pub(crate) fn row_local_membership(query: &crate::query::Query) -> bool {
     let scalar_filters = query.filters.is_empty()
         || crate::node::simple_scalar_exit_query(&crate::query::Query {
             select: None,
@@ -3019,7 +3019,7 @@ fn row_local_membership(query: &crate::query::Query) -> bool {
         && query.relation.is_none()
 }
 
-fn query_uses_claims(query: &crate::query::Query) -> bool {
+pub(crate) fn query_uses_claims(query: &crate::query::Query) -> bool {
     fn operand(operand: &crate::query::Operand) -> bool {
         matches!(operand, crate::query::Operand::Claim(_))
     }

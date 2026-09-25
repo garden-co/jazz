@@ -205,6 +205,12 @@ where
             }
         }
 
+        if !evictable.is_empty() {
+            // A stored watermark's held set is rebuilt from local rows, which
+            // are about to lose bodies: no restart may resume from it.
+            self.purge_subscription_watermarks().await?;
+        }
+
         let mut batch = self.database.open_batch();
         let mut batch_deletes = 0_usize;
         for candidate in evictable {

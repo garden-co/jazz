@@ -1537,9 +1537,14 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        declaration, None,
-        "restart must not recover a body-dedup cursor"
+    // A row-local view resumes "Q at W" from its stored watermark; it is
+    // not a Fast body-dedup cursor and does not restore live settlement.
+    assert!(
+        matches!(
+            declaration,
+            Some(crate::protocol::KnownStateDeclaration::Watermark { .. })
+        ),
+        "restart resumes a row-local view from its stored watermark: {declaration:?}"
     );
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),
@@ -1923,7 +1928,9 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         reopened.row_history("todos", row_uuid).unwrap(),
         persisted_history
     );
-    assert_eq!(
+    // The failed eviction deleted no body, so a stored watermark may still
+    // resume the view; it never comes back as a Fast body-dedup cursor.
+    assert!(!matches!(
         reopened
             .known_state_declaration_for_subscription(
                 &shape,
@@ -1934,8 +1941,8 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
                 None
             )
             .unwrap(),
-        None
-    );
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
 }
 
 #[test]
@@ -1977,8 +1984,15 @@ fn storage_reopen_retains_rows_without_scope_or_fast_cursor() {
             None,
         )
         .unwrap();
-    assert_eq!(declaration, None);
-    assert!(reopened.query.authority_results.is_empty());
+    // The row-local view resumes from its stored watermark ("Q at W"),
+    // rebuilt from the retained rows; live settlement still needs Core.
+    assert!(
+        matches!(
+            declaration,
+            Some(crate::protocol::KnownStateDeclaration::Watermark { .. })
+        ),
+        "{declaration:?}"
+    );
     assert_eq!(reopened.row_history("todos", row_uuid).unwrap().len(), 1);
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),

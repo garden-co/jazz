@@ -2437,16 +2437,38 @@ where
         // Only this fully admitted in-process update establishes a predecessor.
         // Neither membership nor transport revisions survive process restart.
         if !defer_settlement && !opening_pending {
-            if let Some(state) = self.query.authority_results.get_mut(&authority_result_key)
-                && matches!(
-                    state.source_closure,
-                    crate::node::AuthoritySourceClosure::Claimed { .. }
-                )
-            {
+            let claimed = self
+                .query
+                .authority_results
+                .get(&authority_result_key)
+                .filter(|state| {
+                    matches!(
+                        state.source_closure,
+                        crate::node::AuthoritySourceClosure::Claimed { .. }
+                    )
+                })
+                .map(|state| state.settled_through);
+            if let Some(settled_through) = claimed {
+                // Record the watermark before installing it in memory: a
+                // cancelled write then leaves no in-process revision behind.
+                if let (Some(settled_through), Some(revision)) =
+                    (settled_through, normalized_snapshot)
+                    && let Some(shape) = self.registered_shape(subscription.shape_id)
+                    && self.watermark_catch_up_view(&shape)
+                {
+                    self.persist_subscription_watermark(
+                        &authority_result_key,
+                        settled_through,
+                        revision,
+                    )
+                    .await?;
+                }
                 // Only this exact successfully applied frame can install its
                 // normalized predecessor. Legacy/deferred/opening frames do
                 // not preserve an earlier frame's cache accidentally.
-                state.supporting_revision = normalized_snapshot;
+                if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+                    state.supporting_revision = normalized_snapshot;
+                }
             }
         }
         Ok(())

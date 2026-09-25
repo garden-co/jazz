@@ -41,6 +41,10 @@ pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
 pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_bindings";
+/// Per-subscription watermark ("Q at W") v1: the settled seq and supporting
+/// revision of a row-local view, so a reopened receiver can ask Core for only
+/// the rows that moved. The held set is rebuilt from synced local rows.
+pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
 /// Append-only proof that a scope-isolated relay actually received a row
@@ -554,6 +558,21 @@ impl RuntimeSchema {
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                SUBSCRIPTION_WATERMARKS_STORE,
+                RecordDescriptor::new([
+                    ("shape_id", ValueType::Uuid),
+                    ("binding_id", ValueType::Uuid),
+                    ("read_view_id", ValueType::Uuid),
+                    ("policy_scope", ValueType::U8),
+                    ("policy_binding_digest", ValueType::Bytes),
+                ]),
+                RecordDescriptor::new([
+                    ("format_v1", ValueType::U8),
+                    ("settled_through", ValueType::U64),
+                    ("supporting_revision", ValueType::Bytes),
+                ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 LOCAL_ROW_AVAILABILITY_STORE,
