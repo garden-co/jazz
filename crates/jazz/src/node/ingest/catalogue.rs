@@ -49,8 +49,8 @@ where
             Some(CommitUnitIngestContext {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
-                edge_authority: false,
                 admitted_write_authorization: false,
+                version_receipts_validated: false,
             }),
         )
         .await
@@ -101,35 +101,14 @@ where
             });
         }
         Box::pin(async move {
-            // A dynamic edge has exactly one admissible pre-ready transition: the
-            // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
-            // directly.  Incremental catalogue/data/branch traffic has no
-            // authority lineage to validate against and must not leave durable
-            // pending rows that poison a later reopen.
+            // Uninitialized clients and local relays must install a complete
+            // trusted catalogue snapshot before accepting incremental traffic.
             self.require_catalogue_ready()?;
             if self.catalogue_activation_failed {
                 return Err(Error::CatalogueActivationFailed);
             }
             match message {
-                SyncMessage::AuthorityPublication(publication) => {
-                    if !ingest_context.is_some_and(|context| {
-                        matches!(
-                            context.trust,
-                            CommitUnitTrust::TrustedAuthority | CommitUnitTrust::TrustedAdmin
-                        ) && !context.edge_authority
-                    }) {
-                        return Err(Error::UnsupportedSyncMessage(
-                            "authority publication requires an authenticated edge-to-core authority link",
-                        ));
-                    }
-                    for unit in &publication.commits {
-                        let descriptors = version_indirect_descriptors(&unit.versions);
-                        self.current_staged_ids_for_descriptors(&descriptors, true)
-                            .await?;
-                    }
-                    self.ingest_edge_authority_publication(publication, authority_wall_clock_ms()?)
-                        .await
-                }
+                SyncMessage::Reserved30(retired) => match retired {},
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
@@ -853,9 +832,12 @@ where
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.catalogue.physical_write_plan_cache.clear();
+        self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -877,9 +859,12 @@ where
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.catalogue.physical_write_plan_cache.clear();
+        self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -928,8 +913,11 @@ where
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.query.version_storage_sources_cache.clear();
+        self.catalogue.physical_current_winner_projections.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

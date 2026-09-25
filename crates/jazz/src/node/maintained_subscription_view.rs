@@ -10,6 +10,7 @@ use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
 };
 
+use super::NodeAliases;
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
@@ -23,7 +24,7 @@ use super::query_engine::{
     VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{NodeAlias, NodeUuid, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
@@ -57,15 +58,29 @@ struct VersionDecodePlan {
     authored_columns_idx: usize,
 }
 
+/// The lone-subscriber token stays with the view its subscription installed:
+/// a clone that outlives that subscription must not keep the next subscriber
+/// of the shape on the shared path, so clones start without it.
+#[derive(Debug, Default)]
+struct ClientLocalLiteralToken {
+    _held: Option<std::sync::Arc<()>>,
+}
+
+impl Clone for ClientLocalLiteralToken {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// Held while this view is the lone literal-graph subscriber of its
+    /// Local-tier client-local shape; see `NodeState::client_local_literal_shapes`.
+    client_local_literal_token: ClientLocalLiteralToken,
     /// Test receipt from the exact program passed to subscribe_lowered_program,
     /// not from an unrelated prepared AppRows plan or caller-supplied label.
     #[cfg(test)]
     pub(crate) compiled_authorization_mode: Option<super::query_engine::QueryAuthorizationMode>,
-    /// Keep reader exclusion inputs alive until the final serving view closes.
-    pub(crate) edge_availability_owner:
-        Option<std::sync::Arc<super::query_eval::EdgeAvailabilityOwner>>,
     /// The immutable resolved read-view identity of this maintained program.
     /// Terminal row members must retain it so distinct branch views never
     /// collapse when their source row and transaction coincide.
@@ -105,6 +120,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    /// Counts key comparisons made while scanning `structured_root_key_order`
+    /// for membership. Any such scan on an insert path must bump it, so tests
+    /// can pin that opening N fresh rows stays linear.
     #[cfg(test)]
     root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
@@ -140,9 +158,9 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            client_local_literal_token: ClientLocalLiteralToken::default(),
             #[cfg(test)]
             compiled_authorization_mode: None,
-            edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
             result_weights: RetainedResultMap::default(),
@@ -358,7 +376,7 @@ impl VersionPayload {
     fn prepare(
         row: VersionRow,
         identity: &VersionIdentity,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<Arc<Self>, super::Error> {
         let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
             super::Error::InvalidStoredValue("history tx node alias must exist"),
@@ -552,6 +570,10 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn hold_client_local_literal_token(&mut self, token: std::sync::Arc<()>) {
+        self.client_local_literal_token = ClientLocalLiteralToken { _held: Some(token) };
+    }
+
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
         self.read_view = read_view;
     }
@@ -567,7 +589,7 @@ impl MaintainedSubscriptionView {
         &self,
         source: ProgramSourceId,
         row: &VersionRow,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<SupportingRow, super::Error> {
         let physical_table =
             *self
@@ -631,7 +653,7 @@ impl MaintainedSubscriptionView {
         deltas: &RecordDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
@@ -674,7 +696,7 @@ impl MaintainedSubscriptionView {
         deltas: MultisinkDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
@@ -684,9 +706,7 @@ impl MaintainedSubscriptionView {
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
         for (sink, terminal) in deltas.terminal_sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-                && !terminal.operations.is_empty()
-            {
+            if crate::debug_env::covered_input_trace() && !terminal.operations.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
                     schemas.get(&sink)?,
@@ -768,7 +788,7 @@ impl MaintainedSubscriptionView {
             }
         }
         for (sink, deltas) in deltas.sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() && !deltas.is_empty() {
+            if crate::debug_env::covered_input_trace() && !deltas.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",
                     schemas.get(&sink)?,
@@ -809,7 +829,7 @@ impl MaintainedSubscriptionView {
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+        if crate::debug_env::covered_input_trace()
             && (!transitions.adds.is_empty()
                 || !transitions.program_fact_adds.is_empty()
                 || !transitions.program_fact_removes.is_empty())
@@ -829,7 +849,7 @@ impl MaintainedSubscriptionView {
     fn finalize_multisink_transitions(
         &mut self,
         transitions: &mut ResultTransitions,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) {
         // A multisink delta need not contain every terminal that participates
         // in one maintained result. In particular, a current-membership row
@@ -860,7 +880,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
     }
@@ -868,7 +888,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_delta_results(
         &mut self,
         rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
@@ -937,7 +957,7 @@ impl MaintainedSubscriptionView {
             if weight == 0 {
                 continue;
             }
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=apply_decoded_event event={event:?} weight={weight}"
                 );
@@ -1014,11 +1034,24 @@ impl MaintainedSubscriptionView {
                         // Root-collector rows never reach this branch; they
                         // retain the exact opaque terminal key above.
                         let terminal_key = root.0.as_bytes().to_vec();
-                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        // Direct-row keys enter `structured_root_keys` and the
+                        // order together and are only removed together, so a
+                        // fresh key map entry is exactly a key not yet
+                        // ordered. Scanning the order instead made opening N
+                        // rows quadratic.
+                        let first_occurrence = self
+                            .structured_root_keys
+                            .insert(terminal_key.clone(), root)
+                            .is_none();
                         self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
-                        if !self.structured_root_key_order.contains(&terminal_key) {
+                        if first_occurrence {
                             self.structured_root_key_order.push(terminal_key);
                         }
+                        debug_assert_eq!(
+                            self.structured_root_keys.len(),
+                            self.structured_root_key_order.len(),
+                            "direct app-row key map and order must hold the same keys"
+                        );
                     }
                 }
             }
@@ -1516,7 +1549,7 @@ impl MaintainedSubscriptionView {
 
     fn reconcile_publishable_result_members(
         &mut self,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> (
         Vec<ResultMemberEntry>,
         Vec<ResultMemberEntry>,
@@ -1607,27 +1640,26 @@ impl MaintainedSubscriptionView {
     fn result_member_has_bundle_witness(
         &self,
         member: &ResultMemberEntry,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> bool {
         let Some((table, row_uuid, tx_id)) = member.as_row() else {
             // Synthetic aggregate output is self-contained in its payload
             // fact, so it has no Stream B history-row witness.
             return true;
         };
-        // Existence does not require owning or deduplicating the transaction's
-        // rows. Keep selected deletion witnesses in the same candidate union.
-        self.versions
-            .rows_by_tx(tx_id)
-            .chain(
-                self.selected_deletion_witnesses
-                    .iter()
-                    .filter_map(|(fact, version)| (fact.version.tx == tx_id).then_some(version)),
-            )
-            .any(|version| {
-                version.table() == table.as_str()
-                    && version.row_uuid() == row_uuid
-                    && version.deletion().is_none()
-            })
+        // The retained index already orders by table, row and layer within
+        // each transaction. Do not scan the entire transaction for each member:
+        // a batched initial snapshot would otherwise do quadratic identity work.
+        self.versions.has_content_witness(tx_id, table, row_uuid)
+            || self
+                .selected_deletion_witnesses
+                .iter()
+                .any(|(fact, version)| {
+                    fact.version.tx == tx_id
+                        && version.table() == table.as_str()
+                        && version.row_uuid() == row_uuid
+                        && version.deletion().is_none()
+                })
             || self
                 .replacement_for(table.as_str(), row_uuid)
                 .0
@@ -1770,7 +1802,7 @@ impl MaintainedSubscriptionView {
 fn covered_input_for_version(
     source: ProgramSourceId,
     row: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<CoveredInputEntry, super::Error> {
     let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
         super::Error::InvalidStoredValue("covered input tx node alias must exist"),
@@ -1815,7 +1847,7 @@ fn rebind_terminal_operation_to_layout(
     if operation.root_descriptor == layout.root_descriptor {
         return Ok(operation);
     }
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE terminal_descriptor_mismatch operation={:?} layout={:?}",
             operation.root_descriptor, layout.root_descriptor,
@@ -2015,6 +2047,17 @@ impl MaintainedTerminalSchemas {
             })
             .ok_or(super::Error::InvalidStoredValue(
                 "maintained result has no compiled payload schema",
+            ))
+    }
+    pub(in crate::node) fn direct_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::DirectAppRows(output) => Some(output),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained direct result has no compiler-owned app-row schema",
             ))
     }
 
@@ -2347,7 +2390,7 @@ fn decode_typed_terminal_record(
     record: BorrowedRecord<'_>,
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
     decode_plan_cache: &mut VersionDecodePlanCache,
     payload_plans: &mut std::collections::HashMap<
         RecordDescriptor,
@@ -2440,12 +2483,9 @@ fn decode_typed_terminal_record(
             };
             let tx_time = TxTime(record_u64(record, tx_time_field)?);
             let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
-            let tx_node = node_aliases
-                .iter()
-                .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-                .ok_or(super::Error::InvalidStoredValue(
-                    "result tx node alias must exist",
-                ))?;
+            let tx_node = node_aliases.node_for_alias(tx_node_alias).ok_or(
+                super::Error::InvalidStoredValue("result tx node alias must exist"),
+            )?;
             let settle_position = schema
                 .settle_position_field
                 .as_ref()
@@ -2859,7 +2899,7 @@ fn decode_typed_relation_edge(
     record: BorrowedRecord<'_>,
     schema: &RelationEdgeSchema,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<RelationEdgeEntry, super::Error> {
     let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
     let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
@@ -2913,19 +2953,19 @@ fn table_name_from_versioned_ref(
 fn decode_relation_edge_version(
     record: BorrowedRecord<'_>,
     schema: &VersionedRowRefSchema,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<Option<RowVersionRefEntry>, super::Error> {
     let Some(ResultMembershipVersionSchema::Content(version)) = &schema.version else {
         return Ok(None);
     };
     let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
     let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
-    let tx_node = node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-        .ok_or(super::Error::InvalidStoredValue(
-            "relation edge tx node alias must exist",
-        ))?;
+    let tx_node =
+        node_aliases
+            .node_for_alias(tx_node_alias)
+            .ok_or(super::Error::InvalidStoredValue(
+                "relation edge tx node alias must exist",
+            ))?;
     let branch_or_prefix = schema
         .branch_or_prefix_field
         .as_deref()
@@ -3254,6 +3294,31 @@ fn field_idx_in_descriptor(
 }
 
 impl WeightedVersionIndex {
+    fn has_content_witness(
+        &self,
+        tx_id: TxId,
+        table: groove::Intern<String>,
+        row_uuid: RowUuid,
+    ) -> bool {
+        let Some(rows) = self.by_tx.get(&tx_id) else {
+            return false;
+        };
+        // Empty bytes are the inclusive lower bound of all complete record
+        // identities at this prefix. Inspect only its first candidate; content
+        // records sort before deletion records and only positive weights remain
+        // in this index. These keys were decoded from the immutable row when
+        // it entered the index, so lookup need not decode the same bytes again.
+        let lower = VersionSortKey {
+            table,
+            row_uuid,
+            layer: VersionLayer::Content,
+            raw_record: Arc::default(),
+        };
+        rows.range(lower..).next().is_some_and(|(key, _)| {
+            key.table == table && key.row_uuid == row_uuid && key.layer == VersionLayer::Content
+        })
+    }
+
     fn footprint_bytes(&self) -> usize {
         btree_map_bytes(self.by_tx.len()) + btree_map_bytes(self.entry_count) + self.entry_bytes
     }
@@ -3626,8 +3691,8 @@ mod tests {
         TxId::new(TxTime(time), node(byte))
     }
 
-    fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
-        BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    fn aliases() -> NodeAliases {
+        NodeAliases::from_iter([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
     // Internal receipt: `row_digest` is a canonical runtime result identity, so
@@ -4014,6 +4079,55 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // Internal mechanism test, like the collector one above: the public
+    // result cannot reveal a scan of the order for each direct app row.
+    #[test]
+    fn fresh_direct_app_rows_skip_order_scans_and_keep_first_occurrence_order() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = |i: u16| {
+            let mut bytes = [0_u8; 16];
+            bytes[..2].copy_from_slice(&i.to_be_bytes());
+            RowUuid::from_bytes(bytes)
+        };
+        let event = |i: u16, weight| {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: root(i),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(root(i).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                weight,
+            )
+        };
+        let mut maintained = test_maintained();
+        for i in 0..2000 {
+            maintained
+                .apply_decoded_deltas([event(i, 1)], &aliases())
+                .unwrap();
+        }
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+
+        // A root that leaves and returns keeps its first-occurrence slot and
+        // is never ordered twice.
+        maintained
+            .apply_decoded_deltas([event(7, -1)], &aliases())
+            .unwrap();
+        maintained
+            .apply_decoded_deltas([event(7, 1)], &aliases())
+            .unwrap();
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+        let roots: Vec<RowUuid> = maintained
+            .structured_app_rows()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect();
+        assert_eq!(roots, (0..2000).map(root).collect::<Vec<_>>());
     }
 
     #[test]
@@ -4819,7 +4933,8 @@ mod tests {
     #[test]
     fn selected_deletion_witness_replacement_releases_facts_and_versions() {
         let version = deletion(RowUuid(uuid::Uuid::from_u128(7)), 42);
-        let aliases = BTreeMap::from([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
+        let aliases =
+            NodeAliases::from_iter([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
         let input = covered_input_for_version(test_source(), &version, &aliases).unwrap();
         let tx = input.version.tx;
         let fact = physical_input(input);
@@ -5864,6 +5979,88 @@ mod tests {
             index.by_tx[&payloads[0].tx_id][&payloads[0].sort_key].weight,
             1
         );
+    }
+
+    // Internal oracle: arbitrary signed witness-role weights and coexisting
+    // raw identities cannot be prescribed through the public query API. Compare
+    // the seek against the previous independent scan after every mutation.
+    // The public fanout fixture separately checks rows, updates and revocation.
+    #[test]
+    fn content_witness_seek_matches_scan_across_prefixes_and_retractions() {
+        for size in [16, 1024] {
+            let mut index = WeightedVersionIndex::default();
+            let aliases = aliases();
+            let tables = [
+                groove::Intern::new("todos".to_owned()),
+                groove::Intern::new("archive".to_owned()),
+            ];
+            let target = RowUuid::from_bytes((size as u128 / 2).to_be_bytes());
+            for i in 0..size {
+                let mut row = version(RowUuid::from_bytes((i as u128).to_be_bytes()), 10, "seed");
+                row.table = tables[i % 2];
+                let identity = VersionIdentity::for_row(&row);
+                index.apply_delta(
+                    VersionPayload::prepare(row, &identity, &aliases).unwrap(),
+                    1,
+                );
+            }
+            let mut variants = Vec::new();
+            for table in tables {
+                for time in [10, 11] {
+                    for mut row in [
+                        version(target, time, "first"),
+                        version(target, time, "second"),
+                        deletion(target, time),
+                    ] {
+                        row.table = table;
+                        let identity = VersionIdentity::for_row(&row);
+                        variants.push(VersionPayload::prepare(row, &identity, &aliases).unwrap());
+                    }
+                }
+            }
+            for step in 0..120 {
+                let payload = Arc::clone(&variants[(step * 7) % variants.len()]);
+                let weight = [2, -1, -3, 1, 1][step % 5];
+                index.apply_delta(payload, weight);
+                for table in tables
+                    .into_iter()
+                    .chain([groove::Intern::new("missing".to_owned())])
+                {
+                    for time in [10, 11, 12] {
+                        for row_uuid in [
+                            target,
+                            RowUuid::from_bytes(((size + 1) as u128).to_be_bytes()),
+                        ] {
+                            let tx = tx(1, time);
+                            let expected = index.rows_by_tx(tx).any(|row| {
+                                row.table() == table.as_str()
+                                    && row.row_uuid() == row_uuid
+                                    && row.deletion().is_none()
+                            });
+                            assert_eq!(
+                                index.has_content_witness(tx, table, row_uuid),
+                                expected,
+                                "size={size} step={step} table={table:?} tx={tx:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            // A deletion-only row is not content, even when it is exactly the
+            // first entry at the sought prefix. Retract the last content, then
+            // restore it while keeping the deletion independently retained.
+            let mut isolated = WeightedVersionIndex::default();
+            let content = Arc::clone(&variants[0]);
+            let tombstone = Arc::clone(&variants[2]);
+            isolated.apply_delta(Arc::clone(&content), 2);
+            isolated.apply_delta(tombstone, 1);
+            isolated.apply_delta(Arc::clone(&content), -1);
+            assert!(isolated.has_content_witness(tx(1, 10), tables[0], target));
+            isolated.apply_delta(Arc::clone(&content), -1);
+            assert!(!isolated.has_content_witness(tx(1, 10), tables[0], target));
+            isolated.apply_delta(content, 1);
+            assert!(isolated.has_content_witness(tx(1, 10), tables[0], target));
+        }
     }
 
     #[test]

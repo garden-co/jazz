@@ -164,19 +164,6 @@ impl PeerState {
         self.ship_complete_exclusive_payloads = enabled;
     }
 
-    /// Snapshot peer-owned pin-set roots for edge-cache eviction.
-    pub fn eviction_pins(&self) -> PeerEvictionPins {
-        PeerEvictionPins {
-            deferred_edge_fate_txs: self.deferred_edge_fates.keys().copied().collect(),
-            referenced_scope_subscriptions: self
-                .edge_scope_subscription_refs
-                .keys()
-                .chain(self.idle_edge_scope_subscriptions.keys())
-                .copied()
-                .collect(),
-        }
-    }
-
     /// Forget complete-tx payload dedup markers for transactions whose local
     /// payloads were evicted, so a standard rehydrate may resend them.
     pub fn forget_evicted_versions(&mut self, tx_ids: impl IntoIterator<Item = TxId>) -> usize {
@@ -264,9 +251,27 @@ impl PeerState {
             .map(PeerSubscriptionState::previous_tx_ids)
     }
 
-    /// Return this peer's maintained subscription view counters and latest footprint.
+    /// Return this peer's cheap maintained subscription view counters.
     pub fn maintained_subscription_view_metrics(&self) -> MaintainedSubscriptionViewMetrics {
         *self.metrics.maintained_subscription_view
+    }
+
+    /// Inspect the current retained index footprint of one maintained subscription.
+    ///
+    /// This diagnostic walks retained state and can cost O(subscription size).
+    /// Publication never calls it. Inspect outside timed operations when reporting
+    /// benchmark memory, and sample sparingly in production. The estimate excludes
+    /// allocator overhead and is neither process RSS nor a peer-wide aggregate.
+    /// Returns `None` when the subscription has no maintained view, including after
+    /// it has been forgotten; absence is not a measured zero-byte view.
+    pub fn inspect_maintained_subscription_view_footprint(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<MaintainedSubscriptionViewMetricsFootprint> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .map(|maintained| maintained.maintained.footprint().into())
     }
 
 }

@@ -23,7 +23,7 @@ export function TrackLane({
   async function toggle(step: (typeof steps)[number]) {
     setWriteError(null);
     try {
-      await db.update(app.steps, step.id, { enabled: !step.enabled }).wait({ tier: "edge" });
+      await db.update(app.steps, step.id, { enabled: !step.enabled }).wait({ tier: "global" });
     } catch (error) {
       // Local visibility remains optimistic. The receipt makes a server-side
       // permission rejection observable instead of silently looking like a

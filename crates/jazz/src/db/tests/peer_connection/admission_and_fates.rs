@@ -3,8 +3,7 @@
 use super::*;
 use crate::db::peer_connection::{
     ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
-    coverage_group_subscription_key, dispatch_admitted_subscriber_message,
-    row_repair_requires_core,
+    coverage_group_subscription_key,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -295,246 +294,6 @@ fn async_peer_detach_concurrent_cancellation_releases_inventory() {
 }
 
 #[test]
-fn async_peer_detach_cold_replay_yields_and_cancellation_preserves_routes() {
-    use groove::storage::{TestStorage, TestStorageOperation};
-    let schema = schema();
-    let author = AuthorSubject::for_test_bytes([0xd9; 16]);
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let (storage, _) = TestStorage::controlled(&refs);
-    let reopen = storage.clone();
-    let identity = DbIdentity {
-        node: NodeUuid::from_bytes([0xd9; 16]),
-        author,
-    };
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity,
-        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
-    }))
-    .unwrap();
-    let tx_id = db
-        .insert(
-            "todos",
-            cells("cold replay", false, author),
-            Default::default(),
-        )
-        .unwrap()
-        .mergeable_tx_id();
-    let SyncMessage::CommitUnit { tx, versions } =
-        block_on(db.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap()
-    else {
-        panic!("commit unit");
-    };
-    block_on(db.close()).unwrap();
-    drop(db);
-    let storage = block_on(reopen.reopen(families)).unwrap();
-    let control = storage.control();
-    let eviction = storage.clone();
-    let db = block_on(Db::open(DbConfig {
-        schema,
-        storage,
-        identity,
-        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
-    }))
-    .unwrap();
-    let (a, _aw) = duplex_with_admitted_session_context(
-        author,
-        identity.node,
-        1,
-        NodeUuid::from_bytes([0x5d; 16]),
-        1,
-    );
-    let first = block_on(db.connect_upstream(a));
-    let (b, _bw) = duplex_with_admitted_session_context(
-        author,
-        identity.node,
-        2,
-        NodeUuid::from_bytes([0x5e; 16]),
-        1,
-    );
-    let _second = block_on(db.connect_upstream(b));
-    let selected = *db.node.admitted_upstream_authority.borrow();
-    let queue = Rc::new(RefCell::new(Vec::new()));
-    db.node.edge_fate_routes.borrow_mut().insert(
-        tx_id,
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: vec![EdgeFateRoute {
-                authority: selected,
-                queue: Rc::downgrade(&queue),
-                edge_acknowledged: false,
-            }],
-        },
-    );
-    eviction.evict_all();
-    control.pause_on(TestStorageOperation::Get);
-    control.pause_on(TestStorageOperation::ScanOpen);
-    let mut detach = Box::pin(db.detach_connection_async(&first));
-    assert!(
-        std::future::Future::poll(
-            detach.as_mut(),
-            &mut std::task::Context::from_waker(std::task::Waker::noop())
-        )
-        .is_pending()
-    );
-    assert_eq!(db.node.connections.borrow().len(), 2);
-    assert_eq!(*db.node.admitted_upstream_authority.borrow(), selected);
-    drop(detach);
-    assert!(
-        db.node.node.try_lock().is_some(),
-        "cancel releases storage owner"
-    );
-    assert!(first.try_lock().is_some(), "cancel releases peer inventory");
-    assert_eq!(
-        db.node.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
-        selected
-    );
-    let suspended_operation = *control.observed().last().unwrap();
-    control.resume();
-    control.fail_next(suspended_operation);
-    let error = block_on(db.detach_connection_async(&first)).unwrap_err();
-    assert!(error.message.contains("injected"));
-    assert_eq!(db.node.connections.borrow().len(), 2);
-    assert_eq!(*db.node.admitted_upstream_authority.borrow(), selected);
-    assert_eq!(
-        db.node.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
-        selected
-    );
-    assert!(block_on(db.detach_connection_async(&first)).unwrap());
-    assert_eq!(db.node.connections.borrow().len(), 1);
-    assert_ne!(*db.node.admitted_upstream_authority.borrow(), selected);
-    assert!(
-        db.node
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id)
-    );
-}
-
-#[test]
-fn strict_upstream_install_cold_replay_cancellation_and_error_leave_admission_unchanged() {
-    use groove::storage::{TestStorage, TestStorageOperation};
-    let schema = schema();
-    let author = AuthorSubject::for_test_bytes([0xd9; 16]);
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let (storage, _) = TestStorage::controlled(&refs);
-    let reopen = storage.clone();
-    let identity = DbIdentity {
-        node: NodeUuid::from_bytes([0xd9; 16]),
-        author,
-    };
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity,
-        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
-    }))
-    .unwrap();
-    let tx_id = db
-        .insert(
-            "todos",
-            cells("cold replay", false, author),
-            Default::default(),
-        )
-        .unwrap()
-        .mergeable_tx_id();
-    let SyncMessage::CommitUnit { tx, versions } =
-        block_on(db.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap()
-    else {
-        panic!("commit unit");
-    };
-    block_on(db.close()).unwrap();
-    drop(db);
-    let storage = block_on(reopen.reopen(families)).unwrap();
-    let control = storage.control();
-    let eviction = storage.clone();
-    let db = block_on(Db::open(DbConfig {
-        schema,
-        storage,
-        identity,
-        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
-    }))
-    .unwrap();
-    let (a, _aw) = duplex_with_admitted_session_context(
-        author,
-        identity.node,
-        1,
-        NodeUuid::from_bytes([0x5d; 16]),
-        1,
-    );
-    let first = block_on(db.connect_upstream(a));
-    let selected = *db.node.admitted_upstream_authority.borrow();
-    let queue = Rc::new(RefCell::new(Vec::new()));
-    db.node.edge_fate_routes.borrow_mut().insert(
-        tx_id,
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: vec![EdgeFateRoute {
-                authority: selected,
-                queue: Rc::downgrade(&queue),
-                edge_acknowledged: false,
-            }],
-        },
-    );
-    assert!(block_on(db.detach_connection_async(&first)).unwrap());
-    let outbox_before = db.node.outbox.borrow().len();
-    let new_transport = || {
-        duplex_with_admitted_session_context(
-            author,
-            identity.node,
-            2,
-            NodeUuid::from_bytes([0x5e; 16]),
-            1,
-        )
-    };
-    eviction.evict_all();
-    control.pause_on(TestStorageOperation::Get);
-    control.pause_on(TestStorageOperation::ScanOpen);
-    let (transport, _wire) = new_transport();
-    let mut install = Box::pin(db.try_connect_upstream(transport));
-    assert!(
-        std::future::Future::poll(
-            install.as_mut(),
-            &mut std::task::Context::from_waker(std::task::Waker::noop())
-        )
-        .is_pending()
-    );
-    assert!(db.node.connections.borrow().is_empty());
-    assert!(db.node.admitted_upstream_authority.borrow().is_none());
-    assert!(db.node.active_authority_view_receipts.borrow().is_none());
-    drop(install);
-    assert!(db.node.node.try_lock().is_some());
-    let suspended_operation = *control.observed().last().unwrap();
-    control.resume();
-    control.fail_next(suspended_operation);
-    let (transport, _wire2) = new_transport();
-    let result = block_on(db.try_connect_upstream(transport));
-    assert!(matches!(result, Err(error) if error.message.contains("injected")));
-    assert!(db.node.connections.borrow().is_empty());
-    assert!(db.node.admitted_upstream_authority.borrow().is_none());
-    assert!(db.node.active_authority_view_receipts.borrow().is_none());
-    assert!(
-        db.node.edge_fate_routes.borrow()[&tx_id].routes[0]
-            .authority
-            .is_none()
-    );
-    assert_eq!(db.node.outbox.borrow().len(), outbox_before);
-    let (transport, _wire3) = new_transport();
-    assert!(block_on(db.try_connect_upstream(transport)).is_ok());
-    assert_eq!(db.node.connections.borrow().len(), 1);
-    assert!(db.node.admitted_upstream_authority.borrow().is_some());
-    assert!(
-        db.node.edge_fate_routes.borrow()[&tx_id].routes[0]
-            .authority
-            .is_some()
-    );
-}
-
-#[test]
 fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission() {
     let author = AuthorSubject::for_test_bytes([0xdb; 16]);
     let db = open_db(0xdb, author, &schema());
@@ -576,155 +335,6 @@ fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission
     assert!(block_on(db.try_connect_upstream(next_transport)).is_ok());
     assert_eq!(db.node.connections.borrow().len(), 2);
     assert_eq!(*db.node.admitted_upstream_authority.borrow(), selected);
-}
-
-#[test]
-fn restarted_edge_forwards_complete_publication_without_original_clients() {
-    use crate::tools::test_support::AllowAll;
-    // Internal topology test: inspect exact merge authorship and the durable
-    // outbox while exercising the real peer-connection scheduler/storage.
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text)
-                    .column("body", PublicColumnType::Text),
-            )
-            .allow_all(),
-    );
-    let edge_id = NodeUuid::from_bytes([0xe6; 16]);
-    let core_id = NodeUuid::from_bytes([0xc6; 16]);
-    let dir = tempfile::tempdir().unwrap();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut edge_state = NodeState::new(
-        edge_id,
-        schema.clone(),
-        RocksDbStorage::open(dir.path(), &refs).unwrap(),
-    )
-    .unwrap();
-    let shared_row = RowUuid::from_bytes([0x66; 16]);
-    let mut writes = Vec::new();
-    for (writer_id, column, value) in [(0xa6, "title", "left"), (0xb6, "body", "right")] {
-        let mut writer = NodeState::new(
-            NodeUuid::from_bytes([writer_id; 16]),
-            schema.clone(),
-            rocks_storage(&schema),
-        )
-        .unwrap();
-        let (tx_id, unit) = writer
-            .commit_mergeable_unit_settled(
-                MergeableCommit::new("todos", shared_row, 10)
-                    .made_by(AuthorSubject::for_test_bytes([writer_id; 16]))
-                    .cells(BTreeMap::from([(
-                        column.to_owned(),
-                        Value::String(value.to_owned()),
-                    )])),
-            )
-            .unwrap();
-        let SyncMessage::CommitUnit { tx, versions } = unit else {
-            panic!("commit unit")
-        };
-        let outcome = edge_state
-            .ingest_edge_authority_mergeable_commit_unit(tx, versions, 100)
-            .unwrap();
-        block_on(edge_state.persist_and_settle_outcome(outcome)).unwrap();
-        writes.push(tx_id);
-    }
-    let publication = edge_state
-        .edge_authority_publication_for(writes[1])
-        .unwrap();
-    let merge_tx = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id.node == edge_id)
-        .unwrap()
-        .tx
-        .tx_id;
-    drop(edge_state);
-
-    let reopened = NodeState::new(
-        edge_id,
-        schema.clone(),
-        RocksDbStorage::open(dir.path(), &refs).unwrap(),
-    )
-    .unwrap();
-    let edge = Node::new(reopened);
-    block_on(edge.restore_edge_authority_uploads()).unwrap();
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        1,
-        "recover one frontier, not one growing history prefix per write"
-    );
-    let anchor = edge.outbox.borrow().iter().next().unwrap().tx_id;
-    let completed = edge
-        .outbox
-        .borrow_mut()
-        .remove_released(&mut HashSet::from([anchor]));
-    assert!(completed.is_empty());
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        1,
-        "an anchor receipt alone must not retire a publication with unacknowledged members"
-    );
-    assert!(
-        writes
-            .iter()
-            .all(|tx_id| edge.outbox.borrow().authority_members.contains(tx_id)),
-        "recovered member fates remain bound to the selected authority after a partial acknowledgement"
-    );
-    let core = open_core(0xc6, AuthorSubject::SYSTEM, &schema);
-    let (edge_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_id, 61, core_id, 62);
-    let _upstream = block_on(edge.connect_upstream(edge_transport));
-    let _subscriber = core.accept_subscriber_with_trust(
-        core_transport,
-        AuthorSubject::SYSTEM,
-        CommitUnitTrust::TrustedAuthority,
-    );
-    for _ in 0..16 {
-        block_on(edge.tick()).unwrap();
-        core.tick().unwrap();
-        block_on(edge.tick()).unwrap();
-        if edge.outbox.borrow().len() == 0 {
-            break;
-        }
-    }
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        0,
-        "core's accepted receipts must discharge the recovered publication"
-    );
-    for tx_id in writes.into_iter().chain([merge_tx]) {
-        assert!(matches!(
-            edge.node().borrow_mut().transaction_state(tx_id).resolve(),
-            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
-        ));
-    }
-    let rows = core.read(&Query::from("todos")).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(
-        rows[0].cell(&schema.tables()[0], "title"),
-        Some(Value::String("left".to_owned()))
-    );
-    assert_eq!(
-        rows[0].cell(&schema.tables()[0], "body"),
-        Some(Value::String("right".to_owned()))
-    );
-    assert_eq!(
-        core.node()
-            .borrow_mut()
-            .current_row_tx_id(&rows[0])
-            .resolve(),
-        Some(merge_tx),
-        "forwarding must not create a redundant core merge"
-    );
-    block_on(edge.restore_edge_authority_uploads()).unwrap();
-    assert_eq!(
-        edge.outbox.borrow().len(),
-        0,
-        "globally acknowledged history is not recovered again"
-    );
 }
 
 #[test]
@@ -806,7 +416,7 @@ fn downstream_fate_retries_after_bounded_transport_backpressure() {
         tx_id: TxId::new(TxTime::from(2), NodeUuid::from_bytes([0xc2; 16])),
         fate: Fate::Accepted,
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     subscriber
         .borrow()
@@ -1842,9 +1452,9 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
     let base = schema();
     let core = open_core(0x5e, AuthorSubject::SYSTEM, &base);
 
-    let (mut edge_transport, core_edge_transport) = duplex();
-    let edge_link = core.accept_subscriber_with_trust(
-        core_edge_transport,
+    let (mut backend_transport, core_backend_transport) = duplex();
+    let backend_link = core.accept_subscriber_with_trust(
+        core_backend_transport,
         AuthorSubject::for_test_bytes([0xe1; 16]),
         CommitUnitTrust::TrustedBackend,
     );
@@ -1854,15 +1464,15 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
         AuthorSubject::for_test_bytes([0xc1; 16]),
     );
 
-    edge_link.borrow_mut().tick().unwrap();
+    backend_link.borrow_mut().tick().unwrap();
     assert!(matches!(
-        edge_transport.try_recv(),
+        backend_transport.try_recv(),
         Some(SyncMessage::CatalogueSnapshot(_))
     ));
-    assert!(edge_transport.try_recv().is_none());
-    edge_link.borrow_mut().tick().unwrap();
+    assert!(backend_transport.try_recv().is_none());
+    backend_link.borrow_mut().tick().unwrap();
     assert!(
-        edge_transport.try_recv().is_none(),
+        backend_transport.try_recv().is_none(),
         "an unchanged catalogue fingerprint must not resend its snapshot"
     );
     client_link.borrow_mut().tick().unwrap();
@@ -1933,9 +1543,9 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
         })
         .unwrap();
 
-    edge_link.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = edge_transport.try_recv() else {
-        panic!("trusted edge must receive the changed catalogue before any subscription");
+    backend_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = backend_transport.try_recv() else {
+        panic!("trusted backend must receive the changed catalogue before any subscription");
     };
     assert!(
         snapshot
@@ -1944,7 +1554,7 @@ fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
             .any(|schema| schema.id == evolved.id),
         "changed snapshot carries the newly published schema"
     );
-    assert!(edge_transport.try_recv().is_none());
+    assert!(backend_transport.try_recv().is_none());
 
     client_link.borrow_mut().tick().unwrap();
     assert!(
@@ -2717,6 +2327,88 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     );
 }
 
+/// Full-diff fallback counters (#3292). The serving link's counter is the
+/// same one the server shell reports as `subscription_full_diff_fallbacks`;
+/// it is read from the link because no client API exposes a server's
+/// recompute strategy.
+///
+/// alice opens todos ─► initial reset          (not a fallback)
+/// server inserts a row ─► incremental delta  (not a fallback)
+/// alice's claims change ─► retire + reopen    (one query reopen)
+#[test]
+fn claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let first = server
+        .insert("todos", cells("first", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims = test_provider_claims(allowed_owner);
+    let denied_claims = test_provider_claims(denied_owner);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+    let query = Query::from("todos");
+    let tick_all = || {
+        for _ in 0..32 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            subscriber.borrow_mut().tick().unwrap();
+            upstream.borrow_mut().tick().unwrap();
+        }
+    };
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    tick_all();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![first]
+    );
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "opening a maintained view is ordinary hydration"
+    );
+
+    let second = server
+        .insert("todos", cells("second", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    tick_all();
+    let mut expected = vec![first, second];
+    expected.sort();
+    let mut visible = row_ids(&prepared_all(&client, &query, global_subscribe_opts()));
+    visible.sort();
+    assert_eq!(visible, expected);
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "an incremental delta is not a fallback"
+    );
+
+    client.set_test_provider_claims(session_subject, denied_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims);
+    tick_all();
+    assert!(
+        prepared_all(&client, &query, global_subscribe_opts()).is_empty(),
+        "the refreshed subscription must lose the old claims' rows"
+    );
+    let fallbacks = subscriber.borrow().full_diff_fallbacks();
+    assert_eq!(fallbacks.query_reopens, 1, "{fallbacks:?}");
+    assert_eq!(fallbacks.total(), 1, "{fallbacks:?}");
+}
+
 /// The maintained-group cursor consumes each accepted replacement reset once.
 /// The public admission contract normally gives one connection one exact
 /// `SubscriptionKey` per coverage group; this white-box pair exercises the
@@ -3126,8 +2818,8 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     );
 }
 
-/// A direct session served by an Edge must replace its propagated, delegated
-/// Core usage site on refresh. Rebinding only the Edge-local evaluator makes a
+/// A direct session served by a relay must replace its propagated, delegated
+/// Core usage site on refresh. Rebinding only the relay-local evaluator makes a
 /// broader session permanently miss Core-only rows; retaining the old handle
 /// also leaves the old policy-bearing Core receiver resident.
 #[test]
@@ -3141,28 +2833,28 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .insert("todos", cells("only at core", false, allowed_owner))
         .unwrap()
         .row_uuid();
-    let edge = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
-    edge.set_relay_authority_session_owner_for_test();
+    let relay = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
+    relay.set_relay_authority_session_owner_for_test();
     let client = open_db(0xc1, session_subject, &schema);
     let allowed_claims = test_provider_claims(allowed_owner);
     let denied_claims = test_provider_claims(denied_owner);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
 
-    let (edge_transport, core_transport) = duplex();
-    let edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let (relay_transport, core_transport) = duplex();
+    let relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
     // The Core does not infer a user session from a trusted/backend transport.
     // This test models the production scope-relay handshake that admits the
-    // exact foreground binding forwarded by the Edge.
-    let core_edge = core.accept_scope_isolated_relay_subscriber(
+    // exact foreground binding forwarded by the relay.
+    let core_relay = core.accept_scope_isolated_relay_subscriber(
         core_transport,
         session_subject,
         allowed_claims.clone(),
         1,
     );
-    let (client_transport, edge_client_transport, _client_sent, edge_sent) = duplex_with_taps();
+    let (client_transport, relay_client_transport, _client_sent, relay_sent) = duplex_with_taps();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge.accept_subscriber_with_claims(
-        edge_client_transport,
+    let relay_client = relay.accept_subscriber_with_claims(
+        relay_client_transport,
         session_subject,
         allowed_claims.clone(),
     );
@@ -3174,9 +2866,9 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .unwrap();
     for _ in 0..96 {
         client.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         core.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         client.tick().unwrap();
         if client.query_attachment_is_covered(&attachment)
             && row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![remote_row]
@@ -3189,9 +2881,9 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         vec![remote_row]
     );
     let (downstream_subscription, old_upstream_subscription, old_maintained_subscription) = {
-        let connection = edge_client.borrow();
+        let connection = relay_client.borrow();
         let ConnectionLink::Subscriber(state) = &connection.link else {
-            unreachable!("edge serves the direct client")
+            unreachable!("relay serves the direct client")
         };
         let downstream_subscription = attachment.subscription();
         let coverage = &state.served[&downstream_subscription];
@@ -3202,14 +2894,14 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         )
     };
     assert!(matches!(
-        &core_edge.borrow().link,
+        &core_relay.borrow().link,
         ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
     ));
     assert!(matches!(
-        &edge_client.borrow().link,
+        &relay_client.borrow().link,
         ConnectionLink::Subscriber(state) if state.peer.has_maintained_subscription(old_maintained_subscription)
     ));
-    let expected_group_source = edge
+    let expected_group_source = relay
         .node
         .node()
         .borrow()
@@ -3217,7 +2909,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .expect("scope relay installs the exact upstream authority result");
     assert!(
         matches!(
-            &edge_client.borrow().link,
+            &relay_client.borrow().link,
             ConnectionLink::Subscriber(state)
                 if state
                     .peer
@@ -3230,7 +2922,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
     // The original Core capability is immutable. A direct client claim
     // refresh cannot widen or narrow it in place; production `updateAuth`
     // disconnects and re-admits the scope relay under a fresh epoch.
-    let old_core_binding = match &core_edge.borrow().link {
+    let old_core_binding = match &core_relay.borrow().link {
         ConnectionLink::Subscriber(state) => state
             .peer
             .subscription_policy_binding(old_upstream_subscription),
@@ -3240,28 +2932,28 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         old_core_binding,
         Some((session_subject, allowed_claims.clone()))
     );
-    assert!(edge.detach_connection(&edge_upstream));
+    assert!(relay.detach_connection(&relay_upstream));
 
-    let (replacement_edge_transport, replacement_core_transport) = duplex();
-    let _replacement_edge_upstream =
-        crate::db::block_on(edge.connect_upstream(replacement_edge_transport));
-    let replacement_core_edge = core.accept_scope_isolated_relay_subscriber(
+    let (replacement_relay_transport, replacement_core_transport) = duplex();
+    let _replacement_relay_upstream =
+        crate::db::block_on(relay.connect_upstream(replacement_relay_transport));
+    let replacement_core_relay = core.accept_scope_isolated_relay_subscriber(
         replacement_core_transport,
         session_subject,
         denied_claims.clone(),
         2,
     );
     client.set_test_provider_claims(session_subject, denied_claims.clone());
-    edge_client
+    relay_client
         .borrow_mut()
         .update_authenticated_session_claims(denied_claims);
     let mut saw_fresh_downstream_reset = false;
     for _ in 0..96 {
         client.tick().unwrap();
-        edge.tick().unwrap();
+        relay.tick().unwrap();
         core.tick().unwrap();
-        edge.tick().unwrap();
-        saw_fresh_downstream_reset |= edge_sent.borrow().iter().any(|message| {
+        relay.tick().unwrap();
+        saw_fresh_downstream_reset |= relay_sent.borrow().iter().any(|message| {
             matches!(
                 message,
                 SyncMessage::ViewUpdate(update)
@@ -3272,22 +2964,22 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         client.tick().unwrap();
         if saw_fresh_downstream_reset
             && !matches!(
-                &replacement_core_edge.borrow().link,
+                &replacement_core_relay.borrow().link,
                 ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
             )
         {
             break;
         }
     }
-    let connection = edge_client.borrow();
+    let connection = relay_client.borrow();
     let ConnectionLink::Subscriber(state) = &connection.link else {
-        unreachable!("edge keeps serving the direct client")
+        unreachable!("relay keeps serving the direct client")
     };
     let coverage = &state.served[&downstream_subscription];
     let fresh_group_subscription = coverage_group_subscription_key(coverage);
     let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
     drop(connection);
-    let core_fresh = match &replacement_core_edge.borrow().link {
+    let core_fresh = match &replacement_core_relay.borrow().link {
         ConnectionLink::Subscriber(state) => (
             state
                 .peer
@@ -3304,12 +2996,12 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         "the refreshed remote policy must publish a new empty membership reset"
     );
     assert!(matches!(
-        &replacement_core_edge.borrow().link,
+        &replacement_core_relay.borrow().link,
         ConnectionLink::Subscriber(state)
             if !state.served.contains_key(&old_upstream_subscription)
                 && state.served.contains_key(&fresh_upstream_subscription)
     ));
-    let fresh_authority_source = edge
+    let fresh_authority_source = relay
         .node
         .node()
         .borrow()
@@ -3317,7 +3009,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .expect("fresh upstream usage has an exact authority result");
     assert!(
         matches!(
-            &edge_client.borrow().link,
+            &relay_client.borrow().link,
             ConnectionLink::Subscriber(state)
                 if fresh_group_subscription != old_maintained_subscription
                     && !state.peer.has_maintained_subscription(old_maintained_subscription)
@@ -3343,7 +3035,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     // A Core may also maintain an upstream relay; that topology fact must not
-    // turn its client ingress into Edge routing or bypass local proof.
+    // turn its client ingress into relay routing or bypass local proof.
     let (core_upstream, _upstream_peer) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0x5e; 16]),
@@ -3898,1606 +3590,42 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     }
 }
 
-/// Edge client ingress uses the same action-specific authority proof as a
-/// terminal Core, but exposes only Edge durability until an admitted upstream
-/// later reports Global.  In particular, this exercises the production
-/// connection loop rather than calling `PeerState`'s focused proof helpers.
-#[test]
-fn edge_client_ingress_proves_actions_before_one_routed_edge_fate() {
-    let schema = owner_write_schema();
-    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xa1, alice, &schema);
-    let (client_transport, edge_transport, _client_sent, edge_sent) = duplex_with_taps();
-    let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            alice,
-            test_provider_claims(alice),
-            CommitUnitTrust::Session,
-        );
-
-    let inserted = client
-        .insert(
-            "todos",
-            cells("edge-owned", false, alice),
-            Default::default(),
-        )
-        .unwrap();
-    let inserted_tx = inserted.mergeable_tx_id();
-    let sibling = client
-        .insert(
-            "todos",
-            cells("edge-owned-sibling", false, alice),
-            Default::default(),
-        )
-        .unwrap();
-    let sibling_tx = sibling.mergeable_tx_id();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-
-    let edge_acceptances = edge_sent
-        .borrow()
-        .iter()
-        .filter(|message| {
-            matches!(
-                message,
-                SyncMessage::FateUpdate {
-                    tx_id: candidate,
-                    fate: Fate::Accepted,
-                    durability: Some(DurabilityTier::Edge),
-                    ..
-                } if *candidate == inserted_tx || *candidate == sibling_tx
-            )
-        })
-        .count();
-    assert_eq!(
-        edge_acceptances, 2,
-        "each queued commit makes fair progress to one routed edge fate"
-    );
-    client.tick().unwrap();
-    assert_eq!(inserted.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        inserted.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-    assert_eq!(sibling.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        sibling.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-    assert!(
-        [inserted_tx, sibling_tx].into_iter().all(|tx_id| edge
-            .server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id)),
-        "only edge-admitted commits enter the Core upload outbox"
-    );
-
-    // A transport retry cannot re-publish the Edge acceptance.  The retained
-    // route is still needed for Core's later terminal fate, but remembers its
-    // per-client edge acknowledgement.
-    client_upstream
-        .borrow_mut()
-        .transport
-        .send(
-            client
-                .node
-                .node
-                .borrow_mut()
-                .commit_unit_for(inserted_tx)
-                .unwrap(),
-        )
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge_sent.borrow().is_empty(),
-        "a retransmit must not create a second edge acknowledgement"
-    );
-
-    // The exact update action includes the candidate patch. Alice is allowed
-    // by the old-row policy, but changing owner to Bob fails the update check;
-    // it produces one routed rejection instead of a synthetic Edge success.
-    let denied = client
-        .update(
-            "todos",
-            inserted.row_uuid(),
-            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
-            Default::default(),
-        )
-        .unwrap();
-    let denied_tx = denied.mergeable_tx_id();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    let rejections = edge_sent
-        .borrow()
-        .iter()
-        .filter(|message| {
-            matches!(
-                message,
-                SyncMessage::FateUpdate {
-                    tx_id,
-                    fate: Fate::Rejected(_),
-                    ..
-                } if *tx_id == denied_tx
-            )
-        })
-        .count();
-    assert_eq!(
-        rejections, 1,
-        "denial is routed once through the edge route"
-    );
-    assert!(
-        !edge
-            .server
-            .edge_fate_routes
-            .borrow()
-            .contains_key(&denied_tx),
-        "a locally denied upload cannot leave a Core-fate route behind"
-    );
-    assert!(
-        !edge
-            .server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == denied_tx),
-        "a denied upload must not bypass edge authorization through Core replication"
-    );
-}
-
-/// An edge route is server-owned rather than connection-owned: a reconnecting
-/// client may retransmit its exact unit and receive the already-known edge
-/// acceptance, but another connection cannot replace a still-live obligation
-/// with different bytes for the same transaction id.
-///
-/// This stays at the served-peer seam because two authenticated subscriber
-/// connections and their in-memory downstream queues are the boundary where
-/// the otherwise durable transaction identity is deliberately absent while an
-/// edge fate route is live.
-#[test]
-fn edge_fate_route_identity_is_shared_across_client_connections() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let client = open_db(0xa1, alice, &schema);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("identity".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    let tx_id = write.mergeable_tx_id();
-    let SyncMessage::CommitUnit { tx, versions } = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(tx_id)
-        .unwrap()
-    else {
-        panic!("client mergeable write must retain its commit unit");
-    };
-
-    let node = edge.node();
-    let mut first = PeerState::edge_client(alice);
-    let mut reconnect = PeerState::edge_client(alice);
-    let authority: Rc<RefCell<Option<AuthorityContext>>> = Rc::new(RefCell::new(None));
-    let local_routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let first_fates = Rc::new(RefCell::new(Vec::new()));
-    let reconnect_fates = Rc::new(RefCell::new(Vec::new()));
-    let context = CommitUnitIngestContext {
-        identity: alice,
-        trust: CommitUnitTrust::Session,
-        edge_authority: true,
-        admitted_write_authorization: false,
-    };
-
-    let first_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(
-        &node,
-        &mut first,
-        false,
-        context,
-        (alice, BTreeMap::new()),
-        &authority,
-        &edge.server.edge_fate_routes,
-        &local_routes,
-        &first_fates,
-        1,
-        SyncMessage::CommitUnit {
-            tx: tx.clone(),
-            versions: versions.clone(),
-        },
-    ))
-    .expect("first client-link upload is admitted");
-    assert!(first_outcome.value.is_empty());
-    // Explicit INSERT grants hydrate a support scope on the first turn.
-    let admitted = first
-        .drain_deferred_edge_fates(&mut node.borrow_mut(), 2)
-        .unwrap();
-    for fate in admitted.value {
-        route_edge_admission_fate(&edge.server.edge_fate_routes, tx_id, &fate);
-    }
-    assert!(matches!(
-        first_fates.borrow().as_slice(),
-        [SyncMessage::FateUpdate {
-            tx_id: candidate,
-            fate: Fate::Accepted,
-            durability: Some(DurabilityTier::Edge),
-            ..
-        }] if *candidate == tx_id
-    ));
-
-    let mut conflicting = tx.clone();
-    conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
-    assert!(
-        crate::db::block_on(dispatch_admitted_subscriber_message(
-            &node,
-            &mut reconnect,
-            false,
-            context,
-            (alice, BTreeMap::new()),
-            &authority,
-            &edge.server.edge_fate_routes,
-            &local_routes,
-            &reconnect_fates,
-            1,
-            SyncMessage::CommitUnit {
-                tx: conflicting,
-                versions: versions.clone(),
-            },
-        ))
-        .is_err()
-    );
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
-        1,
-        "a conflicting second connection is rejected before it gains a fate route"
-    );
-    assert!(reconnect_fates.borrow().is_empty());
-
-    let retry_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(
-        &node,
-        &mut reconnect,
-        false,
-        context,
-        (alice, BTreeMap::new()),
-        &authority,
-        &edge.server.edge_fate_routes,
-        &local_routes,
-        &reconnect_fates,
-        2,
-        SyncMessage::CommitUnit { tx, versions },
-    ))
-    .expect("an exact reconnect retransmit reuses the route obligation");
-    assert!(retry_outcome.value.is_empty());
-    let admitted = reconnect
-        .drain_deferred_edge_fates(&mut node.borrow_mut(), 3)
-        .unwrap();
-    for fate in admitted.value {
-        route_edge_admission_fate(&edge.server.edge_fate_routes, tx_id, &fate);
-    }
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
-        2,
-        "the reconnect gets one route without replacing the original obligation"
-    );
-    assert_eq!(
-        first_fates.borrow().len(),
-        1,
-        "an exact reconnect retransmit must not duplicate the old session's edge fate"
-    );
-    assert!(matches!(
-        reconnect_fates.borrow().as_slice(),
-        [SyncMessage::FateUpdate {
-            tx_id: candidate,
-            fate: Fate::Accepted,
-            durability: Some(DurabilityTier::Edge),
-            ..
-        }] if *candidate == tx_id
-    ));
-}
-
 #[test]
 fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let schema = schema();
     let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let relay = open_db(0xe0, identity, &schema);
+    let relay_node = NodeUuid::from_bytes([0xe0; 16]);
     let (a_transport, _a_peer) = duplex_with_admitted_session_context(
         identity,
-        edge_node,
+        relay_node,
         10,
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let a = crate::db::block_on(edge.server.connect_upstream(a_transport));
-    let first = *edge.server.admitted_upstream_authority.borrow();
+    let a = crate::db::block_on(relay.node.connect_upstream(a_transport));
+    let first = *relay.node.admitted_upstream_authority.borrow();
     let (b_transport, _b_peer) = duplex_with_admitted_session_context(
         identity,
-        edge_node,
+        relay_node,
         11,
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
+    let _b = crate::db::block_on(relay.node.connect_upstream(b_transport));
     assert_eq!(
-        *edge.server.admitted_upstream_authority.borrow(),
+        *relay.node.admitted_upstream_authority.borrow(),
         first,
         "a concurrent admitted upstream must not steal existing route ownership"
     );
-    assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
-    let tx_id = edge
-        .node()
-        .borrow_mut()
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } =
-        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
-    else {
-        panic!("settled mergeable write must retain its commit unit");
-    };
-    let queue = Rc::new(RefCell::new(Vec::new()));
-    edge.server.edge_fate_routes.borrow_mut().insert(
-        tx_id,
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: vec![EdgeFateRoute {
-                authority: Some(first.unwrap()),
-                queue: Rc::downgrade(&queue),
-                edge_acknowledged: false,
-            }],
-        },
-    );
-    assert!(edge.server.detach_connection(&a));
+    assert_eq!(relay.node.admitted_upstream_authorities.borrow().len(), 2);
+    assert!(relay.node.detach_connection(&a));
     assert_ne!(
-        *edge.server.admitted_upstream_authority.borrow(),
+        *relay.node.admitted_upstream_authority.borrow(),
         first,
         "detaching the selected owner must deterministically hand off future routes"
     );
-    let handoff = edge.server.admitted_upstream_authority.borrow().unwrap();
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
-        Some(handoff),
-        "an Edge-Accepted caller route must follow the selected handoff rather than vanish"
-    );
-}
-
-#[test]
-fn async_peer_detach_replay_error_preserves_authority_and_routes() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-    let (a_transport, _a_peer) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        10,
-        NodeUuid::from_bytes([0xa2; 16]),
-        20,
-    );
-    let a = crate::db::block_on(edge.server.connect_upstream(a_transport));
-    let first = *edge.server.admitted_upstream_authority.borrow();
-    let (b_transport, _b_peer) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        11,
-        NodeUuid::from_bytes([0xb2; 16]),
-        21,
-    );
-    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
-    assert_eq!(
-        *edge.server.admitted_upstream_authority.borrow(),
-        first,
-        "a concurrent admitted upstream must not steal existing route ownership"
-    );
-    assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
-    let tx_id = edge
-        .node()
-        .borrow_mut()
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } =
-        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
-    else {
-        panic!("settled mergeable write must retain its commit unit");
-    };
-    let queue = Rc::new(RefCell::new(Vec::new()));
-    edge.server.edge_fate_routes.borrow_mut().insert(
-        tx_id,
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: vec![EdgeFateRoute {
-                authority: Some(first.unwrap()),
-                queue: Rc::downgrade(&queue),
-                edge_acknowledged: false,
-            }],
-        },
-    );
-    // A missing durable unit models a replay load failure. Detach must not
-    // mutate authority, live routes, receipts, or the shared upload outbox.
-    let missing = TxId::new(TxTime::from(1234), NodeUuid::from_bytes([0xff; 16]));
-    let obligation = edge
-        .server
-        .edge_fate_routes
-        .borrow_mut()
-        .remove(&tx_id)
-        .unwrap();
-    edge.server
-        .edge_fate_routes
-        .borrow_mut()
-        .insert(missing, obligation);
-    let outbox_before = edge.server.outbox.borrow().len();
-    let result = block_on(edge.server.detach_connection_async(&a));
-    assert!(result.unwrap_err().message.contains("transaction"));
-    assert_eq!(edge.server.connections.borrow().len(), 2);
-    assert_eq!(*edge.server.admitted_upstream_authority.borrow(), first);
-    assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&missing].routes[0].authority,
-        first
-    );
-    assert_eq!(edge.server.outbox.borrow().len(), outbox_before);
-    // Repair the fixture's missing unit and prove the same operation retries.
-    let obligation = edge
-        .server
-        .edge_fate_routes
-        .borrow_mut()
-        .remove(&missing)
-        .unwrap();
-    edge.server
-        .edge_fate_routes
-        .borrow_mut()
-        .insert(tx_id, obligation);
-    assert!(block_on(edge.server.detach_connection_async(&a)).unwrap());
-    assert_eq!(edge.server.connections.borrow().len(), 1);
-}
-
-#[test]
-fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let (upstream, _authority) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xe0; 16]),
-        1,
-        NodeUuid::from_bytes([0xc0; 16]),
-        1,
-    );
-    let _upstream = crate::db::block_on(edge.server.connect_upstream(upstream));
-    let selected = edge
-        .server
-        .admitted_upstream_authority
-        .borrow()
-        .expect("admitted upstream");
-
-    let client = open_db(0xa1, identity, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xa1; 16]),
-        1,
-        NodeUuid::from_bytes([0xe0; 16]),
-        2,
-    );
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("bounded".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
-        .unwrap()
-    else {
-        panic!("client mergeable write must retain its commit unit");
-    };
-    let queue = Rc::new(RefCell::new(Vec::new()));
-    edge.server.edge_fate_routes.borrow_mut().insert(
-        write.mergeable_tx_id(),
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: (0..MAX_EDGE_FATE_ROUTES_PER_TX)
-                .map(|_| EdgeFateRoute {
-                    authority: Some(selected),
-                    queue: Rc::downgrade(&queue),
-                    edge_acknowledged: false,
-                })
-                .collect(),
-        },
-    );
-    client.tick().unwrap();
-    edge.server.tick().unwrap();
-    client.tick().unwrap();
-    assert!(matches!(
-        write.write_state().unwrap().fate,
-        Fate::Rejected(RejectionReason::MalformedCommit(_))
-    ));
-}
-
-/// An admitted Edge routes a terminal fate from its selected upstream authority
-/// to exactly the downstream client that uploaded the commit.
-///
-/// This deliberately reaches the route registry directly because the contract
-/// is below the public database API: it proves that authenticated session
-/// admission binds the parked route to one authority epoch before a websocket
-/// adapter or a server lifecycle can obscure the exact wire recipient.
-///
-/// ```text
-/// alice --CommitUnit--> edge --park(tx, core epoch)--> core
-/// alice <--FateUpdate-- edge <--FateUpdate------------ core
-/// ```
-#[test]
-fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-    let core_node = NodeUuid::from_bytes([0xc0; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-
-    // The upstream endpoint is the authority that is allowed to discharge a
-    // downstream Edge-accepted write. The client endpoint is deliberately a
-    // different admitted session, so it cannot supply that authority context.
-    let (edge_upstream_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_node, 41, core_node, 97);
-    let edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
-    let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
-    let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
-
-    let client = open_db(0xa1, alice, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        alice,
-        NodeUuid::from_bytes([0xa1; 16]),
-        11,
-        edge_node,
-        13,
-    );
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            alice,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("routed".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    let tx_id = write.mergeable_tx_id();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-
-    let expected_authority = AuthorityContext {
-        authority: *core_node.as_bytes(),
-        link: AuthorSubject::SYSTEM,
-        connection_id: 41,
-        connection_epoch: 97,
-        claims_revision: 0,
-        policy_epoch: 0,
-        authorization_progress: 0,
-        settled_through: 0,
-    };
-    let routes = edge.server.edge_fate_routes.borrow();
-    let routes_for_tx = routes.get(&tx_id).expect("edge must park the upload route");
-    assert_eq!(routes_for_tx.routes.len(), 1);
-    assert_eq!(routes_for_tx.routes[0].authority, Some(expected_authority));
-    drop(routes);
-
-    // Scope receipts advance authorization metadata on the same physical
-    // connection. They must not turn that admitted link into a different fate
-    // authority: FateUpdate carries no receipt generation of its own.
-    {
-        let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream(UpstreamConnectionState {
-            expected_scope_authority,
-            ..
-        }) = &mut edge_upstream.link
-        else {
-            panic!("edge upstream must retain its admitted authority context");
-        };
-        let authority_context = expected_scope_authority
-            .as_mut()
-            .expect("admitted authority context");
-        authority_context.claims_revision = 3;
-        authority_context.policy_epoch = 5;
-        authority_context.authorization_progress = 7;
-        authority_context.settled_through = 11;
-    }
-
-    let fate = SyncMessage::FateUpdate {
-        tx_id,
-        fate: Fate::Accepted,
-        global_time: Some(GlobalTime(17)),
-        durability: Some(DurabilityTier::Global),
-    };
-
-    // Receipt metadata is intentionally not a fate-route discriminator, but
-    // every physical link discriminator still is. A FateUpdate from a
-    // different epoch, local connection, authority, or admitted subject must
-    // remain unable to discharge Alice's parked route.
-    let advanced_context = {
-        let edge_upstream = edge_upstream.borrow();
-        let ConnectionLink::Upstream(UpstreamConnectionState {
-            expected_scope_authority,
-            ..
-        }) = &edge_upstream.link
-        else {
-            panic!("edge upstream must retain its admitted authority context");
-        };
-        expected_scope_authority.expect("advanced authority context")
-    };
-    for physically_different in [
-        AuthorityContext {
-            connection_id: advanced_context.connection_id.wrapping_add(1),
-            ..advanced_context
-        },
-        AuthorityContext {
-            connection_epoch: advanced_context.connection_epoch.wrapping_add(1),
-            ..advanced_context
-        },
-        AuthorityContext {
-            authority: *NodeUuid::from_bytes([0xc2; 16]).as_bytes(),
-            ..advanced_context
-        },
-        AuthorityContext {
-            link: AuthorSubject::for_test_bytes([0xb2; 16]),
-            ..advanced_context
-        },
-    ] {
-        {
-            let mut edge_upstream = edge_upstream.borrow_mut();
-            let ConnectionLink::Upstream(UpstreamConnectionState {
-                expected_scope_authority,
-                ..
-            }) = &mut edge_upstream.link
-            else {
-                unreachable!("edge upstream shape remains stable");
-            };
-            *expected_scope_authority = Some(physically_different);
-        }
-        core_session
-            .borrow_mut()
-            .transport
-            .send(SyncMessage::FateUpdate {
-                tx_id,
-                fate: Fate::Rejected(RejectionReason::MalformedCommit(
-                    "wrong physical link".to_owned(),
-                )),
-                global_time: None,
-                durability: None,
-            })
-            .unwrap();
-        edge_upstream.borrow_mut().tick().unwrap();
-        assert!(
-            edge_client.borrow().downstream_fates.borrow().is_empty(),
-            "a physically distinct authority context must not reach Alice"
-        );
-        assert_eq!(
-            edge.node()
-                .borrow_mut()
-                .transaction_state_settled(tx_id)
-                .unwrap(),
-            (Fate::Accepted, None, DurabilityTier::Edge),
-            "a rejected fate from a different physical link must not alter the edge-local admission"
-        );
-    }
-    {
-        let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream(UpstreamConnectionState {
-            expected_scope_authority,
-            ..
-        }) = &mut edge_upstream.link
-        else {
-            unreachable!("edge upstream shape remains stable");
-        };
-        *expected_scope_authority = Some(advanced_context);
-    }
-    core_session
-        .borrow_mut()
-        .transport
-        .send(fate.clone())
-        .unwrap();
-    // Step only the selected upstream connection. This makes the exact
-    // downstream fate observable before the client session consumes it.
-    edge_upstream.borrow_mut().tick().unwrap();
-    assert_eq!(
-        edge_client.borrow().downstream_fates.borrow().as_slice(),
-        std::slice::from_ref(&fate),
-        "the authority's terminal fate must be queued once for Alice's session"
-    );
-    assert!(
-        !edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
-        "terminal delivery must retire its exact authority route"
-    );
-
-    edge_client.borrow_mut().tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global
-    );
-}
-
-#[test]
-fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let (a_transport, mut a_peer) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xe0; 16]),
-        1,
-        NodeUuid::from_bytes([0xa2; 16]),
-        1,
-    );
-    let _a = crate::db::block_on(edge.server.connect_upstream(a_transport));
-    let selected = edge.server.admitted_upstream_authority.borrow().unwrap();
-    let (b_transport, mut b_peer) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xe0; 16]),
-        2,
-        NodeUuid::from_bytes([0xb2; 16]),
-        2,
-    );
-    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
-    let tx_id = edge
-        .node()
-        .borrow_mut()
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } =
-        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
-    else {
-        panic!("settled mergeable write must retain its commit unit");
-    };
-    let downstream = Rc::new(RefCell::new(Vec::new()));
-    edge.server.edge_fate_routes.borrow_mut().insert(
-        tx_id,
-        EdgeFateObligation {
-            identity: EdgeFateCommitIdentity::new(&tx, &versions),
-            routes: vec![EdgeFateRoute {
-                authority: Some(selected),
-                queue: Rc::downgrade(&downstream),
-                edge_acknowledged: false,
-            }],
-        },
-    );
-    b_peer
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.server.tick().unwrap();
-    assert!(matches!(
-        edge.node()
-            .borrow_mut()
-            .transaction_state_settled(tx_id)
-            .unwrap()
-            .0,
-        Fate::Pending
-    ));
-    assert!(downstream.borrow().is_empty());
-    a_peer
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.server.tick().unwrap();
-    assert!(matches!(
-        edge.node()
-            .borrow_mut()
-            .transaction_state_settled(tx_id)
-            .unwrap()
-            .0,
-        Fate::Accepted
-    ));
-    assert_eq!(downstream.borrow().len(), 1);
-}
-
-#[test]
-fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let authority_a = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
-    let authority_b = open_core(0xb2, AuthorSubject::SYSTEM, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-
-    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        10,
-        NodeUuid::from_bytes([0xa2; 16]),
-        20,
-    );
-    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let a = authority_a.accept_subscriber_with_trust(
-        a_transport,
-        identity,
-        CommitUnitTrust::TrustedAuthority,
-    );
-    let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        11,
-        NodeUuid::from_bytes([0xb2; 16]),
-        21,
-    );
-    let edge_b = crate::db::block_on(edge.server.connect_upstream(edge_b_transport));
-    let _b = authority_b.accept_subscriber_with_trust(
-        b_transport,
-        identity,
-        CommitUnitTrust::TrustedAuthority,
-    );
-
-    let client = open_db(0xc1, identity, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xc1; 16]),
-        1,
-        edge_node,
-        2,
-    );
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("handoff".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-
-    // B is a real connected authority but it is not the selected one.  Have
-    // it consume the same upload and reject it while permission state is
-    // unavailable; that real early fate must not settle or forward the
-    // parked downstream write.
-    authority_b.server.set_permissions_ready(false).unwrap();
-    authority_b.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-    {
-        let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
-        else {
-            panic!("B must be an upstream connection");
-        };
-        assert!(
-            uploaded.contains(&write.mergeable_tx_id()),
-            "B must have already uploaded the write before it becomes owner"
-        );
-    }
-
-    assert!(edge.server.detach_connection(&edge_a));
-    // The detach schedules a handoff immediately, and the successor must
-    // re-upload even though it was already connected before selection.
-    {
-        let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
-        else {
-            panic!("B must remain the upstream handoff connection");
-        };
-        assert!(
-            !uploaded.contains(&write.mergeable_tx_id()),
-            "handoff must clear B's prior upload suppression before redriving"
-        );
-    }
-    authority_b.server.set_permissions_ready(true).unwrap();
-    edge.tick().unwrap();
-    authority_b.tick().unwrap();
-    // Step B's actual upstream connection separately so the downstream fate
-    // queue is observable before the edge-client connection flushes it.
-    edge_b.borrow_mut().tick().unwrap();
-    assert_eq!(
-        edge_client.borrow().downstream_fates.borrow().len(),
-        1,
-        "B's terminal fate must enqueue exactly one downstream notification"
-    );
-    assert!(
-        !edge
-            .server
-            .edge_fate_routes
-            .borrow()
-            .contains_key(&write.mergeable_tx_id()),
-        "forwarding the terminal fate must retire its route"
-    );
-    edge_client.borrow_mut().tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global
-    );
-
-    // A late packet from the detached authority has no route and cannot add a
-    // second terminal notification for the original downstream handle.
-    a.borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id: write.mergeable_tx_id(),
-            fate: Fate::Rejected(RejectionReason::MalformedCommit("late A".to_owned())),
-            global_time: None,
-            durability: None,
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    edge_client.borrow_mut().tick().unwrap();
-    client.tick().unwrap();
-    assert!(
-        edge_client.borrow().downstream_fates.borrow().is_empty(),
-        "late A must not enqueue a second downstream fate"
-    );
-    assert!(
-        !edge
-            .server
-            .edge_fate_routes
-            .borrow()
-            .contains_key(&write.mergeable_tx_id()),
-        "late A must not recreate the retired route"
-    );
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global
-    );
-}
-
-#[test]
-fn edge_parks_downstream_fate_until_a_later_authority_connects() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let authority_a = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        10,
-        NodeUuid::from_bytes([0xa2; 16]),
-        20,
-    );
-    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let _a = authority_a.accept_subscriber_with_trust(
-        a_transport,
-        identity,
-        CommitUnitTrust::TrustedAuthority,
-    );
-
-    let client = open_db(0xc1, identity, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xc1; 16]),
-        1,
-        edge_node,
-        2,
-    );
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("parked".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-
-    assert!(edge.server.detach_connection(&edge_a));
-    assert_eq!(edge.server.edge_fate_routes.borrow().len(), 1);
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&write.mergeable_tx_id()].routes[0].authority,
-        None,
-        "a route whose authority disconnected remains parked without stale authority claims"
-    );
-
-    let authority_c = open_core(0xc2, AuthorSubject::SYSTEM, &schema);
-    let (edge_c_transport, c_transport) = duplex_with_admitted_session_context(
-        identity,
-        edge_node,
-        12,
-        NodeUuid::from_bytes([0xc2; 16]),
-        22,
-    );
-    let _edge_c = crate::db::block_on(edge.server.connect_upstream(edge_c_transport));
-    let _c = authority_c.accept_subscriber_with_trust(
-        c_transport,
-        identity,
-        CommitUnitTrust::TrustedAuthority,
-    );
-    edge.tick().unwrap();
-    authority_c.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global
-    );
-    assert!(edge.server.edge_fate_routes.borrow().is_empty());
-}
-
-/// An offline-ready Edge retains a client's fate route when a write arrives
-/// before normal upstream admission.
-///
-/// A validated durable Edge may serve while its Core is offline. Its local
-/// acceptance therefore has to retain an unbound downstream obligation, bind
-/// it to the first authenticated authority, and redrive the canonical unit.
-///
-/// ```text
-/// alice --write--> edge (no upstream yet) --later attach--> core
-///                    \-- park(tx, alice) --bind(core)--> global fate
-/// ```
-#[test]
-fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-    let core_node = NodeUuid::from_bytes([0xc0; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xa1, alice, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        alice,
-        NodeUuid::from_bytes([0xa1; 16]),
-        11,
-        edge_node,
-        13,
-    );
-    let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            alice,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-
-    let write = client
-        .insert(
-            "todos",
-            cells("startup race", false, alice),
-            Default::default(),
-        )
-        .unwrap();
-    let tx_id = write.mergeable_tx_id();
-    let canonical = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(tx_id)
-        .unwrap();
-    let mut reconstructed = canonical.clone();
-    let SyncMessage::CommitUnit { versions, .. } = &mut reconstructed else {
-        unreachable!("commit_unit_for returns a CommitUnit");
-    };
-    versions.clear();
-    edge.server.outbox.borrow_mut().push(PendingUpload {
-        tx_id,
-        unit: Some(reconstructed),
-    });
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
-        None,
-        "an offline-ready edge retains the downstream obligation without inventing authority"
-    );
-    let outbox = edge.server.outbox.borrow();
-    let retained = outbox
-        .iter()
-        .find(|pending| pending.tx_id == tx_id)
-        .expect("accepted Edge write remains queued for its future Core");
-    let Some(SyncMessage::AuthorityPublication(publication)) = retained.unit.as_ref() else {
-        panic!("edge must retain a coherent publication, not a bare write");
-    };
-    assert_eq!(publication.tx_id, tx_id);
-    let unit = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id == tx_id)
-        .unwrap();
-    let SyncMessage::CommitUnit { mut tx, versions } = canonical.clone() else {
-        unreachable!("commit_unit_for returns a CommitUnit")
-    };
-    assert_eq!(tx.permission_subject, Some(alice));
-    tx.permission_subject = None;
-    let canonical_carrier = SyncMessage::CommitUnit { tx, versions };
-    assert_eq!(
-        SyncMessage::CommitUnit {
-            tx: unit.tx.clone(),
-            versions: unit.versions.clone()
-        },
-        canonical_carrier,
-        "the publication retains the exact durable write while omitting its local capability"
-    );
-    drop(outbox);
-    client_upstream
-        .borrow_mut()
-        .transport
-        .send(
-            client
-                .node
-                .node
-                .borrow_mut()
-                .commit_unit_for(tx_id)
-                .unwrap(),
-        )
-        .unwrap();
-    edge.tick().unwrap();
-    assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
-        1,
-        "a retransmitted pre-admission unit must reuse the same downstream route"
-    );
-
-    let (edge_upstream_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_node, 41, core_node, 97);
-    let _edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
-    assert!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0]
-            .authority
-            .is_some(),
-        "the first authenticated authority binds the parked route"
-    );
-    let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
-    let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
-    edge.tick().unwrap();
-    let uploaded =
-        std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv()).any(|message| {
-            matches!(message,
-            SyncMessage::AuthorityPublication(publication)
-                if publication.tx_id == tx_id
-                    && publication.commits.iter().any(|unit|
-                        SyncMessage::CommitUnit {
-                            tx: unit.tx.clone(),
-                            versions: unit.versions.clone(),
-                        } == canonical_carrier))
-        });
-    assert!(
-        uploaded,
-        "binding the first authority redrives the parked unit"
-    );
-    core_session
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    edge_client.borrow_mut().tick().unwrap();
-    client.tick().unwrap();
-
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global,
-        "the late Core fate must discharge the offline client's parked route"
-    );
-    assert!(edge.server.edge_fate_routes.borrow().is_empty());
-}
-
-#[test]
-fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
-    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
-    let authority_node = NodeUuid::from_bytes([0xa2; 16]);
-    let old_authority = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
-    let current_authority = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
-
-    let (edge_old_transport, old_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
-    let _edge_old = crate::db::block_on(edge.server.connect_upstream(edge_old_transport));
-    let old = old_authority.accept_subscriber(old_transport, identity);
-    let (edge_current_transport, current_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
-    let _edge_current = crate::db::block_on(edge.server.connect_upstream(edge_current_transport));
-    let current = current_authority.accept_subscriber(current_transport, identity);
-
-    let client = open_db(0xc1, identity, &schema);
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
-        identity,
-        NodeUuid::from_bytes([0xc1; 16]),
-        1,
-        edge_node,
-        2,
-    );
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
-    let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("epoch".to_owned()))]),
-            Default::default(),
-        )
-        .unwrap();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-
-    // Model the already-admitted successor taking ownership while the old
-    // same-UUID socket still has an in-flight frame.  UUID equality alone is
-    // deliberately insufficient: connection id and remote epoch bind the
-    // route to the current authenticated session.
-    let current_context = edge.server.admitted_upstream_authorities.borrow()[1];
-    *edge.server.admitted_upstream_authority.borrow_mut() = Some(current_context);
-    edge.server
-        .edge_fate_routes
-        .borrow_mut()
-        .get_mut(&write.mergeable_tx_id())
-        .expect("routed edge write")
-        .routes[0]
-        .authority = Some(current_context);
-    old.borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id: write.mergeable_tx_id(),
-            fate: Fate::Rejected(RejectionReason::MalformedCommit("old session".to_owned())),
-            global_time: None,
-            durability: None,
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge
-    );
-
-    current
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id: write.mergeable_tx_id(),
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Global
-    );
-}
-
-#[test]
-fn outbox_release_requires_current_admitted_authority_receipt() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa4; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe4; 16]);
-    let authority_node = NodeUuid::from_bytes([0xa4; 16]);
-    let edge = open_core(0xe4, AuthorSubject::SYSTEM, &schema);
-    let current_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
-    let (edge_current_transport, current_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
-    let edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
-    let current = current_authority.accept_subscriber(current_transport, identity);
-    let old_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
-    let (edge_old_transport, old_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
-    let edge_old = block_on(edge.server.connect_upstream(edge_old_transport));
-    let old = old_authority.accept_subscriber(old_transport, identity);
-
-    let client = open_db(0xc4, identity, &schema);
-    let (client_transport, edge_transport) = duplex();
-    let _client_upstream = block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
-    let write = client
-        .insert(
-            "todos",
-            cells("authority receipt", false, identity),
-            Default::default(),
-        )
-        .unwrap();
-    let tx_id = write.mergeable_tx_id();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(
-        write.write_state().unwrap().durability,
-        DurabilityTier::Edge,
-        "an Edge trusted-backend session must not assign Global durability locally"
-    );
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id),
-        "local authority acceptance must retain the future upstream upload"
-    );
-
-    // The superseded connection advertises the same authority node UUID, so
-    // physical admission epoch -- not just the node identity -- must guard
-    // outbox release.
-    old.borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id),
-        "a direct terminal receipt from a superseded authority must not release the upload"
-    );
-
-    // These are real admitted authority frames, but neither is a terminal
-    // Global acceptance: both must leave the canonical upload replayable.
-    current
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Pending,
-            global_time: None,
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id),
-        "a Pending/Global receipt without time must not release the upload"
-    );
-
-    current
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: None,
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id),
-        "an Accepted/Global receipt without time must not release the upload"
-    );
-
-    // Disconnect every previous authority. The new admitted session must be
-    // sent the canonical unit again; if either nonterminal receipt had pruned
-    // it, this reconnect would have no upload to retransmit.
-    assert!(edge.server.detach_connection(&edge_current));
-    assert!(edge.server.detach_connection(&edge_old));
-    let reconnected_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
-    let (edge_reconnected_transport, reconnected_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 12, authority_node, 22);
-    let _edge_reconnected = block_on(edge.server.connect_upstream(edge_reconnected_transport));
-    let reconnected = reconnected_authority.accept_subscriber(reconnected_transport, identity);
-    edge.tick().unwrap();
-    assert!(
-        std::iter::from_fn(|| reconnected.borrow_mut().transport.try_recv()).any(
-            |message| matches!(message, SyncMessage::AuthorityPublication(publication)
-                if publication.tx_id == tx_id && publication.commits.iter().any(|unit| unit.tx.tx_id == tx_id))
-        ),
-        "the retained canonical upload must be retransmitted after authority reconnect"
-    );
-
-    reconnected
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(2)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .all(|pending| pending.tx_id != tx_id),
-        "the current authority's time-bearing Global acceptance releases the upload"
-    );
-}
-
-/// A routed Edge upload has no direct-receipt compatibility path: the frame
-/// must identify the selected authenticated authority session before it can
-/// settle or prune the upload.
-#[test]
-fn featureless_upstream_cannot_release_routed_edge_outbox() {
-    let schema = schema();
-    let identity = AuthorSubject::for_test_bytes([0xa5; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe5; 16]);
-    let authority_node = NodeUuid::from_bytes([0xa5; 16]);
-    let edge = open_core(0xe5, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xc5, identity, &schema);
-    let (client_transport, edge_transport) = duplex();
-    let _client_upstream = block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            identity,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
-    let write = client
-        .insert(
-            "todos",
-            cells("featureless receipt", false, identity),
-            Default::default(),
-        )
-        .unwrap();
-    let tx_id = write.mergeable_tx_id();
-    client.tick().unwrap();
-    edge.tick().unwrap();
-    client.tick().unwrap();
-    assert!(
-        edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
-        "the edge-accepted client write must retain a routed authority obligation"
-    );
-
-    let (edge_featureless_transport, mut featureless_authority) = duplex();
-    let _featureless = block_on(edge.server.connect_upstream(edge_featureless_transport));
-    assert!(
-        edge.server.admitted_upstream_authority.borrow().is_none(),
-        "a duplex without session context must not become an admitted authority"
-    );
-    featureless_authority
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(1)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == tx_id),
-        "a featureless authority frame must not prune a routed Edge upload"
-    );
-
-    let current_authority = open_core(0xa5, AuthorSubject::SYSTEM, &schema);
-    let (edge_current_transport, current_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 12, authority_node, 22);
-    let _edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
-    let current = current_authority.accept_subscriber(current_transport, identity);
-    current
-        .borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_time: Some(GlobalTime(2)),
-            durability: Some(DurabilityTier::Global),
-        })
-        .unwrap();
-    edge.tick().unwrap();
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .all(|pending| pending.tx_id != tx_id),
-        "the selected admitted authority's matching receipt releases the upload"
-    );
+    assert_eq!(relay.node.admitted_upstream_authorities.borrow().len(), 1);
 }
 
 #[test]
@@ -5643,6 +3771,213 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(block_on(missing), PermissionAdvice::Denied);
+}
+
+/// The row lookup must find an existing, readable row: only an `Allowed`
+/// answer distinguishes a correct lookup from one that reports every row as
+/// missing, since both a violating patch and a missing row are `Denied`.
+#[test]
+fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_update(None, public_literal_eq("done", PublicValue::Boolean(false))),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    for title in ["other-1", "other-2"] {
+        server.insert("todos", cells(title, false, author)).unwrap();
+    }
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x61; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut ask = |row, patch| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch,
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    let rename = || BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]);
+
+    assert_eq!(ask(target, rename()), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))])
+        ),
+        PermissionAdvice::Denied
+    );
+    assert_eq!(ask(row(0xef), rename()), PermissionAdvice::Denied);
+}
+
+/// With an allow-all update policy, row existence alone decides update
+/// advice: a live row is Allowed, while a row that never existed or was
+/// deleted is Denied. Guards the #3386 point lookup against treating an
+/// absent or deleted row as present.
+#[test]
+fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_policy() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let live = server
+        .insert("todos", cells("live", false, author))
+        .unwrap()
+        .row_uuid();
+    let deleted = server
+        .insert("todos", cells("deleted", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa5, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa5; 16]),
+        1,
+        NodeUuid::from_bytes([0x62; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let ask = |row| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch: BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+
+    assert_eq!(ask(live), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(deleted),
+        PermissionAdvice::Allowed,
+        "live before deletion"
+    );
+    assert_eq!(ask(row(0xee)), PermissionAdvice::Denied, "never existed");
+
+    let _ = client.delete("todos", deleted, Default::default()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(ask(deleted), PermissionAdvice::Denied, "deleted");
+    assert_eq!(
+        ask(live),
+        PermissionAdvice::Allowed,
+        "unrelated row stays live"
+    );
+}
+
+#[test]
+#[ignore = "#3386: timing probe, run manually with --ignored"]
+/// Server tick for one Update permission advice against a growing table,
+/// next to an idle tick. Before #3386 the row-existence check decoded the
+/// whole table, so the advice tick grew linearly with it.
+fn probe_3386_update_advice_latency() {
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    // No update policy: an update policy's support scope is hydrated over
+    // the whole table on every request and would mask the row lookup.
+    let policies = PublicTablePolicies::new().with_insert(policy);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(policies),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x60; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut inserted = 0usize;
+    for size in [100usize, 1_000, 5_000] {
+        while inserted < size {
+            server
+                .insert("todos", cells(&format!("row {inserted}"), false, author))
+                .unwrap();
+            inserted += 1;
+        }
+        let mut total = std::time::Duration::ZERO;
+        const ASKS: u32 = 20;
+        for _ in 0..ASKS {
+            let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+                table: "todos".to_owned(),
+                row: row(0xef),
+                patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            });
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            total += started.elapsed();
+            client.tick().unwrap();
+            assert_eq!(block_on(advice), PermissionAdvice::Denied);
+        }
+        eprintln!(
+            "PROBE rows={size} server_tick_us={}",
+            (total / ASKS).as_micros()
+        );
+        let mut idle = std::time::Duration::ZERO;
+        for _ in 0..ASKS {
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            idle += started.elapsed();
+        }
+        eprintln!(
+            "PROBE rows={size} idle_tick_us={}",
+            (idle / ASKS).as_micros()
+        );
+    }
 }
 
 #[test]
@@ -6003,24 +4338,6 @@ fn delegated_request_binding_requires_backend_client_link() {
     }
 }
 
-// Internal: this matrix pins host admission independently of wire declarations;
-// the reconnect test exercises its observable confidentiality consequence.
-#[test]
-fn partial_edge_row_repair_uses_effective_scope_not_transport_trust() {
-    let alice = AuthorSubject::for_test_bytes([0x71; 16]);
-    for trust in [
-        CommitUnitTrust::Session,
-        CommitUnitTrust::TrustedBackend,
-        CommitUnitTrust::TrustedAuthority,
-    ] {
-        assert!(row_repair_requires_core(trust, alice));
-        assert_eq!(
-            row_repair_requires_core(trust, AuthorSubject::SYSTEM),
-            trust == CommitUnitTrust::Session
-        );
-    }
-}
-
 // Internal: the capability is a host-only admission event, never a wire field.
 #[test]
 fn authority_query_delegation_requires_explicit_host_admission() {
@@ -6054,15 +4371,9 @@ fn authority_query_delegation_requires_explicit_host_admission() {
     }
 }
 
-// Internal transport fixture: only host admission can mark a partial Edge.
+// Internal transport fixture: only host admission can mark subscriber trust.
 // Observe raw native delivery/rejection because a client facade cannot express
 // the unsupported remote propagation option or delegated transport scope.
-#[derive(Clone, Copy, Debug)]
-enum QueryTestHost {
-    Core,
-    PartialEdge,
-}
-
 #[derive(Clone, Copy, Debug)]
 enum QueryTestClient {
     Session,
@@ -6073,21 +4384,20 @@ enum QueryTestClient {
 fn remote_query_delivery(
     propagate_upstream: bool,
     tier: DurabilityTier,
-    host: QueryTestHost,
     client_scope: QueryTestClient,
 ) -> (bool, bool) {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0x75; 16]);
-    let edge = open_core(0x76, AuthorSubject::SYSTEM, &schema);
+    let core = open_core(0x76, AuthorSubject::SYSTEM, &schema);
     let target = row(0x77);
-    edge.insert_with_id(
+    core.insert_with_id(
         "todos",
         target,
         cells("unverified shared bytes", false, alice),
     )
     .unwrap();
     let forbidden = row(0x78);
-    edge.insert_with_id(
+    core.insert_with_id(
         "todos",
         forbidden,
         cells(
@@ -6112,7 +4422,7 @@ fn remote_query_delivery(
     let (mut client, transport) = duplex();
     let delegated = matches!(client_scope, QueryTestClient::Delegated);
     let subscriber = if delegated {
-        let subscriber = edge.accept_subscriber_with_trust(
+        let subscriber = core.accept_subscriber_with_trust(
             transport,
             AuthorSubject::SYSTEM,
             CommitUnitTrust::TrustedAuthority,
@@ -6120,17 +4430,14 @@ fn remote_query_delivery(
         subscriber.borrow_mut().admit_authority_query_delegate();
         subscriber
     } else if matches!(client_scope, QueryTestClient::System) {
-        edge.accept_subscriber_with_trust(
+        core.accept_subscriber_with_trust(
             transport,
             AuthorSubject::SYSTEM,
             CommitUnitTrust::TrustedBackend,
         )
     } else {
-        edge.accept_subscriber(transport, alice)
+        core.accept_subscriber(transport, alice)
     };
-    if matches!(host, QueryTestHost::PartialEdge) {
-        subscriber.borrow_mut().set_partial_edge_query_host();
-    }
     client
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -6168,7 +4475,7 @@ fn remote_query_delivery(
                                     .versions
                                     .iter()
                                     .any(|version| version.row_uuid() == forbidden),
-                                "local Edge evaluation must narrow payloads under the admitted reader"
+                                "local Core evaluation must narrow payloads under the admitted reader"
                             );
                         }
                         emitted |= bundle
@@ -6193,39 +4500,14 @@ fn remote_query_delivery(
 
 #[test]
 fn remote_queries_cannot_disable_upstream_propagation() {
-    for host in [QueryTestHost::Core, QueryTestHost::PartialEdge] {
-        for client in [
-            QueryTestClient::Session,
-            QueryTestClient::System,
-            QueryTestClient::Delegated,
-        ] {
-            assert_eq!(
-                remote_query_delivery(false, DurabilityTier::Global, host, client),
-                (false, true),
-                "{host:?} {client:?}"
-            );
-        }
-    }
-}
-
-// Internal transport fixture isolates local serving from upstream hydration:
-// no Core is connected. The Edge must evaluate cached data under the admitted
-// reader instead of waiting for a selected Core result for this exact query.
-#[test]
-fn partial_edge_evaluates_cached_queries_without_selected_core_source() {
     for client in [
         QueryTestClient::Session,
-        QueryTestClient::Delegated,
         QueryTestClient::System,
+        QueryTestClient::Delegated,
     ] {
         assert_eq!(
-            remote_query_delivery(
-                true,
-                DurabilityTier::Global,
-                QueryTestHost::PartialEdge,
-                client,
-            ),
-            (true, false),
+            remote_query_delivery(false, DurabilityTier::Global, client),
+            (false, true),
             "{client:?}"
         );
     }

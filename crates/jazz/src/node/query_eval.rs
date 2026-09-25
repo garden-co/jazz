@@ -10,14 +10,13 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
-pub(crate) use unavailable_inputs::EdgeAvailabilityOwner;
 
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
     InputSourceId, InputSourceReplacement, LiteralValue, PreparedShapeId, RoutedMultisinkTerminal,
     StaticScanSpec,
 };
-use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
+use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas, RootIndirectValues};
 use groove::records::{BorrowedRecord, DescriptorField, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
@@ -38,19 +37,19 @@ use super::query_engine::{
     OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
     PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
     ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
-    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
-    SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
-    SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
-    StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
-    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
-    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
-    route_param_field, user_column_field,
+    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramCompilation,
+    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
+    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
+    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
+    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
+    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
+    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
+    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
+    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
+    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
+    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
+    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
+    right_field, route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -104,6 +103,11 @@ pub(crate) fn exact_known_state_declaration_for_test(
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+/// Bounded attempts of one ordered page probe before the complete source.
+const ORDERED_PAGE_PROBE_ATTEMPTS: usize = 3;
+/// Largest prefix a retried ordered page probe reads, unless the requested
+/// page alone is larger.
+const ORDERED_PAGE_PROBE_MAX_CAP: usize = 4_096;
 
 #[cfg(test)]
 thread_local! {
@@ -230,8 +234,8 @@ pub(crate) fn take_required_sink_deltas(
 
 mod lowering;
 
-pub(crate) use lowering::PolicyAuthorizationGraph;
 use lowering::*;
+pub(crate) use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
 
 enum CurrentQueryProgramOutput {
     AppRows,
@@ -492,6 +496,33 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
+    }
+
+    fn current_query_program_request_and_access_paths(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
         let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
@@ -519,8 +550,7 @@ where
                     .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
             );
         }
-        self.compile_query_program_request_with_access_paths(request, access_paths)
-            .await
+        Ok((request, access_paths))
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -552,6 +582,378 @@ where
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
+    }
+
+    /// Compile one bounded ordered-page probe at the Global tier.
+    ///
+    /// The probe never selects an index itself. It narrows the root path that
+    /// first-result hydration already admitted through
+    /// `guarded_current_access_path`, and only when that path is exactly the
+    /// single-column equality probe whose column leads the declared
+    /// `(equality_column, order_column)` composite index. Re-addressing that
+    /// prefix through the composite index keeps the same candidate domain and
+    /// only orders it, so the cap can be re-proved after the graph applies
+    /// every filter, deletion check, and policy. Any other admitted shape,
+    /// including no admitted path at all, declines the probe.
+    async fn compile_ordered_page_probe_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        equality_column: &str,
+        cap: usize,
+    ) -> Result<Option<(QueryProgram, bool)>, Error> {
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::TrustedServing,
+        )?;
+        let root = root_source_id(&shape.query().table);
+        if request.reads.primary.source_current_tier(&root) != Some(DurabilityTier::Global) {
+            return Ok(None);
+        }
+        let mut access_paths = self.current_query_hydration_access_paths(
+            &request,
+            shape,
+            binding,
+            HydrationLifetime::FirstResult,
+        )?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            source_limit,
+            maintained,
+            // A covered-key filter is only attached to join paths; a root
+            // path carrying one is not a plain ordered-page candidate.
+            candidate_filter: None,
+        }) = access_paths.get_mut(&root)
+        else {
+            return Ok(None);
+        };
+        if column != equality_column
+            || order_column.is_some()
+            || prefix.len() != 1
+            || !intersections.is_empty()
+            || source_limit.is_some()
+        {
+            return Ok(None);
+        }
+        let order = &shape.query().order_by[0];
+        *order_column = Some(order.column.clone());
+        *reverse = order.direction == OrderDirection::Desc;
+        *source_limit = Some(cap);
+        // A first-result owner retires this graph after hydration.
+        *maintained = false;
+        let path = access_paths[&root].clone();
+        // The graph's content source reads exactly these capped composite
+        // index entries, so only their deletion winners can affect the page.
+        // Policy subplans that specialise this occurrence inherit the same
+        // capped path and therefore the same register.
+        let (register, exhausted) = self
+            .bounded_deletion_register_for_ordered_page(shape, &path, cap)
+            .await?;
+        let program = self
+            .compile_query_program_request_with_bounded_deletion_register(
+                request,
+                access_paths,
+                (root, register),
+            )
+            .await?;
+        Ok(Some((program, exhausted)))
+    }
+
+    /// Materialize only the deletion winners whose content rows can enter a
+    /// bounded ordered page probe. The caller holds the node's read lock over
+    /// both this snapshot and execution of the lowered query program.
+    ///
+    /// Also reports whether the physical index prefix is exhausted: it holds
+    /// fewer than `cap` raw entries, so the capped content source saw every
+    /// candidate the prefix can ever produce.
+    async fn bounded_deletion_register_for_ordered_page(
+        &mut self,
+        shape: &ValidatedQuery,
+        path: &CurrentAccessPath,
+        cap: usize,
+    ) -> Result<(GraphBuilder, bool), Error> {
+        let CurrentAccessPath::Index {
+            column,
+            order_column: Some(order_column),
+            reverse,
+            prefix,
+            intersections,
+            ..
+        } = path
+        else {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe requires a composite index",
+            ));
+        };
+        if !intersections.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe cannot intersect indexes",
+            ));
+        }
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .and_then(|mapping| mapping.tables.get(&shape.query().table))
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no physical table mapping",
+            ))?;
+        let column_id = *mapping
+            .columns
+            .get(column)
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no equality column mapping",
+            ))?;
+        let order_column_id =
+            *mapping
+                .columns
+                .get(order_column)
+                .ok_or(Error::InvalidStoredValue(
+                    "ordered page probe has no order column mapping",
+                ))?;
+        let content_table = physical_global_current_table_name(mapping.table_id);
+        let register_table = physical_register_global_current_table_name(mapping.table_id);
+        let index = physical_current_composite_index_name(&[column_id, order_column_id]);
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let scan_prefix = std::iter::once(branch.clone())
+            .chain(prefix.iter().cloned())
+            .map(LiteralValue::from)
+            .collect();
+        let scan = if *reverse {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        } else {
+            StaticScanSpec::PrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        };
+        // Both this read and the query graph's content source cap the same
+        // raw composite index entries before projection. With no required
+        // fields this projection omits no more rows than the graph's own
+        // projection target, so every row the graph can admit keeps its
+        // deletion register.
+        let projection = self.ensure_physical_current_projection_for_enum_columns(
+            shape.schema_version(),
+            &shape.query().table,
+            &BTreeSet::new(),
+        )?;
+        let candidates = self
+            .database
+            .query_graph(
+                GraphBuilder::variant_index_scan(
+                    content_table.clone(),
+                    index.clone(),
+                    projection,
+                    scan.clone(),
+                )
+                .project(["row_uuid"]),
+            )
+            .await
+            .map_err(Error::Groove)?;
+        let row_uuids = candidates
+            .iter()
+            .map(|(row, _)| row.get_uuid(0))
+            .collect::<Result<Vec<_>, _>>()?;
+        // The projection may omit a schema-incompatible entry, so a short
+        // projected list does not prove the prefix is short. Only the raw
+        // entry count, which the content source caps identically, does. The
+        // recount runs only when the projected list is already short, and
+        // reads at most `cap` index entries.
+        let exhausted = row_uuids.len() < cap
+            && self
+                .database
+                .query_graph(GraphBuilder::index_scan(content_table, index, scan))
+                .await
+                .map_err(Error::Groove)?
+                .deltas
+                .len()
+                < cap;
+        let mut registers = Vec::with_capacity(row_uuids.len());
+        for row_uuid in row_uuids {
+            if let Some(register) = self
+                .database
+                .primary_key_get_raw(&register_table, &[branch.clone(), Value::Uuid(row_uuid)])
+                .await
+                .map_err(Error::Groove)?
+            {
+                registers.push(register.raw().to_vec());
+            }
+        }
+        let descriptor = self
+            .database
+            .table_schema(&register_table)
+            .map_err(Error::Groove)?
+            .record_schema();
+        Ok((
+            GraphBuilder::inline_records(descriptor, registers),
+            exhausted,
+        ))
+    }
+
+    /// Probe an ordered current index a page at a time. The query graph still
+    /// applies all filters, deletion checks, and policy. An extra visible row
+    /// with a sort key strictly worse than the page's last row proves that the
+    /// requested page is final, and so does an exhausted physical prefix. Ties and sparse visibility
+    /// retry with up to two larger bounded prefixes (4x each, at most
+    /// `max(4096, limit + 1)` entries) before falling back to the ordinary
+    /// complete source.
+    async fn try_ordered_page_probe(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<Vec<CurrentRow>>, Error> {
+        let query = shape.query();
+        let Some(limit) = query.limit.filter(|limit| *limit > 0) else {
+            return Ok(None);
+        };
+        if query.offset != 0
+            || query.order_by.len() != 1
+            || query.select.is_some()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(None);
+        }
+        let order_column = &query.order_by[0].column;
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        // The probe is exact only when the physical index key order equals
+        // the query comparator for the order column. Admit only scalar types
+        // whose order-preserving key encoding and comparator agree; nullable,
+        // floating-point, composite, and physical-only encodings decline.
+        if !table.columns.iter().any(|column| {
+            column.name == *order_column
+                && matches!(
+                    column.column_type,
+                    ColumnType::U8
+                        | ColumnType::U16
+                        | ColumnType::U32
+                        | ColumnType::U64
+                        | ColumnType::I32
+                        | ColumnType::I64
+                        | ColumnType::Bool
+                        | ColumnType::String
+                        | ColumnType::Bytes
+                        | ColumnType::Uuid
+                )
+        }) {
+            return Ok(None);
+        }
+        let paths = self.one_shot_access_paths(shape, binding, DurabilityTier::Global)?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            intersections,
+            ..
+        }) = paths.get(&root_source_id(&query.table))
+        else {
+            return Ok(None);
+        };
+        if !intersections.is_empty()
+            || !table
+                .composite_indexes
+                .contains(&vec![column.clone(), order_column.clone()])
+        {
+            return Ok(None);
+        }
+        // A conjunctive claim equality on another column makes this prefix
+        // sparse by construction. For example, scanning an organization page
+        // in timestamp order cannot efficiently find one user's owner rows.
+        // Alternative policy branches may still admit the ordered prefix.
+        if table.read_policy.as_ref().is_some_and(|policy| {
+            policy.policy_branches.is_empty()
+                && policy.filters.iter().any(|filter| {
+                    let claim_column = match filter {
+                        Predicate::Eq(Operand::Column(column), Operand::Claim(_))
+                        | Predicate::Eq(Operand::Claim(_), Operand::Column(column)) => Some(column),
+                        _ => None,
+                    };
+                    claim_column.is_some_and(|claim_column| claim_column != column)
+                })
+        }) {
+            return Ok(None);
+        }
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+            .schema
+            .clone();
+        let mut cap = limit.saturating_add(1);
+        let max_cap = cap.max(ORDERED_PAGE_PROBE_MAX_CAP);
+        for attempt in 0..ORDERED_PAGE_PROBE_ATTEMPTS {
+            let mut probe_query = query.clone();
+            probe_query.limit = Some(cap);
+            let probe_shape =
+                probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
+            let probe_binding = probe_shape.bind(binding.values().clone())?;
+            let Some((program, exhausted)) = self
+                .compile_ordered_page_probe_program(
+                    &probe_shape,
+                    &probe_binding,
+                    identity,
+                    column,
+                    cap,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let app_output = materialization_app_row_schema(None, Some(&program))?;
+            let root_indirect_values =
+                self.projection_dropped_root_values(&probe_query, shape.schema_version())?;
+            let deltas = self
+                .hydrate_lowered_program_once(program, &probe_binding, root_indirect_values)
+                .await?;
+            let mut rows = self.materialize_and_finalize_query_rows(
+                &probe_query,
+                shape.schema_version(),
+                &table,
+                &app_output,
+                &deltas,
+                None,
+            )?;
+            // The index yields every row tied with the page's last row
+            // before any strictly worse one, so one strictly worse visible
+            // row anywhere in the probe proves the whole tie group was read
+            // and the query's own comparator ordered it. The rows are sorted,
+            // so the last one is the worst.
+            let strictly_worse_row = rows.len() > limit
+                && rows.last().is_some_and(|last| {
+                    query_order_value(&rows[limit - 1], &table, order_column)
+                        != query_order_value(last, &table, order_column)
+                });
+            if strictly_worse_row || exhausted {
+                rows.truncate(limit);
+                return Ok(Some(rows));
+            }
+            if attempt + 1 == ORDERED_PAGE_PROBE_ATTEMPTS || cap >= max_cap {
+                break;
+            }
+            cap = cap.saturating_mul(4).min(max_cap);
+        }
+        Ok(None)
     }
 
     async fn compile_current_query_program_with_access_paths(
@@ -608,7 +1010,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -644,7 +1046,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -695,7 +1097,10 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                shape.query(),
+            )?,
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -763,7 +1168,7 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, lowered_shape.query()),
+            output: current_query_output_request(output, lowered_shape.query())?,
         };
         self.compile_query_program_request(request).await
     }
@@ -874,40 +1279,27 @@ where
         let strips_policy_branches = matches!(policy, PolicyContext::System)
             || authorization_mode == QueryAuthorizationMode::ClientLocal;
         let (shape, binding) = if strips_policy_branches
-            && !shape.query().policy_branches.is_empty()
+            && let Some((shape, binding)) = self.policy_stripped_shape(shape, binding)?
         {
-            let schema = if shape.schema_version() == self.catalogue.local_schema_version_id {
-                &self.catalogue.schema
-            } else {
-                &self
-                    .catalogue
-                    .catalogue_schemas
-                    .get(&shape.schema_version())
-                    .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-                    .schema
-            };
-            let mut query = shape.query().clone();
-            query.policy_branches.clear();
-            residual_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
-            residual_binding = residual_shape.bind(
-                binding
-                    .values()
-                    .iter()
-                    .filter(|(name, _)| residual_shape.params().contains_key(*name))
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect(),
-            )?;
+            residual_shape = shape;
+            residual_binding = binding;
             (&residual_shape, &residual_binding)
         } else {
             (shape, binding)
         };
         let lowered_shape;
         let lowered_binding;
-        // Prepared binding sources are a serving-side optimization. Client
-        // local execution must lower concrete bindings into its locally
-        // available (already upstream-scoped at Edge/Global) data, rather
-        // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
+        // Global-tier client-local receivers must lower concrete bindings
+        // into their upstream-scoped settled views rather than evaluate a
+        // server-maintained binding graph. A Local-tier maintained client
+        // subscription has no settled view and reads unfiltered local data, so
+        // its bindings can share one prepared shape, like serving bindings do.
+        let client_local = authorization_mode == QueryAuthorizationMode::ClientLocal;
+        let client_local_prepared = client_local
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && matches!(output, CurrentQueryProgramOutput::MaintainedView);
+        let use_prepared_binding_source = (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -950,7 +1342,7 @@ where
             &input_shape,
         );
         let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
-        if use_prepared_binding_source {
+        if use_prepared_binding_source && !client_local {
             let policy_schema = self
                 .catalogue
                 .catalogue_schemas
@@ -968,6 +1360,9 @@ where
         // System reads bypass policy evaluation and have no session from
         // which a prepared claim can be bound. A policy-derived claim slot
         // must therefore never survive into their shared descriptor.
+        // Client-local reads evaluate no read policy, so they collect no
+        // policy-dependency claims above, but a claim the query itself reads
+        // stays a binding slot and is bound from the reader's session.
         if matches!(policy, PolicyContext::System) {
             binding_claim_params.clear();
         }
@@ -989,7 +1384,7 @@ where
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
         });
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
                 shape.query().policy_branches.len(),
@@ -1036,8 +1431,8 @@ where
                     read_view,
                     &input_shape,
                 );
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
+        let mut program_binding = self
+            .program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
                 binding,
                 source_shape,
@@ -1045,10 +1440,18 @@ where
                 binding_claim_params,
                 &policy,
                 prepared_claim_binding_mode,
-            )?,
+            )?;
+        // Client-local and trusted-serving plans never share a binding source:
+        // their graphs differ in policy and source authority. Namespace the
+        // final name, since System authority re-derives it above.
+        if client_local && let Some(source_shape) = program_binding.source_shape.as_mut() {
+            source_shape.push_str(":client-local");
+        }
+        let input = RowSetProgramInput {
+            binding: program_binding,
             shape: input_shape,
         };
-        let mut output_request = current_query_output_request(output, shape.query());
+        let mut output_request = current_query_output_request(output, shape.query())?;
         if storage_backed_result_materialization {
             // A simple current root query carries the exact visible content
             // transaction in its result-member terminal.  Keeping every
@@ -1101,6 +1504,8 @@ where
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
     }
 
     #[cfg(test)]
@@ -1129,7 +1534,7 @@ where
         .await
     }
 
-    /// Execute an ordinary local client read. The upstream serving edge is the
+    /// Execute an ordinary local client read. The upstream serving host is the
     /// confidentiality boundary; this path must not re-evaluate row policy.
     pub(crate) async fn query_rows_for_client(
         &mut self,
@@ -1195,7 +1600,7 @@ where
             if !settled {
                 continue;
             }
-            let table = self.table_in_schema(
+            let table = self.table_in_schema_ref(
                 &source_request.source.table,
                 request.reads.primary.read_schema,
             )?;
@@ -1212,7 +1617,7 @@ where
             occurrences.push((source_request.source, descriptor));
         }
         for (table_name, metadata) in table_metadata {
-            let table = self.table_in_schema(&table_name, request.reads.primary.read_schema)?;
+            let table = self.table_in_schema_ref(&table_name, request.reads.primary.read_schema)?;
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
@@ -1396,6 +1801,14 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
+        if authorization_mode == QueryAuthorizationMode::TrustedServing
+            && tier == DurabilityTier::Global
+            && let Some(rows) = self
+                .try_ordered_page_probe(shape, binding, identity)
+                .await?
+        {
+            return Ok(rows);
+        }
         let client_settled_binding_view = (authorization_mode
             == QueryAuthorizationMode::ClientLocal)
             .then(|| {
@@ -1414,13 +1827,13 @@ where
             // A serving node evaluates its complete authority program. A
             // `SettledBindingView` is a receiver-local CoveredInput source,
             // not a server-side cache or an alternate trusted read path.
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => None,
+            QueryAuthorizationMode::TrustedServing => None,
         };
-        // Ordinary Edge/Global reads are allowed to consume only a source
+        // Ordinary Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
         // without that host-owned route must not fall back to its raw overlay.
         if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && tier >= DurabilityTier::Edge
+            && tier >= DurabilityTier::Global
             && settled_binding_view.is_none()
         {
             return Ok(Vec::new());
@@ -1518,7 +1931,11 @@ where
             profile.compile_program = started.elapsed();
         }
         let phase_started = profile.as_ref().map(|_| Instant::now());
-        let deltas_result = self.hydrate_lowered_program_once(program, binding).await;
+        let root_indirect_values =
+            self.projection_dropped_root_values(shape.query(), shape.schema_version())?;
+        let deltas_result = self
+            .hydrate_lowered_program_once(program, binding, root_indirect_values)
+            .await;
         // Retire transient receiver inputs even if the one-shot graph itself
         // fails.  These identities are runtime-local capabilities and must
         // never be re-used by a later receipt.
@@ -1545,6 +1962,51 @@ where
             &deltas,
             profile,
         )
+    }
+
+    /// Root fields a one-shot read can leave as physical large-value
+    /// descriptors: stored columns that [`Self::materialize_and_finalize_query_rows`]
+    /// projects away without reading them first. Rebuilding such a value only
+    /// to drop it made a projected listing scale with the size of the columns
+    /// it excluded (#3471).
+    ///
+    /// Every other field, including ordering keys that the in-memory sort
+    /// re-reads, stays materialized. Structured, aggregate and joined results
+    /// keep the complete materialization because their public fields are not
+    /// the root table's columns.
+    fn projection_dropped_root_values(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+    ) -> Result<RootIndirectValues, Error> {
+        let Some(selected) = &query.select else {
+            return Ok(RootIndirectValues::Materialize);
+        };
+        if query.aggregate.is_some()
+            || query.relation.is_some()
+            || query.flat_join.is_some()
+            || !query.array_subqueries.is_empty()
+        {
+            return Ok(RootIndirectValues::Materialize);
+        }
+        let table = self.table_in_schema(&query.table, schema_version)?;
+        let dropped = table
+            .columns
+            .iter()
+            .filter(|column| {
+                !selected.contains(&column.name)
+                    && !query
+                        .order_by
+                        .iter()
+                        .any(|order| order.column == column.name)
+            })
+            .map(|column| user_column_field(&column.name))
+            .collect::<BTreeSet<_>>();
+        Ok(if dropped.is_empty() {
+            RootIndirectValues::Materialize
+        } else {
+            RootIndirectValues::PhysicalFields(std::sync::Arc::new(dropped))
+        })
     }
 
     /// Materialize one-shot current rows and expose the canonical public
@@ -1593,13 +2055,16 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        // Tree collectors own relation fields such as `posts` in their public
-        // app-row descriptor. Those fields are not columns of the root
-        // table, so normalizing a structured result against that table would
-        // silently discard the recursive payload before the client can read
-        // it. Flat rows still need this boundary to remove materializer-only
-        // physical fields.
-        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+        // Relation terminals and tree collectors own their public fields in
+        // the app-row descriptor. Those fields are not necessarily columns of
+        // the root table, so normalizing such output against that table would
+        // silently discard aliases or recursive payload before the client can
+        // read it. Flat rows still need this boundary to remove
+        // materializer-only physical fields.
+        if query.relation.is_none()
+            && query.flat_join.is_none()
+            && query.array_subqueries.is_empty()
+        {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
@@ -1671,7 +2136,7 @@ where
     /// Select the server-owned result boundary for an ordinary client read.
     ///
     /// Local and process-only reads intentionally scan the complete local
-    /// overlay. Edge/global reads consume only the identity-scoped result
+    /// overlay. Global reads consume only the identity-scoped result
     /// members emitted by the serving host. This is host-owned routing, not
     /// request-controlled authorization.
     fn client_settled_binding_view_key_for_query(
@@ -1723,6 +2188,74 @@ where
                 .is_bounded()
                 .then(|| RetainedRootWindowSource::for_shape(shape)),
         })
+    }
+
+    /// The query with its read-policy alternatives removed, for authorities
+    /// that do not evaluate them (System and client-local reads), or `None`
+    /// when it has none.
+    fn policy_stripped_shape(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<Option<(ValidatedQuery, Binding)>, Error> {
+        if shape.query().policy_branches.is_empty() {
+            return Ok(None);
+        }
+        let schema = if shape.schema_version() == self.catalogue.local_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema
+        };
+        let mut query = shape.query().clone();
+        query.policy_branches.clear();
+        let residual_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
+        let residual_binding = residual_shape.bind(
+            binding
+                .values()
+                .iter()
+                .filter(|(name, _)| residual_shape.params().contains_key(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )?;
+        Ok(Some((residual_shape, residual_binding)))
+    }
+
+    /// The binding-source name a prepared Local-tier client-local plan of
+    /// this query would share, or `None` when the query has no binding slot.
+    /// Mirrors the derivation in
+    /// [`Self::current_query_program_request_with_prepared_claim_mode`].
+    fn client_local_prepared_source_name(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<String>, Error> {
+        let residual = self.policy_stripped_shape(shape, binding)?;
+        let (shape, binding) = residual
+            .as_ref()
+            .map_or((shape, binding), |(shape, binding)| (shape, binding));
+        let source_shape = if matches!(
+            self.query_program_policy_context(identity),
+            PolicyContext::System
+        ) {
+            query_binding_source_shape_for_parts_if_needed(shape.params(), &BTreeMap::new())
+        } else {
+            let input_shape = self.normalized_row_set_shape(shape, binding)?;
+            let claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
+            query_binding_source_shape_for_parts_if_needed(shape.params(), &claim_params).map(
+                |source_shape| {
+                    self.active_session_claim_scope_key(identity)
+                        .map(|scope| format!("{source_shape}:session:{scope}"))
+                        .unwrap_or(source_shape)
+                },
+            )
+        };
+        Ok(source_shape.map(|source_shape| format!("{source_shape}:client-local")))
     }
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
@@ -1804,7 +2337,7 @@ where
             let mut current_table_name = root_table.to_owned();
             for segment in include.path.split('.') {
                 let current_table = self
-                    .table_in_schema(&current_table_name, read_schema_version)
+                    .table_in_schema_ref(&current_table_name, read_schema_version)
                     .ok()?;
                 let target_table = current_table.references.get(segment)?.clone();
                 tables.insert(target_table.clone());
@@ -1843,6 +2376,11 @@ where
             .await?;
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        // The historical program keeps unselected order keys for the sort
+        // above (`app_row_payload_projection`); drop them from public rows.
+        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -1883,7 +2421,7 @@ where
             )
         } else {
             let table = self
-                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .table_in_schema_ref(&lowered_shape.query().table, lowered_shape.schema_version())?
                 .clone();
             self.materialize_historical_query_rows(table, deltas)
         }
@@ -1925,7 +2463,7 @@ where
             )?
         } else {
             let table = self
-                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .table_in_schema_ref(&lowered_shape.query().table, lowered_shape.schema_version())?
                 .clone();
             self.materialize_historical_query_rows(table, deltas)?
         };
@@ -1957,7 +2495,7 @@ where
         let table = if query.aggregate.is_some() {
             self.query_output_table(query, lowered_shape.schema_version())?
         } else {
-            self.table_in_schema(&query.table, lowered_shape.schema_version())?
+            self.table_in_schema_ref(&query.table, lowered_shape.schema_version())?
                 .clone()
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
@@ -2176,8 +2714,7 @@ where
         };
         let node = self
             .node_aliases
-            .iter()
-            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            .node_for_alias(alias)
             .ok_or(Error::InvalidStoredValue(
                 "historical content witness node alias is missing",
             ))?;
@@ -2202,7 +2739,7 @@ where
             .flatten();
         let settled_binding_view = client_settled_view.as_ref().map(|view| view.key);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && tier >= DurabilityTier::Edge
+            && tier >= DurabilityTier::Global
             && settled_binding_view.is_none()
         {
             return Ok(RelationSnapshot {
@@ -2333,7 +2870,7 @@ where
                 self.prepare_client_subscription_binding(shape, binding, tier, identity)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+            QueryAuthorizationMode::TrustedServing => {
                 self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
                     .await
             }
@@ -2488,6 +3025,32 @@ where
             identity,
             row_uuid,
             QueryAuthorizationMode::TrustedServing,
+            RootIndirectValues::Materialize,
+        )
+        .await
+    }
+
+    /// Like [`Self::query_rows_for_link_physical_row`], for callers that
+    /// inspect only row identity and provenance: large values stay physical
+    /// descriptors. A policy predicate that reads a large column still
+    /// materializes that field inside the graph, so visibility is unchanged;
+    /// the probe no longer rebuilds whole values it never reads (#3471).
+    pub(crate) async fn query_row_visibility_for_link_physical_row(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::TrustedServing,
+            RootIndirectValues::Physical,
         )
         .await
     }
@@ -2509,10 +3072,12 @@ where
             identity,
             row_uuid,
             QueryAuthorizationMode::ClientLocal,
+            RootIndirectValues::Materialize,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn query_rows_for_physical_row_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -2521,9 +3086,10 @@ where
         identity: AuthorSubject,
         row_uuid: RowUuid,
         authorization_mode: QueryAuthorizationMode,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let access_paths = BTreeMap::from([(
             root_source_id(&shape.query().table),
@@ -2557,11 +3123,12 @@ where
                     &policy,
                     PreparedClaimBindingMode::Strict,
                 )?;
-                self.bind_disposable_shape_snapshot(shape, &values).await?
+                self.bind_disposable_shape_snapshot(shape, &values, root_indirect_values)
+                    .await?
             }
             PreparedQueryPlan::Graph { graph, .. } => self
                 .database
-                .query_graph(graph)
+                .query_graph_with_root_values(graph, root_indirect_values)
                 .await
                 .map_err(Error::Groove)?,
             PreparedQueryPlan::PeerMaintainedMarker => {
@@ -2582,7 +3149,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let program = self
             .compile_include_deleted_query_program_in_authorization_mode(
@@ -2612,7 +3179,8 @@ where
                     &policy,
                     PreparedClaimBindingMode::Strict,
                 )?;
-                self.bind_disposable_shape_snapshot(shape, &values).await?
+                self.bind_disposable_shape_snapshot(shape, &values, RootIndirectValues::Materialize)
+                    .await?
             }
             PreparedQueryPlan::Graph { graph, .. } => self
                 .database
@@ -2635,7 +3203,7 @@ where
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let request = self.current_query_program_request(
             shape,
@@ -2744,7 +3312,7 @@ where
                     self.query_rows_for_client(shape, binding, tier, identity)
                         .await?
                 }
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+                QueryAuthorizationMode::TrustedServing => {
                     self.query_rows_with_prepared_plan_for_identity(
                         shape, binding, tier, None, identity,
                     )
@@ -2762,7 +3330,7 @@ where
                 self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+            QueryAuthorizationMode::TrustedServing => {
                 self.query_relation_snapshot_for_serving_in_read_view(
                     shape, binding, tier, identity, read_view,
                 )
@@ -2805,17 +3373,12 @@ where
             if presentation_query.order_by.is_empty() || presentation_query.aggregate.is_some() {
                 None
             } else {
-                Some(self.table_in_schema(
+                Some(self.table_in_schema_ref(
                     &presentation_query.table,
                     self.catalogue.active_schema.schema,
                 )?)
             };
-        Self::sort_query_rows_with_occurrences(
-            &presentation_query,
-            table.as_ref(),
-            rows,
-            occurrence_ids,
-        )
+        Self::sort_query_rows_with_occurrences(&presentation_query, table, rows, occurrence_ids)
     }
 
     fn apply_projection(
@@ -3137,17 +3700,19 @@ where
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view_in_authorization_mode(
+        let (request, access_paths) = self.current_query_program_request_and_access_paths(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            None,
             authorization_mode,
-        )
-        .await
-        .map(|_| ())
+            PreparedClaimBindingMode::Strict,
+        )?;
+        self.ensure_query_program_request_supported(request, access_paths)
+            .await
     }
 
     pub(crate) fn mark_peer_maintained_query_shape_cache(
@@ -3260,26 +3825,20 @@ where
         )
     }
 
-    pub(crate) fn enable_edge_query_serving(&mut self) {
-        self.edge_query_serving = true;
-    }
-
     pub(crate) fn peer_query_authorization_mode(&self) -> QueryAuthorizationMode {
         if self.client_relay_scope().is_some() {
             QueryAuthorizationMode::ClientLocal
-        } else if self.edge_query_serving {
-            QueryAuthorizationMode::EdgeServing
         } else {
             QueryAuthorizationMode::TrustedServing
         }
     }
 
-    /// Re-publish an Edge window from a durable relay to its non-durable
+    /// Re-publish a Core-confirmed window from a durable relay to its non-durable
     /// browser peer. The relay's Global receipt already names the
     /// authority-selected members, so this must consume that membership as
     /// its source instead of applying the query window a second time.
     #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
-    pub(crate) async fn open_seeded_relay_edge_subscription_view(
+    pub(crate) async fn open_seeded_relay_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3298,13 +3857,13 @@ where
         ),
         Error,
     > {
-        self.open_seeded_relay_edge_subscription_view_with_waker(
+        self.open_seeded_relay_subscription_view_with_waker(
             shape,
             binding,
             identity,
             read_view,
             RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
+                tier: DurabilityTier::Global,
                 read_view: read_view.clone(),
                 ..RegisterShapeOptions::default()
             }
@@ -3315,7 +3874,7 @@ where
         .await
     }
 
-    pub(crate) async fn open_seeded_relay_edge_subscription_view_with_waker(
+    pub(crate) async fn open_seeded_relay_subscription_view_with_waker(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3350,7 +3909,7 @@ where
                 shape,
                 binding,
                 identity,
-                DurabilityTier::Edge,
+                DurabilityTier::Global,
                 read_view,
                 read_view_key,
                 QueryAuthorizationMode::ClientLocal,
@@ -3375,6 +3934,20 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection_if_present)
+                .transpose()?
+                .flatten(),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
@@ -3569,6 +4142,32 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
+        // A lone Local-tier subscription gains nothing from routing through a
+        // shared binding source, and its literal graph hydrates faster. Share
+        // only once a sibling of the same shape with a different binding is
+        // open: the first subscriber keeps its literal graph for its lifetime
+        // and holds a token so later siblings know to prepare the shared
+        // shape. Reopening the same binding (a remount, or a resubscribe
+        // whose predecessor's teardown is still queued) gains nothing from
+        // sharing either, so it stays literal too.
+        let lone_client_local_source = if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && settled_binding_view.is_none()
+        {
+            self.client_local_prepared_source_name(&shape, &binding, identity)?
+                .filter(|source_shape| {
+                    !self
+                        .client_local_literal_shapes
+                        .get(source_shape)
+                        .is_some_and(|(token, literal_binding)| {
+                            token.strong_count() > 0 && *literal_binding != binding
+                        })
+                        && !self.database.prepared_binding_source_is_bound(source_shape)
+                })
+        } else {
+            None
+        };
         let mut request = self.current_query_program_request_with_prepared_claim_mode(
             &shape,
             &binding,
@@ -3579,20 +4178,8 @@ where
             settled_binding_view,
             authorization_mode,
             prepared_claim_binding_mode,
-            false,
+            lone_client_local_source.is_some(),
         )?;
-        // Acquire before compiling the input graph, including across cold
-        // storage awaits. On failure the temporary owner drops; on success
-        // the maintained view retains it for its complete serving lifetime.
-        let edge_availability_owner = if authorization_mode == QueryAuthorizationMode::EdgeServing
-            || (self.edge_query_serving
-                && authorization_mode == QueryAuthorizationMode::ClientLocal)
-        {
-            unavailable_inputs::local_unavailable_policy_binding(&request)
-                .map(|scope| self.pin_edge_availability_scope(scope))
-        } else {
-            None
-        };
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
                 if let SourceExpr::SettledBindingView {
@@ -3673,7 +4260,7 @@ where
                 }
             }
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=opened_program table={} node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
                 shape.query().table,
@@ -3742,7 +4329,7 @@ where
                 return Err(error);
             }
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
@@ -3764,7 +4351,6 @@ where
             .collect();
         maintained.targeted_refresh_tables = targeted_refresh_tables;
         maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
-        maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
         // from equal row UUIDs or a search for the first matching table label.
@@ -3803,7 +4389,7 @@ where
         let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
             std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
                 let snapshot = update.deltas;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
                 }
                 let snapshot_transitions = match maintained.apply_multisink_deltas(
@@ -3901,8 +4487,18 @@ where
                 }
             }
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
+        }
+        if let Some(source_shape) = lone_client_local_source {
+            let token = std::sync::Arc::new(());
+            self.client_local_literal_shapes
+                .retain(|_, (token, _)| token.strong_count() > 0);
+            self.client_local_literal_shapes.insert(
+                source_shape,
+                (std::sync::Arc::downgrade(&token), binding.clone()),
+            );
+            maintained.hold_client_local_literal_token(token);
         }
         Ok((
             subscription,
@@ -3942,10 +4538,11 @@ where
         &mut self,
         shape: PreparedShapeId,
         values: &[groove::records::Value],
+        root_indirect_values: RootIndirectValues,
     ) -> Result<RecordDeltas, Error> {
         let subscription = match self
             .database
-            .bind_shape(shape, values)
+            .bind_shape_with_root_values(shape, values, root_indirect_values)
             .await
             .map_err(Error::Groove)
         {

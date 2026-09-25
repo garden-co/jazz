@@ -78,7 +78,7 @@ connection to the same SQLite store. The worker stays alive across a clean
 foreground handoff. Explicit foreground disconnect synchronously cancels and
 joins that worker before publishing offline state; reconnect restarts it using
 the retained native admission. Trusted scope revocation and host teardown
-stop the worker and retire the admission. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
+stop the worker and retire the admission. A bearer session requires HTTPS/WSS for remote Core; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
 host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O failures and
 handshake timeouts leave local relay work available while the worker retries.
@@ -590,7 +590,7 @@ the ordinary `mergeable` or `exclusive` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
 previously committed public `txId` and becomes a pending operation until the
-ordinary foreground/relay/Edge/Core fate path reaches Core durability. It lets
+ordinary foreground/local-relay/Core fate path reaches Core durability. It lets
 a host prove authoritative admission without reading relay SQLite; callers
 continue bounded ticks and `Poll` while it waits. Cell payloads are the established postcard
 `(RecordDescriptor, encoded-record)` envelope already used by NAPI/WASM; the

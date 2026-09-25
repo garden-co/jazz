@@ -228,11 +228,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     )));
     let shape = Query::from("todos").validate(&evolved).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         assert_eq!(
             core.query_rows(&shape, &binding, tier)
                 .unwrap()

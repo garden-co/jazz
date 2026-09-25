@@ -67,7 +67,7 @@ async function assertWriteHandleContract() {
     const _voidUpdate: void = tx.update(todos, row.id, { done: true });
     return row.id;
   });
-  callbackResult.wait({ tier: "edge" });
+  callbackResult.wait({ tier: "global" });
 
   const exclusiveResult: ExclusiveWriteResult<string> = await db.exclusiveTransaction(
     () => "committed",

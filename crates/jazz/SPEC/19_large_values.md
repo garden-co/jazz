@@ -266,7 +266,7 @@ already match local storage; a conflicting or unauthenticated node yields the
 descriptor-scoped `Rejected` result without poisoning the peer connection.
 Download remains locator-driven pull with `ChunkRequestBatch` and
 `ChunkResponseBatch`; download bytes are not upload ingress and do not consume
-the upload rate limit. Edges terminate or forward push uploads before forwarding
+the upload rate limit. Relays terminate or forward push uploads before forwarding
 the referencing row, just as missing pull requests may be relayed independently.
 
 Groove persists each retainer claim's creation time and incoming byte/node
@@ -474,7 +474,7 @@ Jazz has no large-value-specific durable root registry. A Jazz version is an
 ordinary Groove physical record, and Groove's persisted record mutation owns
 the descriptor reference delta described in Groove chapter 9. Jazz updates and
 logical deletes append versions and therefore do not release old roots. The
-existing edge-cache eviction and rejected-version cleanup paths physically
+existing explicit client-cache eviction and rejected-version cleanup paths physically
 delete or move versions; their ordinary Groove batches account for descriptors
 like every other physical-record mutation.
 

@@ -19,6 +19,9 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_table: String,
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) result_select: Option<Vec<String>>,
+    pub(super) result_relation_projection: Option<Vec<crate::query::RelationProjectColumn>>,
+    pub(super) result_relation_projections:
+        Option<BTreeMap<String, Vec<crate::query::RelationProjectColumn>>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
@@ -112,6 +115,43 @@ impl LocalMaintainedViewSubscription {
     /// authorization result.
     pub(crate) fn initial_snapshot_received(&self) -> bool {
         self.initial_received
+    }
+
+    pub(super) fn relation_projection_for_member(
+        &self,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let occurrence = super::public_result_member_occurrence_id(
+            member,
+            self.result_table.as_str(),
+            self.result_query.aggregate.is_some(),
+        )?
+        .ok_or(Error::InvalidStoredValue(
+            "maintained union member has no occurrence identity",
+        ))?;
+        self.relation_projection_for_occurrence(&occurrence)
+    }
+
+    pub(super) fn relation_projection_for_occurrence(
+        &self,
+        occurrence: &OutputOccurrenceId,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let Some(projections) = &self.result_relation_projections else {
+            return Ok(self.result_relation_projection.as_ref());
+        };
+        let label = occurrence
+            .union_arms()
+            .iter()
+            .find_map(|(position, label)| (*position == 0).then_some(label))
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has no position-0 arm label",
+            ))?;
+        projections
+            .get(label)
+            .map(Some)
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has an unknown arm label",
+            ))
     }
 }
 
@@ -230,8 +270,26 @@ impl LocalMaintainedViewSubscription {
                 .as_ref()
                 .map(|columns| columns.iter().map(String::len).sum::<usize>())
                 .unwrap_or_default()
+            + self
+                .result_relation_projection
+                .as_ref()
+                .map(|columns| {
+                    postcard::to_allocvec(columns)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
+            + self
+                .result_relation_projections
+                .as_ref()
+                .map(|projections| {
+                    postcard::to_allocvec(projections)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
@@ -253,10 +311,10 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
         added: Vec<(OutputOccurrenceId, CurrentRow)>,
         removed: Vec<OutputOccurrenceId>,
     },
-    /// Aggregate terminals retain every group, while the public facade shows
-    /// an ordered window of those groups. Re-materialize that complete facade
-    /// after each transition so displaced page members are retracted too.
-    AggregateWindow {
+    /// Ordered relation and aggregate terminals retain every member, while
+    /// the public facade shows an ordered window. Re-materialize that complete
+    /// facade after each transition so displaced page members are retracted too.
+    OrderedWindow {
         snapshot: RelationSnapshot,
         occurrence_ids: Vec<OutputOccurrenceId>,
     },
@@ -264,6 +322,22 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
     Structured {
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
     },
+}
+
+impl LocalMaintainedViewSubscription {
+    fn needs_ordered_relation_snapshot(&self) -> bool {
+        let query_has_window = !self.result_query.order_by.is_empty()
+            || self.result_query.limit.is_some()
+            || self.result_query.offset != 0;
+        let relation_has_union_window =
+            self.result_query.relation.as_ref().is_some_and(|relation| {
+                crate::query::relation_union_presentation_order(relation).is_some()
+                    || crate::query::relation_union_parts(&relation.rel)
+                        .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some())
+            });
+        (self.result_relation_projection.is_some() || self.result_relation_projections.is_some())
+            && (query_has_window || relation_has_union_window)
+    }
 }
 
 impl<S> NodeState<S>
@@ -369,6 +443,20 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection_if_present)
+                .transpose()?
+                .flatten(),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
@@ -379,7 +467,7 @@ where
                 read_view.clone(),
             ),
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=open root_terminal={} sources={} initial_received={}",
                 local.has_root_collector(),
@@ -387,7 +475,7 @@ where
                 local.initial_received,
             );
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=initial_transitions adds={} removes={} facts_adds={} facts_removes={} terminal_ops={}",
                 transitions.adds.len(),
@@ -531,7 +619,7 @@ where
     /// Install an already-claimed exact authority closure into a newly opened
     /// receiver, drive the one shared Groove graph to quiescence, and fold the
     /// resulting local terminal into its retained state.  Both ordinary late
-    /// client opening and seeded relay-edge opening use this sequence: neither
+    /// client opening and seeded relay opening use this sequence: neither
     /// may read an authority result/output cache to synthesize its reset.
     ///
     /// `None` means the receipt has not claimed a complete closure yet.  A
@@ -604,6 +692,18 @@ where
             .is_due(authority_result_key, generation)
     }
 
+    /// Whether a covered receiver still has admitted evaluation work, such as
+    /// an evaluation detached while it waits for large-value chunks. A failed
+    /// receiver has none: its error must be drained and reported, not waited
+    /// on (a failed chunk fetch would otherwise stall it silently).
+    pub(crate) fn covered_receiver_evaluation_pending(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> bool {
+        local.has_covered_input_sources()
+            && self.subscription_has_pending_query_evaluation(local.subscription_id())
+    }
+
     /// Replace the exact authority-covered source frontier of a receiver's
     /// local maintained graph. The authority selects and ships the input
     /// closure; this function neither re-runs policy nor reads an arbitrary
@@ -637,10 +737,11 @@ where
             .is_some_and(|(key, _)| key == authority_result_key);
         if !installed_for_authority {
             return self
-                .replace_covered_input_receiver(
+                .replace_covered_input_receiver_in(
                     &mut local.covered_input_receiver,
                     local.result_schema_version,
                     authority_result_key,
+                    self.local_covered_install(),
                 )
                 .await;
         }
@@ -655,10 +756,11 @@ where
         // carries the predecessor-preserving incremental record below.
         if authority_result.source_incrementals.is_empty() {
             return self
-                .replace_covered_input_receiver(
+                .replace_covered_input_receiver_in(
                     &mut local.covered_input_receiver,
                     local.result_schema_version,
                     authority_result_key,
+                    self.local_covered_install(),
                 )
                 .await;
         }
@@ -772,12 +874,17 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        let metrics = self
-            .database
-            .apply_input_source_deltas(deltas)
-            .await
-            .map_err(Error::Groove)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        let metrics = match self.local_covered_install() {
+            // See `CoveredInstall::DetachCold` (#3349).
+            CoveredInstall::DetachCold => {
+                self.database
+                    .apply_input_source_deltas_detaching_cold(deltas)
+                    .await
+            }
+            CoveredInstall::Complete => self.database.apply_input_source_deltas(deltas).await,
+        }
+        .map_err(Error::Groove)?;
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=incremental_receiver_delta predecessor={} generation={} tick={} processed={}",
                 incremental.predecessor_generation,
@@ -811,11 +918,40 @@ where
     }
     /// Install one exact authority closure into a receiver-owned source map.
     /// Both the facade and relay publication use this same source-only path.
+    /// This form completes the install's evaluation before returning, for
+    /// callers that read the result immediately (relay publication, one-shot
+    /// reads).
     pub(crate) async fn replace_covered_input_receiver(
         &mut self,
         receiver: &mut CoveredInputReceiver,
         result_schema_version: SchemaVersionId,
         authority_result_key: &AuthorityResultKey,
+    ) -> Result<bool, Error> {
+        self.replace_covered_input_receiver_in(
+            receiver,
+            result_schema_version,
+            authority_result_key,
+            CoveredInstall::Complete,
+        )
+        .await
+    }
+
+    /// How a local subscriber's covered install runs: detached only for a
+    /// host that drops pending ticks (see `CoveredInstall::DetachCold`).
+    fn local_covered_install(&self) -> CoveredInstall {
+        if self.detaches_covered_chunk_waits() {
+            CoveredInstall::DetachCold
+        } else {
+            CoveredInstall::Complete
+        }
+    }
+
+    async fn replace_covered_input_receiver_in(
+        &mut self,
+        receiver: &mut CoveredInputReceiver,
+        result_schema_version: SchemaVersionId,
+        authority_result_key: &AuthorityResultKey,
+        install: CoveredInstall,
     ) -> Result<bool, Error> {
         if receiver.sources.is_empty() {
             return Ok(false);
@@ -859,7 +995,7 @@ where
                 // Opening a usage site is not a claim that every source is
                 // empty.  Keep strict receivers pending until an exact reset
                 // manifest arrives; this is deliberately not an error.
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=covered_closure_pending sources={}",
                         receiver.sources.len(),
@@ -920,12 +1056,17 @@ where
             })
             .collect::<Vec<_>>();
 
-        let replacement_metrics = self
-            .database
-            .replace_input_sources(replacements)
-            .await
-            .map_err(Error::Groove)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        let replacement_metrics = match install {
+            // See `CoveredInstall::DetachCold` (#3349).
+            CoveredInstall::DetachCold => {
+                self.database
+                    .replace_input_sources_detaching_cold(replacements)
+                    .await
+            }
+            CoveredInstall::Complete => self.database.replace_input_sources(replacements).await,
+        }
+        .map_err(Error::Groove)?;
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=replaced sources={replacement_record_counts:?} tick={} processed={} notifications={} notification_records={}",
                 replacement_metrics.tick,
@@ -1070,6 +1211,12 @@ where
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
+        // A covered receiver's evaluation may be waiting on large-value
+        // chunks. Its terminal is incomplete until that work finishes, so do
+        // not drain (and let the caller publish) a partial authority state.
+        if authoritative_result_key.is_some() && self.covered_receiver_evaluation_pending(local) {
+            return Ok((None, false));
+        }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut payload_states = BTreeMap::<
             ResultMemberEntry,
@@ -1094,7 +1241,7 @@ where
                             deltas.terminal_sinks.len()
                         );
                     }
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=drain sinks={} terminals={}",
                             deltas.sinks.len(),
@@ -1108,7 +1255,7 @@ where
                         &self.node_aliases,
                     )?;
                     terminal_operations.extend(transitions.terminal_operations);
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=transitions terminal_ops={} adds={} removes={}",
                             terminal_operations.len(),
@@ -1310,7 +1457,7 @@ where
                         local.result_query.aggregate.is_some(),
                     )?
                 {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=local_maintained_added table={} occurrence={occurrence_id:?}",
                             row.table(),
@@ -1365,12 +1512,14 @@ where
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
             }
-        } else if materialize_update && local.result_query.aggregate.is_some() {
+        } else if materialize_update
+            && (local.result_query.aggregate.is_some() || local.needs_ordered_relation_snapshot())
+        {
             let materialized = self
                 .materialize_local_maintained_relation_snapshot_with_occurrences(local)
                 .await?;
             local.root_occurrence_ids = materialized.root_occurrence_ids.clone();
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot: materialized.snapshot,
                 occurrence_ids: materialized.root_occurrence_ids,
             }
@@ -1437,4 +1586,16 @@ mod terminal_transition_tests {
         }
         assert!(drained_transition_is_empty(true, true, true, &[]));
     }
+}
+
+/// How a covered receiver install runs its evaluation.
+#[derive(Clone, Copy)]
+enum CoveredInstall {
+    /// Hand evaluation that waits on a large-value chunk to a later owner
+    /// turn; the caller must not publish until it completes. A host that
+    /// drops a pending tick needs this: the chunk request leaves through a
+    /// later tick, so waiting inside this one never ends (#3349).
+    DetachCold,
+    /// Complete the evaluation before returning.
+    Complete,
 }

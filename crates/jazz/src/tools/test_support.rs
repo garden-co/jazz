@@ -106,7 +106,7 @@ where
                 last_error = None;
             }
             Ok(Err(e)) => {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=wait_for_query_error description={description} error={e}"
                     );

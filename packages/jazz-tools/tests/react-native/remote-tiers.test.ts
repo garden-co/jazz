@@ -11,18 +11,16 @@ const app = schema.defineApp({
 });
 
 // These cases intentionally have no authority peer: an ordinary persisted
-// local write is not evidence of Edge or Global admission.
-it("keeps Edge and Global waits pending while local writes remain responsive", async () => {
+// local write is not evidence of Core admission.
+it("keeps a Global wait pending while local writes remain responsive", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const write = db.insert(app.todos, { title: "pending admission", done: false });
     const row = await write.wait({ tier: "local" });
     const settled: string[] = [];
-    const waits = ["edge", "global"].map((tier) =>
-      write.wait({ tier: tier as "edge" | "global" }).then(
-        () => settled.push(tier),
-        () => settled.push(`${tier}:closed`),
-      ),
+    const globalWait = write.wait({ tier: "global" }).then(
+      () => settled.push("global"),
+      () => settled.push("global:closed"),
     );
     const later = await db
       .insert(app.todos, { title: "responsive local", done: false })
@@ -31,8 +29,8 @@ it("keeps Edge and Global waits pending while local writes remain responsive", a
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(settled).toEqual([]);
     await db.shutdown();
-    await Promise.all(waits);
-    expect(settled.sort()).toEqual(["edge:closed", "global:closed"]);
+    await globalWait;
+    expect(settled).toEqual(["global:closed"]);
   });
 });
 
@@ -63,7 +61,7 @@ it("does not publish unconfirmed local rows to a strict remote subscription", as
   });
 });
 
-it("resumes strict remote reads and both write tiers after native reconnect", async () => {
+it("resumes strict remote reads and Global write waits after native reconnect", async () => {
   const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
@@ -101,22 +99,18 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         await db.disconnect();
         const write = db.insert(app.todos, { title: "offline queued", done: false });
         const row = await write.wait({ tier: "local" });
-        expect(await db.all(app.todos, { tier: ReadTier.RemoteIfPossible })).toEqual([row]);
+        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
         const fallback: unknown[][] = [];
         const stopFallback = db.subscribe(app.todos, (rows) => fallback.push(rows), {
-          tier: ReadTier.RemoteIfPossible,
+          tier: ReadTier.LocalFirstUnlessEmpty,
         });
         await expect.poll(() => fallback.at(-1)).toEqual([row]);
         stopFallback();
         let remoteReady = false;
-        let edgeReady = false;
         let globalReady = false;
         const remote = db.all(app.todos, { tier: ReadTier.Remote }).then((rows) => {
           remoteReady = true;
           return rows;
-        });
-        const edge = write.wait({ tier: "edge" }).then(() => {
-          edgeReady = true;
         });
         const global = write.wait({ tier: "global" }).then(() => {
           globalReady = true;
@@ -127,9 +121,9 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         await laterWrite.wait({ tier: "local" });
         await new Promise((resolve) => setTimeout(resolve, 100));
         expect(strictSnapshots.flat()).toEqual([]);
-        expect([remoteReady, edgeReady, globalReady]).toEqual([false, false, false]);
+        expect([remoteReady, globalReady]).toEqual([false, false]);
         await db.reconnect();
-        await Promise.all([edge, global]);
+        await global;
         // The parked read can observe an empty authority snapshot before the
         // queued upload is accepted. Completion proves fresh coverage; the
         // post-settlement read below asserts the accepted write is visible.
@@ -141,7 +135,7 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         const stoppedCount = strictSnapshots.length;
         await db.update(app.todos, row.id, { title: "after detach" }).wait({ tier: "global" });
         expect(strictSnapshots).toHaveLength(stoppedCount);
-        expect(await db.all(app.todos, { tier: ReadTier.RemoteIfPossible })).toEqual([
+        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([
           { ...row, title: "after detach", done: true },
         ]);
       },
@@ -205,17 +199,15 @@ it("keeps local work usable while remote read tiers recover from an established 
           .poll(async () => db.all(app.todos, { tier: ReadTier.LocalFirst }))
           .toEqual([local]);
 
-        let remoteIfPossibleSettled = false;
-        const remoteIfPossible = db.all(app.todos, { tier: ReadTier.RemoteIfPossible }).then(
-          (rows) => {
-            remoteIfPossibleSettled = true;
-            return rows;
-          },
-          (error) => {
-            remoteIfPossibleSettled = true;
-            throw error;
-          },
-        );
+        // Local knowledge answers immediately during the outage; only a
+        // strict remote read waits for the server to come back.
+        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([local]);
+        // An empty local result must not hang on the unreachable server.
+        expect(
+          await db.all(app.todos.where({ title: "not synced anywhere" }), {
+            tier: ReadTier.LocalFirstUnlessEmpty,
+          }),
+        ).toEqual([]);
         let strictSettled = false;
         const strict = db.all(app.todos, { tier: ReadTier.Remote }).then(
           (rows) => {
@@ -228,7 +220,7 @@ it("keeps local work usable while remote read tiers recover from an established 
           },
         );
         await new Promise((resolve) => setTimeout(resolve, 100));
-        expect([remoteIfPossibleSettled, strictSettled]).toEqual([false, false]);
+        expect(strictSettled).toBe(false);
 
         server = await startLocalJazzServer({
           ...initial,
@@ -237,12 +229,10 @@ it("keeps local work usable while remote read tiers recover from an established 
           jwtIssuer: issuer.issuer,
           jwtAudience: issuer.audience,
         });
-        const [resumedIfPossible, resumedStrict] = await Promise.all([remoteIfPossible, strict]);
-        for (const rows of [resumedIfPossible, resumedStrict]) {
-          // Recovery establishes a fresh authority snapshot, which may precede
-          // this queued write's later Global admission.
-          expect(rows.every((row) => row.id === local.id)).toBe(true);
-        }
+        // Recovery establishes a fresh authority snapshot, which may precede
+        // this queued write's later Global admission.
+        const resumedStrict = await strict;
+        expect(resumedStrict.every((row) => row.id === local.id)).toBe(true);
         await write.wait({ tier: "global" });
         await expect(db.all(app.todos, { tier: ReadTier.Remote })).resolves.toEqual([local]);
       },

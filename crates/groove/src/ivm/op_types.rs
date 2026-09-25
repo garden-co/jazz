@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ivm::graph::{DurableStorage, ProjectExpr};
+use crate::ivm::graph::{DurableStorage, IndexCandidateFilter, ProjectExpr};
 use crate::records::{FieldIdentity, RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
 
@@ -51,6 +51,7 @@ pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
     pub intersections: Vec<(String, StaticScanSpec)>,
+    pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.
@@ -77,6 +78,15 @@ pub enum StaticScanSpec {
     /// only emitted by conservative one-shot lowering after every downstream
     /// operation that could discard or reorder a candidate has been ruled out.
     PrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
+    /// Read the last `max_items` entries under a prefix, in descending key
+    /// order, bounded before row decoding. Jazz emits this (and an ordered
+    /// `PrefixLimit`) only for a one-shot ordered-page probe whose caller
+    /// re-proves the page after every downstream filter, and falls back to an
+    /// unbounded source when it cannot.
+    ReversePrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },
@@ -517,6 +527,12 @@ pub enum PlanExpr {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PredicateExpr {
+    /// Process-local compiler argument. It must be bound before installation;
+    /// it has no row-evaluation, storage or wire meaning.
+    TemplateArgument {
+        slot: u32,
+        fields: Vec<String>,
+    },
     Eq {
         field: String,
         value: LiteralValue,
@@ -631,7 +647,11 @@ impl From<Value> for LiteralValue {
 }
 
 impl LiteralValue {
-    pub(crate) fn value_type(&self) -> Option<ValueType> {
+    /// Infer the representation used by an untyped literal projection. This
+    /// is not a schema contract: null/empty arrays lack an element type and an
+    /// enum tag alone does not carry its registry. Use a declared type for
+    /// parameter and authorization-route projections.
+    pub fn value_type(&self) -> Option<ValueType> {
         match self {
             Self::U8(_) => Some(ValueType::U8),
             Self::U16(_) => Some(ValueType::U16),
@@ -698,6 +718,27 @@ impl LiteralValue {
 }
 
 impl PredicateExpr {
+    pub(crate) fn accepts_template_argument(&self, argument: &Self) -> bool {
+        let Self::TemplateArgument { fields, .. } = self else {
+            return false;
+        };
+        if argument.has_template_arguments() {
+            return false;
+        }
+        let mut referenced = std::collections::BTreeSet::new();
+        argument.referenced_fields(&mut referenced);
+        referenced.iter().all(|field| fields.contains(field))
+    }
+    pub(crate) fn has_template_arguments(&self) -> bool {
+        match self {
+            Self::TemplateArgument { .. } => true,
+            Self::And(children) | Self::Or(children) => {
+                children.iter().any(Self::has_template_arguments)
+            }
+            Self::EnumMatch { payload, .. } => payload.has_template_arguments(),
+            _ => false,
+        }
+    }
     pub fn canonicalize(self) -> Self {
         match self {
             Self::And(predicates) => {

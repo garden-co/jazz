@@ -341,7 +341,7 @@ describe("raw websocket private read gate", () => {
     );
   }, 60_000);
 
-  it("lets Bob insert a camelCase chat message after edge-confirmed membership", async () => {
+  it("lets Bob insert a camelCase chat message after global-confirmed membership", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("camel-chat-member-message-insert"),
     );
@@ -363,9 +363,9 @@ describe("raw websocket private read gate", () => {
           userId: aliceUserId,
           name: "Alice",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice profile edge wait",
+      "Alice profile global wait",
     );
     const bobProfile = await withTimeout(
       bob
@@ -373,9 +373,9 @@ describe("raw websocket private read gate", () => {
           userId: bobUserId,
           name: "Bob",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob profile edge wait",
+      "Bob profile global wait",
     );
     const chat = await withTimeout(
       alice
@@ -384,9 +384,9 @@ describe("raw websocket private read gate", () => {
           isPublic: true,
           createdBy: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice chat edge wait",
+      "Alice chat global wait",
     );
     await withTimeout(
       alice
@@ -394,9 +394,9 @@ describe("raw websocket private read gate", () => {
           chatId: chat.id,
           userId: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice membership edge wait",
+      "Alice membership global wait",
     );
     await withTimeout(
       alice
@@ -406,9 +406,9 @@ describe("raw websocket private read gate", () => {
           text: "hello from seed chat",
           createdAt: new Date(),
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice seed message edge wait",
+      "Alice seed message global wait",
     );
     await withTimeout(
       bob
@@ -416,9 +416,9 @@ describe("raw websocket private read gate", () => {
           chatId: chat.id,
           userId: bobUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob membership edge wait",
+      "Bob membership global wait",
     );
 
     await expect(
@@ -428,7 +428,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read the camelCase chat member list after joining",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -440,9 +440,9 @@ describe("raw websocket private read gate", () => {
           text: "bob member message",
           createdAt: new Date(),
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob message edge wait",
+      "Bob message global wait",
     );
 
     await expect(
@@ -454,9 +454,9 @@ describe("raw websocket private read gate", () => {
           .orderBy("createdAt", "desc")
           .limit(21),
         (rows) => rows.some((row) => row.id === bobMessage.id),
-        "Bob should read his camelCase member message after edge-confirmed membership",
+        "Bob should read his camelCase member message after global-confirmed membership",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -467,7 +467,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.length === 0,
         "Bob should settle reaction reads that inherit through camelCase message membership",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -478,7 +478,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobProfile.id),
         "Bob should read the sender profile mounted by rendered chat messages",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -519,7 +519,7 @@ describe("raw websocket private read gate", () => {
             predicate as (rows: unknown[]) => boolean,
             `Bob subscription should settle: ${label}`,
             15_000,
-            { tier: "edge" },
+            { tier: "global" },
           ).then((unsubscribe) => {
             unsubscribeSubscriptions.push(unsubscribe);
           }),
@@ -535,10 +535,10 @@ describe("raw websocket private read gate", () => {
       text: "bob local-first message before alice reconnects",
       createdAt: new Date(),
     });
-    const bobPendingMessageEdgeWait = withTimeout(
-      bobPendingMessage.wait({ tier: "edge" }),
+    const bobPendingMessageGlobalWait = withTimeout(
+      bobPendingMessage.wait({ tier: "global" }),
       15_000,
-      "Bob fire-and-forget message edge wait",
+      "Bob fire-and-forget message global wait",
     );
 
     const aliceAgain = await openUserDb(appId, serverUrl, "camel-chat-insert-alice-again");
@@ -553,9 +553,9 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobPendingMessage.value.id),
         "Alice should receive Bob's fire-and-forget member message through websocket sync",
         15_000,
-        { tier: "edge" },
+        { tier: "global" },
       ),
-      bobPendingMessageEdgeWait,
+      bobPendingMessageGlobalWait,
     ]).then(([unsubscribe]) => unsubscribe);
     aliceAgainUnsubscribe();
   }, 60_000);
@@ -594,9 +594,9 @@ describe("raw websocket private read gate", () => {
           userId: aliceUserId,
           name: "Alice",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice profile edge wait",
+      "Alice profile global wait",
     );
     const bobProfile = await withTimeout(
       bob
@@ -604,9 +604,9 @@ describe("raw websocket private read gate", () => {
           userId: bobUserId,
           name: "Bob",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob profile edge wait",
+      "Bob profile global wait",
     );
 
     const chat = await withTimeout(
@@ -617,9 +617,9 @@ describe("raw websocket private read gate", () => {
           createdBy: aliceUserId,
           joinCode,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice private invite chat edge wait",
+      "Alice private invite chat global wait",
     );
     await withTimeout(
       alice
@@ -627,9 +627,9 @@ describe("raw websocket private read gate", () => {
           chatId: chat.id,
           userId: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice private chat membership edge wait",
+      "Alice private chat membership global wait",
     );
     const seedMessage = await withTimeout(
       alice
@@ -639,9 +639,9 @@ describe("raw websocket private read gate", () => {
           text: "invite-only seed",
           createdAt: new Date(),
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Alice private seed message edge wait",
+      "Alice private seed message global wait",
     );
 
     const inviteSession = {
@@ -664,7 +664,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should query the private chat through the invite-authenticated connection",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -674,7 +674,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === chat.id),
       "Bob should subscribe to the private chat through the invite claim",
       15_000,
-      { tier: "edge" },
+      { tier: "global" },
       inviteSession,
     );
     unsubscribeInviteRead();
@@ -686,9 +686,9 @@ describe("raw websocket private read gate", () => {
           userId: bobUserId,
           joinCode,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob invite membership edge wait",
+      "Bob invite membership global wait",
     );
 
     await expect(
@@ -698,7 +698,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should read the private chat through normal membership after accepting invite",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -709,7 +709,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read his confirmed private chat membership",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -720,7 +720,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages without include/order after accepting invite",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -734,7 +734,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages through normal membership after accepting invite",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -748,7 +748,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === seedMessage.id),
       "Bob should subscribe to private seed messages through normal membership",
       15_000,
-      { tier: "edge" },
+      { tier: "global" },
     );
     unsubscribeBobMessages();
 
@@ -760,9 +760,9 @@ describe("raw websocket private read gate", () => {
           text: "bob accepted invite",
           createdAt: new Date(),
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       15_000,
-      "Bob private invite message edge wait",
+      "Bob private invite message global wait",
     );
 
     await expect(
@@ -770,9 +770,9 @@ describe("raw websocket private read gate", () => {
         bob,
         camelChatApp.messages.where({ chatId: chat.id }),
         (rows) => rows.some((row) => row.id === bobMessage.id),
-        "Bob should read his own private invite message after edge wait",
+        "Bob should read his own private invite message after global wait",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -786,21 +786,21 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Alice should receive Bob's private invite message",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
     const deniedDelete = bob.delete(camelChatApp.messages, seedMessage.id);
-    await expect(deniedDelete.wait({ tier: "edge" })).rejects.toMatchObject({
+    await expect(deniedDelete.wait({ tier: "global" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
       transactionId: deniedDelete.txId,
       code: "permission_denied",
     });
 
     await withTimeout(
-      bob.delete(camelChatApp.messages, bobMessage.id).wait({ tier: "edge" }),
+      bob.delete(camelChatApp.messages, bobMessage.id).wait({ tier: "global" }),
       15_000,
-      "Bob own-message delete edge wait",
+      "Bob own-message delete global wait",
     );
     await expect(
       waitForQuery(
@@ -809,12 +809,12 @@ describe("raw websocket private read gate", () => {
         (rows) => !rows.some((row) => row.id === bobMessage.id),
         "Alice should observe Bob's own message deletion",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
 
-  it("reads messages through public-chat or membership read policy after edge writes", async () => {
+  it("reads messages through public-chat or membership read policy after global writes", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("chat-style-message-read"),
     );
@@ -831,13 +831,13 @@ describe("raw websocket private read gate", () => {
         visibility: "public",
         owner_id: aliceUserId,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await alice
       .insert(app.chat_members, {
         chat_id: publicChat.id,
         user_id: aliceUserId,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const publicMessage = await alice
       .insert(app.messages, {
         chat_id: publicChat.id,
@@ -845,7 +845,7 @@ describe("raw websocket private read gate", () => {
         author_id: aliceUserId,
         owner_id: aliceUserId,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await expect(
       waitForQuery(
@@ -854,7 +854,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicChat.id),
         "Bob should read the public chat dependency",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -865,7 +865,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicMessage.id),
         "Bob should read a public-chat message through the message read policy",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
 
@@ -874,7 +874,7 @@ describe("raw websocket private read gate", () => {
         chat_id: publicChat.id,
         user_id: bobUserId,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const bobMessage = await bob
       .insert(app.messages, {
         chat_id: publicChat.id,
@@ -882,16 +882,16 @@ describe("raw websocket private read gate", () => {
         author_id: bobUserId,
         owner_id: bobUserId,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await expect(
       waitForQuery(
         bob,
         app.messages.where({ chat_id: publicChat.id }),
         (rows) => rows.some((row) => row.id === bobMessage.id),
-        "Bob should read his member message after an edge-confirmed membership",
+        "Bob should read his member message after a global-confirmed membership",
         15_000,
-        "edge",
+        "global",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
@@ -913,7 +913,7 @@ describe("raw websocket private read gate", () => {
           visibility: "private",
           owner_id: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "Alice private chat insert did not reach the server",
     );
@@ -923,7 +923,7 @@ describe("raw websocket private read gate", () => {
           chat_id: privateChat.id,
           user_id: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "Alice private membership insert did not reach the server",
     );
@@ -935,7 +935,7 @@ describe("raw websocket private read gate", () => {
           author_id: aliceUserId,
           owner_id: aliceUserId,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "Alice private message insert did not reach the server",
     );
@@ -945,14 +945,14 @@ describe("raw websocket private read gate", () => {
         .insert(app.announcements, {
           title: `public-control-${Date.now()}`,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "Alice public control insert did not reach the server",
     );
 
     const afterBootstrap = await snapshotBobLocalExposure(
       bob,
-      "after Bob bootstrap, before public announcement edge query",
+      "after Bob bootstrap, before public announcement global query",
       privateChat.id,
       privateMessage.id,
     );
@@ -967,12 +967,12 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === publicAnnouncement.id),
       "Bob should see the public control row from the server",
       15_000,
-      "edge",
+      "global",
     );
 
     const afterPublicAnnouncement = await snapshotBobLocalExposure(
       bob,
-      "after public announcement edge query",
+      "after public announcement global query",
       privateChat.id,
       privateMessage.id,
     );
@@ -981,17 +981,17 @@ describe("raw websocket private read gate", () => {
       privateMessageVisibleToBob: false,
     });
 
-    const bobChats = await bob.all(app.chats, { tier: "edge" });
-    const afterChatsEdgeQuery = await snapshotBobLocalExposure(
+    const bobChats = await bob.all(app.chats, { tier: "global" });
+    const afterChatsGlobalQuery = await snapshotBobLocalExposure(
       bob,
-      "after private chats edge query",
+      "after private chats global query",
       privateChat.id,
       privateMessage.id,
     );
-    const bobMessages = await bob.all(app.messages, { tier: "edge" });
-    const afterMessagesEdgeQuery = await snapshotBobLocalExposure(
+    const bobMessages = await bob.all(app.messages, { tier: "global" });
+    const afterMessagesGlobalQuery = await snapshotBobLocalExposure(
       bob,
-      "after private messages edge query",
+      "after private messages global query",
       privateChat.id,
       privateMessage.id,
     );
@@ -1001,8 +1001,8 @@ describe("raw websocket private read gate", () => {
       localExposureTimeline: [
         afterBootstrap,
         afterPublicAnnouncement,
-        afterChatsEdgeQuery,
-        afterMessagesEdgeQuery,
+        afterChatsGlobalQuery,
+        afterMessagesGlobalQuery,
       ],
     }).toEqual({
       privateChatVisibleToBob: false,
@@ -1035,7 +1035,7 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           chatSnapshots.push(rows);
         },
-        { tier: "edge" },
+        { tier: "global" },
       ),
     );
     const unsubscribeMessages = ctx.trackSubscription(
@@ -1044,14 +1044,14 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           messageSnapshots.push(rows);
         },
-        { tier: "edge" },
+        { tier: "global" },
       ),
     );
 
     await waitForCondition(
       async () => chatSnapshots.length > 0 && messageSnapshots.length > 0,
       10_000,
-      "Bob edge subscriptions should produce initial private table snapshots",
+      "Bob global subscriptions should produce initial private table snapshots",
     );
     await sleep(500);
 
@@ -1134,7 +1134,7 @@ async function waitForSubscription<T extends { id: string }>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  options?: { tier?: "local" | "edge" },
+  options?: { tier?: "local" | "global" },
   session?: {
     issuer: string;
     user_id: string;

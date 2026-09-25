@@ -1,6 +1,6 @@
 use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_user, wait_for_global_txs};
 
 use super::*;
 
@@ -41,7 +41,7 @@ async fn rebac_insert_allowed_by_simple_policy_inner() {
         .expect("insert should be allowed when owner_id matches the session user")
         .2
         .expect("allowed insert should commit immediately");
-    wait_for_edge_txs(&alice, &[transaction_id]).await;
+    wait_for_global_txs(&alice, &[transaction_id]).await;
 
     alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
@@ -83,7 +83,7 @@ async fn rebac_insert_denied_by_simple_policy_inner() {
         .2
         .expect("denied insert should commit locally");
     let rejected = alice
-        .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
+        .wait_for_transaction(transaction_id, DurabilityTier::GlobalServer)
         .await;
     assert!(
         rejected.is_err(),
@@ -161,7 +161,7 @@ async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_expli
         .2
         .expect("denied insert should commit locally");
     let rejected = client
-        .wait_for_transaction(transaction_id, DurabilityTier::EdgeServer)
+        .wait_for_transaction(transaction_id, DurabilityTier::GlobalServer)
         .await;
     assert!(
         rejected.is_err(),
@@ -216,12 +216,12 @@ async fn rebac_two_clients_different_sessions_inner() {
             ),
         )
         .expect("bob should be able to insert bob-owned document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[alice_tx.expect("alice insert should commit immediately")],
     )
     .await;
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[bob_tx.expect("bob insert should commit immediately")],
     )
@@ -310,7 +310,7 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
         .expect("null row should satisfy deleted_at = NULL policy")
         .2
         .expect("allowed insert should commit immediately");
-    wait_for_edge_txs(&client, &[allowed_tx]).await;
+    wait_for_global_txs(&client, &[allowed_tx]).await;
 
     let archived_tx = client
         .insert(
@@ -321,7 +321,7 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
         .2
         .expect("denied insert should commit locally");
     let rejected = client
-        .wait_for_transaction(archived_tx, DurabilityTier::EdgeServer)
+        .wait_for_transaction(archived_tx, DurabilityTier::GlobalServer)
         .await;
     assert!(
         rejected.is_err(),
@@ -362,7 +362,7 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                 let (seed, _, tx) = admin
                     .insert("notes", crate::row_input!("content" => "seed"))
                     .unwrap();
-                wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+                wait_for_global_txs(&admin, &[tx.unwrap()]).await;
                 let client =
                     connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT)
                         .await;
@@ -386,7 +386,7 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                 for (operation, tx) in ["INSERT", "UPDATE", "DELETE"].into_iter().zip(writes) {
                     let settled = match tx {
                         Ok(Some(tx)) => client
-                            .wait_for_transaction(tx, DurabilityTier::EdgeServer)
+                            .wait_for_transaction(tx, DurabilityTier::GlobalServer)
                             .await
                             .map(|_| ()),
                         Ok(None) => panic!("{case}: {operation} did not commit"),
@@ -442,7 +442,7 @@ async fn insert_then_delete_checks_candidate_content_and_provenance() {
                 let id = tx.commit().unwrap();
                 let settled = tokio::time::timeout(
                     READY_TIMEOUT,
-                    alice.wait_for_transaction(id, DurabilityTier::EdgeServer),
+                    alice.wait_for_transaction(id, DurabilityTier::GlobalServer),
                 )
                 .await
                 .unwrap();

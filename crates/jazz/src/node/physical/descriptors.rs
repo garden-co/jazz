@@ -866,6 +866,24 @@ pub(super) fn physical_version_storage_tables(
                 vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
             ));
         }
+        let composite_indexes = variants
+            .iter()
+            .flat_map(|(_, logical_table, mapping, _)| {
+                logical_table.composite_indexes.iter().filter_map(|columns| {
+                    columns
+                        .iter()
+                        .map(|column| mapping.columns.get(column).copied())
+                        .collect::<Option<Vec<_>>>()
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        for column_ids in &composite_indexes {
+            physical_global = physical_global.with_index(GrooveIndexSchema::new(
+                physical_current_composite_index_name(column_ids),
+                std::iter::once("branch_key".to_owned())
+                    .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
+            ));
+        }
         let mut register_global = logical_global_tables[1].clone();
         register_global.name = physical_register_global_current_table_name(table_id);
 
@@ -880,6 +898,13 @@ pub(super) fn physical_version_storage_tables(
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
                 vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
+            ));
+        }
+        for column_ids in &composite_indexes {
+            physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
+                physical_current_composite_index_name(column_ids),
+                std::iter::once("branch_key".to_owned())
+                    .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
         let mut register_ahead = logical_ahead_tables[1].clone();
@@ -1123,26 +1148,11 @@ fn merge_physical_value_type(
     }
 }
 
-fn physical_history_descriptor(
-    table: &TableSchema,
-    mapping: &TablePhysicalMapping,
-    _alias: SchemaVersionAlias,
-) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.history_storage_table().record_schema();
-    let physical_names = physical_history_field_names(table, mapping)?;
-    if logical_descriptor.fields().len() != physical_names.len() {
-        return Err(Error::InvalidStoredValue(
-            "physical history descriptor width mismatch",
-        ));
-    }
-    physical_descriptor_with_enum_registries(table, logical_descriptor, physical_names, mapping)
-}
-
 fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let logical_descriptor = table.global_current_content_storage_table().record_schema();
     let physical_names = physical_current_field_names(table, mapping)?;
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(

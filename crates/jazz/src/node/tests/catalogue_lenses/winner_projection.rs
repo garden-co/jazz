@@ -67,11 +67,7 @@ fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
             ]),
         ),
     ]);
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         assert_eq!(
             core.query_rows(&shape, &binding, tier)
                 .unwrap()
@@ -157,11 +153,7 @@ fn assert_current_winner_copied_enum_remap(
             ("status_copy".to_owned(), old_value.clone()),
         ]),
     )]);
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         assert_eq!(
             core.query_rows(&shape, &binding, tier)
                 .unwrap()
@@ -203,11 +195,7 @@ fn assert_current_winner_copied_enum_remap(
             ("status_copy".to_owned(), old_value),
         ])),
     );
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         assert_eq!(
             core.query_rows(&shape, &binding, tier)
                 .unwrap()

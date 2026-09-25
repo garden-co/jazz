@@ -251,7 +251,7 @@ where
     }
 
     /// Return the authoritative current-write pointer, or fail closed before
-    /// an edge has adopted its first trusted catalogue snapshot.
+    /// the node has adopted its first trusted catalogue snapshot.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.require_catalogue_ready()?;
@@ -259,7 +259,7 @@ where
     }
 
     /// Return the active read-schema only after an authority catalogue has
-    /// been durably adopted.  Dynamic-edge callers must use this instead of
+    /// been durably adopted.  Dynamic-catalogue callers must use this instead of
     /// treating the temporary system schema as an application schema.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_current_schema(&self) -> Result<&JazzSchema, Error> {
@@ -298,7 +298,7 @@ where
 
     /// Current write-schema pointer known to this node.
     ///
-    /// An uninitialized dynamic edge has no current application schema; the
+    /// An uninitialized dynamic-catalogue node has no current application schema; the
     /// temporary system-only layout must not leak through this API.
     pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.try_current_write_schema()
@@ -413,7 +413,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         match settled {
             DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled).await,
-            DurabilityTier::Edge => self.current_rows(table, settled).await,
             DurabilityTier::Global => {
                 // This convenience surface is used by topology tests, but it
                 // must exercise the same local Groove terminal as a serving
@@ -508,7 +507,7 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, false)
+        self.below_global_transaction_ids(Some(author), false)
             .await
     }
 
@@ -518,7 +517,7 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, true)
+        self.below_global_transaction_ids(Some(author), true)
             .await
     }
 
@@ -529,26 +528,16 @@ where
         node: NodeUuid,
     ) -> Result<Vec<TxId>, Error> {
         Ok(self
-            .below_global_transaction_ids(None, false, true)
+            .below_global_transaction_ids(None, true)
             .await?
             .into_iter()
             .filter(|tx| tx.node == node)
             .collect())
     }
 
-    /// Edge-host recovery includes accepted writes from every originating
-    /// client, plus edge-generated merges; it is not local-author recovery.
-    #[cfg(any(test, feature = "runtime"))]
-    pub(crate) async fn pending_edge_authority_transaction_ids(
-        &mut self,
-    ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(None, true, false).await
-    }
-
     async fn below_global_transaction_ids(
         &mut self,
         author: Option<AuthorSubject>,
-        edge_only: bool,
         include_missing_authority_timestamp: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
@@ -571,13 +560,8 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
             if author.is_some_and(|author| !durable_author_matches(author, made_by))
-                || if edge_only {
-                    fate != 1 || durability != DurabilityTier::Edge
-                } else {
-                    !(fate == 0 || fate == 1)
-                        || (!include_missing_authority_timestamp
-                            && durability >= DurabilityTier::Global)
-                }
+                || !(fate == 0 || fate == 1)
+                || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
             {
                 continue;
             }
@@ -914,6 +898,21 @@ where
     /// Whether an earlier non-blocking query-runtime turn left resumable work.
     pub(crate) fn has_pending_query_runtime(&self) -> bool {
         self.database.has_pending_progress()
+    }
+
+    pub(crate) fn subscription_has_pending_query_runtime(
+        &self,
+        subscription: groove::ivm::SubscriptionId,
+    ) -> bool {
+        self.database.subscription_has_pending_progress(subscription)
+    }
+
+    pub(crate) fn subscription_has_pending_query_evaluation(
+        &self,
+        subscription: groove::ivm::SubscriptionId,
+    ) -> bool {
+        self.database
+            .subscription_has_pending_evaluation(subscription)
     }
 
     pub(crate) async fn set_initial_sync_flush_cadence(

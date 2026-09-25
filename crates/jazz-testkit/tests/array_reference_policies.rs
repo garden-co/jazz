@@ -13,15 +13,13 @@ use jazz::tools::{
 };
 use jazz_server::JazzServer;
 use support::{
-    collect_stream_deltas, connect_ready_client, connect_ready_user, has_added_id, has_removed,
-    has_row, lacks_row, wait_for_edge_txs, wait_for_query, wait_for_rows,
-    wait_for_subscription_update,
+    connect_ready_client, connect_ready_user, has_added_id, has_removed, has_row, lacks_row,
+    wait_for_global_txs, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 use uuid::Uuid;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
-const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
 fn test_user_id(subject: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes()).to_string()
@@ -76,7 +74,7 @@ fn team_project_schema(index_only_name: bool) -> Schema {
 ///
 /// ```text
 /// alice ──insert roots(target_id=absent UUID)──► JazzServer
-/// alice ◄────────── accepted Edge settlement ───┘
+/// alice ◄──────── accepted Global settlement ───┘
 /// alice ──query roots──► referring row visible
 /// alice ──query targets──► empty
 /// ```
@@ -125,7 +123,7 @@ async fn public_schema_allows_uuid_reference_without_target_rows_inner() {
     let (root_id, _, transaction_id) = alice
         .insert("roots", row_input!("target_id" => absent_target))
         .expect("alice inserts a root pointing at an absent target");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -165,7 +163,7 @@ async fn create_project(admin: &JazzClient, title: &str) -> ObjectId {
     let (id, _, transaction_id) = admin
         .insert("projects", row_input!("title" => title))
         .expect("insert project");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -189,7 +187,7 @@ async fn create_team(
             ),
         )
         .expect("insert team");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -209,7 +207,7 @@ async fn set_team_projects(admin: &JazzClient, team_id: ObjectId, project_ids: &
         )
         .expect("update team project_ids")
         .expect("ordinary mutation commits immediately");
-    wait_for_edge_txs(admin, &[transaction_id]).await;
+    wait_for_global_txs(admin, &[transaction_id]).await;
 }
 
 async fn assert_alice_granted_and_mallory_denied(
@@ -354,7 +352,17 @@ async fn array_reference_grant_updates_incrementally_inner() {
         .await
         .expect("subscribe projects");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    // The revocation is observable only as a removal from a delivered result,
+    // so the subscription's first result must show the project before the
+    // grant is edited. A fixed quiet window races slow first delivery.
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "alice's subscription delivers the granted project",
+        |entries| has_added_id(entries, atlas),
+    )
+    .await;
     log.clear();
 
     set_team_projects(&admin, team_id, &[]).await;

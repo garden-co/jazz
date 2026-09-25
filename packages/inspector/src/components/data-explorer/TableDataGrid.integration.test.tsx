@@ -125,7 +125,7 @@ function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedD
 
     if (!interruptFirstConfirmation) return result;
     const realWait = result.wait.bind(result);
-    // Fault only after the real edge receipt resolves: the runtime has committed,
+    // Fault only after the real server receipt resolves: the runtime has committed,
     // but the Inspector observes the same ambiguity as a lost confirmation.
     return new Proxy(result, {
       get(target, property) {
@@ -231,7 +231,7 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "global" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
@@ -260,7 +260,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     await expect(
       setup.db.all(inspectorSaveApp.todos.where({ title: "updated after ambiguity" }), {
-        tier: "edge",
+        tier: "global",
       }),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -317,7 +317,7 @@ describe("TableDataGrid real Db save retries", () => {
     );
 
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "global" }),
     ).resolves.toEqual([]);
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([insertedId]);
@@ -361,7 +361,7 @@ describe("TableDataGrid real Db save retries", () => {
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([expect.any(String), instrumented.insertIds[0]]);
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "global" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
@@ -389,7 +389,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     await waitFor(async () => {
       const rows = await setup.db.all(inspectorSaveApp.todos.where({ title: "explicit-null" }), {
-        tier: "edge",
+        tier: "global",
       });
       expect(rows).toHaveLength(1);
       expect(rows[0]!.textNumber).toBeNull();
@@ -415,7 +415,7 @@ describe("TableDataGrid real Db save retries", () => {
     );
     await expect(
       setup.db.all(inspectorSaveApp.todos.where({ title: "untouched-default" }), {
-        tier: "edge",
+        tier: "global",
       }),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -447,7 +447,7 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
 
-    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "global" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           title: "exact bigint",
@@ -485,7 +485,7 @@ describe("TableDataGrid real Db save retries", () => {
       },
       { timeout: 10_000 },
     );
-    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "global" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           title: "nested bigint",
@@ -507,14 +507,14 @@ describe("TableDataGrid real Db save retries", () => {
         owner_id: permittedOwner,
         rank: exactValue,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await setup.db
       .insert(inspectorSaveApp.todos, {
         title: "nearby rank",
         owner_id: permittedOwner,
         rank: exactValue - 1n,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const filters = JSON.stringify([
       { id: "hydrated-rank", column: "rank", operator: "eq", value: String(exactValue) },
@@ -530,7 +530,7 @@ describe("TableDataGrid real Db save retries", () => {
     const query = new GenericQueryBuilder("todos", inspectorSaveApp.wasmSchema).where({
       [hydratedFilter.column]: hydratedFilter.value,
     });
-    const rows = await setup.db.all(query, { tier: "edge" });
+    const rows = await setup.db.all(query, { tier: "global" });
 
     expect(rows).toEqual([
       expect.objectContaining({
@@ -550,14 +550,14 @@ describe("TableDataGrid real Db save retries", () => {
         owner_id: permittedOwner,
         payload: exactPayload,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await setup.db
       .insert(inspectorByteaApp.todos, {
         title: "nearby payload",
         owner_id: permittedOwner,
         payload: new Uint8Array([0, 254]),
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     currentDb = setup.db;
     renderGrid();
@@ -581,7 +581,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     const query = latestQuery;
     if (!query) throw new Error("TableDataGrid did not issue a query");
-    const rows = await setup.db.all(query, { tier: "edge" });
+    const rows = await setup.db.all(query, { tier: "global" });
     expect(rows).toEqual([
       expect.objectContaining({
         title: "exact payload",

@@ -821,7 +821,7 @@ fn pending_backpressure_admits_later_receipt_in_bounded_channel_queue() {
         ),
         fate: Fate::Accepted,
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
 
     assert_eq!(sender.send(view.clone()), Ok(()));
@@ -1461,7 +1461,7 @@ fn small_query_completes_while_requested_bulk_upload_is_in_flight() {
                     })
                     .collect(),
             });
-            if encode_sync_message(&batch).unwrap().len() > 16 * CHANNEL_CHUNK_BYTES {
+            if crate::wire::encode_sync_message(&batch).unwrap().len() > 16 * CHANNEL_CHUNK_BYTES {
                 return Some(batch);
             }
             client.send(batch).unwrap();
@@ -2072,11 +2072,7 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
             } else {
                 None
             },
-            durability: Some(if repair {
-                DurabilityTier::Global
-            } else {
-                DurabilityTier::Edge
-            }),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     subscriber.borrow_mut().transport.poll_flush().unwrap();

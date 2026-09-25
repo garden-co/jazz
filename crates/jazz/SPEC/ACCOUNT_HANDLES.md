@@ -38,8 +38,9 @@ to the shared state; they do not implement independent authentication flows.
 - A successful response follows durable commit. Storage errors cannot publish
   speculative admission in memory. Authority restart preserves assignments,
   revocations, and replay outcomes.
-- Edge nodes cannot independently accept registry mutations. Routing must
-  preserve the application's single authoritative decision order.
+- Relays (browser workers, native relays, trusted backends) cannot
+  independently accept registry mutations. Routing must preserve the
+  application's single authoritative decision order in Core.
 - Provider JWT claims never supply an authoritative account ID. Existing JWT
   verification supplies a principal; the registry supplies its account.
 
@@ -165,13 +166,12 @@ subscription tick must recheck admission; idle sessions observe registry changes
 and close. Trusted backend/admin service connections use their separate
 authority and are not public account sessions.
 
-Edges authenticate the original JWT before resolving admission against the core.
-A service-authenticated registry lookup is read-only: it cannot register, found,
-link, or revoke an identity. Local-first founding forwarded by an edge requires
-the founder's original bearer proof. Edges recheck admission for each operation
-and delivery, fail closed if the core is unavailable, and poll idle sessions
-once per second until a registry watch protocol replaces that polling. Public
-account mutation forwarding never substitutes an edge service credential.
+The server edge that used to authenticate the original JWT and resolve
+admission against the core was removed (#3235); sessions are admitted by Core
+itself, as described above. A service-authenticated registry lookup is
+read-only: it cannot register, found, link, or revoke an identity, and public
+account mutations are never forwarded under a relay or backend service
+credential.
 
 ## Context lifecycle and linking
 
@@ -262,8 +262,8 @@ Application/schema, driver and server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
 backend-secret validation must succeed before the host issues an opaque handle.
 A reachable server is required, including for memory-driver initialization.
-An edge validates the same service credential used by its backend transport;
-identity registration and linking still resolve through the core registry.
+Core validates that service credential on the backend transport; identity
+registration and linking resolve through the core registry.
 Browser and React Native hosts reject backend selection through their absent
 backend admission adapter.
 

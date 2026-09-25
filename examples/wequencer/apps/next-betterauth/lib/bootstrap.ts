@@ -11,7 +11,7 @@ export async function ensureProfile(accountId: string, displayName: string) {
   try {
     return await db
       .insert(app.profiles, { author, displayName }, { id: profileId(author) })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
   } catch (error) {
     const raced = await db.one(app.profiles.where({ author }));
     if (raced) return raced;

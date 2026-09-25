@@ -4,9 +4,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { benchmarkMetadata, getBenchmarkMetadata, throughput } from "./index.ts";
 
 const root = new URL("../../../", import.meta.url);
-test("catalogue documents all 67 known current and retired wallclock cases", () => {
-  assert.equal(benchmarkMetadata.length, 67);
-  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, 67);
+// No fixed total: parallel example lanes add suites independently. Coverage of
+// every Divan function is asserted below; names must stay unique.
+test("catalogue documents known current and retired wallclock cases once each", () => {
+  assert.ok(benchmarkMetadata.length > 0);
+  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, benchmarkMetadata.length);
   for (const m of benchmarkMetadata) {
     for (const key of ["name", "title", "description", "fixture", "storage", "source"] as const)
       assert.ok(m[key].length > 0, `${m.name}: ${key}`);
@@ -55,6 +57,7 @@ test("denominators distinguish transaction count, batch rows, queries and load c
   assert.equal(getBenchmarkMetadata("sequential_insert_1350_rocksdb")?.work.count, 1350);
   assert.equal(getBenchmarkMetadata("batch_update_1350_rocksdb")?.work.unit, "rows updated/s");
   assert.equal(getBenchmarkMetadata("first_sync_27518_rocksdb")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
   assert.match(
     getBenchmarkMetadata("first_sync_27518_rocksdb")!.description,
     /Member, not anonymous/,

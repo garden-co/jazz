@@ -1,6 +1,6 @@
 use crate::JazzClient;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs, wait_for_query};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs, wait_for_query};
 
 use super::*;
 
@@ -91,7 +91,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
             crate::row_input!("owner_id" => super::ALICE_ID, "content" => "Alice's document"),
         )
         .expect("seed alice document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[transaction_id.expect("seed insert should commit immediately")],
     )
@@ -131,7 +131,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
         .expect("Bob can stage an optimistic update to an observed row")
         .expect("ordinary update commits immediately");
     let error = bob
-        .wait_for_transaction(transaction_id, jazz::tools::DurabilityTier::EdgeServer)
+        .wait_for_transaction(transaction_id, jazz::tools::DurabilityTier::GlobalServer)
         .await
         .expect_err("the server must reject Bob's update under UPDATE USING");
     assert!(
@@ -241,7 +241,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
     let bob_delete = bob
         .wait_for_transaction(
             bob_delete_transaction.expect("permissive delete should commit immediately"),
-            jazz::tools::DurabilityTier::EdgeServer,
+            jazz::tools::DurabilityTier::GlobalServer,
         )
         .await;
     assert!(

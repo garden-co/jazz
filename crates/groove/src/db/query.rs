@@ -1,6 +1,15 @@
 use super::*;
 
 impl Database {
+    /// Describe one concrete input to an immutable query template. No source
+    /// is installed, retained or authorized by this operation.
+    pub fn describe_template_input(
+        &self,
+        graph: GraphBuilder,
+    ) -> Result<crate::ivm::TemplateGraphInput, Error> {
+        let output = self.graph_output_descriptor(&graph)?;
+        Ok(crate::ivm::TemplateGraphInput::new(graph, output))
+    }
     /// Infer the exact output contract without installing or executing a graph.
     pub fn graph_output_descriptor(&self, graph: &GraphBuilder) -> Result<RecordDescriptor, Error> {
         self.ensure_not_poisoned()?;
@@ -22,6 +31,26 @@ impl Database {
         &mut self,
         replacements: impl IntoIterator<Item = InputSourceReplacement>,
     ) -> Result<TickMetrics, Error> {
+        self.replace_input_sources_in(replacements, false).await
+    }
+
+    /// [`Self::replace_input_sources`] for runtime owners that must not hold their turn
+    /// open for cold storage or a remote chunk. Runnable evaluation finishes
+    /// before this returns; cold evaluation stays pending (see
+    /// [`Self::has_pending_progress`]) until a later
+    /// [`Self::drive_ready_progress_with_waker`] turn completes it.
+    pub async fn replace_input_sources_detaching_cold(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+    ) -> Result<TickMetrics, Error> {
+        self.replace_input_sources_in(replacements, true).await
+    }
+
+    async fn replace_input_sources_in(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        detach_cold: bool,
+    ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -31,11 +60,16 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let metrics = match self
-            .ivm_runtime
-            .replace_input_sources(replacements, &storage)
-            .await
-        {
+        let tick = if detach_cold {
+            self.ivm_runtime
+                .replace_input_sources_detaching_cold(replacements, &storage)
+                .await
+        } else {
+            self.ivm_runtime
+                .replace_input_sources(replacements, &storage)
+                .await
+        };
+        let metrics = match tick {
             Ok(metrics) => metrics,
             // These are all preflight failures: record decoding, runtime
             // ownership, and descriptor compatibility are checked before the
@@ -71,6 +105,26 @@ impl Database {
         &mut self,
         deltas: impl IntoIterator<Item = InputSourceDelta>,
     ) -> Result<TickMetrics, Error> {
+        self.apply_input_source_deltas_in(deltas, false).await
+    }
+
+    /// [`Self::apply_input_source_deltas`] for runtime owners that must not hold their turn
+    /// open for cold storage or a remote chunk. Runnable evaluation finishes
+    /// before this returns; cold evaluation stays pending (see
+    /// [`Self::has_pending_progress`]) until a later
+    /// [`Self::drive_ready_progress_with_waker`] turn completes it.
+    pub async fn apply_input_source_deltas_detaching_cold(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+    ) -> Result<TickMetrics, Error> {
+        self.apply_input_source_deltas_in(deltas, true).await
+    }
+
+    async fn apply_input_source_deltas_in(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+        detach_cold: bool,
+    ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -80,11 +134,16 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let metrics = match self
-            .ivm_runtime
-            .apply_input_source_deltas(deltas, &storage)
-            .await
-        {
+        let tick = if detach_cold {
+            self.ivm_runtime
+                .apply_input_source_deltas_detaching_cold(deltas, &storage)
+                .await
+        } else {
+            self.ivm_runtime
+                .apply_input_source_deltas(deltas, &storage)
+                .await
+        };
+        let metrics = match tick {
             Ok(metrics) => metrics,
             Err(
                 error @ (IvmRuntimeError::RecordEncoding(_)
@@ -183,6 +242,24 @@ impl Database {
     /// polling this work until the runtime reaches a terminal state.
     pub fn has_pending_progress(&self) -> bool {
         self.ivm_runtime.has_pending_incremental()
+    }
+
+    /// Whether already-admitted work can still change this subscription's
+    /// terminal. This does not poll, consume queued results, or predict future
+    /// writes. A caller must drain the receiver before treating it as current.
+    /// Missing/failed subscription IDs return true rather than proving readiness.
+    pub fn subscription_has_pending_progress(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_progress(subscription)
+    }
+
+    /// Whether admitted evaluation work can still change this subscription's
+    /// terminal. A failed or missing subscription reports `false`: its error
+    /// is already queued for the receiver, which must drain it rather than
+    /// wait for progress that will never come.
+    pub fn subscription_has_pending_evaluation(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_evaluation(subscription)
     }
 
     /// Drive every suspended incremental evaluation until the runtime is
@@ -507,6 +584,27 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.subscribe_with_lifetime_and_root_values(
+            sinks,
+            lifetime,
+            RootIndirectValues::Materialize,
+            progress_waker,
+        )
+    }
+
+    /// Like [`Self::subscribe_with_lifetime`], choosing how the initial
+    /// snapshot presents indirect root values; see [`RootIndirectValues`].
+    pub fn subscribe_with_lifetime_and_root_values<I, K>(
+        &mut self,
+        sinks: I,
+        lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -517,7 +615,13 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .subscribe_with_lifetime(sinks, &storage, lifetime, progress_waker)
+            .subscribe_with_lifetime(
+                sinks,
+                &storage,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
             .map_err(Error::IvmRuntime)
     }
 
@@ -700,6 +804,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(prepared.id, &values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -708,6 +817,7 @@ impl Database {
                 prepared.output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -802,6 +912,35 @@ impl Database {
             .map_err(Error::IvmRuntime)
     }
 
+    /// Prepare a routed shape that callers with identical terminals share.
+    /// The shape retires itself when its last retained binding unsubscribes;
+    /// see [`crate::ivm::IvmRuntime::prepare_shared`].
+    pub async fn prepare_shared(
+        &mut self,
+        terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+    ) -> Result<crate::ivm::PreparedShape, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.ivm_runtime
+            .prepare_shared(
+                terminals,
+                binding_source_shape,
+                binding_descriptor,
+                &storage,
+            )
+            .await
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Retire a shared prepared shape that no retained binding holds, for a
+    /// caller whose bind failed or was cancelled.
+    pub fn release_shared_prepared_shape(&mut self, shape: PreparedShapeId) {
+        self.ivm_runtime.release_shared_prepared_shape(shape);
+    }
+
     /// Bind a prepared one-sink graph shape by positional values.
     ///
     /// ```rust
@@ -855,9 +994,14 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None)
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None, live)
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
@@ -885,6 +1029,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -893,6 +1042,7 @@ impl Database {
                 public_output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -905,8 +1055,33 @@ impl Database {
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_root_values(shape, binding_values, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::bind_shape`], choosing how the initial snapshot presents
+    /// indirect root values; see [`RootIndirectValues`].
+    pub async fn bind_shape_with_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<MultisinkSubscription, Error> {
+        // Physical root values are only valid for a first result: later
+        // retained updates arrive materialized and could not retract them.
+        let lifetime = if root_indirect_values == RootIndirectValues::Materialize {
+            SubscriptionLifetime::Retained
+        } else {
+            SubscriptionLifetime::FirstResult
+        };
         let subscription = self
-            .bind_shape_with_waker(shape, binding_values, None)
+            .bind_shape_with_lifetime_and_root_values(
+                shape,
+                binding_values,
+                lifetime,
+                root_indirect_values,
+                None,
+            )
             .await?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
@@ -938,6 +1113,26 @@ impl Database {
         lifetime: SubscriptionLifetime,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_lifetime_and_root_values(
+            shape,
+            binding_values,
+            lifetime,
+            RootIndirectValues::Materialize,
+            progress_waker,
+        )
+        .await
+    }
+
+    /// Like [`Self::bind_shape_with_lifetime`], choosing how the initial
+    /// snapshot presents indirect root values; see [`RootIndirectValues`].
+    pub async fn bind_shape_with_lifetime_and_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -947,8 +1142,24 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = if lifetime == SubscriptionLifetime::Retained {
+            self.ivm_runtime
+                .prepare_live_attach(shape, binding_values, &storage)
+                .await
+                .map_err(Error::IvmRuntime)?
+        } else {
+            None
+        };
         self.ivm_runtime
-            .bind_shape_with_lifetime(shape, binding_values, &storage, lifetime, progress_waker)
+            .bind_shape_with_lifetime(
+                shape,
+                binding_values,
+                &storage,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+                live,
+            )
             .map_err(Error::IvmRuntime)
     }
 
@@ -1029,11 +1240,22 @@ impl Database {
     /// # }).unwrap();
     /// ```
     pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
+        self.query_graph_with_root_values(graph, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::query_graph`], choosing how the result presents indirect
+    /// root values; see [`RootIndirectValues`].
+    pub async fn query_graph_with_root_values(
+        &mut self,
+        graph: GraphBuilder,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
-            .query_snapshot(graph, &storage)
+            .query_snapshot_with_root_values(graph, &storage, root_indirect_values)
             .await
             .map_err(Error::IvmRuntime)
     }

@@ -13,15 +13,15 @@ use jazz::ids::{
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
     MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
-    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, RelationCmpOp,
-    RelationColumnRef, RelationExpr, RelationPredicate, RelationQuery, RelationUnionArm,
-    RelationValueRef, ShapeId, col, eq, lit,
+    RelationColumnRef, RelationExpr, RelationOrderBy, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationQuery, RelationUnionArm, RelationValueRef, ShapeId, col, eq, lit,
 };
 use jazz::schema::JazzSchema;
 use jazz::time::{GlobalTime, TxTime};
@@ -53,6 +53,10 @@ const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
 const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/native_query_codec.json"
+);
+const RELATION_SHAPE_ID_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/relation_shape_id_preimage.json"
 );
 const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -173,6 +177,18 @@ struct BindingCodecGoldenBinaryCase {
 struct BindingCodecGoldenTerminal {
     events: serde_json::Value,
     rejections: serde_json::Value,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RelationShapeIdFixture {
+    cases: Vec<RelationShapeIdCase>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RelationShapeIdCase {
+    name: String,
+    canonical_hex: String,
+    shape_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -318,51 +334,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .clone();
 
     let mut messages: Vec<_> = vec![
-        (
-            "authority_publication_two_complete_transactions",
-            "AuthorityPublication",
-            SyncMessage::AuthorityPublication(jazz::protocol::AuthorityPublication {
-                tx_id,
-                commits: (0..2)
-                    .map(|index| {
-                        let schema = compiled_todos_schema(&["title"]);
-                        jazz::protocol::AuthorityCommitUnit {
-                            tx: Transaction {
-                                tx_id: TxId::new(TxTime(12 + index), node),
-                                kind: TxKind::Mergeable,
-                                n_total_writes: 1,
-                                made_by: author,
-                                permission_subject: None,
-                                base_snapshot: None,
-                                row_read_set: None,
-                                absent_read_set: None,
-                                predicate_read_set: None,
-                                user_metadata_json: None,
-                                contribution_merge: None,
-                            },
-                            versions: vec![
-                                VersionRecord::from_cells(
-                                    &schema.tables()[0],
-                                    schema_version,
-                                    row,
-                                    if index == 0 { Vec::new() } else { vec![tx_id] },
-                                    author,
-                                    12,
-                                    author,
-                                    12 + index,
-                                    &BTreeMap::from([(
-                                        "title".to_owned(),
-                                        format!("publication-{index}"),
-                                    )]),
-                                    None,
-                                )
-                                .expect("publication fixture row encodes"),
-                            ],
-                        }
-                    })
-                    .collect(),
-            }),
-        ),
         (
             "chunk_upload_start_root_descriptor",
             "ChunkUploadStart",
@@ -722,14 +693,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     messages
 }
 
-fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
-    (
-        groove::Intern::new("todos".to_owned()),
-        RowUuid::from_bytes([0x77; 16]),
-        tx_id,
-    )
-}
-
 fn mixed_version_carriers(
     schema_version: SchemaVersionId,
     author: AuthorSubject,
@@ -858,18 +821,6 @@ fn hello_fixture_manifest() -> HelloManifest {
             Some(u64::MAX),
         ),
         (
-            "edge_without_authority",
-            WirePeerRole::Edge,
-            FEATURE_MESSAGE_FRAGMENTATION,
-            None,
-        ),
-        (
-            "edge_with_authority",
-            WirePeerRole::Edge,
-            FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
-            Some(300),
-        ),
-        (
             "relay_without_authority",
             WirePeerRole::Relay,
             FEATURE_AUTHORIZATION_SCOPE_VIEWS,
@@ -900,7 +851,6 @@ fn hello_fixture_manifest() -> HelloManifest {
                 role: match role {
                     WirePeerRole::Client => 0,
                     WirePeerRole::Core => 1,
-                    WirePeerRole::Edge => 2,
                     WirePeerRole::Relay => 3,
                 },
                 authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
@@ -981,6 +931,24 @@ fn wire_hello_frame_fixtures_decode_exactly() {
         suffixed.push(0);
         assert!(jazz::wire::decode_frame(&suffixed).is_err());
     }
+}
+
+/// A complete legacy publication must fail decoding before any trust-specific
+/// admission path can see it. Pin the real old bytes, not only truncated tags.
+#[test]
+fn retired_edge_publication_rejects_at_every_decoder_boundary() {
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../fixtures/retired_edge_publication.json")).unwrap();
+    let bytes = parse_hex(&fixture.frame_hex);
+    let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes).unwrap() else {
+        panic!("legacy fixture is a complete message frame");
+    };
+    assert_eq!(envelope.payload[0], 30);
+    for payload in [&[30][..], &[30, 0][..], envelope.payload.as_slice()] {
+        assert!(decode_sync_message(payload).is_err());
+        assert!(jazz::wire::decode_sync_message_trusted(payload).is_err());
+    }
+    assert!(jazz::wire::validate_frame_for_artifact_corpus(&bytes, u64::MAX).is_err());
 }
 
 /// Retired tags must fail even at the trusted codec boundary; the other
@@ -1757,6 +1725,117 @@ fn fixture_decoded_hex(bytes: &[u8], value_type: &groove::records::ValueType) ->
         },
         _ => Some(hex(bytes)),
     }
+}
+
+// Shape ids are a cross-peer contract: a receiver recomputes the id from the
+// registered AST (`INV-QUERY-4`) and rejects a mismatch. A retained relation
+// projection feeds its `jazz-relation-v1` tree into that preimage, so its exact
+// bytes are pinned here. This is deliberately a byte-level receipt rather than
+// a public DB test: the durable thing under test is the preimage itself.
+#[test]
+fn relation_shape_id_preimage_fixture_is_current() {
+    let schema = compiled_todos_schema(&["title", "notes"]);
+    let actual = RelationShapeIdFixture {
+        cases: relation_shape_id_cases()
+            .into_iter()
+            .map(|(name, query)| {
+                let validated = query
+                    .validate(&schema)
+                    .unwrap_or_else(|error| panic!("{name} validates: {error}"));
+                RelationShapeIdCase {
+                    name: name.to_owned(),
+                    canonical_hex: hex(validated.canonical_bytes()),
+                    shape_id: validated.shape_id().0.to_string(),
+                }
+            })
+            .collect(),
+    };
+    if std::env::var_os("JAZZ_UPDATE_RELATION_SHAPE_ID_FIXTURE").is_some() {
+        std::fs::write(
+            RELATION_SHAPE_ID_FIXTURE_PATH,
+            serde_json::to_string_pretty(&actual).expect("shape id fixture serializes") + "\n",
+        )
+        .expect("shape id fixture writes");
+        return;
+    }
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/relation_shape_id_preimage.json"))
+            .expect("shape id fixture parses");
+    assert_eq!(
+        serde_json::to_value(actual).expect("shape id fixture value serializes"),
+        expected,
+        "relation shape-id preimages changed; this breaks shape registration between peers on \
+         different releases. Review the compatibility contract, then run \
+         `JAZZ_UPDATE_RELATION_SHAPE_ID_FIXTURE=1 cargo test -p jazz --test wire_fixtures \
+         relation_shape_id_preimage_fixture_is_current -- --exact` to accept"
+    );
+}
+
+fn relation_shape_id_cases() -> Vec<(&'static str, Query)> {
+    let title = |alias: &str| RelationProjectColumn {
+        alias: alias.to_owned(),
+        expr: RelationProjectExpr::Column(RelationColumnRef {
+            scope: Some("todos".to_owned()),
+            column: "title".to_owned(),
+        }),
+    };
+    let scan = || {
+        Box::new(RelationExpr::TableScan {
+            table: "todos".to_owned(),
+            alias: None,
+        })
+    };
+    let envelope = |relation: RelationExpr| {
+        let mut query = Query::from("todos");
+        query.relation = Some(RelationQuery { rel: relation });
+        query
+    };
+    let renamed = RelationExpr::Project {
+        input: scan(),
+        columns: vec![title("label")],
+    };
+    let ordered_window = RelationExpr::Limit {
+        input: Box::new(RelationExpr::OrderBy {
+            input: Box::new(renamed.clone()),
+            terms: vec![RelationOrderBy {
+                column: RelationColumnRef {
+                    scope: Some("todos".to_owned()),
+                    column: "notes".to_owned(),
+                },
+                direction: OrderDirection::Desc,
+            }],
+        }),
+        limit: 5,
+    };
+    // A full identity projection (what the TypeScript adapter emits for hops
+    // and payload matches) is the ordinary row shape and is not retained, so
+    // it keeps the ordinary `jazz-query-v0` preimage with no relation bytes,
+    // with or without an include.
+    let identity = || {
+        envelope(RelationExpr::Project {
+            input: scan(),
+            columns: ["id", "title", "notes"]
+                .map(|column| RelationProjectColumn {
+                    alias: column.to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("todos".to_owned()),
+                        column: column.to_owned(),
+                    }),
+                })
+                .to_vec(),
+        })
+    };
+    let identity_with_include = identity()
+        .array_subquery(ArraySubquery::new("children", "todos", "id", "id").select(["title"]));
+    vec![
+        ("renamed_projection", envelope(renamed)),
+        (
+            "renamed_projection_ordered_window",
+            envelope(ordered_window),
+        ),
+        ("identity_projection", identity()),
+        ("identity_projection_with_include", identity_with_include),
+    ]
 }
 
 fn native_query_codec_cases() -> Vec<(&'static str, Query)> {

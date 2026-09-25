@@ -26,9 +26,9 @@ pub enum AuthMode {
 }
 
 /// The non-authoritative identity projection used only to partition a local
-/// client cache before its bearer reaches the Edge.  This deliberately decodes
+/// client cache before its bearer reaches the server.  This deliberately decodes
 /// the JWT payload without inspecting the header or signature: callers MUST
-/// NOT use it for admission, permissions, or transport identity.  The Edge
+/// NOT use it for admission, permissions, or transport identity.  The server
 /// remains the sole JWT verifier.
 ///
 /// Keeping this tiny projection in the shared crate prevents native shells

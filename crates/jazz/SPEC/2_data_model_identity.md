@@ -173,9 +173,21 @@ Schema identity is derived from schema content so independently observed copies
 of the same storage shape name the same version, while any storage-shape change
 names a different version. A `SchemaVersionId` is
 `Uuid::new_v5(SCHEMA_VERSION_NAMESPACE, JazzSchema::canonical_bytes())`
-(`INV-DATA-6`), domain-tagged `"jazz-schema-v0"`. The canonical bytes cover
-sorted tables, names, columns in declared order, types, merge
-strategy, and references. They deliberately do **not** include read/write
+(`INV-DATA-6`), domain-tagged `"jazz-schema-v1-large-value-kinds"`. The
+canonical bytes cover sorted tables, names, columns in declared order, types,
+merge strategy, references, and `branch_by`. A schema in which some table
+declares a composite index is instead domain-tagged
+`"jazz-schema-v2-composite-indexes"`, and each table's encoding then ends with
+its composite indexes: a `u64` count, then per index in canonical order
+(lexicographic over UTF-8 column-name bytes) a `u64` column count and each
+length-prefixed column name. Every schema without a composite index keeps its
+frozen v1 bytes and id; a distinct domain tag, rather than an optional trailing
+section, keeps the encoding injective. Adding or removing a composite index is
+therefore a new schema version that goes through ordinary catalogue lineage
+publication (ch. 10), which backfills the new index for existing rows; it is
+never a silent in-place respelling of the stored schema.
+`crates/jazz/tests/composite_indexes.rs` pins a plain and two composite ids.
+The canonical bytes deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization
 without creating a second physical storage partition. Changing any storage-shape
@@ -349,7 +361,7 @@ user_metadata_json, contribution_merge, permission_subject,
 view_scoped_cardinality_marker, fate, global_time, rejection_reason,
 cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
-`None=0`, `Local=1`, `Edge=2`, `Global=3`; rejection reasons are
+`None=0`, `Local=1`, legacy `Edge=2`, `Global=3` (legacy tag 2 reads as Local; new writes never emit it); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
 `view-scoped-cardinality` marker is exactly the internal string
@@ -468,7 +480,7 @@ comparison in canonical wire-byte order. `GlobalTime` establishes authoritative
 acceptance/progress, not the row-conflict tie-break. A deletion winner does not
 erase content history, and a later restore/delete-register event changes only
 deletion visibility. Pending,
-rejected, local-only, edge-only, view-scoped-incomplete, or malformed facts may
+rejected, local-only, legacy-edge-only, view-scoped-incomplete, or malformed facts may
 be retained for their stated purpose but cannot be promoted into a global
 winner by replay or reopen. Replaying an identical receipt is idempotent;
 conflicting bytes for an already named transaction/version fail closed.
@@ -496,7 +508,7 @@ require byte-for-byte postcard equality.
 `VersionRecord::new` remains a public untrusted constructor, so every node
 semantic ingress repeats whole-carrier validation before accessor-based
 filtering, parking, staging, policy evaluation, or mutation. This includes
-commit authority and edge/relay paths, local exclusive finalization, view and
+Core commit authority and local relay paths, local exclusive finalization, view and
 authorization-view application, and row-version repair. Multi-bundle view and
 repair frames are preflighted in full: one bad later receipt leaves no partial
 transaction, history, clock, or view mutation.

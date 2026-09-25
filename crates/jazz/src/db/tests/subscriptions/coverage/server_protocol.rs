@@ -880,7 +880,7 @@ fn local_live_subscription_requests_global_upstream_coverage() {
 }
 
 #[test]
-fn edge_live_subscription_requests_global_upstream_coverage() {
+fn client_live_subscription_requests_global_upstream_coverage() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -890,16 +890,16 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     server.tick().unwrap();
 
-    // Edge-tier is the local visible tier for browser clients, but propagated
-    // upstream coverage is still registered at global tier. Edge serving is
-    // link-local; the subscription's settled contract is satisfied when the
-    // globally settled coverage arrives back at the client.
+    // The client's live subscription propagates upstream as coverage
+    // registered at global tier on Core's subscriber link; the subscription's
+    // settled contract is satisfied when the globally settled coverage arrives
+    // back at the client.
     let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..
@@ -921,29 +921,29 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 
     // Internal sync-loop coverage: public APIs normalize local subscriptions to
     // global upstream coverage. Malformed/direct peers must not install an
-    // unsupported edge-tier subscription.
+    // unsupported local-tier subscription.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
-    let edge_opts = RegisterShapeOptions {
-        tier: DurabilityTier::Edge,
+    let local_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
         read_view: ReadViewSpec::default(),
         ..RegisterShapeOptions::default()
     };
-    let rejected_read_view = edge_opts.read_view_key();
+    let rejected_read_view = local_opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
             ast: ShapeAst::from_validated(&shape),
-            opts: edge_opts,
+            opts: local_opts,
         })
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
         try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected edge-tier registration rejection"),
+            .expect("expected local-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: BindingId(uuid::Uuid::nil()),

@@ -189,7 +189,7 @@ describe("solid/useAll", () => {
     const unsubscribeA = vi.fn();
     const unsubscribeB = vi.fn();
 
-    mocks.makeQueryKey.mockReturnValueOnce("key-local").mockReturnValueOnce("key-edge");
+    mocks.makeQueryKey.mockReturnValueOnce("key-local").mockReturnValueOnce("key-global");
     mocks.getCacheEntry
       .mockReturnValueOnce({
         state: { status: "fulfilled" as const, data: [] },
@@ -212,10 +212,10 @@ describe("solid/useAll", () => {
 
       expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
 
-      setOptions({ tier: "edge" });
+      setOptions({ tier: "global" });
       await flushMicrotasks();
 
-      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
       expect(unsubscribeA).toHaveBeenCalledTimes(1);
       dispose();
       expect(unsubscribeB).toHaveBeenCalledTimes(1);

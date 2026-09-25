@@ -1,11 +1,14 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
+import { formatUuidAt } from "../hex.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
+import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
 import type {
   ColumnDescriptor,
   ColumnType,
   InsertValues,
+  NativeTerminalBytes,
   NativeTerminalOperation,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
@@ -109,6 +112,15 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const NETWORK_RETRY_LIMIT = 10;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
+/** Runtime read tier whose empty opening the core Db may hold for the server. */
+const LOCAL_FIRST_UNLESS_EMPTY = "local-first-unless-empty";
+const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
+  none: "none",
+  connecting: "attempting",
+  connected: "live",
+  unavailable: "failed",
+};
+const NATIVE_LINK_POLL_MS = 250;
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -211,6 +223,8 @@ type NativeDb = {
   isNativeForegroundClosed?(): boolean;
   disconnectNativeUpstream?(): void;
   reconnectNativeUpstream?(): void;
+  /** Tell the core Db what the host knows about its path to the server. */
+  setRemoteLinkHint?(state: string): void;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -570,7 +584,6 @@ type NativeRowFieldPlan = {
 };
 
 const textDecoder = new Utf8Decoder({ fatal: true });
-const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
@@ -699,6 +712,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReconnectReject: ((error: Error) => void) | null = null;
   private preHelloRetryCount = 0;
   private networkRetryCount = 0;
+  private serverLinkRequested = false;
+  private nativeLinkEverConnected = false;
+  private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
+  private unlessEmptyReadSeen = false;
+  private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
@@ -1117,6 +1135,102 @@ export class NativeRuntimeAdapter implements Runtime {
     return operation();
   }
 
+  /**
+   * Forward the host's view of the server link to the core Db, which owns the
+   * local-first-unless-empty gate. Hosts whose link lives in Rust derive it
+   * there and expose no setter.
+   */
+  setRemoteLinkHint(state: RemoteLinkState): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setRemoteLinkHint(state);
+    if (this.closed) return;
+    this.db.setRemoteLinkHint?.(REMOTE_LINK_HINTS[state]);
+  }
+
+  /** Live reachability of this runtime's upstream server. */
+  remoteLinkState(): RemoteLinkState {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.remoteLinkState();
+    return this.readRemoteLinkState();
+  }
+
+  /** Observe changes of {@link remoteLinkState}. */
+  onRemoteLinkStateChange(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.onRemoteLinkStateChange(listener, signal);
+      return;
+    }
+    this.remoteLink.subscribe(listener, signal);
+    this.startNativeLinkPoll();
+  }
+
+  /**
+   * A native host owns its socket and exposes status only by request; each
+   * request also lets the relay report the link to the core read gate. Poll
+   * only while someone listens and this runtime has issued a
+   * local-first-unless-empty read, so apps that never use the tier pay
+   * nothing.
+   */
+  private startNativeLinkPoll(): void {
+    if (
+      !this.db?.nativeConnectionStatus ||
+      this.nativeLinkPoll ||
+      this.closed ||
+      !this.unlessEmptyReadSeen ||
+      !this.remoteLink.hasListeners
+    ) {
+      return;
+    }
+    this.nativeLinkPoll = setInterval(() => {
+      if (!this.remoteLink.hasListeners) this.stopNativeLinkPoll();
+      else this.remoteLink.changed();
+    }, NATIVE_LINK_POLL_MS);
+  }
+
+  private noteReadTier(tier?: string | null): void {
+    if (tier !== LOCAL_FIRST_UNLESS_EMPTY) return;
+    const owner = this.ownerRuntime;
+    if (owner.unlessEmptyReadSeen) return;
+    owner.unlessEmptyReadSeen = true;
+    owner.startNativeLinkPoll();
+  }
+
+  private stopNativeLinkPoll(): void {
+    if (this.nativeLinkPoll) clearInterval(this.nativeLinkPoll);
+    this.nativeLinkPoll = null;
+  }
+
+  private readRemoteLinkState(): RemoteLinkState {
+    if (this.closed) return "unavailable";
+    const nativeStatus = this.db?.nativeConnectionStatus?.();
+    if (nativeStatus) {
+      if (!nativeStatus.configured) return "none";
+      if (nativeStatus.explicitlyOffline) return "unavailable";
+      if (nativeStatus.connected) {
+        this.nativeLinkEverConnected = true;
+        return "connected";
+      }
+      // A native socket reports only whether it is connected. Before its
+      // first connection that means "still connecting"; afterwards it is
+      // reconnecting after a drop.
+      return this.nativeLinkEverConnected ? "unavailable" : "connecting";
+    }
+    if (!this.serverLinkRequested) return "none";
+    if (this.serverTransport) return "connected";
+    if (this.serverTransportError) return "unavailable";
+    // A dropped established link retries with backoff. Readers must not
+    // wait on that recovery; a bootstrapping server's pre-hello retry is
+    // still the first connection attempt.
+    if (this.networkRetryCount > 0) return "unavailable";
+    if (
+      this.serverConnectionAttempt ||
+      this.serverReplacementPromise ||
+      this.serverCarrierPromise ||
+      this.serverReconnectTimer
+    ) {
+      return "connecting";
+    }
+    return "unavailable";
+  }
+
   async waitForUpstreamServerConnection(): Promise<void> {
     if (this !== this.ownerRuntime) {
       return await this.ownerRuntime.waitForUpstreamServerConnection();
@@ -1197,6 +1311,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes.clear();
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
+    this.stopNativeLinkPoll();
+    this.remoteLink.changed();
     const connectionAttempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (connectionAttempt) {
@@ -1868,13 +1984,14 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<unknown> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     assertSupportedReadOptions(tier, optionsJson);
+    this.noteReadTier(tier);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
     // Browser runtimes still materialize row bodies from their in-memory
-    // cache, but an Edge/Global read must keep its requested tier while doing
+    // cache, but a remote/global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
@@ -1921,6 +2038,7 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson?: string | null,
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
+    this.noteReadTier(tier);
     if (queryIncludesDeleted(queryJson)) {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }
@@ -1998,10 +2116,14 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
+    this.serverLinkRequested = true;
+    this.remoteLink.changed();
     if (this.db?.reconnectNativeUpstream) {
       // The admitted native host owns the endpoint and credentials. The JS
       // connection manager controls lifecycle only, never a parallel socket.
       this.db.reconnectNativeUpstream();
+      this.nativeLinkEverConnected = false;
+      this.remoteLink.changed();
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
@@ -2094,6 +2216,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     this.serverAuthJson = normalizedAuthJson;
+    this.remoteLink.changed();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
@@ -2218,6 +2341,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.networkRetryCount = 0;
         attempt.transport = transport;
         this.serverTransport = transport;
+        this.remoteLink.changed();
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
@@ -2305,6 +2429,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attempt = this.serverConnectionAttempt;
     const transport = this.serverTransport;
     const attemptTransport = attempt?.transport;
+    this.remoteLink.changed();
     if (attempt) {
       this.finishServerConnectionAttempt(attempt, options.error, false);
     } else {
@@ -2361,6 +2486,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.db?.disconnectNativeUpstream) {
       this.db.disconnectNativeUpstream();
+      this.remoteLink.changed();
       return;
     }
     this.serverReplacementIntent = null;
@@ -2421,6 +2547,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
     this.serverTransportError = null;
     this.clearServerTransportErrorWaiters();
+    this.remoteLink.changed();
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -2797,7 +2924,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
-    if (tier !== "edge" && tier !== "global") return;
+    if (tier !== "global") return;
     const initialIntent = this.serverReplacementIntent;
     const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
     const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
@@ -2860,19 +2987,19 @@ export class NativeRuntimeAdapter implements Runtime {
     query: NativeQueryInput,
     session: RuntimeSession | null,
   ): void {
-    if (tier != null && tier !== "local") return;
+    if (tier != null && tier !== "local" && tier !== LOCAL_FIRST_UNLESS_EMPTY) return;
     if (!readPropagationIsFull(optionsJson)) return;
     if (this.nonDurableClient || !this.serverTransport) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed || this.ownerRuntime.closed) return;
-      const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      await this.waitForStrictRemoteQueryTransport("edge");
+      const remoteOptionsJson = JSON.stringify({ propagation: "full" });
+      await this.waitForStrictRemoteQueryTransport("global");
       if (this.closed || this.ownerRuntime.closed) return;
       await this.readRowsForContextAsync(
         query,
-        readOptions("edge", false, edgeOptionsJson),
+        readOptions("global", false, remoteOptionsJson),
         this.nativeReadContext(session),
       );
     };
@@ -3518,6 +3645,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.serverTransportError && message === "websocket closed") return;
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
+    this.remoteLink.changed();
     this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
@@ -3547,6 +3675,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const url = this.serverEndpointUrl;
     const authJson = this.serverAuthJson;
     const delay = Math.min(100 * 2 ** this.networkRetryCount++, 1_000);
+    this.remoteLink.changed();
     // Retire this generation before any suspended pump or handshake can report
     // its close as a terminal failure. Native subscriptions survive the detach.
     this.serverConnectionGeneration += 1;
@@ -3645,6 +3774,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (attempt.finished) return;
     attempt.finished = true;
+    this.remoteLink.changed();
     attempt.outcome = error;
     attempt.resolveTerminal(error);
     const isCurrent =
@@ -3713,7 +3843,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      if (subscription.tier !== "edge" && subscription.tier !== "global") continue;
+      if (subscription.tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -3766,7 +3896,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
-    if ((tier === "edge" || tier === "global") && this.serverTransportError) {
+    if (tier === "global" && this.serverTransportError) {
       throw this.serverTransportError;
     }
   }
@@ -3774,7 +3904,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (this.serverTransportError) {
       return {
         promise: Promise.reject(this.serverTransportError),
@@ -3818,7 +3948,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
-    if (tier !== "edge" && tier !== "global") return null;
+    if (tier !== "global") return null;
     if (
       this.serverTransportWorkEpoch !== observedEpoch ||
       this.pendingInboundServerFrames.length > 0
@@ -4163,7 +4293,7 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "edge", "global"].includes(tier)) {
+  if (tier != null && !["local", "global", LOCAL_FIRST_UNLESS_EMPTY].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
@@ -4470,7 +4600,7 @@ function decodeRuntimeTerminalOperations(
     let columns = rootColumns;
     let targetColumns: readonly ColumnDescriptor[] | undefined;
     const path: RuntimeTerminalOperation["path"] = operation.path.map((segment) => {
-      if ("Key" in segment) return { Key: segment.Key };
+      if ("Key" in segment) return { Key: terminalKey(segment.Key) };
 
       if (!columns) {
         throw new Error("native terminal collection path requires subscription output columns");
@@ -4494,13 +4624,13 @@ function decodeRuntimeTerminalOperations(
       if (!targetColumns) throw new Error("native terminal insert has no collection target");
       const id = terminalPayloadRowId(edit.Insert.key);
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Insert: {
             index: edit.Insert.index,
-            key: edit.Insert.key,
-            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Insert.value)),
+            key: terminalKey(edit.Insert.key),
+            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Insert.value)),
           },
         },
       };
@@ -4509,34 +4639,44 @@ function decodeRuntimeTerminalOperations(
       if (!targetColumns) throw new Error("native terminal update has no collection target");
       const id = terminalPayloadRowId(edit.Update.key);
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Update: {
-            key: edit.Update.key,
-            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Update.value)),
+            key: terminalKey(edit.Update.key),
+            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Update.value)),
           },
         },
       };
     }
     if ("Remove" in edit) {
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
-        edit: { Remove: edit.Remove },
+        edit: { Remove: { key: terminalKey(edit.Remove.key) } },
       };
     }
     return {
-      root_key: operation.root_key,
+      root_key: terminalKey(operation.root_key),
       path,
-      edit: { Move: edit.Move },
+      edit: { Move: { key: terminalKey(edit.Move.key), index: edit.Move.index } },
     };
   });
 }
 
+/** Materializer keys stay number arrays; NAPI and WASM hand over `Uint8Array`s. */
+function terminalKey(bytes: NativeTerminalBytes): number[] {
+  return Array.isArray(bytes) ? bytes : Array.from(bytes);
+}
+
+/** Row payloads are decoded straight from a native `Uint8Array` without a copy. */
+function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
+  return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+}
+
 /** Decode the leading UUID key field from Groove's ordered record-key carrier. */
-function terminalPayloadRowId(encoded: readonly number[]): string {
-  const bytes = Uint8Array.from(encoded);
+function terminalPayloadRowId(encoded: NativeTerminalBytes): string {
+  const bytes = terminalBytes(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
     throw new Error("terminal key must begin with a UUID row key");
   }
@@ -6331,28 +6471,7 @@ export function parseUuid(value: string): Uint8Array {
 }
 
 export function formatUuid(bytes: Uint8Array): string {
-  return (
-    byteHex[bytes[0]!] +
-    byteHex[bytes[1]!] +
-    byteHex[bytes[2]!] +
-    byteHex[bytes[3]!] +
-    "-" +
-    byteHex[bytes[4]!] +
-    byteHex[bytes[5]!] +
-    "-" +
-    byteHex[bytes[6]!] +
-    byteHex[bytes[7]!] +
-    "-" +
-    byteHex[bytes[8]!] +
-    byteHex[bytes[9]!] +
-    "-" +
-    byteHex[bytes[10]!] +
-    byteHex[bytes[11]!] +
-    byteHex[bytes[12]!] +
-    byteHex[bytes[13]!] +
-    byteHex[bytes[14]!] +
-    byteHex[bytes[15]!]
-  );
+  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

@@ -1,6 +1,10 @@
 use jazz_example_big_label_benchmark::IngestFixture;
 
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     divan::main();
 }
 

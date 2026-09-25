@@ -256,12 +256,14 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       title: "Native note",
     });
     await expect(inserted.txId).resolves.toBe("04".repeat(16));
-    await expect(client.db.all(app.notes, { tier: "edge" })).resolves.toMatchObject([
+    await expect(client.db.all(app.notes, { tier: "global" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
-    expect(readOptions).toContainEqual({ tier: "edge" });
+    expect(readOptions).toContainEqual({ tier: "global" });
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
-    expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // #3273: reads and subscriptions no longer tick (pump) the native relay
+    // before their command; unsubscribe still drives its cleanup turn.
+    expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");
     expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
     expect(nativeForegroundTest.openAttached).toHaveBeenCalledWith(nativeRelayCapability);

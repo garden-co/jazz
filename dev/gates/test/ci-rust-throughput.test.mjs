@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
 import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
@@ -1434,25 +1435,55 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
-test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
+test("CodSpeed baselines every main merge and runs only for benchmark-labeled PRs", () => {
+  // Every main merge queues a CodSpeed run. Otherwise PR reports compare
+  // against a stale main run and attribute intervening merges to the PR
+  // (#3488).
   const document = parse(codspeedWorkflow);
-  assert.equal(document.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  assert.deepEqual(document.on.push, { branches: ["main"] });
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  assert.deepEqual(document.on.schedule, [{ cron: "17 3 * * *" }]);
+  assert.equal(document.on.schedule, undefined, "per-merge runs replace the nightly baseline");
   assert.equal(document.on.workflow_dispatch, null);
-  assert.equal(
-    document.jobs.examples.if,
-    "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
-  );
+  // Every root job carries the label gate; dependent jobs inherit its skip.
+  const labelGate =
+    "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')";
+  const rootJobsAreGated = (jobs) => {
+    for (const [name, job] of Object.entries(jobs)) {
+      if (!job.needs) assert.equal(job.if, labelGate, `${name} must carry the label gate`);
+    }
+  };
+  rootJobsAreGated(document.jobs);
+  // Main runs share one group and are never cancelled mid-run, so a burst of
+  // merges coalesces to the running commit plus the latest. PR runs cancel
+  // superseded pushes.
+  assert.deepEqual(document.concurrency, {
+    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
+  assert.throws(() => {
+    // Keying main runs by commit would run every merge of a burst in parallel.
+    const thrash = parse(codspeedWorkflow.replace("|| github.ref }}", "|| github.sha }}"));
+    assert.match(thrash.concurrency.group, /github\.ref \}\}$/);
+  }, /match/);
 
   assert.throws(() => {
+    const unsafe = parse(codspeedWorkflow.replace("  push:\n    branches: [main]\n", ""));
+    assert.deepEqual(unsafe.on.push, { branches: ["main"] });
+  }, /Expected values to be strictly deep-equal/);
+  assert.throws(() => {
     const unsafe = parse(
-      codspeedWorkflow.replace("  schedule:\n", "  push:\n    branches: [main]\n  schedule:\n"),
+      codspeedWorkflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: true",
+      ),
     );
-    assert.equal(unsafe.on.push, undefined, "ordinary main pushes must not run CodSpeed");
-  }, /ordinary main pushes/);
+    assert.equal(
+      unsafe.concurrency["cancel-in-progress"],
+      "${{ github.event_name == 'pull_request' }}",
+    );
+  }, /strictly equal/);
   assert.throws(() => {
     const unsafe = parse(
       codspeedWorkflow.replace(
@@ -1460,33 +1491,44 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
         "true",
       ),
     );
-    assert.equal(
-      unsafe.jobs.examples.if,
-      "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
-    );
-  }, /strictly equal/);
+    rootJobsAreGated(unsafe.jobs);
+  }, /label gate/);
 });
 
 test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
   const document = parse(codspeedWorkflow);
-  const job = document.jobs["route-subscription-walltime"];
-  assert.ok(job, "route subscription wall-time job must remain present");
+  const plan = document.jobs["native-workloads-plan"];
+  const measure = document.jobs["native-workloads-walltime"];
   assert.equal(
-    job.if,
+    plan.if,
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
-  assert.equal(job["runs-on"], "codspeed-macro");
-  const commands = job.steps
-    .map((step) => step.run)
-    .filter(Boolean)
-    .join("\n");
-  assert.match(
-    commands,
-    /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/,
+  assert.deepEqual(measure.needs, ["native-workloads-plan", "native-workloads-build"]);
+  assert.equal(measure["runs-on"], "codspeed-macro");
+  const matrix = spawnSync(
+    "node",
+    [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), "matrix"],
+    { encoding: "utf8" },
+  ).stdout;
+  assert.ok(
+    JSON.parse(matrix).includes("route-subscription"),
+    "route subscription wall-time workload must remain present",
   );
-  const run = job.steps.find((step) => step.with?.run)?.with?.run;
-  assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
-  assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
+  // Features are selected at `cargo codspeed build` time. `run` only executes
+  // that copied target; cargo-codspeed rejects Cargo feature flags there, which
+  // once left this receipt reporting no walltime benchmarks.
+  const args = (action) =>
+    spawnSync(
+      "node",
+      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, "route-subscription"],
+      { encoding: "utf8" },
+    ).stdout.trim();
+  assert.equal(
+    args("build-args"),
+    "--package jazz --bench route_subscription_curve --features testing",
+  );
+  assert.equal(args("run-args"), "--package jazz --bench route_subscription_curve");
+  assert.doesNotMatch(JSON.stringify(measure), /--features|JAZZ_ROUTE_CURVE_ROUTES/);
   assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
   assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
   assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);
@@ -1721,68 +1763,54 @@ test("realistic timing retains every retired legacy smoke suite", () => {
   );
 });
 
-test("CodSpeed preserves example benchmark package and bench coverage", () => {
-  const commands = new Map();
-  for (const command of ["build", "run"]) {
-    const match = codspeedWorkflow.match(
-      new RegExp(`cargo codspeed ${command} [^\\n]*--package jazz-example-benchmark-smoke[^\\n]*`),
-    );
-    assert.ok(match, `CodSpeed must ${command} the example benchmark suite`);
-    commands.set(command, match[0]);
-  }
+test("CodSpeed measures every example benchmark suite in wall-clock mode", () => {
+  // The examples page reads wall-clock results only, so no example suite may
+  // fall back to simulation.
+  assert.doesNotMatch(codspeedWorkflow, /mode: simulation/);
 
-  for (const command of ["build", "run"]) {
-    for (const benchmarkPackage of [
-      "jazz-example-benchmark-smoke",
+  // Build and run arguments come from the artifact script's workload table.
+  const args = (action, workload) =>
+    spawnSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, workload], {
+      encoding: "utf8",
+    }).stdout.trim();
+  for (const [workload, benchmarkPackage, benches] of [
+    ["big-label", "jazz-example-big-label-benchmark", ["ingest_walltime", "loads"]],
+    [
+      "w1",
       "jazz-example-benchmark-w1",
-      "jazz-example-big-label-benchmark",
-      "jazz-example-band-chat-benchmark",
-    ]) {
-      assert.match(commands.get(command), new RegExp(`--package ${benchmarkPackage}(?: |$)`));
+      ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
+    ],
+  ]) {
+    for (const action of ["build-args", "run-args"]) {
+      const line = args(action, workload);
+      assert.match(line, new RegExp(`--package ${benchmarkPackage}(?: |$)`));
+      for (const bench of benches) assert.match(line, new RegExp(`--bench ${bench}(?: |$)`));
     }
   }
-  for (const bench of ["fixture", "ahead_current", "loads"]) {
-    assert.match(commands.get("build"), new RegExp(`--bench ${bench}(?: |$)`));
-  }
-
+  assert.match(codspeedWorkflow, /cargo codspeed build -m walltime "\$\{args\[@\]\}"/);
   assert.throws(
     () =>
       assert.match(
-        codspeedWorkflow
-          .replace(" --package jazz-example-benchmark-w1", "")
-          .match(/cargo codspeed build [^\n]*--package jazz-example-benchmark-smoke[^\n]*/)?.[0],
-        /--package jazz-example-benchmark-w1(?: |$)/,
+        args("build-args", "w1").replace(" --bench ahead_current", ""),
+        /--bench ahead_current(?: |$)/,
       ),
-    /jazz-example-benchmark-w1/,
+    /ahead_current/,
   );
 });
 
-test("CodSpeed builds and runs the BandChat benchmark variant", () => {
-  for (const command of ["build", "run"]) {
-    assert.match(
-      codspeedWorkflow,
-      new RegExp(`cargo codspeed ${command} [^\\n]*--package jazz-example-band-chat-benchmark`),
-    );
-  }
-  assert.throws(
-    () =>
-      assert.match(
-        codspeedWorkflow.replaceAll(" --package jazz-example-band-chat-benchmark", ""),
-        /jazz-example-band-chat-benchmark/,
-      ),
-    /jazz-example-band-chat-benchmark/,
+test("CodSpeed measures BandChat and WorldTour through the native wall-time matrix", async () => {
+  const { workloads } = await import(
+    pathToFileURL(path.join(root, "dev/benchmarks/codspeed-artifact.mjs")).href
   );
-});
-
-test("CodSpeed builds the BandChat caught-up fast-resume receipt", () => {
-  assert.match(
-    codspeedWorkflow,
-    /cargo codspeed build [^\n]*--package jazz-example-band-chat-benchmark[^\n]*--bench fast_resume/,
+  for (const workload of ["band-chat", "world-tour"]) assert.ok(workloads.includes(workload));
+  assert.equal(
+    codspeedWorkflow.match(
+      /workload: \$\{\{ fromJSON\(needs\.native-workloads-plan\.outputs\.workloads\) \}\}/g,
+    )?.length,
+    2,
+    "both native matrix jobs read the single workload list",
   );
-  assert.throws(
-    () => assert.match(codspeedWorkflow.replace(" --bench fast_resume", ""), /--bench fast_resume/),
-    /fast_resume/,
-  );
+  assert.match(codspeedWorkflow, /node dev\/benchmarks\/codspeed-artifact\.mjs matrix/);
 });
 
 test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
@@ -1908,17 +1936,6 @@ test("React Native CI has a separate bridge-enabled producer and real Vitest adm
   );
   assert.match(localCi, /React Native bridge tests[\s\S]*vitest\.react-native\.config\.ts/);
   assert.match(localCi, /JAZZ_RN_TEST_BRIDGE: "1"/);
-});
-
-test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {
-  const inspectorPackage = JSON.parse(
-    fs.readFileSync(path.join(root, "packages/inspector/package.json"), "utf8"),
-  );
-  const browserCommand = inspectorPackage.scripts["test:browser"];
-
-  assert.match(browserCommand, /run-correctness-consumer\.mjs --/);
-  assert.match(browserCommand, /pnpm run build:embedded/);
-  assert.match(browserCommand, /playwright test --config playwright\.config\.ts/);
 });
 
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
@@ -2072,7 +2089,7 @@ test("the Jazz Tools preflight derives public exports and keeps test-only entryp
   }
 });
 
-test("missing public root or framework exports prevent both TypeScript suites from starting", () => {
+test("missing public exports or inspector assets prevent both TypeScript suites from starting", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
   const write = (relative, contents = "export {};") => {
     const target = path.join(fixture, relative);
@@ -2121,6 +2138,8 @@ test("missing public root or framework exports prevent both TypeScript suites fr
         encoding: "utf8",
         env: {
           ...process.env,
+          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
           JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
           JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
           JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
@@ -2138,6 +2157,39 @@ test("missing public root or framework exports prevent both TypeScript suites fr
       );
       write(`packages/jazz-tools/${relative}`);
     }
+
+    const nodeMarker = path.join(fixture, "node-inspector.html");
+    const browserMarker = path.join(fixture, "browser-inspector.html");
+    const run = () =>
+      spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+        cwd: fixture,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(nodeMarker)}`,
+          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(browserMarker)}`,
+        },
+      });
+    const missing = run();
+    assert.notEqual(missing.status, 0, missing.stdout);
+    assert.equal(fs.existsSync(nodeMarker), false, "node suite started without inspector assets");
+    assert.equal(
+      fs.existsSync(browserMarker),
+      false,
+      "browser suite started without inspector assets",
+    );
+
+    write("packages/inspector/dist-embedded/embedded.html", "prepared inspector");
+    const prepared = run();
+    assert.equal(prepared.status, 0, `${prepared.stdout}\n${prepared.stderr}`);
+    assert.equal(fs.readFileSync(nodeMarker, "utf8"), "prepared inspector");
+    assert.equal(fs.readFileSync(browserMarker, "utf8"), "prepared inspector");
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

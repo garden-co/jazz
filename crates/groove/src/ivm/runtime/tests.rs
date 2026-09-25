@@ -6,6 +6,208 @@ use crate::storage::{MemoryStorage, OwnedStorage, RecordStore, TestStorage, Test
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+#[futures_test::test]
+async fn immutable_compilation_reuse_preserves_live_updates_and_retirement() {
+    // The private hit counter proves avoided compilation; row equality alone
+    // cannot distinguish recompilation from reuse. All data and lifecycle
+    // behavior below goes through ordinary runtime subscription/tick APIs.
+    let schema = albums_schema();
+    let descriptor = schema.table("albums").unwrap().record_schema();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..32 {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let before = runtime.compilation_cache.hits;
+    let second = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    assert!(
+        runtime.compilation_cache.hits > before,
+        "shared immutable inputs should reuse compilation"
+    );
+    assert!(first.recv().unwrap().is_empty());
+    assert!(second.recv().unwrap().is_empty());
+    let values = vec![Value::U64(1), Value::String("shared".into())];
+    for weight in [1, -1] {
+        runtime
+            .tick(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "albums".into(),
+                    descriptor,
+                    deltas: vec![RecordDelta {
+                        record: descriptor.create(&values).unwrap().into(),
+                        weight,
+                    }],
+                }],
+                &storage,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(
+            second.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+    }
+    runtime.unsubscribe(first.id());
+    runtime.unsubscribe(second.id());
+    runtime.collect_unretained_ephemeral_nodes();
+    let third = runtime.subscribe_one_sink(graph, &storage).await.unwrap();
+    assert!(
+        third.recv().unwrap().is_empty(),
+        "compilation reuse must not retain evaluated rows"
+    );
+}
+
+#[futures_test::test]
+async fn immutable_compilation_reuse_still_rejects_retired_and_foreign_inputs() {
+    // Internal cache instrumentation verifies the failure follows a real hit,
+    // rather than testing only the uncached source-validation path.
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+    let id = runtime.allocate_input_source(descriptor);
+    let graph = GraphBuilder::input_source(id, descriptor)
+        .filter(PredicateExpr::gt("id", Value::U64(0)))
+        .project(["id"]);
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let before = runtime.compilation_cache.hits;
+    let second = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    assert!(runtime.compilation_cache.hits > before);
+    runtime.retire_input_sources([id], &storage).await.unwrap();
+    assert!(matches!(
+        runtime.subscribe_one_sink(graph.clone(), &storage).await,
+        Err(IvmRuntimeError::InputSourceRetired)
+    ));
+    let mut foreign = IvmRuntime::new(albums_schema()).unwrap();
+    assert!(matches!(
+        foreign.subscribe_one_sink(graph, &storage).await,
+        Err(IvmRuntimeError::ForeignInputSource)
+    ));
+    runtime.unsubscribe(first.id());
+    runtime.unsubscribe(second.id());
+}
+
+#[futures_test::test]
+async fn immutable_compilation_reuse_does_not_follow_mutated_arc_definitions() {
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+    let source =
+        GraphBuilder::inline_records(descriptor, [descriptor.create(&[Value::U64(1)]).unwrap()]);
+    let mut shared = Arc::new(
+        source
+            .clone()
+            .filter(PredicateExpr::eq("id", Value::U64(1))),
+    );
+    let wrap = |input| GraphBuilder::Project {
+        input,
+        fields: vec![ProjectField::named("id")],
+    };
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let first = runtime
+        .subscribe_one_sink(wrap(shared.clone()), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1)], 1)]
+    );
+    *Arc::make_mut(&mut shared) = source.filter(PredicateExpr::eq("id", Value::U64(2)));
+    let second = runtime
+        .subscribe_one_sink(wrap(shared), &storage)
+        .await
+        .unwrap();
+    assert!(second.recv().unwrap().is_empty());
+}
+
+#[futures_test::test]
+async fn typed_projection_reuse_keeps_sources_literals_and_descriptor_order_isolated() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let graph = |id, title: &str, marker| {
+        GraphBuilder::inline_records(
+            descriptor,
+            [descriptor
+                .create(&[Value::U64(id), Value::String(title.into())])
+                .unwrap()],
+        )
+        .project_fields([
+            ProjectField::named("title"),
+            ProjectField::literal("marker", Value::U64(marker)),
+        ])
+    };
+    for (id, title, marker) in [(1, "one", 7), (2, "two", 7), (3, "three", 9)] {
+        let result = runtime
+            .query_snapshot(graph(id, title, marker), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.to_values().unwrap(),
+            vec![(vec![Value::String(title.into()), Value::U64(marker),], 1)]
+        );
+    }
+    // The same names in a different physical order must not reuse resolved
+    // field slots. This also exercises reuse after disposable graph retirement.
+    let reordered = RecordDescriptor::new([("title", ValueType::String), ("id", ValueType::U64)]);
+    let result = runtime
+        .query_snapshot(
+            GraphBuilder::inline_records(
+                reordered,
+                [reordered
+                    .create(&[Value::String("reordered".into()), Value::U64(4)])
+                    .unwrap()],
+            )
+            .project_fields([
+                ProjectField::named("title"),
+                ProjectField::literal("marker", Value::U64(7)),
+            ]),
+            &storage,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.to_values().unwrap(),
+        vec![(vec![Value::String("reordered".into()), Value::U64(7),], 1)]
+    );
+    // Repeated cache collisions/eviction are performance-only, not result state.
+    for marker in 0..600 {
+        let result = runtime
+            .query_snapshot(graph(5, "churn", marker), &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.to_values().unwrap(),
+            vec![(vec![Value::String("churn".into()), Value::U64(marker),], 1)]
+        );
+    }
+    let result = runtime
+        .query_snapshot(graph(1, "again", 7), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.to_values().unwrap(),
+        vec![(vec![Value::String("again".into()), Value::U64(7),], 1)]
+    );
+}
+
 #[test]
 fn touched_unbounded_membership_matches_full_window_diff_for_signed_bags() {
     // Internal oracle intentionally exercises negative intermediate bag weights
@@ -388,89 +590,6 @@ async fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
             Value::Nullable(None),
         ),
         Value::Nullable(None)
-    );
-}
-
-#[futures_test::test]
-async fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
-    // Internal coverage is intentional: the public browser matrix proves
-    // end-to-end ordering, while this pins the terminal operation protocol
-    // ordering that is not otherwise observable through the public API.
-    let key = |byte| vec![byte];
-    let before = BTreeMap::from([(key(1), 0), (key(2), 1), (key(3), 2)]);
-    let after = BTreeMap::from([(key(3), 0), (key(4), 1), (key(1), 2), (key(2), 3)]);
-    let mut terminal = TerminalDeltas {
-        operations: vec![
-            TerminalOperation {
-                root_descriptor: RecordDescriptor::default(),
-                root_key: key(2),
-                path: Vec::new(),
-                edit: TerminalEdit::Update {
-                    key: key(2),
-                    value: vec![22],
-                },
-            },
-            TerminalOperation {
-                root_descriptor: RecordDescriptor::default(),
-                root_key: key(4),
-                path: Vec::new(),
-                edit: TerminalEdit::Insert {
-                    index: 0,
-                    key: key(4),
-                    value: vec![44],
-                },
-            },
-        ],
-    };
-
-    apply_root_ordering_operations(&before, &after, RecordDescriptor::default(), &mut terminal);
-
-    assert!(matches!(
-        terminal.operations[1].edit,
-        TerminalEdit::Insert { index: 1, .. }
-    ));
-    assert!(matches!(
-        terminal.operations[0].edit,
-        TerminalEdit::Update { .. }
-    ));
-    assert_eq!(
-        terminal.operations[2..]
-            .iter()
-            .map(|operation| match &operation.edit {
-                TerminalEdit::Move { key, index } => (key.clone(), *index),
-                edit => panic!("expected root move after payload edits, got {edit:?}"),
-            })
-            .collect::<Vec<_>>(),
-        vec![(key(3), 0), (key(4), 1)]
-    );
-}
-
-#[futures_test::test]
-async fn root_ordering_emits_moves_without_payload_terminal_edits() {
-    // A policy-scope re-entry can reorder visible roots without any
-    // payload edit. The subscription output descriptor, rather than a
-    // payload operation, supplies the descriptor for the following move.
-    let key = |byte| vec![byte];
-    let before = BTreeMap::from([(key(1), 0), (key(2), 1)]);
-    let after = BTreeMap::from([(key(2), 0), (key(1), 1)]);
-    let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
-    let mut terminal = TerminalDeltas {
-        operations: Vec::new(),
-    };
-
-    apply_root_ordering_operations(&before, &after, descriptor, &mut terminal);
-
-    assert_eq!(
-        terminal.operations,
-        vec![TerminalOperation {
-            root_descriptor: descriptor,
-            root_key: key(2),
-            path: Vec::new(),
-            edit: TerminalEdit::Move {
-                key: key(2),
-                index: 0,
-            },
-        }]
     );
 }
 
@@ -1970,6 +2089,56 @@ async fn subscription_retainers_keep_output_ancestors_alive() {
     assert_eq!(retained.len(), 3);
     assert!(retained.contains(&output));
     assert!(runtime.graph().node(output).is_some());
+}
+
+#[futures_test::test]
+async fn ready_queue_drives_shared_deep_chain_without_ancestor_rewalks() {
+    // Internal work instrumentation is necessary to distinguish two correct
+    // output paths with linear versus repeated-ancestor scheduling work.
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..64 {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    evaluator::take_subgraph_walk_count();
+    let first = runtime
+        .subscribe_one_sink(graph.clone(), &storage)
+        .await
+        .unwrap();
+    let second = runtime.subscribe_one_sink(graph, &storage).await.unwrap();
+    assert!(first.recv().unwrap().is_empty());
+    assert!(second.recv().unwrap().is_empty());
+    assert_eq!(evaluator::take_subgraph_walk_count(), 0);
+    let values = vec![Value::U64(1), Value::String("Blue Train".to_owned())];
+    for weight in [1, -1, 1] {
+        runtime
+            .tick(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "albums".to_owned(),
+                    descriptor: albums.clone(),
+                    deltas: vec![RecordDelta {
+                        record: albums.create(&values).unwrap().into(),
+                        weight,
+                    }],
+                }],
+                &storage,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(
+            second.recv().unwrap().to_values().unwrap(),
+            vec![(values.clone(), weight)]
+        );
+        assert_eq!(evaluator::take_subgraph_walk_count(), 0);
+    }
 }
 
 #[futures_test::test]

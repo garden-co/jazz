@@ -63,7 +63,7 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
-/// Complete edge-authority publications, reconciled as a group at core.
+/// Reserved legacy edge-publication bit. Never advertised by current peers.
 pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
@@ -172,16 +172,48 @@ impl std::fmt::Debug for WireMessageFragment {
 
 /// Link role advertised during handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "WirePeerRoleEncoding", into = "WirePeerRoleEncoding")]
 pub enum WirePeerRole {
     /// End-user or local application runtime.
     Client,
     /// Durable server or authority runtime.
     Core,
-    /// Edge runtime terminating client identity and policy composition.
+    /// Local relay/cache runtime without independent fate authority.
+    Relay = 3,
+}
+
+// Preserve the declared postcard role tags; the removed server role is never
+// constructible by callers and is rejected when decoding old handshakes.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WirePeerRoleEncoding {
+    Client,
+    Core,
     Edge,
-    /// Relay/cache runtime without a terminated end-user identity.
     Relay,
+}
+
+impl From<WirePeerRole> for WirePeerRoleEncoding {
+    fn from(role: WirePeerRole) -> Self {
+        match role {
+            WirePeerRole::Client => Self::Client,
+            WirePeerRole::Core => Self::Core,
+            WirePeerRole::Relay => Self::Relay,
+        }
+    }
+}
+
+impl TryFrom<WirePeerRoleEncoding> for WirePeerRole {
+    type Error = &'static str;
+
+    fn try_from(role: WirePeerRoleEncoding) -> Result<Self, Self::Error> {
+        match role {
+            WirePeerRoleEncoding::Client => Ok(Self::Client),
+            WirePeerRoleEncoding::Core => Ok(Self::Core),
+            WirePeerRoleEncoding::Relay => Ok(Self::Relay),
+            WirePeerRoleEncoding::Edge => Err("server edge role is no longer supported"),
+        }
+    }
 }
 
 /// Handshake payload used to negotiate a common wire version and feature set.
@@ -302,7 +334,7 @@ pub struct WireSession {
     pub session_id: String,
     /// Monotone session incarnation. Reconnects that abandon prior ordering use a new epoch.
     pub epoch: u64,
-    /// Authenticated user identity for edge/client links, once admission succeeds.
+    /// Authenticated user identity for client links, once admission succeeds.
     pub identity: Option<AuthorSubject>,
 }
 
@@ -389,6 +421,12 @@ impl WireInboundContext {
 
     pub(crate) fn set_trusted_encoder(&mut self, trusted: bool) {
         self.trusted_encoder = trusted;
+    }
+
+    /// Whether semantic payloads admitted through this context pass the
+    /// checked decoder, which validates every carried version receipt.
+    pub(crate) fn validates_receipts(&self) -> bool {
+        !self.trusted_encoder
     }
 
     pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
@@ -690,6 +728,12 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
     to_allocvec(message)
 }
 
+/// Exact byte length `encode_sync_message` would produce, without allocating
+/// or copying the encoding. For diagnostics that only need the size.
+pub(crate) fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
+    postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+}
+
 /// Serialize a semantic message only when its required capabilities were
 /// negotiated for this link.
 ///
@@ -716,16 +760,13 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     if validate_logical_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
+    // Wire receipts and replay fixtures name bytes, not only deserialized
+    // values. `decode_postcard_exact` already rejects any alternate postcard
+    // representation of the same transaction/version message.
     let message: SyncMessage = decode_postcard_exact(bytes)?;
     message
         .validate_wire_contract()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
-    // Wire receipts and replay fixtures name bytes, not only deserialized
-    // values.  Do not accept an alternate postcard representation for the
-    // same transaction/version message.
-    if to_allocvec(&message)? != bytes {
-        return Err(postcard::Error::DeserializeBadOption);
-    }
     Ok(message)
 }
 
@@ -753,10 +794,47 @@ where
     T: Deserialize<'a> + Serialize,
 {
     let (value, remainder) = take_from_bytes(bytes)?;
-    if !remainder.is_empty() || to_allocvec(&value)? != bytes {
+    if !remainder.is_empty() || !encodes_exactly(&value, bytes) {
         Err(postcard::Error::DeserializeBadEncoding)
     } else {
         Ok(value)
+    }
+}
+
+/// Whether the canonical postcard encoding of `value` is exactly `expected`.
+///
+/// Equivalent to `to_allocvec(value)? == expected`, but compares while
+/// serializing: it allocates nothing and stops at the first differing byte.
+fn encodes_exactly<T: Serialize + ?Sized>(value: &T, expected: &[u8]) -> bool {
+    postcard::serialize_with_flavor(value, CanonicalBytesMatch { expected })
+        .is_ok_and(|remaining: &[u8]| remaining.is_empty())
+}
+
+/// Postcard output flavor that consumes `expected` instead of writing bytes.
+struct CanonicalBytesMatch<'a> {
+    expected: &'a [u8],
+}
+
+impl<'a> postcard::ser_flavors::Flavor for CanonicalBytesMatch<'a> {
+    /// The expected bytes the encoding did not reach.
+    type Output = &'a [u8];
+
+    fn try_push(&mut self, byte: u8) -> postcard::Result<()> {
+        self.try_extend(&[byte])
+    }
+
+    fn try_extend(&mut self, bytes: &[u8]) -> postcard::Result<()> {
+        match self.expected.split_at_checked(bytes.len()) {
+            Some((head, tail)) if head == bytes => {
+                self.expected = tail;
+                Ok(())
+            }
+            _ => Err(postcard::Error::SerializeBufferFull),
+        }
+    }
+
+    fn finalize(self) -> postcard::Result<Self::Output> {
+        Ok(self.expected)
     }
 }
 
@@ -828,7 +906,7 @@ fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::E
     let source = *bytes;
     let (value, remaining) = take_from_bytes::<usize>(source)?;
     let consumed = source.len() - remaining.len();
-    if to_allocvec(&value)? != source[..consumed] {
+    if !encodes_exactly(&value, &source[..consumed]) {
         return Err(postcard::Error::DeserializeBadEncoding);
     }
     *bytes = remaining;
@@ -926,7 +1004,6 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-        | FEATURE_AUTHORITY_PUBLICATIONS
         | runtime_transport_compression_features()
 }
 
@@ -1198,6 +1275,25 @@ mod tests {
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+
+    /// Wire layout is tested internally because enum tags are not a query API.
+    #[test]
+    fn peer_role_tags_preserve_relay_and_reject_retired_edge() {
+        for (role, tag, name) in [
+            (WirePeerRole::Client, 0, "client"),
+            (WirePeerRole::Core, 1, "core"),
+            (WirePeerRole::Relay, 3, "relay"),
+        ] {
+            assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
+            assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
+            assert_eq!(serde_json::to_value(role).unwrap(), name);
+        }
+        assert!(postcard::from_bytes::<WirePeerRole>(&[2]).is_err());
+        assert!(serde_json::from_str::<WirePeerRole>(r#""edge""#).is_err());
+        // Complete former Edge Hello, not merely an isolated enum decoder.
+        assert!(decode_frame(&[0, 3, 3, 32, 2, 0]).is_err());
+        assert_eq!(current_wire_features() & FEATURE_AUTHORITY_PUBLICATIONS, 0);
+    }
 
     #[test]
     fn hello_json_shape_is_stable() {
@@ -1513,16 +1609,18 @@ mod tests {
         assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
 
         // Sensitivity plant: the final enum tag is durability.  A receiver
-        // must not silently retain Global when a payload says Edge.
+        // must decode the legacy Edge tag as Local, never as Global.
         let mut edge = fixture.clone();
         *edge.last_mut().expect("non-empty fixture") = 2;
+        // The untrusted boundary also rejects this sequenced Local receipt.
+        assert!(decode_sync_message(&edge).is_err());
         assert_eq!(
-            decode_sync_message(&edge).unwrap(),
+            decode_sync_message_trusted(&edge).unwrap(),
             SyncMessage::FateUpdate {
                 tx_id,
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
-                durability: Some(DurabilityTier::Edge),
+                durability: Some(DurabilityTier::Local),
             }
         );
     }
@@ -2268,8 +2366,20 @@ mod tests {
         assert!(streaming_zstd < per_message_zstd);
     }
 
+    /// `last_resume_bytes` reports this length for diagnostics and receipts,
+    /// so it must equal the real encoding's length for every message shape.
     #[test]
-    fn message_frame_round_trips_sync_message_payload_variants() {
+    fn encoded_sync_message_len_matches_the_encoding() {
+        for message in sync_message_payload_variants() {
+            assert_eq!(
+                encoded_sync_message_len(&message).unwrap(),
+                encode_sync_message(&message).unwrap().len(),
+                "{message:?}"
+            );
+        }
+    }
+
+    fn sync_message_payload_variants() -> Vec<SyncMessage> {
         let node = NodeUuid::from_bytes([0x11; 16]);
         let tx_id = TxId::new(TxTime(12), node);
         let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
@@ -2280,7 +2390,7 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let messages = vec![
+        vec![
             SyncMessage::RegisterShape {
                 shape_id,
                 ast: ShapeAst::new(Query::from("todos"), schema_version),
@@ -2349,7 +2459,12 @@ mod tests {
             SyncMessage::RowVersionPayloads {
                 version_bundles: Vec::new(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn message_frame_round_trips_sync_message_payload_variants() {
+        let messages = sync_message_payload_variants();
 
         for message in messages {
             let payload = encode_sync_message(&message).unwrap();
@@ -2366,6 +2481,76 @@ mod tests {
 
             assert_eq!(decode_sync_message(&envelope.payload).unwrap(), message);
         }
+    }
+
+    /// `decode_postcard_exact` compares while serializing instead of
+    /// allocating a re-encode (#3376). Pin that it accepts exactly what the
+    /// old decode-then-`to_allocvec` equality accepted, across truncations,
+    /// insertions, substitutions, overlong varints and deletions of every
+    /// payload variant and of canonical maps and sets. This is a white-box
+    /// differential test because the equivalence is a property of one
+    /// internal function that no public path can enumerate.
+    #[test]
+    fn canonical_postcard_check_matches_allocating_re_encode() {
+        fn allocating_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            match postcard::take_from_bytes::<T>(bytes) {
+                Ok((value, rest)) => {
+                    rest.is_empty()
+                        && postcard::to_allocvec(&value).is_ok_and(|encoded| encoded == bytes)
+                }
+                Err(_) => false,
+            }
+        }
+        fn streaming_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            decode_postcard_exact::<T>(bytes).is_ok()
+        }
+        fn mutations_agree<T: serde::de::DeserializeOwned + Serialize>(canonical: &[u8]) {
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    allocating_exact::<T>(bytes),
+                    streaming_exact::<T>(bytes),
+                    "canonical check diverges on {bytes:02x?}"
+                );
+            };
+            assert!(streaming_exact::<T>(canonical));
+            for i in 0..=canonical.len() {
+                check(&canonical[..i]);
+                for byte in 0..=u8::MAX {
+                    let mut inserted = canonical.to_vec();
+                    inserted.insert(i, byte);
+                    check(&inserted);
+                    if i < canonical.len() {
+                        let mut substituted = canonical.to_vec();
+                        substituted[i] = byte;
+                        check(&substituted);
+                    }
+                    if i + 1 < canonical.len() {
+                        let mut overlong = canonical.to_vec();
+                        overlong[i] = byte | 0x80;
+                        overlong.insert(i + 1, 0);
+                        check(&overlong);
+                    }
+                }
+                if i < canonical.len() {
+                    let mut removed = canonical.to_vec();
+                    removed.remove(i);
+                    check(&removed);
+                }
+            }
+        }
+
+        for message in sync_message_payload_variants() {
+            mutations_agree::<SyncMessage>(&encode_sync_message(&message).unwrap());
+        }
+        type Map = std::collections::BTreeMap<u32, String>;
+        let map: Map = [(1, "a".to_owned()), (2, "b".to_owned())].into();
+        mutations_agree::<Map>(&postcard::to_allocvec(&map).unwrap());
+        let duplicate_key = [vec![2u8], vec![1, 1, b'a'], vec![1, 1, b'b']].concat();
+        let unsorted_keys = [vec![2u8], vec![2, 1, b'b'], vec![1, 1, b'a']].concat();
+        assert!(!streaming_exact::<Map>(&duplicate_key));
+        assert!(!streaming_exact::<Map>(&unsorted_keys));
+        let set: std::collections::BTreeSet<u64> = [1, 300, 70_000].into();
+        mutations_agree::<std::collections::BTreeSet<u64>>(&postcard::to_allocvec(&set).unwrap());
     }
 
     #[test]

@@ -31,7 +31,7 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 }
 
 #[test]
-fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
+fn one_shot_global_coverage_requires_current_authority_after_reconnect() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -53,7 +53,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     assert!(client.detach_connection(&first_upstream));
     assert!(
         !client.query_attachment_is_covered(&attachment),
-        "disconnect must invalidate an Edge/Global one-shot coverage witness"
+        "disconnect must invalidate a Global one-shot coverage witness"
     );
 
     let (second_client_transport, second_server_transport) = duplex();
@@ -497,7 +497,14 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     assert_eq!(group.subscribers.len(), 1);
     let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
-    assert_eq!(maintained_metrics.footprint.result_rows, 1);
+    let footprint = peer
+        .inspect_maintained_subscription_view_footprint(
+            crate::db::peer_connection::coverage_group_subscription_key(
+                coverage_groups.keys().next().expect("one coverage group"),
+            ),
+        )
+        .expect("maintained subscription footprint");
+    assert_eq!(footprint.result_rows, 1);
     assert_eq!(prepared_read(&client, &query).len(), 1);
     drop(subscriber_ref);
     client.detach_query(first_attachment);
@@ -682,7 +689,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,
             global_time: Some(GlobalTime(44)),
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }]))
         .unwrap();
     client.tick().unwrap();
@@ -800,7 +807,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
 }
 
 #[test]
-fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
+fn one_shot_global_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
@@ -817,7 +824,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
     let first_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -827,7 +834,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 
     seed(&server, "todos", cells("second", false, owner));
     let second_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
@@ -868,11 +875,11 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 
     let backend_query = prepared(&backend, &Query::from("todos"));
     let backend_attachment = backend
-        .attach_query_with_opts(&backend_query, edge_subscribe_opts())
+        .attach_query_with_opts(&backend_query, global_subscribe_opts())
         .unwrap();
     let session_query = prepared(&session, &Query::from("todos"));
     let session_attachment = session
-        .attach_query_with_opts(&session_query, edge_subscribe_opts())
+        .attach_query_with_opts(&session_query, global_subscribe_opts())
         .unwrap();
 
     backend.tick().unwrap();
@@ -891,7 +898,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 }
 
 #[test]
-fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
+fn one_shot_global_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")
@@ -935,14 +942,14 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
     let query = Query::from("chats");
     let prepared = prepared(&client, &query);
     let first_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert_eq!(
-        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![first]
     );
 
@@ -958,7 +965,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         ]),
     );
     let second_attachment = client
-        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
@@ -968,7 +975,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
     assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(
-        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![first, second]
     );
     client.detach_query(first_attachment);
@@ -976,7 +983,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 }
 
 #[test]
-fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
+fn global_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("chats")
@@ -1012,7 +1019,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
     let query = Query::from("chats");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();

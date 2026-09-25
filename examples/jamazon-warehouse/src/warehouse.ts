@@ -53,7 +53,7 @@ export async function purchase(db: Db, request: PurchaseRequest): Promise<Purcha
   // Create the client before beginning an exclusive transaction. This is also
   // the app's minimal connected preflight; an exclusive checkout is not an
   // offline cart operation.
-  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "edge" });
+  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
 
   // A duplicate browser-to-edge delivery can overlap the first checkout's
   // authoritative snapshot. Re-run only an explicit exclusive conflict; the

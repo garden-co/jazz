@@ -1039,7 +1039,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     // this raw event. Bindings always cross the explicit hydration boundary
     // before exposing it to application code; keep the public assertion below
     // on that boundary rather than requiring opening to synchronously fetch a
-    // cold chunk (which would deadlock an edge before its I/O pump starts).
+    // cold chunk (which would deadlock a server runtime before its I/O pump starts).
     block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
     let (descriptor, title_index, terminal_value) = {
         let SubscriptionEvent::Delta { added, .. } = &mut event else {
@@ -1412,10 +1412,119 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         )
         .unwrap()
         .row_uuid();
+    let error =
+        block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Schema);
     assert_eq!(
-        block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap(),
-        Some(serde_json::json!(42))
+        error.message,
+        "JSON pointer selection requires a JSON column"
     );
+}
+
+#[test]
+fn json_pointer_reads_require_json_columns_and_preserve_literal_semantics() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("body", PublicColumnType::Json { schema: None })
+                .column("text", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0x59, AuthorSubject::SYSTEM, &schema);
+    for padding in [0, groove::large_values::INLINE_VALUE_MAX_BYTES + 32] {
+        let source = format!(
+            r#"[{{"items":["zero","one"],"01":"object key","+1":"signed key"}},"{}"]"#,
+            "p".repeat(padding)
+        );
+        let write = db
+            .insert(
+                "documents",
+                BTreeMap::from([
+                    ("body".to_owned(), Value::String(source.clone())),
+                    ("text".to_owned(), Value::String(source)),
+                ]),
+                Default::default(),
+            )
+            .unwrap();
+        let row = write.row_uuid();
+        for (pointer, expected) in [
+            ("/0/items/0", Some(serde_json::json!("zero"))),
+            ("/0/items/1", Some(serde_json::json!("one"))),
+            ("/0/items/01", None),
+            ("/0/items/+1", None),
+            ("/0/items/-", None),
+            ("/0/01", Some(serde_json::json!("object key"))),
+            ("/0/+1", Some(serde_json::json!("signed key"))),
+        ] {
+            assert_eq!(
+                block_on(db.read_json_pointer("documents", row, "body", pointer)).unwrap(),
+                expected,
+                "{pointer} padding={padding}"
+            );
+        }
+        let error =
+            block_on(db.read_json_pointer("documents", row, "text", "/0/items/1")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Schema);
+        assert_eq!(
+            error.message,
+            "JSON pointer selection requires a JSON column"
+        );
+        db.update(
+            "documents",
+            row,
+            BTreeMap::from([("body".to_owned(), Value::String("null".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(db.read_json_pointer("documents", row, "body", "")).unwrap(),
+            Some(serde_json::Value::Null)
+        );
+    }
+}
+
+#[test]
+fn json_publication_rejects_invalid_insert_and_update_before_pointer_reads() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("body", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0x5a, AuthorSubject::SYSTEM, &schema);
+    let row = db
+        .insert(
+            "documents",
+            BTreeMap::from([("body".to_owned(), Value::String("[42]".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    for padding in [0, groove::large_values::INLINE_VALUE_MAX_BYTES + 32] {
+        let invalid = format!("[42,{}", " ".repeat(padding));
+        assert!(
+            db.insert(
+                "documents",
+                BTreeMap::from([("body".to_owned(), Value::String(invalid.clone()))]),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert!(
+            db.update(
+                "documents",
+                row,
+                BTreeMap::from([("body".to_owned(), Value::String(invalid))]),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert_eq!(prepared_read(&db, &db.table("documents")).len(), 1);
+        assert_eq!(
+            block_on(db.read_json_pointer("documents", row, "body", "/0")).unwrap(),
+            Some(serde_json::json!(42))
+        );
+    }
 }
 
 #[test]
@@ -1545,6 +1654,12 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
     );
     let denied = block_on(db.read_value_range("documents", hidden, "body", 0..8)).unwrap_err();
     assert_eq!(denied.code, ErrorCode::NotObserved);
+    let denied = block_on(db.read_json_pointer("documents", hidden, "body", "/0")).unwrap_err();
+    assert_eq!(
+        denied.code,
+        ErrorCode::NotObserved,
+        "authorization precedes JSON type validation"
+    );
 }
 
 #[test]
@@ -1851,7 +1966,7 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
 
 /// An authority rejection with no application waiter is delivered once through
 /// the mutation-error callback on the following scheduled database tick. This
-/// is an ordinary client connection, so the fate has no edge-forwarding route
+/// is an ordinary client connection, so the fate has no relay-forwarding route
 /// and must still run the local write-state handler.
 #[test]
 fn unhandled_rejection_is_delivered_as_mutation_error() {
@@ -1878,7 +1993,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1893,7 +2008,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -1931,7 +2046,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Local),
         })
         .unwrap();
 
@@ -1946,7 +2061,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Local,
         }
     );
     assert_eq!(events[0].code, "permission_denied");
@@ -1980,7 +2095,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
     client.wait_for_write_with(
         &write,
         WriteWaitOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             observe_only: true,
         },
         move |outcome| *observer.borrow_mut() = Some(outcome),
@@ -1990,7 +2105,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2374,12 +2489,12 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
 
     let target_outcome = Rc::new(RefCell::new(None));
     let target_callback = Rc::clone(&target_outcome);
-    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Global, move |outcome| {
         *target_callback.borrow_mut() = Some(outcome);
     });
     let alias_outcome = Rc::new(RefCell::new(None));
     let alias_callback = Rc::clone(&alias_outcome);
-    client.wait_for_write_with(&alias, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_write_with(&alias, DurabilityTier::Global, move |outcome| {
         *alias_callback.borrow_mut() = Some(outcome);
     });
     authority_transport
@@ -2387,7 +2502,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
             tx_id: target_tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches client");
     client.tick().expect("fate settles both active observers");
@@ -2429,7 +2544,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
 
 /// A live application waiter consumes an authority rejection and prevents the
 /// fallback mutation-error callback from firing, including when the fate has
-/// no edge-forwarding route and only the ordinary local handler can notify it.
+/// no relay-forwarding route and only the ordinary local handler can notify it.
 #[test]
 fn waited_rejection_is_not_delivered_as_mutation_error() {
     let schema = schema();
@@ -2454,7 +2569,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     let callback_result = Rc::clone(&wait_result);
     client.wait_for_transaction_with(
         write.mergeable_tx_id(),
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         move |result| *callback_result.borrow_mut() = Some(result),
     );
     authority_transport
@@ -2462,7 +2577,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
 
@@ -2511,13 +2626,13 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
             tx_id: write.mergeable_tx_id(),
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
 
     let error =
-        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Edge))
+        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global))
             .unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(error.message.contains("AuthorizationDenied"));
@@ -2576,7 +2691,7 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     client.tick().unwrap();
@@ -2663,7 +2778,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches durable client");
     client
@@ -2672,7 +2787,7 @@ fn close_acknowledges_rejection_claimed_by_drained_waiter() {
 
     let drained_outcome = Rc::new(RefCell::new(None));
     let callback_outcome = Rc::clone(&drained_outcome);
-    client.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |outcome| {
+    client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
         *callback_outcome.borrow_mut() = Some(outcome);
     });
     drop(write);
@@ -2805,29 +2920,27 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 }
 
 #[test]
-fn session_upload_strips_forged_system_permission_before_storage_and_publication() {
+fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     let schema = schema();
     let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
-    let edge_node = NodeUuid::from_bytes([0xe2; 16]);
-    let edge = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
+    let core_node = NodeUuid::from_bytes([0xe2; 16]);
+    let core = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc2, session_author, &schema);
 
-    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+    let (client_transport, core_transport) = duplex_with_admitted_session_context(
         session_author,
         NodeUuid::from_bytes([0xc2; 16]),
         1,
-        edge_node,
+        core_node,
         2,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_transport,
-            session_author,
-            BTreeMap::new(),
-            CommitUnitTrust::Session,
-        );
+    let _subscriber = core.server.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        session_author,
+        BTreeMap::new(),
+        CommitUnitTrust::Session,
+    );
 
     let write = client
         .insert(
@@ -2854,44 +2967,23 @@ fn session_upload_strips_forged_system_permission_before_storage_and_publication
     ));
 
     client.tick().unwrap();
-    edge.tick().unwrap();
+    core.tick().unwrap();
     client.tick().unwrap();
 
     let SyncMessage::CommitUnit { tx, .. } =
-        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+        core.node().borrow_mut().commit_unit_for(tx_id).unwrap()
     else {
-        unreachable!("edge retained the accepted transaction");
+        unreachable!("core retained the accepted transaction");
     };
     assert_eq!(
         tx.permission_subject, None,
         "storage drops untrusted SYSTEM"
     );
 
-    crate::db::block_on(edge.node().borrow_mut().apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        None,
-        Some(DurabilityTier::Edge),
-    ))
-    .unwrap();
     assert!(matches!(
-        crate::db::block_on(edge.node().borrow_mut().transaction_state(tx_id)),
-        Some((Fate::Accepted, None, DurabilityTier::Edge))
+        crate::db::block_on(core.node().borrow_mut().transaction_state(tx_id)),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
-    let publication = edge
-        .node()
-        .borrow_mut()
-        .edge_authority_publication_for(tx_id)
-        .unwrap();
-    let published = publication
-        .commits
-        .iter()
-        .find(|unit| unit.tx.tx_id == tx_id)
-        .expect("publication contains its anchor transaction");
-    assert_eq!(
-        published.tx.permission_subject, None,
-        "publication cannot re-emit a session-forged capability"
-    );
 }
 
 #[test]
@@ -2925,6 +3017,147 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
+}
+
+// Receipt-validation work is internal: an accepted upload looks the same
+// whether the server validated each version receipt once or twice. The
+// counter proves that a checked wire decoder's validation is not repeated at
+// ingest, while a transport that hands over decoded messages still is.
+#[test]
+fn session_upload_validates_each_version_receipt_once() {
+    const ROWS: usize = 3;
+    for wire in [true, false] {
+        let schema = owner_write_schema();
+        let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+        let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(0xc2, session_author, &schema);
+        let (client_transport, server_transport) = if wire { byte_duplex() } else { duplex() };
+        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+        let tx = client.mergeable_tx().unwrap();
+        for index in 0..ROWS {
+            tx.insert(
+                "todos",
+                cells(&format!("row {index}"), false, session_author),
+                Default::default(),
+            )
+            .unwrap();
+        }
+        let tx_id = tx.commit().unwrap();
+        client.tick().unwrap();
+
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        server.tick().unwrap();
+        let validations = crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get());
+        client.tick().unwrap();
+
+        assert_eq!(
+            validations, ROWS,
+            "wire={wire}: each uploaded version receipt is validated exactly once"
+        );
+        assert_eq!(
+            block_on(client.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap(),
+            tx_id
+        );
+        assert_eq!(server.read(&Query::from("todos")).unwrap().len(), ROWS);
+    }
+}
+
+// Write-policy work is internal: an accepted or rejected upload looks the
+// same whether the server evaluated each version's policy once or twice. The
+// counter proves the session admission proof no longer repeats the evaluation
+// that terminal ingest performs, while both outcomes stay unchanged.
+#[test]
+fn session_upload_evaluates_write_policy_once_per_version() {
+    const ROWS: usize = 3;
+    let schema = owner_write_schema();
+    let session_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, session_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    let tx = client.mergeable_tx().unwrap();
+    for index in 0..ROWS {
+        tx.insert(
+            "todos",
+            cells(&format!("row {index}"), false, session_author),
+            Default::default(),
+        )
+        .unwrap();
+    }
+    let tx_id = tx.commit().unwrap();
+    client.tick().unwrap();
+
+    crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+    server.tick().unwrap();
+    let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+    client.tick().unwrap();
+
+    assert_eq!(
+        evaluations, ROWS,
+        "each accepted version's write policy is evaluated exactly once"
+    );
+    assert_eq!(
+        block_on(client.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap(),
+        tx_id
+    );
+    assert_eq!(server.read(&Query::from("todos")).unwrap().len(), ROWS);
+}
+
+// Same internal accounting for a denial: the session writes a row owned by
+// someone else, bypassing the client's own policy check the way an untrusted
+// client can. The server still rejects it after one evaluation.
+#[test]
+fn session_upload_denied_by_write_policy_evaluates_it_once() {
+    let schema = owner_write_schema();
+    let session_author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc5, session_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    let tx_id = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0xf2), client.next_now_ms())
+                .made_by(session_author)
+                .cells(cells("not mine", false, other_author)),
+        )
+        .unwrap();
+    client
+        .node
+        .outbox
+        .borrow_mut()
+        .push(PendingUpload { tx_id, unit: None });
+    client.tick().unwrap();
+
+    crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+    server.tick().unwrap();
+    let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+    client.tick().unwrap();
+
+    assert_eq!(
+        evaluations, 1,
+        "the denied version is evaluated exactly once"
+    );
+    let handle = WriteHandle {
+        node: Rc::downgrade(&client.node.node),
+        row_uuid: row(0xf2),
+        tx_id,
+        local_tier: DurabilityTier::Local,
+        queued_status: None,
+        queued_alias: None,
+    };
+    let err = block_on(handle.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
 }
 
 // This sync-boundary test is intentionally lower-level: the public policy
@@ -4067,7 +4300,7 @@ fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionS
 }
 
 /// Alice registers application and internal waits before deferred persistence.
-/// Publishing locally must wake both Local waits, but cannot satisfy Edge.
+/// Publishing locally must wake both Local waits, but cannot satisfy Global.
 /// The Db facade is used to control owner turns without a client's tick driver.
 #[test]
 fn local_persistence_wakes_existing_transaction_waits() {
@@ -4116,11 +4349,11 @@ fn local_persistence_wakes_existing_transaction_waits() {
             observe_only: true,
         }
     ));
-    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Edge));
+    let mut global = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     assert!(local.as_mut().poll(&mut context).is_pending());
     assert!(observer.as_mut().poll(&mut context).is_pending());
-    assert!(edge.as_mut().poll(&mut context).is_pending());
+    assert!(global.as_mut().poll(&mut context).is_pending());
 
     block_on(db.tick()).unwrap();
     assert_eq!(
@@ -4129,7 +4362,7 @@ fn local_persistence_wakes_existing_transaction_waits() {
     );
     assert!(matches!(local.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
     assert!(matches!(observer.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
-    assert!(edge.as_mut().poll(&mut context).is_pending());
+    assert!(global.as_mut().poll(&mut context).is_pending());
 }
 
 /// A deferred local writer transfers its publication to the node queue before

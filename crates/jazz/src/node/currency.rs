@@ -70,11 +70,11 @@ where
                 versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
         }
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
                 version.layer(),
             )
         });
@@ -160,11 +160,11 @@ where
                 versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
             }
         }
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
                 version.layer(),
             )
         });
@@ -238,12 +238,12 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema
         } else {
-            self.table_in_schema(table, self.catalogue.local_schema_version_id)?;
+            self.table_in_schema_ref(table, self.catalogue.local_schema_version_id)?;
             self.catalogue.local_schema_version_id
         };
         self.query_global_layer_winner_in_schema(schema_version, table, row_uuid, layer)
@@ -471,7 +471,7 @@ where
             self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
         {
             let schema_version = if self
-                .table_in_schema(table, self.catalogue.active_schema.schema)
+                .table_in_schema_ref(table, self.catalogue.active_schema.schema)
                 .is_ok()
             {
                 self.catalogue.active_schema.schema
@@ -504,11 +504,11 @@ where
             }
         }
         let mut versions = versions_by_key.into_values().collect::<Vec<_>>();
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
                 version.layer(),
             )
         });
@@ -766,7 +766,7 @@ where
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema
@@ -947,13 +947,12 @@ where
         } else {
             NodeAlias(record_view.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?)
         };
-        let tx_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "history tx node alias must exist",
-            ))?;
+        let tx_node =
+            self.node_aliases
+                .node_for_alias(tx_node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "history tx node alias must exist",
+                ))?;
         let tx_time = if is_deletion {
             TxTime(record_view.get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?)
         } else {
@@ -1003,6 +1002,19 @@ where
                     record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
                 )?,
             ))
+        })
+        .await
+    }
+
+    /// The stored transaction's global time, if the transaction is stored.
+    pub(super) async fn query_transaction_global_time(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Option<Option<GlobalTime>>, Error> {
+        self.query_transaction_fields(tx_id, |_, _, record| {
+            Ok(record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .map(GlobalTime))
         })
         .await
     }
@@ -1340,7 +1352,7 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .table_in_schema_ref(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
             self.catalogue.active_schema.schema

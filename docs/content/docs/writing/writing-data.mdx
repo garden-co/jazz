@@ -176,21 +176,19 @@ mutation methods.
 
 ## Write durability tiers
 
-For ordinary mutations and mergeable transactions, the tier passed to `wait({ tier })` controls how
-far the mutation must propagate before the promise resolves: locally on the client (`local`), the
-nearest edge server (`edge`), or the global core (`global`).
+For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
+confirmation the caller waits for:
 
-| Tier     | Resolves when                       |
-| -------- | ----------------------------------- |
-| `local`  | Persisted to local durable storage  |
-| `edge`   | Acknowledged by nearest sync server |
-| `global` | Propagated to global core           |
+| Tier     | Resolves when                           |
+| -------- | --------------------------------------- |
+| `local`  | Saved by the local persistence driver   |
+| `global` | Authorized and durably accepted by Core |
 
 <WriteTierDiagram />
 
-Offline, only `local` can resolve. `edge` and `global` waits stay pending until the device
-reconnects and the queued write either propagates upstream or is rejected. Choosing a higher tier
-changes when the promise settles; it does not delay the initial local mutation.
+Offline, only `local` can resolve. A `global` wait stays pending until the device
+reconnects and Core accepts or rejects the queued write. Both choices apply the
+initial mutation locally and upload it when connected.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">

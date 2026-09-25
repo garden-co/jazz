@@ -107,7 +107,7 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         projection: SchemaProjection<R>,
         /// Data branch/prefix selected for this source.
         data: DataSource<R::DataBranch>,
-        /// Local, edge, or global source currency.
+        /// Local or global source currency.
         tier: DurabilityTier,
     },
     /// Effective branch-keyed rows from a live head and optional live/frozen base.
@@ -118,7 +118,7 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         head: BranchKey,
         /// Optional exact fallback source.
         base: Option<BranchViewSourceBase>,
-        /// Local, edge, or global source currency for live inputs.
+        /// Local or global source currency for live inputs.
         tier: DurabilityTier,
     },
     /// Historical global cut.
@@ -425,7 +425,7 @@ pub(crate) enum FrontierPosition {
     GlobalTime(GlobalTime),
     /// A concrete snapshot frontier fingerprint.
     Snapshot(Vec<u8>),
-    /// A concrete local/edge transaction frontier.
+    /// A concrete local transaction frontier.
     Transaction(TxId),
     /// Opaque ordered stream position for transports that do not expose Jazz
     /// sequence ids directly.

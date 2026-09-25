@@ -260,13 +260,13 @@ describe("forRequest auth and policy", () => {
         description: scopeTag,
         owner_id: alice.user,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     // forRequest session surfaces its own row.
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows).toEqual([
           expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.user }),
@@ -284,14 +284,14 @@ describe("forRequest auth and policy", () => {
           description: scopeTag,
           owner_id: "00000000-0000-4000-8000-000000000099",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     // Backend can see the row regardless of ownership.
     await vi.waitFor(
       async () => {
         const rows = await backendDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows).toContainEqual(expect.objectContaining({ id: row.id }));
       },
@@ -417,7 +417,7 @@ describe("forRequest auth and policy", () => {
           description: scopeTag,
           owner_id: alice.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       writerBackend
         .insert(todoApp.todos, {
           title: "bob-item",
@@ -425,7 +425,7 @@ describe("forRequest auth and policy", () => {
           description: scopeTag,
           owner_id: bob.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       writerBackend
         .insert(todoApp.todos, {
           title: "carol-item",
@@ -433,7 +433,7 @@ describe("forRequest auth and policy", () => {
           description: scopeTag,
           owner_id: carol.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ]);
 
     const aliceSessionDb = readerContext.forSession({
@@ -458,7 +458,7 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const rows = await readerBackend.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((r) => r.title).sort()).toEqual(["alice-item", "bob-item", "carol-item"]);
       },
@@ -469,9 +469,9 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const [aliceSession, aliceRequest, bobSession] = await Promise.all([
-          aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+          aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
         ]);
         expect(aliceSession.map((r) => r.title)).toEqual(["alice-item"]);
         expect(aliceRequest.map((r) => r.title)).toEqual(["alice-item"]);
@@ -513,7 +513,7 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: alice.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       bobDb
         .insert(todoApp.todos, {
           title: "bob-todo",
@@ -521,14 +521,14 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: bob.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ]);
 
     // Alice's scoped Db should only surface her own row.
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
@@ -539,7 +539,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((r) => r.title)).toEqual(["bob-todo"]);
       },
@@ -555,7 +555,7 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: bob.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
     await expect(
       bobDb
@@ -565,7 +565,7 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: alice.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     // A new Db handle for alice (same identity, new forRequest call — simulating
@@ -576,7 +576,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceAgain.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
@@ -608,7 +608,7 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: alice.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       bobDb
         .insert(todoApp.todos, {
           title: "bob-todo",
@@ -616,20 +616,22 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: bob.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ]);
 
     // Each user can update their own row concurrently.
     await Promise.all([
-      aliceDb.update(todoApp.todos, aliceRow.id, { title: "alice-updated" }).wait({ tier: "edge" }),
-      bobDb.update(todoApp.todos, bobRow.id, { title: "bob-updated" }).wait({ tier: "edge" }),
+      aliceDb
+        .update(todoApp.todos, aliceRow.id, { title: "alice-updated" })
+        .wait({ tier: "global" }),
+      bobDb.update(todoApp.todos, bobRow.id, { title: "bob-updated" }).wait({ tier: "global" }),
     ]);
 
     await vi.waitFor(
       async () => {
         const [aliceRows, bobRows] = await Promise.all([
-          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
         ]);
         expect(aliceRows.map((r) => r.title)).toEqual(["alice-updated"]);
         expect(bobRows.map((r) => r.title)).toEqual(["bob-updated"]);
@@ -647,11 +649,11 @@ describe("forRequest concurrent session isolation", () => {
         description: scopeTag,
         owner_id: alice.user,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((row) => row.title)).toEqual(["alice-upserted"]);
       },
@@ -684,12 +686,12 @@ describe("forRequest concurrent session isolation", () => {
     // terminal and quiet: a later permitted write cannot inherit a stale queued
     // failure from the rejected attempt.
     await bobDb.update(todoApp.todos, bobRow.id, { title: "bob-still-writable" }).wait({
-      tier: "edge",
+      tier: "global",
     });
     await vi.waitFor(
       async () => {
         const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows.map((row) => row.title)).toEqual(["bob-still-writable"]);
       },
@@ -722,7 +724,7 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: alice.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       bobDb
         .insert(todoApp.todos, {
           title: "bob-todo",
@@ -730,28 +732,28 @@ describe("forRequest concurrent session isolation", () => {
           description: scopeTag,
           owner_id: bob.user,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ]);
 
     // Cross-user deletes stage locally but are rejected by the serving authority.
-    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "edge" })).rejects.toThrow(
+    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" })).rejects.toThrow(
       /AuthorizationDenied|Write rejected by server authorization/,
     );
-    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "edge" })).rejects.toThrow(
+    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" })).rejects.toThrow(
       /AuthorizationDenied|Write rejected by server authorization/,
     );
 
     // Each user can delete their own row concurrently.
     await Promise.all([
-      aliceDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "edge" }),
-      bobDb.delete(todoApp.todos, bobRow.id).wait({ tier: "edge" }),
+      aliceDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" }),
+      bobDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" }),
     ]);
 
     await vi.waitFor(
       async () => {
         const [aliceRows, bobRows] = await Promise.all([
-          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
         ]);
         expect(aliceRows).toEqual([]);
         expect(bobRows).toEqual([]);
@@ -794,14 +796,14 @@ describe("forRequest concurrent session isolation", () => {
         description: scopeTag,
         owner_id: alice.user,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     // Both alice handles surface the row; neither should see bob's (not yet inserted).
     await vi.waitFor(
       async () => {
         const [rows1, rows2] = await Promise.all([
-          aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+          aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
         ]);
         expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
         expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
@@ -816,13 +818,13 @@ describe("forRequest concurrent session isolation", () => {
         description: scopeTag,
         owner_id: bob.user,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     // After bob's insert lands, neither alice handle should see bob's row.
     await vi.waitFor(
       async () => {
         const bobRows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(bobRows).toHaveLength(1);
       },
@@ -830,8 +832,8 @@ describe("forRequest concurrent session isolation", () => {
     );
 
     const [rows1, rows2] = await Promise.all([
-      aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-      aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+      aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+      aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
     ]);
     expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
     expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
@@ -859,13 +861,13 @@ describe("forRequest concurrent session isolation", () => {
         description: scopeTag,
         owner_id: alice.user,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     // Wait for alice's row to be visible to alice, then verify carol sees nothing.
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "edge",
+          tier: "global",
         });
         expect(rows).toHaveLength(1);
       },
@@ -873,7 +875,7 @@ describe("forRequest concurrent session isolation", () => {
     );
 
     const carolRows = await carolDb.all(todoApp.todos.where({ description: scopeTag }), {
-      tier: "edge",
+      tier: "global",
     });
     expect(carolRows).toEqual([]);
   }, 30_000);
@@ -928,17 +930,17 @@ it.each(["table", "relation"] as const)(
     await writer
       .asBackend()
       .insert(app.rooms, { title: "room-a", code: "code-a" })
-      .wait({ tier: "edge" })
+      .wait({ tier: "global" })
       .then(async (row) => {
-        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
         return row;
       });
     await writer
       .asBackend()
       .insert(app.rooms, { title: "room-b", code: "code-b" })
-      .wait({ tier: "edge" })
+      .wait({ tier: "global" })
       .then(async (row) => {
-        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
         return row;
       });
     const identity = await createExternalIdentity("same-actor", server, appId);
@@ -953,10 +955,10 @@ it.each(["table", "relation"] as const)(
     const neither = reader.forSession({ ...base, claims: {} });
     for (let round = 0; round < 3; round++) {
       const [rowsA, rowsB, rowsNeither, rowsBackend] = await Promise.all([
-        a.all(query, { tier: "edge" }),
-        b.all(query, { tier: "edge" }),
-        neither.all(query, { tier: "edge" }),
-        reader.asBackend().all(query, { tier: "edge" }),
+        a.all(query, { tier: "global" }),
+        b.all(query, { tier: "global" }),
+        neither.all(query, { tier: "global" }),
+        reader.asBackend().all(query, { tier: "global" }),
       ]);
       expect(rowsA.map((row) => row.title)).toEqual(["room-a"]);
       expect(rowsB.map((row) => row.title)).toEqual(["room-b"]);
@@ -969,18 +971,18 @@ it.each(["table", "relation"] as const)(
       seenBackend: string[][] = [];
     const stops = [
       a.subscribe(query, (rows) => seenA.push(rows.map((row) => row.title).sort()), {
-        tier: "edge",
+        tier: "global",
       }),
       b.subscribe(query, (rows) => seenB.push(rows.map((row) => row.title).sort()), {
-        tier: "edge",
+        tier: "global",
       }),
       neither.subscribe(query, (rows) => seenNeither.push(rows.map((row) => row.title).sort()), {
-        tier: "edge",
+        tier: "global",
       }),
       reader
         .asBackend()
         .subscribe(query, (rows) => seenBackend.push(rows.map((row) => row.title).sort()), {
-          tier: "edge",
+          tier: "global",
         }),
     ];
     try {
@@ -993,17 +995,17 @@ it.each(["table", "relation"] as const)(
       await writer
         .asBackend()
         .insert(app.rooms, { title: "room-a-next", code: "code-a" })
-        .wait({ tier: "edge" })
+        .wait({ tier: "global" })
         .then(async (row) => {
-          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
           return row;
         });
       await writer
         .asBackend()
         .insert(app.rooms, { title: "room-b-next", code: "code-b" })
-        .wait({ tier: "edge" })
+        .wait({ tier: "global" })
         .then(async (row) => {
-          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
           return row;
         });
       await vi.waitFor(() => {
@@ -1030,7 +1032,7 @@ it.each(["table", "relation"] as const)(
           return row;
         });
       expect(
-        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "edge" }),
+        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "global" }),
       ).toEqual([]);
       const localA: string[][] = [],
         localB: string[][] = [];
@@ -1113,12 +1115,14 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   // state; constructing it must not reconnect the shared client.
   const later = reader.asBackend();
   await later.insert(app.notes, { title: "offline-later" }).wait({ tier: "local" });
-  expect(await writer.asBackend().all(app.notes, { tier: "edge" })).toEqual([]);
+  expect(await writer.asBackend().all(app.notes, { tier: "global" })).toEqual([]);
 
   await sibling.reconnect();
   await vi.waitFor(async () => {
     expect(
-      (await writer.asBackend().all(app.notes, { tier: "edge" })).map((note) => note.title).sort(),
+      (await writer.asBackend().all(app.notes, { tier: "global" }))
+        .map((note) => note.title)
+        .sort(),
     ).toEqual(["offline-later", "offline-sibling"]);
   });
 }, 30_000);
@@ -1150,7 +1154,7 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const owner = context.asBackend();
   const sibling = context.asBackend();
   await owner.disconnect();
-  const pendingRemoteRead = sibling.all(app.notes, { tier: "edge" });
+  const pendingRemoteRead = sibling.all(app.notes, { tier: "global" });
   const rejectedRead = expect(pendingRemoteRead).rejects.toThrow("JazzContext is shutting down");
   const closing = context.shutdown();
   expect(() => sibling.insert(app.notes, { title: "during-close" })).toThrow(

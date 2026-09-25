@@ -1,5 +1,5 @@
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 
 use super::*;
 
@@ -84,7 +84,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
     let (note, _, note_tx) = alice
         .insert("notes", crate::row_input!("title" => "draft"))
         .expect("alice-authored note should insert");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[note_tx.expect("alice note should commit immediately")],
     )
@@ -139,7 +139,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
         )
         .expect("attributed update should succeed without a session")
         .expect("attributed update should commit immediately");
-    wait_for_edge_txs(&client, &[update_tx]).await;
+    wait_for_global_txs(&client, &[update_tx]).await;
 
     let updated = client
         .query(
@@ -197,7 +197,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
         .expect("system-authored note should insert without a session")
         .2
         .expect("system note should commit immediately");
-    wait_for_edge_txs(&client, &[system_tx]).await;
+    wait_for_global_txs(&client, &[system_tx]).await;
     let system = client
         .query(
             Query::from("notes")
@@ -256,7 +256,7 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
     let (note, _, note_tx) = alice
         .insert("notes", crate::row_input!("title" => "draft"))
         .expect("alice-authored note should insert");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[note_tx.expect("alice note should commit immediately")],
     )
@@ -297,7 +297,7 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
         )
         .expect("explicit updated_at override should succeed")
         .expect("backfill update should commit immediately");
-    wait_for_edge_txs(&client, &[update_tx]).await;
+    wait_for_global_txs(&client, &[update_tx]).await;
 
     let updated = client
         .query(
@@ -375,12 +375,12 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         .expect("system note should insert")
         .2
         .expect("system note should commit immediately");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[alice_owned_tx.expect("alice note should commit immediately")],
     )
     .await;
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &client,
         &[
             attributed_tx.expect("attributed note should commit immediately"),
@@ -439,7 +439,7 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         .delete("notes", alice_owned)
         .expect("creator should be able to delete her own row")
         .expect("creator delete should commit immediately");
-    wait_for_edge_txs(&alice, &[alice_update_tx, alice_delete_tx]).await;
+    wait_for_global_txs(&alice, &[alice_update_tx, alice_delete_tx]).await;
 
     let alice_after_mutations = alice
         .query(

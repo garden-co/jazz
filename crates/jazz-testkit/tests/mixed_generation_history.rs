@@ -122,7 +122,7 @@ async fn connect_ready(server: &JazzServer, schema: Schema, user: &str) -> JazzC
         .await
 }
 
-/// Insert alice's v1-era task and settle it at the edge. Returns the row id
+/// Insert alice's v1-era task and settle it at the server. Returns the row id
 /// and its project reference.
 async fn insert_v1_task(alice: &JazzClient) -> (ObjectId, ObjectId) {
     let project_id = ObjectId::new();
@@ -137,7 +137,7 @@ async fn insert_v1_task(alice: &JazzClient) -> (ObjectId, ObjectId) {
             ),
         )
         .expect("alice creates v1 task");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -145,7 +145,7 @@ async fn insert_v1_task(alice: &JazzClient) -> (ObjectId, ObjectId) {
     (row_id, project_id)
 }
 
-/// Update the task's v2-only columns and settle the write at the edge.
+/// Update the task's v2-only columns and settle the write at the server.
 async fn update_task_v2(bob: &JazzClient, row_id: ObjectId) {
     let transaction_id = bob
         .update(
@@ -157,7 +157,7 @@ async fn update_task_v2(bob: &JazzClient, row_id: ObjectId) {
             ],
         )
         .expect("bob updates the task under v2");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -347,7 +347,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update_
             )],
         )
         .expect("alice's late v1 write must be accepted");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -655,7 +655,7 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_im
             ),
         )
         .expect("alice creates a task before the draft publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -704,7 +704,7 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_im
             ),
         )
         .expect("alice keeps writing while the draft exists");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -795,7 +795,7 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable_imp
             vec![("tags".to_string(), Value::Text("sess-new".to_string()))],
         )
         .expect("bob updates only the tags column");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )

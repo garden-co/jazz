@@ -3,6 +3,7 @@ import {
   type CompiledPermissionsMap,
 } from "../schema-permissions.js";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,8 +14,20 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
+function validateServerHost(host: string | undefined): string | undefined {
+  if (host === undefined) return undefined;
+  if (isIP(host) === 0) {
+    throw new Error(`Invalid Jazz server host "${host}". Expected a concrete IP address.`);
+  }
+  if (host === "0.0.0.0" || host === "::") {
+    throw new Error(`Invalid Jazz server host "${host}". Wildcard addresses are not supported.`);
+  }
+  return host;
+}
 
 interface LocalJazzServerOptions {
+  /** Concrete IP address used for both listener binding and the advertised URL. */
+  host?: string;
   appId?: string;
   port?: number;
   dataDir?: string;
@@ -24,7 +37,6 @@ interface LocalJazzServerOptions {
   jwtAudience?: string;
   backendSecret?: string;
   adminSecret?: string;
-  upstreamUrl?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
@@ -68,11 +80,17 @@ async function createOwnedDataDir(): Promise<string> {
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
+  if ((options as { upstreamUrl?: unknown }).upstreamUrl !== undefined) {
+    throw new Error(
+      "Server edges are no longer supported. Remove upstreamUrl and connect clients directly to Core.",
+    );
+  }
   if (options.schema !== undefined && options.permissions == null) {
     throw new Error(
       "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
     );
   }
+  const host = validateServerHost(options.host);
   const schema =
     options.schema === undefined
       ? undefined
@@ -94,6 +112,7 @@ export async function startLocalJazzServer(
     server = await JazzServer.start({
       appId,
       port,
+      host,
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
@@ -101,7 +120,6 @@ export async function startLocalJazzServer(
       jwtAudience: options.jwtAudience,
       backendSecret,
       adminSecret,
-      upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       schema: schema ? [...schema] : undefined,

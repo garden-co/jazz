@@ -1215,6 +1215,8 @@ self.database.finish_persistence(persisted)?;
         self.catalogue.active_schema = active;
         self.query.version_storage_sources_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -1239,12 +1241,7 @@ self.database.finish_persistence(persisted)?;
         // cancelled/failed writer must not leave an absence proof alive after
         // its alias may have entered resident or durable storage.
         self.absent_node_alias = None;
-        let mut max_alias = self
-            .node_aliases
-            .values()
-            .map(|alias| alias.0)
-            .max()
-            .unwrap_or(0);
+        let mut max_alias = self.node_aliases.max_alias();
         for raw in self
             .database
             .primary_key_scan_raw("jazz_nodes", &[])

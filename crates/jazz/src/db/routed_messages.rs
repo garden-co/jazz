@@ -33,6 +33,29 @@ fn decode_envelope(bytes: &[u8]) -> Result<Envelope<'_>, String> {
     Ok(envelope)
 }
 
+#[cfg(test)]
+thread_local! {
+    static ROUTED_PAYLOAD_LIMIT_FOR_TEST: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Lower this thread's routed payload limit so a regression can cross it
+/// without hundreds of MiB of rows. `None` restores the protocol limit.
+#[cfg(test)]
+pub(super) fn set_routed_payload_limit_for_test(limit: Option<usize>) {
+    ROUTED_PAYLOAD_LIMIT_FOR_TEST.with(|cell| cell.set(limit));
+}
+
+/// Largest semantic payload one routed message admits: the logical-message
+/// ceiling minus the bounded envelope allowance.
+pub(super) fn max_routed_payload_bytes() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = ROUTED_PAYLOAD_LIMIT_FOR_TEST.with(std::cell::Cell::get) {
+        return limit;
+    }
+    crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES - MAX_ENVELOPE_OVERHEAD
+}
+
 /// The lease follows payload ownership through canonical and deferred queues.
 /// Its last owner releases transport capacity; it has no authority semantics.
 #[derive(Debug)]
@@ -40,12 +63,16 @@ pub struct ReceivedSyncMessage {
     /// The decoded canonical message.
     pub message: SyncMessage,
     pub(crate) lease: Option<BufferLease>,
+    /// The checked (untrusted-encoder) wire decoder produced this message, so
+    /// every version receipt it carries has already been validated.
+    pub(crate) receipts_validated: bool,
 }
 impl ReceivedSyncMessage {
     pub(crate) fn unleased(message: SyncMessage) -> Self {
         Self {
             message,
             lease: None,
+            receipts_validated: false,
         }
     }
 }
@@ -56,6 +83,7 @@ struct Pending {
     predecessors: Option<Vec<(u16, u64)>>,
     message: SyncMessage,
     lease: BufferLease,
+    receipts_validated: bool,
 }
 
 pub(super) struct RoutedMessages {
@@ -92,8 +120,7 @@ impl RoutedMessages {
         if channel as usize >= MAX_CHANNELS {
             return Err("invalid logical stream ID".into());
         }
-        if payload.len() > crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES - MAX_ENVELOPE_OVERHEAD
-        {
+        if payload.len() > max_routed_payload_bytes() {
             return Err("semantic message exceeds routed payload limit".into());
         }
         let ordinal = self.sent[channel as usize]
@@ -194,6 +221,7 @@ impl RoutedMessages {
             predecessors: envelope.predecessors,
             message,
             lease,
+            receipts_validated: context.validates_receipts(),
         });
         loop {
             let eligible = self.pending.iter().position(|pending| {
@@ -217,6 +245,7 @@ impl RoutedMessages {
             self.ready.push_back(ReceivedSyncMessage {
                 message: pending.message,
                 lease: Some(pending.lease),
+                receipts_validated: pending.receipts_validated,
             });
         }
         Ok(())

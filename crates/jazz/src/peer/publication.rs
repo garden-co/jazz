@@ -345,16 +345,11 @@ impl PeerState {
         }
     }
 
-    /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorSubject) -> Self {
-        Self::client_link(identity)
-    }
-
-    /// Construct an edge peer whose wire identity and read-policy identity differ.
+    /// Construct a client link whose wire identity and read-policy identity differ.
     ///
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
-    pub fn edge_client_with_permission_identity(
+    pub fn client_link_with_permission_identity(
         identity: AuthorSubject,
         permission_identity: AuthorSubject,
     ) -> Self {
@@ -403,7 +398,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) {
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} identity={:?} claims={:?}",
                 self, self.publication_owner, self.role, binding.0, binding.1,
@@ -478,7 +473,7 @@ impl PeerState {
         subscription: SubscriptionKey,
     ) -> Result<(AuthorSubject, BTreeMap<String, groove::records::Value>), Error> {
         self.subscription_policy_binding(subscription).ok_or_else(|| {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=missing_served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} states={:?} caller={}",
                     self,
@@ -561,7 +556,6 @@ impl PeerState {
                 }
                 state.clear_groove_runtime_handles();
             }
-            self.refresh_maintained_subscription_view_footprint(subscription);
         }
     }
 
@@ -587,7 +581,6 @@ impl PeerState {
         if let Some(stale) = stale {
             node.unsubscribe_groove_subscription(stale.subscription.id());
         }
-        self.refresh_maintained_subscription_view_footprint(subscription);
     }
 
     fn requires_selected_authority_source(
@@ -981,6 +974,18 @@ impl PeerState {
                         generation != node.physical_identity_generation()
                     })
             });
+        if metadata_was_stale
+            && self
+                .publication_states
+                .get(&subscription)
+                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .is_some_and(|maintained| maintained.initial_received)
+        {
+            self.metrics
+                .maintained_subscription_view
+                .full_diff_fallbacks
+                .runtime_resets += 1;
+        }
         self.clear_stale_groove_runtime_handles(node, subscription);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         self.ensure_query_subscription_registered(
@@ -1114,7 +1119,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
+        let trace_rehydrate = crate::debug_env::rehydrate_trace();
         let trace_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -1192,6 +1197,10 @@ impl PeerState {
                 .ok_or(Error::InvalidStoredValue(
                     "maintained subscription view is missing prepared state",
                 ))?;
+            self.metrics
+                .maintained_subscription_view
+                .full_diff_fallbacks
+                .membership_reconciliations += 1;
             return self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -1393,7 +1402,6 @@ impl PeerState {
                 view.maintained.acknowledge_peer_source_closure();
             }
         }
-        self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(Some(MaintainedCanonicalUpdate {
             changed: true,
             update,
@@ -1412,7 +1420,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        // Relay Edge children own a receiver-local graph. Before draining its
+        // Strict Global relay children own a receiver-local graph. Before draining its
         // terminal, atomically replace every compiled input source from the
         // exact selected authority closure. Do not let the generic
         // trusted-serving drain observe an authority output or a stale source
@@ -1541,7 +1549,7 @@ impl PeerState {
                             requires_authoritative_membership_reconcile |=
                                 transitions.requires_authoritative_membership_reconcile;
                         }
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+                        if crate::debug_env::covered_input_trace()
                             && (!transitions.adds.is_empty()
                                 || !transitions.program_fact_adds.is_empty())
                         {
@@ -1669,17 +1677,17 @@ impl PeerState {
             read_view,
             purpose,
         } = request;
-        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
+        let trace_rehydrate = crate::debug_env::rehydrate_trace();
         let open_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let relay_edge_requires_authority_source =
+        let relay_requires_authority_source =
             self.requires_selected_authority_source(subscription, purpose);
         // The downstream usage registration chose this policy scope.  Carry
         // that exact receipt into source resolution; the shared binding-view
         // key alone is not an authority identity in a multiplexed relay.
-        let source_authority_result_key = if relay_edge_requires_authority_source {
+        let source_authority_result_key = if relay_requires_authority_source {
             // The downstream opening can be serviced before the relay's
             // upstream Subscribe has been registered locally. That is normal
             // owner-loop ordering, not an invalid subscription. Suspend this
@@ -1704,7 +1712,7 @@ impl PeerState {
         };
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(subscription)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate peer={:p} owner={} subscription={subscription:?} identity={policy_identity:?} source={source_authority_result_key:?} purpose={purpose:?}",
                 self, self.publication_owner,
@@ -1713,12 +1721,12 @@ impl PeerState {
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             match purpose {
-                // A relay's selected Edge child is the browser half of a durable
-                // worker authority receipt. Every strict Edge child consumes the
+                // A relay's selected Global child is the browser half of a durable
+                // worker authority receipt. Every strict Global child consumes the
                 // same authority-selected membership, including unbounded
                 // filtered queries whose supporting rows are absent locally.
-                RehydratePurpose::Query if relay_edge_requires_authority_source => scoped
-                    .open_seeded_relay_edge_subscription_view_with_waker(
+                RehydratePurpose::Query if relay_requires_authority_source => scoped
+                    .open_seeded_relay_subscription_view_with_waker(
                         shape,
                         binding,
                         policy_identity,
@@ -1828,12 +1836,12 @@ impl PeerState {
             }
             Err(error) => return Err(error),
         };
-        // `open_seeded_relay_edge_subscription_view_with_waker` has already
+        // `open_seeded_relay_subscription_view_with_waker` has already
         // installed the exact source closure, driven the receiver graph, and
         // folded the same terminal batch it returns here. Repeating that work
         // used to create a second opening path that could publish a different
         // reset from the generic late-opener path.
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
                 self.publication_owner, transitions.adds, transitions.program_fact_adds,
@@ -2055,7 +2063,6 @@ impl PeerState {
             .or_default()
             .has_served_authorization_progress = true;
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(Some(update))
     }
 
@@ -2175,6 +2182,37 @@ impl PeerState {
         )
         .await
     }
+    /// Count a full rehydrate-and-diff that retires `subscription`'s view.
+    ///
+    /// Retiring a view that already published its initial result replaces
+    /// incremental maintenance with a full recompute. A first open or a retry
+    /// of a still-cold view is ordinary hydration and is not counted.
+    fn note_full_diff_reopen(
+        &mut self,
+        subscription: SubscriptionKey,
+        purpose: RehydratePurpose,
+    ) {
+        let published = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .is_some_and(|maintained| maintained.initial_received);
+        if !published {
+            return;
+        }
+        let fallbacks = &mut self.metrics.maintained_subscription_view.full_diff_fallbacks;
+        match purpose {
+            RehydratePurpose::Query => fallbacks.query_reopens += 1,
+            RehydratePurpose::AuthorizationSupport => fallbacks.authorization_support_reopens += 1,
+        }
+    }
+
+    /// Count a claim refresh that retires a published direct query view; its
+    /// replacement coverage key is opened cold.
+    pub(crate) fn note_claim_refresh_full_diff(&mut self, subscription: SubscriptionKey) {
+        self.note_full_diff_reopen(subscription, RehydratePurpose::Query);
+    }
+
     async fn rehydrate_query_for_subscription_with_purpose<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -2220,6 +2258,7 @@ impl PeerState {
         {
             self.metrics.maintained_subscription_view.rehydrate_attempts += 1;
         }
+        self.note_full_diff_reopen(subscription, purpose);
         self.clear_stale_groove_runtime_handles(node, subscription);
         let previous_member_result_set = self
             .publication_states
@@ -2599,7 +2638,6 @@ impl PeerState {
         }
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(Some(update))
     }
 
@@ -2824,7 +2862,6 @@ impl PeerState {
         }
         self.record_outgoing_view_update_metadata(&target_reset);
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(target_reset)
     }
 }

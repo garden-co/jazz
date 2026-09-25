@@ -36,7 +36,7 @@ where
             .ok_or(Error::InvalidStoredValue("current write schema missing"))?
             .schema
             .clone();
-        let table_schema = self.table_in_schema(table, schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, schema_version)?;
         let (head, _) = schema
             .project_branch_view_selector(&table_schema, head)
             .map_err(Error::InvalidBranchKey)?;
@@ -113,7 +113,7 @@ where
         if evidence.version != 1 {
             return Ok(None);
         }
-        let _table_schema = match self.table_in_schema(&evidence.table, authored_schema) {
+        let _table_schema = match self.table_in_schema_ref(&evidence.table, authored_schema) {
             Ok(table) => table,
             Err(Error::TableNotFound(_)) => return Ok(None),
             Err(error) => return Err(error),
@@ -391,10 +391,7 @@ where
                             matches!(tx.fate, Fate::Accepted)
                                 && tx.durability >= DurabilityTier::Global
                         }
-                        DurabilityTier::Edge => {
-                            matches!(tx.fate, Fate::Accepted)
-                                && tx.durability >= DurabilityTier::Edge
-                        }
+
                         DurabilityTier::None | DurabilityTier::Local => {
                             !matches!(tx.fate, Fate::Rejected(_))
                         }
@@ -550,8 +547,8 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, version)?;
+            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, version)?;
             let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
@@ -628,9 +625,7 @@ where
                 DurabilityTier::Global => {
                     matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
                 }
-                DurabilityTier::Edge => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Edge
-                }
+
                 DurabilityTier::None | DurabilityTier::Local => {
                     !matches!(tx.fate, Fate::Rejected(_))
                 }
@@ -667,8 +662,8 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, &version)?;
+            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, &version)?;
             let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
@@ -717,7 +712,9 @@ where
         read_schema_version: SchemaVersionId,
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let read_table = self.table_in_schema(table, read_schema_version)?.clone();
+        let read_table = self
+            .table_in_schema_ref(table, read_schema_version)?
+            .clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
@@ -765,8 +762,8 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(content.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let source_table = self.table_in_schema_ref(content.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, &content)?;
             let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
@@ -815,7 +812,9 @@ where
         read_schema_version: SchemaVersionId,
         snapshot: &Snapshot,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let read_table = self.table_in_schema(table, read_schema_version)?.clone();
+        let read_table = self
+            .table_in_schema_ref(table, read_schema_version)?
+            .clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
@@ -855,8 +854,8 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(content.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let source_table = self.table_in_schema_ref(content.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, &content)?;
             let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,

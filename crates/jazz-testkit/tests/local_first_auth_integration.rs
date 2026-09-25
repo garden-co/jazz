@@ -271,7 +271,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
         .insert("todos", todo_values("remember this", false))
         .expect("create todo");
 
-    // Let the row settle at EdgeServer so we can verify the server recognized
+    // Let the row settle at GlobalServer so we can verify the server recognized
     // our principal on the first connect.
     wait_for_rows(
         &first,
@@ -301,12 +301,12 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
         "reconnected client should see its own persisted row locally"
     );
 
-    // Server still recognizes the same principal: an EdgeServer query
+    // Server still recognizes the same principal: an GlobalServer query
     // (which requires successful server auth) succeeds and returns the row.
     wait_for_rows(
         &reconnected,
         jazz::query::Query::from("todos"),
-        "reconnected client re-authenticates with same principal and reads from edge",
+        "reconnected client re-authenticates with same principal and reads from server",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
     .await;
@@ -374,7 +374,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
 /// result. Alice's Ed25519-authenticated write keeps its author and millisecond
 /// timestamps even when the other three provenance fields are not projected.
 ///
-/// alice --insert--> edge --single-field query result--> alice
+/// alice --insert--> server --single-field query result--> alice
 #[tokio::test]
 async fn remote_single_provenance_fields_match_complete_provenance() {
     tokio::task::LocalSet::new()
@@ -398,7 +398,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             let (row_id, _, tx) = alice
                 .insert("todos", todo_values("independent provenance fields", false))
                 .expect("insert Alice's todo");
-            support::wait_for_edge_txs(&alice, &[tx.expect("insert transaction")]).await;
+            support::wait_for_global_txs(&alice, &[tx.expect("insert transaction")]).await;
 
             let columns = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
             let complete = tokio::time::timeout(
@@ -572,14 +572,14 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .await
         .expect("connect with short-lived token");
 
-    // Pre-expiry write: confirm the session is healthy and reaches the edge.
+    // Pre-expiry write: confirm the session is healthy and reaches the server.
     let (pre_id, pre_values, _) = client
         .insert("todos", todo_values("pre-expiry", false))
         .expect("pre-expiry create");
     wait_for_rows(
         &client,
         jazz::query::Query::from("todos"),
-        "pre-expiry todo settles at edge server",
+        "pre-expiry todo settles at Core",
         |rows| has_row(&rows, pre_id, &pre_values).then_some(()),
     )
     .await;

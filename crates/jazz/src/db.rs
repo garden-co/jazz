@@ -43,10 +43,10 @@ use crate::node::CurrentRowBindingRole;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    RowProvenance, TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -56,7 +56,7 @@ use crate::protocol::{
     CoverageKey, CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction,
     PermissionAdviceRequestId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
@@ -76,8 +76,8 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
-use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
+use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures};
 
 pub(crate) mod channel_endpoint;
 mod routed_messages;
@@ -86,7 +86,7 @@ pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
-pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
+pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -560,6 +560,42 @@ impl PeerChunkResolver {
             }
         }
         debug_assert!(state.relay_chunk_obligations <= MAX_RELAY_CHUNK_OBLIGATIONS);
+    }
+
+    /// Fail every local chunk read that still waits on an upstream. Close
+    /// calls this before its final query flush: no later owner turn can
+    /// deliver those chunks, and a detached evaluation waiting on one would
+    /// otherwise hold close open until a reconnect that never comes.
+    fn fail_local_demand_for_close(&self) {
+        let mut state = self.state.borrow_mut();
+        let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
+        let mut failed = false;
+        for request in requests {
+            let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
+                continue;
+            };
+            let waiters = std::mem::take(&mut pending.waiters);
+            for waiter in waiters {
+                match waiter {
+                    ChunkDemandWaiter::Local { sender, .. } => {
+                        failed = true;
+                        let _ = sender.send(Err(groove::chunks::ChunkError::Unavailable));
+                    }
+                    relay @ ChunkDemandWaiter::Relay { .. } => pending.waiters.push(relay),
+                }
+            }
+            if pending.waiters.is_empty() {
+                let upstream_id = pending.upstream_id;
+                state.pending_by_chunk.remove(&request);
+                state.chunk_by_upstream_id.remove(&upstream_id);
+                state
+                    .outbound
+                    .retain(|outbound| outbound.request_id != upstream_id);
+            }
+        }
+        if failed {
+            state.completion_generation = state.completion_generation.wrapping_add(1);
+        }
     }
 
     fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
@@ -1508,21 +1544,17 @@ trait LocalMutexBorrow<T> {
 impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
     #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 
     #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 }
@@ -1571,6 +1603,18 @@ pub trait TickScheduler {
     /// default keeps manually-driven hosts source-compatible.
     fn query_runtime_waker(&self) -> Option<Waker> {
         None
+    }
+
+    /// Whether this host polls a [`Db::tick`] once and drops it while still
+    /// pending, rather than awaiting it.
+    ///
+    /// Such a host cannot let a tick wait for a large-value chunk: the request
+    /// leaves through a later tick, and dropping the tick cancels the wait.
+    /// Covered subscription installs then hand chunk-waiting evaluation to a
+    /// later turn instead (#3349). Hosts that await their ticks keep the
+    /// default and complete installs inline.
+    fn drops_pending_ticks(&self) -> bool {
+        false
     }
 }
 
@@ -1928,8 +1972,6 @@ struct PendingLocalPublication {
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
 type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
-const MAX_EDGE_FATE_ROUTES: usize = 1024;
-const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 
 #[derive(Default)]
 struct AuthorityViewReceipts {
@@ -1950,57 +1992,14 @@ struct StagedInboundMessage {
     message: SyncMessage,
     lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
+    /// See [`ReceivedSyncMessage`]: set only from the checked wire decoder.
+    receipts_validated: bool,
 }
 
 struct PendingAuthorityViewUpdate {
     parts: ViewUpdateParts,
     authority_receipt_eligible: bool,
 }
-
-struct EdgeFateRoute {
-    authority: Option<AuthorityContext>,
-    queue: Weak<RefCell<Vec<SyncMessage>>>,
-    /// The edge-local acceptance has already been emitted to this exact
-    /// downstream session.  The later Core terminal fate remains separately
-    /// routable through the same retained obligation.
-    edge_acknowledged: bool,
-}
-
-/// The immutable identity of a client commit while its edge fate obligation is
-/// live.  An edge intentionally keeps a pre-proof upload out of durable
-/// transaction history, but it must still enforce history's one-payload-per-id
-/// rule across all client connections.  Normalize version order here because
-/// transport ordering is not semantically meaningful.
-#[derive(Clone, Debug)]
-struct EdgeFateCommitIdentity {
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-}
-
-impl EdgeFateCommitIdentity {
-    fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
-        let mut versions = versions.to_vec();
-        versions.sort();
-        let mut tx = tx.clone();
-        // An edge route compares durable commit identity across a local staged
-        // write and redacted carrier retransmissions. Its local policy hint is
-        // deliberately excluded from that identity.
-        tx.permission_subject = None;
-        Self { tx, versions }
-    }
-
-    fn matches(&self, other: &Self) -> bool {
-        self.tx == other.tx && self.versions == other.versions
-    }
-}
-
-/// The shared edge obligation for one transaction.
-struct EdgeFateObligation {
-    identity: EdgeFateCommitIdentity,
-    routes: Vec<EdgeFateRoute>,
-}
-
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
 
 pub(super) struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
@@ -2260,38 +2259,6 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
-/// Deliver the edge's own admission fate through the same route registry that
-/// later carries the selected Core fate.  This avoids a direct-response path
-/// that would acknowledge only the tick currently handling the upload (and
-/// would duplicate a retransmitted upload), while a rejection retires the
-/// obligation because there is no admitted unit for Core to settle.
-fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMessage) {
-    let terminal = matches!(
-        fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Rejected(_),
-            ..
-        }
-    );
-    let mut routes = routes.borrow_mut();
-    let Some(obligation) = routes.get_mut(&tx_id) else {
-        return;
-    };
-    obligation.routes.retain_mut(|route| {
-        let Some(queue) = route.queue.upgrade() else {
-            return false;
-        };
-        if terminal || !route.edge_acknowledged {
-            queue.borrow_mut().push(fate.clone());
-            route.edge_acknowledged = true;
-        }
-        !terminal
-    });
-    if obligation.routes.is_empty() {
-        routes.remove(&tx_id);
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 
 enum LocalReplayStatus {
@@ -2513,26 +2480,6 @@ where
     Ok(())
 }
 
-/// A parked fate either awaits its first admitted upstream or belongs to one
-/// admitted upstream epoch. Drop routes for departed/replaced sessions (and
-/// dead subscriber queues) eagerly: retaining a weak queue alone would let
-/// arbitrary uploads grow this registry forever.
-fn prune_edge_fate_routes(
-    routes: &mut BTreeMap<TxId, EdgeFateObligation>,
-    admitted: Option<AuthorityContext>,
-) {
-    routes.retain(|_, obligation| {
-        obligation.routes.retain(|route| {
-            route.queue.upgrade().is_some()
-                && match (route.authority, admitted) {
-                    (None, _) => true,
-                    (Some(route), Some(admitted)) => admitted.same_admitted_link(route),
-                    (Some(_), None) => false,
-                }
-        });
-        !obligation.routes.is_empty()
-    });
-}
 type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
@@ -2621,6 +2568,15 @@ fn direct_schema_view_lens(
                 ErrorCode::Schema,
                 format!(
                     "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.composite_indexes != target_table.composite_indexes {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes composite indexes on {} without explicit index admission",
                     target_table.name
                 ),
             ));
@@ -2933,18 +2889,32 @@ pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
-    authority_members: HashSet<TxId>,
-    authority_receipts: HashSet<TxId>,
+    /// Declared by a server shell that owns final authority for its writes.
+    declared_root: bool,
+    /// Sticky: set once any upstream attaches, including after the fact.
+    upstream_attached: bool,
 }
 
 impl UploadOutbox {
+    /// Whether a subscriber upload this node settled terminally has nobody
+    /// above it to forward to. Only a declared root that has never attached
+    /// an upstream qualifies; anything else must queue and relay as usual.
+    pub(super) fn settles_uploads_locally(&self) -> bool {
+        self.declared_root && !self.upstream_attached
+    }
+
+    #[cfg(any(test, feature = "runtime"))]
+    pub(super) fn declare_root(&mut self) {
+        self.declared_root = true;
+    }
+
+    pub(super) fn mark_upstream_attached(&mut self) {
+        self.upstream_attached = true;
+    }
+
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
-        }
-        if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-            self.authority_members
-                .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
         }
         self.entries.push_back(pending);
         true
@@ -2958,49 +2928,18 @@ impl UploadOutbox {
         self.entries.len()
     }
 
+    pub(super) fn contains(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id)
+    }
+
     fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
         self.entries.retain(|pending| keep(pending));
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
-        self.reindex_authority_members();
-    }
-
-    fn reindex_authority_members(&mut self) {
-        self.authority_members.clear();
-        for pending in &self.entries {
-            if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
-                self.authority_members
-                    .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
-            }
-        }
-        self.authority_receipts
-            .retain(|tx_id| self.authority_members.contains(tx_id));
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
-        if !self.authority_members.is_empty() {
-            self.authority_receipts.extend(
-                released
-                    .iter()
-                    .filter(|tx_id| self.authority_members.contains(tx_id))
-                    .copied(),
-            );
-            let completed = self
-                .entries
-                .iter()
-                .filter(|pending| match &pending.unit {
-                    Some(SyncMessage::AuthorityPublication(publication)) => publication
-                        .commits
-                        .iter()
-                        .all(|unit| self.authority_receipts.contains(&unit.tx.tx_id)),
-                    _ => released.contains(&pending.tx_id),
-                })
-                .map(|pending| pending.tx_id)
-                .collect::<HashSet<_>>();
-            self.retain(|pending| !completed.contains(&pending.tx_id));
-            return completed;
-        }
         // Ordinary single-transaction uploads retain their prefix fast path.
         let completed = released.clone();
         while self
@@ -3032,10 +2971,12 @@ struct PendingUpload {
 /// recovery marker or an earlier same-transaction reconstruction.
 fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessage>) -> bool {
     let mut outbox = outbox.borrow_mut();
-    if let Some(pending) = outbox
-        .entries
-        .iter_mut()
-        .find(|pending| pending.tx_id == tx_id)
+    // `tx_ids` mirrors `entries`, so a new transaction skips the linear search.
+    if outbox.tx_ids.contains(&tx_id)
+        && let Some(pending) = outbox
+            .entries
+            .iter_mut()
+            .find(|pending| pending.tx_id == tx_id)
     {
         let Some(unit) = unit else {
             return false;
@@ -3047,7 +2988,6 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
         // but before subscriber ingest queues the exact inbound unit. The
         // canonical payload must win even when both entries have a body.
         pending.unit = Some(unit);
-        outbox.reindex_authority_members();
         return true;
     }
     outbox.push(PendingUpload { tx_id, unit });
@@ -3115,7 +3055,7 @@ pub struct QueryAttachment {
     /// A memory-only foreground reads local state from its durable owner.
     /// That delivery is required independently of any remote authority receipt.
     requires_delivery_receipt: bool,
-    /// Edge/Global coverage is live authority evidence, not merely a newer
+    /// Global coverage is live authority evidence, not merely a newer
     /// durable view generation.
     requires_current_authority_receipt: bool,
     registrations: Vec<SubscriptionKey>,
@@ -3199,6 +3139,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
+mod empty_opening;
+pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3270,7 +3213,6 @@ use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
 mod row_availability;
-mod row_version_repairs;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
@@ -3291,6 +3233,10 @@ pub struct ReadOpts {
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
+    /// What to do with an empty, unsettled opening. Host read-option state
+    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    #[serde(default)]
+    pub empty_opening: EmptyOpening,
 }
 
 impl Default for ReadOpts {
@@ -3301,6 +3247,7 @@ impl Default for ReadOpts {
             propagation: Propagation::Full,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
+            empty_opening: EmptyOpening::Deliver,
         }
     }
 }
@@ -3373,6 +3320,13 @@ fn row_already_deleted(row: RowUuid) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
         format!("row already deleted: {}", row.0),
+    )
+}
+
+fn row_already_exists(table: &str, row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("row already exists in table {table}: {}", row.0),
     )
 }
 
@@ -4482,7 +4436,14 @@ where
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .stage_exclusive_insert(
+                self.tx_id(),
+                table,
+                row,
+                cells,
+                options.updated_at_ms,
+                options.row_id.is_some(),
+            )
             .await?;
         Ok(row)
     }
@@ -4705,7 +4666,7 @@ where
         let state = self.write_state().await?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
-            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+            Fate::Pending if tier >= DurabilityTier::Global => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
             )),
@@ -4905,7 +4866,8 @@ struct SubscriptionState {
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
-    /// Online remote-if-possible overlays pending changes on scoped inputs.
+    /// An online remote read with immediate local updates overlays pending
+    /// changes on scoped inputs.
     pending_overlay: bool,
     remote_read_tier: Option<DurabilityTier>,
     /// Once this stream has an upstream, cached durable state needs a receipt
@@ -4925,6 +4887,11 @@ struct SubscriptionState {
     /// A non-durable foreground has not yet received its local owner's answer.
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
+    /// Global coverage held only while a non-durable foreground's
+    /// local-first-unless-empty opening gate is armed: its settled authority
+    /// answer, relayed by the storage owner, is what may release an empty
+    /// opening. Retired as soon as the gate releases.
+    authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
 }
 
@@ -4943,6 +4910,14 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
+    /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
+    opening_gate: Option<OpeningGate>,
+    /// This stream is an `EmptyOpening::AwaitRemote` offset window read as a
+    /// strict remote view, with a local-first fallback beside it.
+    remote_window: bool,
+    /// The remote window released unopened because its remote could no
+    /// longer answer; its stream now serves the local-first fallback.
+    window_fell_back: bool,
 }
 
 struct SubscriptionPublicationSnapshot {
@@ -5007,7 +4982,7 @@ impl SubscriptionSender {
         index: &RelationSnapshotIndex,
     ) -> Result<Option<SubscriptionPublicationSnapshot>, Error> {
         let publication = self.publication.borrow();
-        if tier >= DurabilityTier::Edge
+        if tier >= DurabilityTier::Global
             && !settled
             && publication.opened
             && publication.deferred.is_none()
@@ -5053,11 +5028,20 @@ impl SubscriptionSender {
         let mut publication = self.publication.borrow_mut();
         if !publishable
             || !materialized
-            || (self.requested_tier >= DurabilityTier::Edge && !settled)
+            || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
+            // A strict remote window withholds its unsettled opening here;
+            // remember it so a link loss can still release that opening.
+            if publishable
+                && materialized
+                && !publication.opened
+                && let Some(gate) = publication.opening_gate.as_mut()
+            {
+                gate.withheld = true;
+            }
             if publication.opened
                 && publication.deferred.is_none()
-                && self.requested_tier >= DurabilityTier::Edge
+                && self.requested_tier >= DurabilityTier::Global
             {
                 publication.deferred = Some(before.ok_or_else(|| {
                     Error::new(
@@ -5070,8 +5054,27 @@ impl SubscriptionSender {
             // immediate delivery. Do not checkpoint those updates. If local
             // required cells are actually missing, resume with a canonical
             // reset when the maintained result becomes materialized again.
-            publication.reset |= reset || self.requested_tier < DurabilityTier::Edge;
+            publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
+        }
+        if publication.opening_gate.is_some() {
+            // Local-first unless empty: withhold the opening while it is still
+            // empty and unanswered (unsettled, or for a non-durable foreground
+            // its authority witness unanswered). The first answered or
+            // non-empty result releases the gate and opens with a canonical
+            // reset below.
+            if !publication.opened
+                && publication
+                    .opening_gate
+                    .is_some_and(|gate| gate.awaits_answer(settled))
+                && snapshot.root_count == 0
+            {
+                if let Some(gate) = publication.opening_gate.as_mut() {
+                    gate.withheld = true;
+                }
+                return Ok(false);
+            }
+            publication.opening_gate = None;
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
             let current = SubscriptionPublicationSnapshot::capture(snapshot, index)?;
@@ -5109,11 +5112,40 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        if matches!(&event, SubscriptionEvent::Closed)
+        let terminal = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
-                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission))
-        {
-            self.publication.borrow_mut().deferred = None;
+                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
+        if terminal {
+            let mut publication = self.publication.borrow_mut();
+            publication.deferred = None;
+            // A rejection releases a withheld local-first opening: the
+            // caller sees the (empty) local result, then the rejection.
+            if let Some(gate) = publication.opening_gate.take()
+                && gate.withheld
+                && gate.route == OpeningRoute::LocalFirst
+                && !publication.opened
+                && publication.unresolved.is_empty()
+            {
+                publication.opened = true;
+                drop(publication);
+                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
+                    reset: true,
+                    publishable: true,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    settled: false,
+                    tier: self.requested_tier,
+                });
+            }
+        } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
+            // Receipt-only transitions bypass `publish`; before a gated
+            // stream has opened there is no published view to transition.
+            let publication = self.publication.borrow();
+            if publication.opening_gate.is_some() && !publication.opened {
+                return Ok(());
+            }
         }
         self.sender.unbounded_send(event)
     }
@@ -5280,7 +5312,7 @@ pub enum SubscriptionEvent {
         /// Typed structural edits to already hydrated terminal rows.
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Whether the result is complete at the requested read tier.
-        /// Public Edge/Global streams emit only settled results. Local streams
+        /// Public Global streams emit only settled results. Local streams
         /// can publish materialized local rows before remote coverage settles.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -5306,8 +5338,8 @@ enum SubscriptionFinalization {
 
 /// Stream of application-ready subscription events.
 ///
-/// Local results publish as soon as required cells are materialized. Edge and
-/// Global results also wait for settlement at the requested tier. Withheld
+/// Local results publish as soon as required cells are materialized. Global
+/// results also wait for settlement at the requested tier. Withheld
 /// changes are coalesced relative to the last emitted result, so consumers do
 /// not maintain provisional snapshots or replay hidden terminal history.
 pub struct SubscriptionStream {
@@ -5316,6 +5348,10 @@ pub struct SubscriptionStream {
     cleanup: Option<SubscriptionCleanup>,
     finalization: Option<SubscriptionFinalization>,
     terminated: bool,
+    /// The local-first read of a remote window. Dropped once the window
+    /// opens; served while the window cannot be answered, until it opens.
+    window_fallback: Option<Box<SubscriptionStream>>,
+    serving_fallback: bool,
 }
 
 struct CleanupGuard {
@@ -5351,6 +5387,14 @@ impl SubscriptionStream {
     /// so cancelling this caller future leaves a later `close` able to resume
     /// and await the same finalization command.
     pub async fn close(&mut self) -> Result<(), Error> {
+        self.close_own().await?;
+        if let Some(fallback) = self.window_fallback.as_mut() {
+            Box::pin(fallback.close()).await?;
+        }
+        Ok(())
+    }
+
+    async fn close_own(&mut self) -> Result<(), Error> {
         if self.finalization.is_none() {
             let Some(cleanup) = self.cleanup.take() else {
                 return Ok(());
@@ -5413,15 +5457,74 @@ impl SubscriptionStream {
 
     /// Await the next materialized subscription event.
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
-        if self.terminated {
-            return None;
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
+    pub(super) fn is_remote_window(&self) -> bool {
+        self._state
+            .borrow()
+            .sender
+            .publication
+            .borrow()
+            .remote_window
+    }
+
+    /// Settle which side of a remote window this stream serves. Once the
+    /// window opens (or ends without opening) its fallback is dropped. Once
+    /// it falls back, the fallback serves while the window stays registered;
+    /// see [`Self::poll_window_fallback`].
+    fn sync_window_fallback(&mut self) {
+        if self.serving_fallback || self.window_fallback.is_none() {
+            return;
         }
+        let (fell_back, decided) = {
+            let state = self._state.borrow();
+            let publication = state.sender.publication.borrow();
+            (
+                publication.window_fell_back,
+                publication.opened || publication.opening_gate.is_none(),
+            )
+        };
+        if fell_back {
+            self.serving_fallback = true;
+        } else if decided {
+            self.window_fallback = None;
+        }
+    }
+
+    /// Serve a fallen-back window: the cached local-first page until the
+    /// still-registered remote window opens with the server's page, which
+    /// replaces it with one reset. From then on the stream is the window.
+    fn poll_window_fallback(&mut self, cx: &mut Context<'_>) -> Poll<Option<SubscriptionEvent>> {
         loop {
-            let event =
-                std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
-            if subscription_event_is_publishable(&event) {
-                return Some(event);
+            match Pin::new(&mut self.receiver).poll_next(cx) {
+                Poll::Ready(Some(
+                    event @ SubscriptionEvent::Delta {
+                        reset: true,
+                        publishable: true,
+                        ..
+                    },
+                )) => {
+                    self.serving_fallback = false;
+                    self.window_fallback = None;
+                    return Poll::Ready(Some(event));
+                }
+                // Anything before the window's opening reset (its link wake,
+                // receipt-only transitions) describes no published view.
+                Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
+                // A rejected window is reported like any rejected read; the
+                // fallback keeps serving the cached page afterwards.
+                Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                    return Poll::Ready(Some(event));
+                }
+                // A closed window leaves the fallback serving.
+                Poll::Ready(Some(SubscriptionEvent::Closed)) => break,
+                Poll::Ready(None) | Poll::Pending => break,
             }
+        }
+        match self.window_fallback.as_mut() {
+            Some(fallback) => Pin::new(fallback.as_mut()).poll_next(cx),
+            None => Poll::Ready(None),
         }
     }
 
@@ -5460,6 +5563,14 @@ impl SubscriptionStream {
             return None;
         }
         loop {
+            self.sync_window_fallback();
+            if self.serving_fallback {
+                let mut context = Context::from_waker(Waker::noop());
+                return match self.poll_window_fallback(&mut context) {
+                    Poll::Ready(event) => event,
+                    Poll::Pending => None,
+                };
+            }
             let event = self.receiver.try_recv().ok()?;
             if subscription_event_is_publishable(&event) {
                 return Some(event);
@@ -5499,6 +5610,10 @@ impl Stream for SubscriptionStream {
             return Poll::Ready(None);
         }
         loop {
+            this.sync_window_fallback();
+            if this.serving_fallback {
+                return this.poll_window_fallback(cx);
+            }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
                     return Poll::Ready(Some(event));
@@ -5622,7 +5737,7 @@ impl PreparedQuery {
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
-            DurabilityTier::None | DurabilityTier::Edge => None,
+            DurabilityTier::None => None,
         }
     }
 
@@ -5674,7 +5789,7 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
                         .upstream_subscription_handles
                         .iter()
                         .any(|handle| publishing_subscriptions.contains(&handle.subscription));
-                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Edge {
+                    if !frame_will_publish && state_ref.read_tier < DurabilityTier::Global {
                         let event = subscription_delta_event(
                             state_ref.read_tier,
                             false,
@@ -5885,7 +6000,7 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         let update_kind = match &update {
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
@@ -5893,11 +6008,11 @@ fn apply_maintained_update_to_snapshot(
             LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
                 format!("flat:add={} remove={}", added.len(), removed.len())
             }
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot,
                 occurrence_ids,
             } => format!(
-                "aggregate-window:roots={} occurrences={}",
+                "ordered-window:roots={} occurrences={}",
                 snapshot.root_count,
                 occurrence_ids.len()
             ),
@@ -5908,7 +6023,7 @@ fn apply_maintained_update_to_snapshot(
         );
     }
     match update {
-        LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+        LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
             snapshot: current,
             occurrence_ids,
         } => {
@@ -6077,7 +6192,7 @@ fn apply_maintained_membership_update_to_snapshot(
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             let equivalent = snapshot.rows[position].subscription_equivalent(row);
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=flat_snapshot_replace occurrence={key:?} position={position} equivalent={equivalent} old={:?} new={:?}",
                     snapshot.rows[position], row,
@@ -7081,3 +7196,6 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use crate::{protocol::VersionRecord, tx::Transaction};

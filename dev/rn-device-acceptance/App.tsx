@@ -14,8 +14,10 @@ import {
 import {
   proveHighLevelForegroundRestart,
   proveHighLevelForegroundRelayReadback,
+  proveTypingComposer,
   seedHighLevelForegroundRuntime,
 } from "./src/high-level-foreground";
+import { receiptMetrics } from "./src/typing-composer";
 import {
   admittedNativeRelay,
   clearDeviceDiagnostic,
@@ -59,6 +61,7 @@ async function observeTrustedAdmissionLifecycleInner(
   const receipt = await deviceReceiptContext(markFailure);
   markFailure("fixture-phase-failed");
   const phase = await nativeAcceptancePhase();
+  const metrics: Record<string, Record<string, number>> = {};
   if (phase === "verify") {
     // This is intentionally a new JS and native process. The row was committed
     // through `createJazzClient` by the previous seed launch; this launch must
@@ -100,7 +103,7 @@ async function observeTrustedAdmissionLifecycleInner(
     );
     markFailure("logout-revocation-failed");
     await closeNativeRelay();
-    return { phase, receipt };
+    return { phase, receipt, metrics };
   }
   markFailure("native-admission-failed");
   const admitted = await admittedNativeRelay();
@@ -153,6 +156,7 @@ async function observeTrustedAdmissionLifecycleInner(
   // the first proof that the seed escaped its in-memory UI preview.
   markFailure("public-client-relay-readback-failed");
   await proveHighLevelForegroundRelayReadback(scopeA, receipt.runNonce);
+  metrics["typing-composer"] = receiptMetrics(await proveTypingComposer(scopeA, markFailure));
   markFailure("scope-isolation-failed");
   await proveForegroundScopeIsolation(
     foregroundFactory,
@@ -234,7 +238,7 @@ async function observeTrustedAdmissionLifecycleInner(
   );
   markFailure("logout-revocation-failed");
   await closeNativeRelay();
-  return { phase, receipt };
+  return { phase, receipt, metrics };
 }
 
 async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
@@ -258,6 +262,9 @@ export default function App() {
         .map((scenario, index) =>
           encodeResult({
             ...scenario,
+            ...(observed.metrics[scenario.scenario]
+              ? { metrics: observed.metrics[scenario.scenario] }
+              : {}),
             receipt: {
               ...observed.receipt,
               sequence: index + 1,

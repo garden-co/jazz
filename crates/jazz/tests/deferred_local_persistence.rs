@@ -672,14 +672,14 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     let reentrant_db = Rc::clone(&db);
     db.wait_for_transaction_with(second_tx, DurabilityTier::Local, move |result| {
         local_wait_results.borrow_mut().push(result);
-        reentrant_db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
+        reentrant_db.wait_for_transaction_with(second_tx, DurabilityTier::Global, move |result| {
             reentrant_wait_results.borrow_mut().push(result)
         });
     });
-    let edge_waits = Rc::new(RefCell::new(Vec::new()));
-    let edge_wait_results = Rc::clone(&edge_waits);
-    db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
-        edge_wait_results.borrow_mut().push(result);
+    let global_waits = Rc::new(RefCell::new(Vec::new()));
+    let global_wait_results = Rc::clone(&global_waits);
+    db.wait_for_transaction_with(second_tx, DurabilityTier::Global, move |result| {
+        global_wait_results.borrow_mut().push(result);
     });
 
     let waker = noop_waker();
@@ -747,9 +747,9 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     close_result.expect("close drains every accepted operation before storage retirement");
     assert_eq!(local_waits.borrow().len(), 1);
     assert_eq!(local_waits.borrow()[0].as_ref().unwrap(), &second_tx);
-    assert_eq!(edge_waits.borrow().len(), 1);
+    assert_eq!(global_waits.borrow().len(), 1);
     assert_eq!(
-        edge_waits.borrow()[0].as_ref().unwrap_err().code,
+        global_waits.borrow()[0].as_ref().unwrap_err().code,
         ErrorCode::NotObserved,
     );
     assert_eq!(reentrant_waits.borrow().len(), 1);

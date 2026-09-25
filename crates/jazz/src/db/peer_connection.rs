@@ -126,25 +126,6 @@ const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
 const COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("19fdc830-2dd8-5876-ae31-a8f526512ac5");
 
-/// Wall-clock time used exclusively for authority admission checks.
-///
-/// This must not use `UploadRetryClock`: that clock is deliberately monotonic
-/// and process-relative so retry backoff is unaffected by wall-clock changes,
-/// whereas transaction HLC physical components are Unix milliseconds.
-fn authority_admission_now_ms() -> Result<u64, Error> {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map_err(|_| Error::new(ErrorCode::Protocol, "authority clock precedes Unix epoch"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| {
-            Error::new(
-                ErrorCode::Protocol,
-                "authority clock exceeds u64 milliseconds",
-            )
-        })
-}
-
 fn relay_upstream_subscription_key(
     connection_epoch: u64,
     downstream: SubscriptionKey,
@@ -280,8 +261,8 @@ where
                 Some(CommitUnitIngestContext {
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
-                    edge_authority: false,
                     admitted_write_authorization: false,
+                    version_receipts_validated: false,
                 }),
             )
             .await?;
@@ -303,11 +284,8 @@ pub(super) fn dispatch_admitted_subscriber_message<'a, S>(
     local_receiver: bool,
     ingest_context: CommitUnitIngestContext,
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
-    admitted_upstream_authority: &'a Rc<RefCell<Option<AuthorityContext>>>,
-    edge_fate_routes: &'a EdgeFateRoutes,
     local_fate_routes: &'a LocalFateRoutes,
     downstream_fates: &'a PendingDownstreamFates,
-    maintenance_now_ms: u64,
     message: SyncMessage,
 ) -> Pin<Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>>
 where
@@ -335,7 +313,8 @@ where
                     .ingest_relay_commit_unit_with_encoder_trust(
                         tx.clone(),
                         versions.clone(),
-                        ingest_context.trust.is_trusted(),
+                        ingest_context.trust.is_trusted()
+                            || ingest_context.version_receipts_validated,
                     )
                     .await?;
                 if same_scope_author {
@@ -348,159 +327,6 @@ where
                         .await?;
                 }
                 Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::CommitUnit { tx, versions }
-                if ingest_context.edge_authority
-                    && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
-            {
-                // Edge admission persists and republishes this unit without
-                // passing through the Core ingest path below. A direct session
-                // therefore needs the same capability scrub here; terminal
-                // policy still receives its separately admitted binding.
-                let tx = if ingest_context.trust == CommitUnitTrust::Session {
-                    Transaction {
-                        permission_subject: None,
-                        ..tx
-                    }
-                } else {
-                    tx
-                };
-                if tx.kind != TxKind::Mergeable {
-                    node.lock()
-                        .await
-                        .ingest_relay_commit_unit(tx, versions)
-                        .await?;
-                    return Ok(PublicationOutcome::settled(Vec::new()));
-                }
-
-                let tx_id = tx.tx_id;
-                let identity = EdgeFateCommitIdentity::new(&tx, &versions);
-                let route_registered = if let Some(authority) =
-                    *admitted_upstream_authority.borrow()
-                {
-                    let mut routes = edge_fate_routes.borrow_mut();
-                    prune_edge_fate_routes(&mut routes, Some(authority));
-                    let route_count = routes
-                        .values()
-                        .map(|obligation| obligation.routes.len())
-                        .sum::<usize>();
-                    let existing = routes.get(&tx_id);
-                    if existing.is_some_and(|obligation| !obligation.identity.matches(&identity)) {
-                        return Err(crate::node::Error::ConflictingCommitUnit(tx_id).into());
-                    }
-                    let already_routed = existing.is_some_and(|obligation| {
-                        obligation.routes.iter().any(|route| {
-                            route
-                                .authority
-                                .is_some_and(|route| route.same_admitted_link(authority))
-                                && route
-                                    .queue
-                                    .upgrade()
-                                    .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
-                        })
-                    });
-                    if already_routed {
-                        true
-                    } else if route_count < MAX_EDGE_FATE_ROUTES {
-                        let obligation =
-                            routes.entry(tx_id).or_insert_with(|| EdgeFateObligation {
-                                identity: identity.clone(),
-                                routes: Vec::new(),
-                            });
-                        if obligation.routes.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
-                            obligation.routes.push(EdgeFateRoute {
-                                authority: Some(authority),
-                                queue: Rc::downgrade(downstream_fates),
-                                edge_acknowledged: false,
-                            });
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    let mut routes = edge_fate_routes.borrow_mut();
-                    prune_edge_fate_routes(&mut routes, None);
-                    let existing = routes.get(&tx_id);
-                    if existing.is_some_and(|obligation| !obligation.identity.matches(&identity)) {
-                        return Err(crate::node::Error::ConflictingCommitUnit(tx_id).into());
-                    }
-                    let already_routed = existing.is_some_and(|obligation| {
-                        obligation.routes.iter().any(|route| {
-                            route.authority.is_none()
-                                && route
-                                    .queue
-                                    .upgrade()
-                                    .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
-                        })
-                    });
-                    let route_count = routes
-                        .values()
-                        .map(|obligation| obligation.routes.len())
-                        .sum::<usize>();
-                    if already_routed {
-                        true
-                    } else if route_count >= MAX_EDGE_FATE_ROUTES {
-                        false
-                    } else {
-                        let obligation =
-                            routes.entry(tx_id).or_insert_with(|| EdgeFateObligation {
-                                identity: identity.clone(),
-                                routes: Vec::new(),
-                            });
-                        if obligation.routes.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
-                            false
-                        } else {
-                            obligation.routes.push(EdgeFateRoute {
-                                authority: None,
-                                queue: Rc::downgrade(downstream_fates),
-                                edge_acknowledged: false,
-                            });
-                            true
-                        }
-                    }
-                };
-
-                if !route_registered {
-                    return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
-                        tx_id,
-                        fate: Fate::Rejected(RejectionReason::MalformedCommit(
-                            "no admitted authority route".to_owned(),
-                        )),
-                        global_time: None,
-                        durability: None,
-                    }]));
-                }
-
-                let authority_now_ms = authority_admission_now_ms()?;
-                let mut node = node.lock().await;
-                let outcome = peer
-                    .ingest_edge_mergeable_commit_unit(
-                        &mut node,
-                        tx,
-                        versions,
-                        maintenance_now_ms,
-                        authority_now_ms,
-                        session_claim_binding.1,
-                    )
-                    .await
-                    .map_err(Error::from)?;
-                let (responses, publications, post_settlement_work) = outcome.into_parts();
-                let mut direct_responses = Vec::new();
-                for response in responses {
-                    if matches!(response, SyncMessage::FateUpdate { .. }) {
-                        route_edge_admission_fate(edge_fate_routes, tx_id, &response);
-                    } else {
-                        direct_responses.push(response);
-                    }
-                }
-                Ok(PublicationOutcome {
-                    value: direct_responses,
-                    publications,
-                    post_settlement_work,
-                })
             }
             SyncMessage::CommitUnit { tx, versions }
                 if matches!(peer.role(), PeerRole::ClientLink { .. })
@@ -556,16 +382,31 @@ where
                         ));
                     }
                 }
+                // Only a relay's terminal ingest consumes this receipt. Every
+                // other trust evaluates the write policies itself at ingest, so
+                // it needs the support proof but not a discarded evaluation.
                 let admitted_write_authorization = {
                     let mut node = node.lock().await;
-                    peer.prove_terminal_commit_authorization(
-                        &mut node,
-                        permission_subject,
-                        session_claim_binding.1,
-                        &versions,
-                        tx.tx_id,
-                    )
-                    .await?
+                    if ingest_context.trust == CommitUnitTrust::Relay {
+                        peer.prove_terminal_commit_authorization(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?
+                    } else {
+                        peer.prove_terminal_commit_support(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?;
+                        false
+                    }
                 };
                 Ok(node
                     .lock()
@@ -600,9 +441,10 @@ fn admitted_provenance_matches(admitted: AuthorSubject, made_by: AuthorSubject) 
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
-/// serving one subscriber under their identity. An edge is simply both at once
-/// (one upstream connection plus many subscriber connections); edge authority
-/// (relay/edge/core) stays below this facade in [`crate::peer`].
+/// serving one subscriber under their identity. A relay or browser worker is
+/// simply both at once (one upstream connection plus many subscriber
+/// connections); peer authority (relay/core) stays below this facade in
+/// [`crate::peer`].
 pub struct PeerConnection<S>
 where
     S: OrderedKvStorage,
@@ -629,7 +471,6 @@ where
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
-    pub(super) edge_fate_routes: EdgeFateRoutes,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) downstream_fates: PendingDownstreamFates,
@@ -940,14 +781,11 @@ fn commit_unit_large_value_refs(unit: &SyncMessage) -> Vec<groove::large_values:
 }
 
 pub(super) struct SubscriberConnectionState {
-    pub(super) pending_authority_repairs:
-        VecDeque<super::row_version_repairs::PendingAuthorityRepair>,
     pub(super) peer: PeerState,
     pub(super) ingest_context: CommitUnitIngestContext,
     pub(super) session_claims: BTreeMap<String, Value>,
     pub(super) session_claim_revision: u64,
     pub(super) local_receiver: bool,
-    pub(super) partial_edge_query_host: bool,
     pub(super) outbox: Outbox,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) served: BTreeMap<SubscriptionKey, CoverageKey>,
@@ -963,13 +801,6 @@ pub(super) struct SubscriberConnectionState {
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
     pub(super) serve_dirty: bool,
-}
-
-/// Missing-body repair must not authorize a new payload from stale policy
-/// inputs. Ordinary Edge queries evaluate locally; explicit repair still asks
-/// Core under the admitted reader, including readers on trusted transports.
-pub(super) fn row_repair_requires_core(trust: CommitUnitTrust, subject: AuthorSubject) -> bool {
-    trust == CommitUnitTrust::Session || subject != AuthorSubject::SYSTEM
 }
 
 /// A valid request awaiting activation of its schema, not a rejected query.
@@ -1019,6 +850,14 @@ pub struct ResumeCursor {
 }
 
 impl ResumeCursor {
+    /// Full-diff fallbacks carried by the parked subscriber peer.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
+        self.peer
+            .maintained_subscription_view_metrics()
+            .full_diff_fallbacks
+    }
+
     /// Resume attaches the saved peer to a new physical transport. Preserve
     /// the server-authenticated scope binding while replacing its old
     /// per-attachment admission capability.
@@ -1255,6 +1094,7 @@ where
         // scheduling a fresh group. Otherwise its PeerState cursor and
         // Groove subscription remain live under the old policy snapshot.
         for stale_subscription in stale_maintained_subscriptions {
+            peer.note_claim_refresh_full_diff(stale_subscription);
             let mut node = self.node.borrow_mut();
             node.apply_unsubscribe(stale_subscription);
             peer.forget_subscription_with_node(&mut node, stale_subscription);
@@ -1558,8 +1398,12 @@ where
                 rebind_pending = true;
                 continue;
             };
-            for subscription in refresh_subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut refresh_subscribers = refresh_subscribers.into_iter().peekable();
+            while let Some(subscription) = refresh_subscribers.next() {
+                let update =
+                    take_last_or_clone(&mut shared_update, refresh_subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     maintained_subscription,
@@ -1655,6 +1499,20 @@ where
         self.last_resume_bytes
     }
 
+    /// Full-diff fallbacks of this connection's served maintained views.
+    /// Upstream links serve no subscriptions and report zero.
+    pub fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
+        match &self.link {
+            ConnectionLink::Subscriber(state) => {
+                state
+                    .peer
+                    .maintained_subscription_view_metrics()
+                    .full_diff_fallbacks
+            }
+            ConnectionLink::Upstream(_) => Default::default(),
+        }
+    }
+
     /// Host-only capability; does not alter write or publication trust.
     #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn admit_authority_query_delegate(&mut self) {
@@ -1663,15 +1521,6 @@ where
                 == CommitUnitTrust::TrustedAuthority
                 && state.ingest_context.identity == AuthorSubject::SYSTEM
                 && matches!(state.peer.role(), PeerRole::ClientLink { .. });
-        }
-    }
-
-    /// Set only by the serving shell's host-owned Edge role at admission.
-    #[cfg(any(test, feature = "runtime"))]
-    pub(crate) fn set_partial_edge_query_host(&mut self) {
-        if let ConnectionLink::Subscriber(state) = &mut self.link {
-            state.partial_edge_query_host = true;
-            self.node.borrow_mut().enable_edge_query_serving();
         }
     }
 
@@ -1714,13 +1563,11 @@ where
             ingest_context,
             session_claims,
             session_claim_revision,
-            pending_authority_repairs,
             ..
         }) = &mut self.link
         else {
             return None;
         };
-        pending_authority_repairs.clear();
         let replacement = match peer.role() {
             PeerRole::Relay => PeerState::relay(),
             PeerRole::ClientLink { identity } => PeerState::client_link(identity),
@@ -1844,8 +1691,11 @@ where
                 *serve_dirty = true;
                 continue;
             };
-            for subscription in subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut subscribers = subscribers.into_iter().peekable();
+            while let Some(subscription) = subscribers.next() {
+                let update = take_last_or_clone(&mut shared_update, subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     group_subscription,
@@ -1958,6 +1808,7 @@ where
                     message: message.message,
                     lease: message.lease,
                     authority_receipt_eligible: false,
+                    receipts_validated: message.receipts_validated,
                 }),
                 Ok(None) => {
                     self.inbound_authority_receipt_quarantine = false;
@@ -2079,8 +1930,6 @@ where
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
         self.pump_current_rows()?;
-        self.drive_pending_authority_repairs(progress_waker.as_ref())
-            .await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -2727,6 +2576,7 @@ where
                                     lease: message.lease,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
+                                    receipts_validated: message.receipts_validated,
                                 }),
                                 Ok(None) => {
                                     self.inbound_authority_receipt_quarantine = false;
@@ -2749,6 +2599,7 @@ where
                             message,
                             lease,
                             authority_receipt_eligible,
+                            receipts_validated,
                         }) = next
                         else {
                             break;
@@ -2761,7 +2612,7 @@ where
                                 return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
                             }
                             deferred_repair_fates.push_back(StagedInboundMessage {
-                                message, lease, authority_receipt_eligible,
+                                message, lease, authority_receipt_eligible, receipts_validated,
                             });
                             continue;
                         }
@@ -2873,6 +2724,7 @@ where
                                                 },
                                                 authority_receipt_eligible: false,
                                                 lease: None,
+                                                receipts_validated: false,
                                             });
                                         }
                                     }
@@ -2909,6 +2761,7 @@ where
                                         message: SyncMessage::CatalogueSnapshot(snapshot),
                                         lease: lease.clone(),
                                         authority_receipt_eligible,
+                                        receipts_validated,
                                     });
                                     break;
                                 }
@@ -3765,40 +3618,10 @@ where
                                                 admitted.same_admitted_link(expected)
                                             })
                                         });
-                                let routed_fate = matches!(
-                                    &message,
-                                    SyncMessage::FateUpdate { tx_id, .. }
-                                        if self.edge_fate_routes.borrow().contains_key(tx_id)
-                                );
-                                let publication_fate = matches!(&message,
-                                    SyncMessage::FateUpdate { tx_id, .. }
-                                        if outbox.borrow().authority_members.contains(tx_id));
-                                // The Edge outbox is tied to an authenticated
-                                // selected authority. Ordinary direct uploads
-                                // keep their legacy featureless-link receipt
-                                // behavior, which has no routed Edge fate to
-                                // discharge.
                                 let outbox_release_receipt_eligible =
                                     current_authority_receipt_eligible
-                                        || (!routed_fate && !publication_fate
-                                            && authority_receipt_eligible
+                                        || (authority_receipt_eligible
                                             && expected_scope_authority.is_none());
-                                if let SyncMessage::FateUpdate { tx_id: _, .. } = &message {
-                                    // Authenticated authority links must match the
-                                    // currently admitted connection, not merely
-                                    // deliver a direct, unstaged frame.
-                                    // Gate fate before any NodeState mutation. A
-                                    // parallel, stale, or featureless upstream is
-                                    // not merely forbidden from forwarding an
-                                    // edge route; it must not settle the routed
-                                    // transaction's local state. Ordinary Core
-                                    // client links have no edge route and retain
-                                    // their normal fate transport.
-                                    if (routed_fate || publication_fate) && !current_authority_receipt_eligible {
-                                        drop_peer_request(&self.node);
-                                        continue;
-                                    }
-                                }
                                 let routed_fate = match &message {
                                     SyncMessage::FateUpdate { tx_id, .. } => {
                                         Some((*tx_id, message.clone()))
@@ -3806,19 +3629,9 @@ where
                                     _ => None,
                                 };
                                 let released_outbox_tx_id = match &message {
-                                    SyncMessage::FateUpdate {
-                                        tx_id,
-                                        fate,
-                                        global_time,
-                                        durability,
-                                        ..
-                                    } if outbox_release_receipt_eligible
-                                        && (matches!(fate, Fate::Rejected(_))
-                                            || (matches!(fate, Fate::Accepted)
-                                                && global_time.is_some()
-                                                && durability.is_some_and(|tier| {
-                                                    tier >= DurabilityTier::Global
-                                                }))) =>
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if outbox_release_receipt_eligible
+                                            && fate_update_settles_upload(&message, *tx_id) =>
                                     {
                                         Some(*tx_id)
                                     }
@@ -3848,7 +3661,7 @@ where
                                     && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
                                 {
                                     drop(ingress_owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible, receipts_validated });
                                     break;
                                 }
                                 if *local_receiver {
@@ -3867,35 +3680,6 @@ where
                                 }
                                 drop(ingress_owner);
                                 if let Some((tx_id, fate)) = routed_fate {
-                                    let authority = *expected_scope_authority;
-                                    let mut routes = self.edge_fate_routes.borrow_mut();
-                                    if let Some(obligation) = routes.get_mut(&tx_id) {
-                                        let mut remaining = Vec::new();
-                                        for route in std::mem::take(&mut obligation.routes) {
-                                            let authority_matches = matches!(
-                                                (route.authority, authority),
-                                                (Some(route), Some(authority))
-                                                    if route.same_admitted_link(authority)
-                                            );
-                                            let queue = route.queue.upgrade();
-                                            if authority_matches {
-                                                if let Some(queue) = queue {
-                                                    queue.borrow_mut().push(fate.clone());
-                                                }
-                                            } else {
-                                                remaining.push(route);
-                                            }
-                                        }
-                                        if remaining.is_empty() {
-                                            routes.remove(&tx_id);
-                                        } else {
-                                            let obligation = routes
-                                                .get_mut(&tx_id)
-                                                .expect("route remains present");
-                                            obligation.routes = remaining;
-                                        }
-                                    }
-                                    drop(routes);
                                     route_local_fate(&self.local_fate_routes, tx_id, &fate);
                                 }
                                 if let Some(tx_id) = released_outbox_tx_id {
@@ -3999,10 +3783,8 @@ where
                 peer,
                 ingest_context,
                 session_claims: _,
-                session_claim_revision,
+                session_claim_revision: _,
                 local_receiver,
-                partial_edge_query_host,
-                pending_authority_repairs,
                 outbox,
                 upstream_subscriptions,
                 served,
@@ -4165,12 +3947,17 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding, lease) =
+                    let (message, parked_policy_binding, lease, receipts_validated) =
                         if let Some(staged) = self.staged_inbound.pop_front() {
-                            (Box::new(staged.message), None, staged.lease)
+                            (Box::new(staged.message), None, staged.lease, staged.receipts_validated)
                         } else {
                             match self.transport.try_recv_owned_result() {
-                                Ok(Some(message)) => (Box::new(message.message), None, message.lease),
+                                Ok(Some(message)) => (
+                                    Box::new(message.message),
+                                    None,
+                                    message.lease,
+                                    message.receipts_validated,
+                                ),
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
@@ -4201,6 +3988,7 @@ where
                                         Box::new(SyncMessage::Subscribe(pending.subscribe)),
                                         Some(pending.policy_binding),
                                         None,
+                                        false,
                                     )
                                 }
                             }
@@ -5069,7 +4857,7 @@ where
                                 // Settled authority membership survives a
                                 // RocksDB reopen, while its wire registration
                                 // does not. Do not let that ownerless result
-                                // settle this fresh Edge usage site before the
+                                // settle this fresh Global usage site before the
                                 // new relay authority registration receives a
                                 // current reset from upstream.
                                 self.node
@@ -5404,28 +5192,12 @@ where
                             delegated_session,
                         } => {
                             #[cfg(any(test, feature = "testing"))]
-                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} partial={partial_edge_query_host} delegated={} session_binding={}", self.node.borrow().groove_runtime_token(), requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} delegated={} session_binding={}", self.node.borrow().groove_runtime_token(), requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
                                 #[cfg(any(test, feature = "testing"))]
                                 crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                 drop_peer_request(&self.node);
-                                continue;
-                            }
-                            if *partial_edge_query_host {
-                                let Some(binding) = admitted_request_policy_binding(
-                                    *ingest_context, peer, session_claim_binding.clone(), delegated_session,
-                                ) else {
-                                    #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                };
-                                let requires_core = row_repair_requires_core(ingest_context.trust, binding.0);
-                                super::row_version_repairs::enqueue_authority_repair(
-                                    pending_authority_repairs, requests, binding, *session_claim_revision, requires_core,
-                                )?;
-                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 continue;
                             }
                             let repair_context = if *local_receiver {
@@ -5526,19 +5298,8 @@ where
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
-                            let edge_client_upload = matches!(
-                                &other,
-                                SyncMessage::CommitUnit { tx, .. } if tx.kind == TxKind::Mergeable
-                            ) && ingest_context.edge_authority
-                                && matches!(peer.role(), PeerRole::ClientLink { .. });
-                            let edge_upload = edge_client_upload.then(|| match &other {
-                                SyncMessage::CommitUnit { tx, .. } => (tx.tx_id, other.clone()),
-                                _ => unreachable!("edge upload was matched as a commit unit"),
-                            });
                             let local_upload = match &other {
-                                SyncMessage::CommitUnit { tx, .. } => {
-                                    (!edge_client_upload).then(|| (tx.tx_id, other.clone()))
-                                }
+                                SyncMessage::CommitUnit { tx, .. } => Some((tx.tx_id, other.clone())),
                                 _ => None,
                             };
                             if let Some((tx_id, _)) = &local_upload
@@ -5565,12 +5326,11 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
-                            let maintenance_now_ms = self.upload_retry_clock.borrow().now_ms();
                             let outcome = if crate::node::is_catalogue_mutation(&other) {
                                 let mut owner = self.node.lock().await;
                                 if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
                                     drop(owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false, receipts_validated });
                                     catalogue_deferred = true;
                                     return Ok::<bool, Error>(false);
                                 }
@@ -5580,15 +5340,15 @@ where
                                 &self.node,
                                 peer,
                                 *local_receiver,
-                                *ingest_context,
+                                CommitUnitIngestContext {
+                                    version_receipts_validated: receipts_validated,
+                                    ..*ingest_context
+                                },
                                 session_claim_binding.clone().expect(
                                     "subscriber dispatch has an admitted immutable session binding",
                                 ),
-                                &self.admitted_upstream_authority,
-                                &self.edge_fate_routes,
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
-                                maintenance_now_ms,
                                 other,
                             )
                             .await?
@@ -5614,6 +5374,18 @@ where
                                     tx_id,
                                 );
                             }
+                            // A declared root with no upstream that settled this
+                            // upload terminally (the same predicate an upstream
+                            // fate must meet to release an outbox entry) has
+                            // nobody left to ask. Queueing it would retain the
+                            // unit forever. Any node with an upstream must still
+                            // relay, even though its own ingest says Global.
+                            let settled_here = outbox.borrow().settles_uploads_locally()
+                                && local_upload.as_ref().is_some_and(|(tx_id, _)| {
+                                responses
+                                    .iter()
+                                    .any(|response| fate_update_settles_upload(response, *tx_id))
+                            });
                             for response in responses {
                                 if matches!(response, SyncMessage::FateUpdate { .. }) {
                                     self.downstream_fates.borrow_mut().push(response);
@@ -5626,30 +5398,16 @@ where
                                     )?;
                                 }
                             }
-                            if let Some((tx_id, _)) = edge_upload {
-                                let admitted = self
-                                    .node
-                                    .lock()
-                                    .await
-                                    .transaction_state(tx_id)
-                                    .await
-                                    .is_some_and(|(fate, _, durability)| {
-                                        fate == Fate::Accepted
-                                            && durability >= DurabilityTier::Edge
-                                    });
-                                if admitted {
-                                    let publication = self.node.lock().await
-                                        .edge_authority_publication_for(tx_id).await?;
-                                    let unit = SyncMessage::AuthorityPublication(publication);
-                                    if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
-                                        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                            if let Some((tx_id, unit)) = local_upload {
+                                if settled_here {
+                                    // A reconnect may have reconstructed this
+                                    // upload before the unit arrived here.
+                                    if outbox.borrow().contains(tx_id) {
+                                        self.released_outbox_tx_ids.push(tx_id);
                                     }
+                                } else if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
-                            }
-                            if let Some((tx_id, unit)) = local_upload
-                                && queue_pending_upload_in(&outbox, tx_id, Some(unit))
-                            {
-                                schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                             }
                             Ok::<bool, Error>(false)
                             })
@@ -5668,72 +5426,6 @@ where
                 // future. It contains the maintained-view serving graph and
                 // does not need to inflate the inbound message dispatcher.
                 return Box::pin(async {
-                // A client upload arriving before its action-specific support
-                // view settles is retained by `PeerState`, not optimistically
-                // inserted into edge history.  Drive that state on every
-                // served-connection turn: the receipt/view may have settled
-                // immediately before or immediately after the original
-                // registration, and all pending commits must make fair
-                // progress without requiring unrelated inbound traffic.
-                if ingest_context.edge_authority
-                    && matches!(peer.role(), PeerRole::ClientLink { .. })
-                {
-                    let now_ms = self.upload_retry_clock.borrow().now_ms();
-                    let outcome = {
-                        let mut node = self.node.lock().await;
-                        // Deferred admission owns its policy and persistence futures.
-                        Box::pin(peer.drain_deferred_edge_fates(&mut node, now_ms))
-                        .await
-                        .map_err(Error::from)?
-                    };
-                    let (responses, changed, published) =
-                        finish_peer_publication_outcome_with_refresh(
-                            &self.node,
-                            &self.subscriptions,
-                            &self.active_authority_view_receipts,
-                            progress_waker.as_ref(),
-                            outcome,
-                            false,
-                        )
-                        .await?;
-                    stats.subscription_events += changed;
-                    needs_subscription_refresh |= published;
-                    let admitted = responses
-                        .iter()
-                        .filter_map(|response| match response {
-                            SyncMessage::FateUpdate {
-                                tx_id,
-                                fate: Fate::Accepted,
-                                durability: Some(durability),
-                                ..
-                            } if *durability >= DurabilityTier::Edge => Some(*tx_id),
-                            _ => None,
-                        })
-                        .collect::<BTreeSet<_>>();
-                    for response in responses {
-                        if let SyncMessage::FateUpdate { tx_id, .. } = &response {
-                            route_edge_admission_fate(
-                                &self.edge_fate_routes,
-                                *tx_id,
-                                &response,
-                            );
-                        } else {
-                            send_with_sync_context(
-                                &self.node,
-                                peer,
-                                self.transport.as_mut(),
-                                response,
-                            )?;
-                        }
-                    }
-                    for tx_id in admitted {
-                        let unit = SyncMessage::AuthorityPublication(self.node.lock().await
-                            .edge_authority_publication_for(tx_id).await?);
-                        if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
-                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
-                        }
-                    }
-                }
                 // View serving is a separate phase from deferred policy admission.
                 return Box::pin(async {
                 queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
@@ -6271,8 +5963,14 @@ where
                                 summarize_subscription_key(group_subscription),
                                 summarize_sync_message(&update)
                             ));
-                            for subscription in group.subscribers.iter().copied() {
-                                let mut update = retarget_view_update(update.clone(), subscription);
+                            let mut shared_update = Some(update);
+                            let mut subscribers = group.subscribers.iter().copied().peekable();
+                            while let Some(subscription) = subscribers.next() {
+                                let update = take_last_or_clone(
+                                    &mut shared_update,
+                                    subscribers.peek().is_some(),
+                                );
+                                let mut update = retarget_view_update(update, subscription);
                                 stamp_view_update_authorization_progress_from(
                                     peer,
                                     group_subscription,
@@ -6393,15 +6091,6 @@ where
             *serve_dirty = true;
         }
     }
-
-    pub(super) fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
-        match &self.link {
-            ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
-                peer.eviction_pins()
-            }
-            ConnectionLink::Upstream(_) => crate::peer::PeerEvictionPins::default(),
-        }
-    }
 }
 
 pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {
@@ -6413,13 +6102,13 @@ pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrg
 fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     #[cfg(feature = "cold-settle-attribution")]
     let started = Instant::now();
-    let encoded = encode_sync_message(message);
+    let len = crate::wire::encoded_sync_message_len(message).unwrap_or(0);
     #[cfg(feature = "cold-settle-attribution")]
     crate::cold_settle_attribution::record_preflight_payload(
         started.elapsed().as_nanos() as u64,
-        encoded.as_ref().map_or(0, Vec::len),
+        len,
     );
-    encoded.map_or(0, |bytes| bytes.len())
+    len
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -6736,7 +6425,7 @@ where
     }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
-        // Edge child. Advance the shared generation only after the validated
+        // Global child. Advance the shared generation only after the validated
         // batch commits, so a later tab is rehydrated from the worker's
         // resident authority membership without unrelated upstream traffic.
         let next = subscriber_dirty_epoch.get().wrapping_add(1);
@@ -6818,8 +6507,8 @@ where
                 .await
         }
         PermissionAdviceAction::Update { table, row, patch } => {
-            match node.current_rows(&table, DurabilityTier::Local).await {
-                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => {
+            match node.local_current_row_exists(&table, row).await {
+                Ok(true) => {
                     node.dry_run_insert_allows(
                         MergeableCommit::new(table, row, 0)
                             .made_by(identity)
@@ -6828,7 +6517,7 @@ where
                     )
                     .await
                 }
-                Ok(_) => Ok(false),
+                Ok(false) => Ok(false),
                 Err(error) => Err(error),
             }
         }
@@ -7645,12 +7334,13 @@ where
             .authorization_progress
             .get_or_insert_with(|| peer.authorization_progress_for_subscription(*subscription));
     }
+    bound_view_update_inline_bodies(&mut message)?;
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
         "transport send {}",
         summarize_sync_message(&message)
     ));
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+    if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
         eprintln!(
@@ -7722,11 +7412,124 @@ fn stamp_subscriber_opening_state<S>(
             // source exists conceptually at admission but has not delivered a
             // live authority reset yet. Every route to the foreground—including
             // recovery/rehydration—must retain that fact; an ordinary empty reset
-            // would otherwise complete a strict Edge read and release U before
+            // would otherwise complete a strict Global read and release U before
             // the authority reply can arrive.
             payload.peer_payload_inventory.opening_pending = true;
         }
     }
+}
+
+/// Keep an over-limit `ViewUpdate` admissible by leaving some inline bodies
+/// to the existing row-version repair lane (#3477).
+///
+/// Inline carriers are an availability optimization, not membership: the
+/// supporting-row manifest alone declares the (complete) snapshot or delta,
+/// and a receiver that lacks a referenced body holds the whole update, fetches
+/// the missing bodies with bounded `FetchRowVersions` requests, and only then
+/// applies it atomically. Known-state dedup already omits bodies this way.
+///
+/// Only bodies the receiver's preflight can detect and repair are omitted:
+/// settled (non-`Pending`) main-branch content versions whose exact
+/// `(table, row, tx)` is a supporting-row addition. Everything else (deletion
+/// witnesses, replacement winners, pending transactions whose fates must be
+/// routed, complete-exclusive extras) stays inline. Messages already within
+/// the budget are returned unchanged, byte for byte.
+fn bound_view_update_inline_bodies(message: &mut SyncMessage) -> Result<(), Error> {
+    fn carriers_of(message: &mut SyncMessage) -> Option<&mut Vec<crate::protocol::VersionCarrier>> {
+        match message {
+            SyncMessage::ViewUpdate(view) => Some(&mut view.version_carriers),
+            _ => None,
+        }
+    }
+    let SyncMessage::ViewUpdate(view) = &*message else {
+        return Ok(());
+    };
+    if view.peer_payload_inventory.opening_pending {
+        return Ok(());
+    }
+    let budget = super::routed_messages::max_routed_payload_bytes();
+    let encoded_len = |message: &SyncMessage| {
+        crate::wire::encoded_sync_message_len(message).unwrap_or(usize::MAX)
+    };
+    // A size walk without allocation; ordinary updates stop here unchanged.
+    let size = encoded_len(message);
+    if size <= budget {
+        return Ok(());
+    }
+    let SyncMessage::ViewUpdate(view) = &*message else {
+        return Ok(());
+    };
+    let malformed = |_| Error::new(ErrorCode::Protocol, "malformed version-bundle run");
+    let carrier_bytes = view
+        .version_carriers
+        .iter()
+        .map(|carrier| postcard::experimental::serialized_size(carrier).unwrap_or(0))
+        .sum::<usize>();
+    // Everything except the carrier bodies.
+    let fixed_bytes = size.saturating_sub(carrier_bytes);
+    let repairable = view
+        .supporting_rows
+        .added_rows()
+        .iter()
+        .filter(|row| row.version.layer == crate::protocol::ResultRowLayer::Content)
+        .map(|row| (row.version_table.as_str(), row.row, row.version.tx))
+        .collect::<HashSet<_>>();
+    let bundles = expand_version_carriers(&view.version_carriers)
+        .map_err(malformed)?
+        .into_iter()
+        .map(|bundle| {
+            let bytes = postcard::experimental::serialized_size(&bundle).unwrap_or(usize::MAX);
+            let omittable = !matches!(bundle.fate, Fate::Pending)
+                && !bundle.versions.is_empty()
+                && bundle.versions.iter().all(|version| {
+                    version.deletion().is_none()
+                        && version.branch_key().values.is_empty()
+                        && repairable.contains(&(
+                            version.table(),
+                            version.row_uuid(),
+                            bundle.tx.tx_id,
+                        ))
+                });
+            (bundle, bytes, omittable)
+        })
+        .collect::<Vec<_>>();
+    drop(repairable);
+    let original = carriers_of(message).map(std::mem::take).unwrap_or_default();
+    // Singleton sizes only estimate the rebuilt run carriers, so measure the
+    // real encoding and tighten the estimate by any overshoot.
+    let mut target = budget;
+    for _ in 0..4 {
+        let mut kept_bytes = fixed_bytes;
+        let kept = bundles
+            .iter()
+            .filter(|(_, bytes, omittable)| {
+                if *omittable && kept_bytes.saturating_add(*bytes) > target {
+                    return false;
+                }
+                kept_bytes = kept_bytes.saturating_add(*bytes);
+                true
+            })
+            .map(|(bundle, _, _)| bundle.clone())
+            .collect::<Vec<_>>();
+        if kept.len() == bundles.len() {
+            // Nothing repairable is left to omit.
+            break;
+        }
+        if let Some(carriers) = carriers_of(message) {
+            *carriers =
+                crate::protocol::build_version_carriers_from_singletons(kept).map_err(malformed)?;
+        }
+        let trimmed_size = encoded_len(message);
+        if trimmed_size <= budget {
+            return Ok(());
+        }
+        target = target.saturating_sub(trimmed_size - budget + budget / 1024);
+    }
+    // Unchanged; routed admission reports the limit as before.
+    if let Some(carriers) = carriers_of(message) {
+        *carriers = original;
+    }
+    Ok(())
 }
 
 /// A retained publication already owns its opening/authorization envelope.
@@ -7763,6 +7566,28 @@ where
     Ok(())
 }
 
+/// Whether `message` is a terminal fate for `tx_id` that no upstream can
+/// revise: a rejection, or a Global-durable acceptance carrying its global
+/// time. Only such a fate retires an upload-outbox entry.
+fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
+    match message {
+        SyncMessage::FateUpdate {
+            tx_id: fate_tx_id,
+            fate,
+            global_time,
+            durability,
+            ..
+        } => {
+            *fate_tx_id == tx_id
+                && (matches!(fate, Fate::Rejected(_))
+                    || (matches!(fate, Fate::Accepted)
+                        && global_time.is_some()
+                        && durability.is_some_and(|tier| tier >= DurabilityTier::Global)))
+        }
+        _ => false,
+    }
+}
+
 /// Deliver terminal/local fate updates in FIFO order without letting a bounded
 /// byte transport turn an already-produced settlement into a dropped message.
 ///
@@ -7782,21 +7607,29 @@ fn flush_downstream_fates<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    loop {
-        let Some(fate) = fates.borrow().first().cloned() else {
-            return Ok(true);
+    // Send from a detached batch so draining K queued fates is O(K), not the
+    // O(K²) of removing each sent fate from the front of the `Vec`. Whatever
+    // was not sent goes back ahead of anything queued meanwhile.
+    let mut pending = std::mem::take(&mut *fates.borrow_mut());
+    let mut sent = 0;
+    let result = loop {
+        let Some(fate) = pending.get(sent).cloned() else {
+            break Ok(true);
         };
         match send_with_sync_context(node, peer, transport, fate) {
-            Ok(()) => {
-                fates.borrow_mut().remove(0);
-            }
+            Ok(()) => sent += 1,
             Err(error) if error.code == ErrorCode::Backpressure => {
                 schedule_tick_in(scheduler, TickUrgency::Deferred);
-                return Ok(false);
+                break Ok(false);
             }
-            Err(error) => return Err(error),
+            Err(error) => break Err(error),
         }
-    }
+    };
+    pending.drain(..sent);
+    let mut queue = fates.borrow_mut();
+    pending.append(&mut queue);
+    *queue = pending;
+    result
 }
 
 /// Retry the one ordinary-wire chunk response whose byte admission was refused.
@@ -7889,7 +7722,7 @@ where
 }
 
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.
-/// Trusted edge links have no application subscription during bootstrap, so
+/// Trusted relay links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
 fn send_catalogue_snapshot_if_needed<S>(
     node: &SharedNodeState<S>,
@@ -7957,6 +7790,17 @@ fn stamp_view_update_authorization_progress_from(
         return;
     }
     peer_payload_inventory.authorization_progress = Some(source_progress);
+}
+
+/// Hand one generated update to each sibling subscriber: every sibling but
+/// the last gets a clone, and the last takes the original, so the common
+/// single-subscriber group never deep-copies its (often large) snapshot.
+fn take_last_or_clone(slot: &mut Option<SyncMessage>, more_follow: bool) -> SyncMessage {
+    if more_follow {
+        slot.clone().expect("update remains for later siblings")
+    } else {
+        slot.take().expect("update remains for the last sibling")
+    }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {

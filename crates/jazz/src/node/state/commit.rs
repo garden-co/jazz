@@ -76,7 +76,7 @@ where
         let schema_version = self.catalogue.active_schema.schema;
         let mut emitted = BTreeSet::new();
         for commit in &commits {
-            let table = self.table_in_schema(&commit.table, schema_version)?;
+            let table = self.table_in_schema_ref(&commit.table, schema_version)?;
             let schema = &self
                 .catalogue
                 .catalogue_schemas
@@ -350,7 +350,7 @@ where
                 .get(schema_version)
                 .ok_or(Error::InvalidStoredValue("write schema is missing"))?
                 .schema;
-            let table = self.table_in_schema(&commit.table, *schema_version)?;
+            let table = self.table_in_schema_ref(&commit.table, *schema_version)?;
             // Project only through the target table. The schema-wide
             // branch-view projection would incorrectly demand unrelated
             // branch dimensions from another table in a heterogeneous schema.
@@ -462,7 +462,7 @@ where
             let schema_version_alias = self
                 .ensure_schema_version_alias(write_schema_version)
                 .await?;
-            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let table_schema = self.table_in_schema_ref(&commit.table, write_schema_version)?;
             let schema = &self
                 .catalogue
                 .catalogue_schemas
@@ -470,11 +470,11 @@ where
                 .ok_or(Error::InvalidStoredValue("commit schema missing"))?
                 .schema;
             let (branch_key, branch_cells) = schema
-                .project_branch_selector(&table_schema, &commit.branch)
+                .project_branch_selector(table_schema, &commit.branch)
                 .map_err(Error::InvalidBranchKey)?;
             let table_id = self.physical_table_id_for_schema(
                 write_schema_version,
-                &table_schema.name,
+                &commit.table,
             )?;
             let layer = VersionLayer::for_commit(&commit);
             let parent_coordinate = ParentCoordinate {
@@ -500,7 +500,7 @@ where
                 None
             } else {
                 self.query_local_layer_winner_in_branch(
-                    &table_schema.name,
+                    &commit.table,
                     &branch_key,
                     commit.row_uuid,
                     layer,
@@ -515,7 +515,7 @@ where
                 Some(previous) => Some(previous),
                 None if !known_fresh_content_row => {
                     self.query_global_layer_winner_in_branch(
-                        &table_schema.name,
+                        &commit.table,
                         &branch_key,
                         commit.row_uuid,
                         layer,
@@ -528,14 +528,14 @@ where
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
                 match self.query_local_layer_winner_in_branch(
-                    &table_schema.name,
+                    &commit.table,
                     &branch_key,
                     commit.row_uuid,
                     VersionLayer::Content,
                 ).await? {
                     Some(previous) => Some(previous),
                     None => self.query_global_layer_winner_in_branch(
-                        &table_schema.name,
+                        &commit.table,
                         &branch_key,
                         commit.row_uuid,
                         VersionLayer::Content,
@@ -573,14 +573,14 @@ where
             );
             let authored_column_ids = self.authored_column_ids_for_names(
                 write_schema_version,
-                &table_schema.name,
+                &commit.table,
                 authored_columns.as_ref(),
             )?;
             let history_descriptor = if commit.deletion.is_none() {
                 Some(
                     self.prepared_physical_write_plan(
                         write_schema_version,
-                        &table_schema.name,
+                        &commit.table,
                         PhysicalWriteTarget::History,
                     )?
                     .logical_descriptor,
@@ -589,7 +589,7 @@ where
                 None
             };
             let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
+                self.table_in_schema_ref(&commit.table, write_schema_version)?,
                 VersionRowParts {
                     table: commit.table,
                     branch_key,
@@ -699,7 +699,19 @@ where
         commits: &mut [(SchemaVersionId, MergeableCommit)],
     ) -> Result<(), Error> {
         for (schema_version, commit) in commits.iter_mut() {
-            let table_schema = self.table_in_schema(&commit.table, *schema_version)?;
+            let table_schema = self.table_in_schema_ref(&commit.table, *schema_version)?;
+            let semantic_kinds = commit
+                .cells
+                .keys()
+                .map(|column| {
+                    table_schema
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == *column)
+                        .map(|column| column.large_value_kind)
+                        .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge)
+                })
+                .collect::<Vec<_>>();
             let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
                 self.current_physical_cells_in_branch_schema(
                     *schema_version,
@@ -712,19 +724,13 @@ where
             } else {
                 BTreeMap::new()
             };
-            for (column, value) in commit.cells.iter_mut() {
+            for ((column, value), semantic_kind) in commit.cells.iter_mut().zip(semantic_kinds) {
                 if value_contains_indirect_descriptor(value)
                     && inherited.get(column) == Some(value)
                 {
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let semantic_kind = table_schema
-                    .columns
-                    .iter()
-                    .find(|candidate| candidate.name == *column)
-                    .map(|column| column.large_value_kind)
-                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
                 let Some(staged) = self
                     .prepare_and_stage_large_scalar(value, semantic_kind)
                     .await?
@@ -961,7 +967,7 @@ where
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<(BTreeMap<String, Value>, TxId)>, Error> {
-        let table_schema = self.table_in_schema(table, schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, schema_version)?;
         let schema = &self
             .catalogue
             .catalogue_schemas
@@ -969,7 +975,7 @@ where
             .ok_or(Error::InvalidStoredValue("registered read schema missing"))?
             .schema;
         let (branch_key, _) = schema
-            .project_branch_selector(&table_schema, branch)
+            .project_branch_selector(table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
         let deletion = match self.query_local_layer_winner_in_branch(
             table,
@@ -1018,14 +1024,14 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "current version schema alias must exist",
             ))?;
-        let authored_table = self.table_in_schema(content.table(), authored_schema)?.clone();
-        let mut cells = self.materialized_cells_for_version(&authored_table, &content)?;
+        let authored_table = self.table_in_schema_ref(content.table(), authored_schema)?;
+        let mut cells = self.materialized_cells_for_version(authored_table, &content)?;
         let Some(projected_table) =
             self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
         else {
             return Ok(None);
         };
-        if projected_table != table_schema.name {
+        if projected_table != table {
             return Err(Error::InvalidStoredValue(
                 "current version projects to an unexpected table",
             ));
@@ -1073,7 +1079,7 @@ where
         layer: VersionLayer,
     ) -> Result<Option<TxId>, Error> {
         let schema_version = self.catalogue.active_schema.schema;
-        let table_schema = self.table_in_schema(table, schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, schema_version)?;
         let schema = &self
             .catalogue
             .catalogue_schemas
@@ -1306,7 +1312,7 @@ where
     }
 
     fn materialized_cells_for_version(
-        &mut self,
+        &self,
         table: &TableSchema,
         version: &VersionRow,
     ) -> Result<BTreeMap<String, Value>, Error> {
@@ -1639,9 +1645,7 @@ where
                 .map_err(malformed)?,
         );
         let tx_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+            .node_aliases.node_for_alias(tx_node_alias)
             .ok_or(Error::InvalidStoredValue(
                 "current row references unknown node alias",
             ))?;

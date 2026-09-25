@@ -51,7 +51,7 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 }
 
 #[test]
-fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
+fn global_settlement_requires_a_fresh_current_connection_view_receipt() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -79,7 +79,7 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
     assert!(client.detach_connection(&first_upstream));
     assert!(
         !subscription._state.borrow().settled,
-        "disconnect must immediately demote cached Edge/Global rows to unsettled"
+        "disconnect must immediately demote cached Global rows to unsettled"
     );
     assert!(subscription.try_next_event().is_none());
     assert_eq!(
@@ -260,7 +260,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
 }
 
 #[test]
-fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
+fn stale_old_upstream_epoch_cannot_settle_after_upstream_switch_or_fallback() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -269,7 +269,7 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     seed(
         &server,
         "todos",
-        cells("served by either edge", false, owner),
+        cells("served by either upstream", false, owner),
     );
 
     let (old_client_transport, old_server_transport) = duplex();
@@ -295,7 +295,7 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(
         !subscription._state.borrow().settled,
-        "edge switch must immediately demote the prior edge receipt"
+        "upstream switch must immediately demote the prior upstream receipt"
     );
     assert!(subscription.try_next_event().is_none());
 
@@ -310,13 +310,13 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
                 .try_next_event()
                 .expect("expected settled publication after driving authority")
         ),
-        "the selected B edge must have a real receipt before the fallback test"
+        "the selected B upstream must have a real receipt before the fallback test"
     );
 
     seed(
         &server,
         "todos",
-        cells("queued pre-fallback old-edge update", false, owner),
+        cells("queued pre-fallback old-upstream update", false, owner),
     );
     server.tick().unwrap();
     // Leave A's response staged while B is selected, then select A again by
@@ -336,7 +336,7 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     seed(
         &server,
         "todos",
-        cells("fresh fallback-edge update", false, owner),
+        cells("fresh fallback-upstream update", false, owner),
     );
     server.tick().unwrap();
     client.tick().unwrap();
@@ -346,7 +346,7 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
                 .try_next_event()
                 .expect("expected settled publication after driving authority")
         ),
-        "after the selected edge detaches, the surviving edge may settle only with its own fresh response"
+        "after the selected upstream detaches, the surviving upstream may settle only with its own fresh response"
     );
 
     drop(old_upstream);
@@ -551,7 +551,7 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     let mut subscription = prepared_subscribe(&reopened, &query, global_subscribe_opts()).unwrap();
     assert!(
         !subscription._state.borrow().settled,
-        "an offline Edge/Global subscription must retain unsettled coverage without publishing cached rows"
+        "an offline Global subscription must retain unsettled coverage without publishing cached rows"
     );
     assert!(subscription.try_next_event().is_none());
     let (reopened_client_transport, reopened_server_transport) = duplex();

@@ -53,7 +53,7 @@ use crate::tools::{
 ///
 /// authority ──re-admit alice──► replacement set
 /// bob ──content update─────────► ordinary add (not replacement)
-/// A real settled Edge ViewUpdate seeds the client's authority membership;
+/// A real settled Global ViewUpdate seeds the client's authority membership;
 /// a later local content version of that occurrence remains an update when
 /// the ClientLocal maintained graph drains.
 ///
@@ -67,6 +67,22 @@ fn collect_binding_source_descriptor_fields(
     descriptors_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
 ) {
     match graph {
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+            scalars,
+        } => collect_binding_source_descriptor_fields(
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
+            descriptors_by_shape,
+        ),
+        GraphBuilder::TemplateInput { input, .. } => {
+            if let Some(input) = input {
+                collect_binding_source_descriptor_fields(input, descriptors_by_shape);
+            }
+        }
         GraphBuilder::BindingSource { shape, output } => {
             let fields = output
                 .fields()
@@ -122,6 +138,22 @@ fn collect_binding_source_projected_fields(
     projected_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
 ) {
     match graph {
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+            scalars,
+        } => collect_binding_source_projected_fields(
+            &program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .unwrap(),
+            projected_by_shape,
+        ),
+        GraphBuilder::TemplateInput { input, .. } => {
+            if let Some(input) = input {
+                collect_binding_source_projected_fields(input, projected_by_shape);
+            }
+        }
         GraphBuilder::Project { input, fields } => {
             if let GraphBuilder::BindingSource { shape, .. } = input.as_ref() {
                 projected_by_shape.entry(shape.clone()).or_default().insert(
@@ -523,7 +555,7 @@ fn evolved_todos_version() -> (
 ///
 /// This is deliberately an internal seam test: the production relation
 /// snapshot receives only an exact `(table, row, tx)` witness here; the
-/// broader client/edge scenario remains the black-box catalogue test.
+/// broader client/server scenario remains the black-box catalogue test.
 /// Proves that a remote authority reset renders an old joined target in
 /// the subscription schema, including table rename and added-column lens
 /// operations.

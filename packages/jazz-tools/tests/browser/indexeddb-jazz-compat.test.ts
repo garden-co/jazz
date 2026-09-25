@@ -229,19 +229,19 @@ describe("browser Jazz storage compatibility corpus", () => {
       return main.id;
     });
     await withTimeout(
-      initial.wait({ tier: "edge" }),
+      initial.wait({ tier: "global" }),
       20_000,
       "corpus initial write did not settle",
     );
     await withTimeout(
       db
         .update(app.documents, initial.value, { title: "current title" }, { branch: "main" })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       20_000,
       "corpus history update did not settle",
     );
-    expect(await db.all(app.documents, { tier: "edge", branch: "main" })).toHaveLength(1);
-    expect(await db.all(app.documents, { tier: "edge", branch: "draft" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "global", branch: "main" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "global", branch: "draft" })).toHaveLength(1);
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
@@ -332,7 +332,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawRecords(physicalDbName),
     );
     // Reopen must materialize the durable local replica without depending on
-    // a fresh remote-coverage round trip. The earlier edge read proves the
+    // a fresh remote-coverage round trip. The earlier global read proves the
     // synced fixture; this is specifically the offline persistence boundary.
     const reopenedMain = await pinnedPhase("readonly-main-query", () =>
       db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),

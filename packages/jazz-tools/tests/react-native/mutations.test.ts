@@ -72,13 +72,18 @@ describe("React Native public mutations through the real foreground C ABI", () =
       });
       await db.delete(app.documents, row.id).wait({ tier: "local" });
       expect(await db.all(app.documents)).toEqual([]);
-      // Native bindings can reject local admission synchronously; the row
-      // remains tombstoned at either the setup or settlement boundary.
-      await expect(async () =>
-        db
-          .upsert(app.documents, row.id, { title: "must stay hidden", done: false })
-          .wait({ tier: "local" }),
-      ).rejects.toThrow(`row already deleted: ${row.id}`);
+      // Row-state failures never throw from the call (#3273, decision (b)):
+      // the write handle rejects, and the row stays tombstoned.
+      let tombstoneUpsert: ReturnType<typeof db.upsert> | undefined;
+      expect(() => {
+        tombstoneUpsert = db.upsert(app.documents, row.id, {
+          title: "must stay hidden",
+          done: false,
+        });
+      }).not.toThrow();
+      await expect(tombstoneUpsert!.wait({ tier: "local" })).rejects.toThrow(
+        `row already deleted: ${row.id}`,
+      );
       expect(await db.all(app.documents)).toEqual([]);
       await db
         .restore(app.documents, row.id, { title: "restored", done: false })

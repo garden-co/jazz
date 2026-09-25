@@ -121,7 +121,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        let mode = if effective_read_tier(&opts) >= DurabilityTier::Edge {
+        let mode = if effective_read_tier(&opts) >= DurabilityTier::Global {
             QueryAuthorizationMode::ClientLocal
         } else {
             QueryAuthorizationMode::TrustedServing
@@ -180,7 +180,7 @@ where
             upstream_opts,
             self.identity.author,
             prepared.request_policy_binding(self.identity.author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -237,7 +237,7 @@ where
             upstream_opts,
             author,
             prepared.request_policy_binding(author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -357,7 +357,7 @@ where
             upstream_opts,
             author.unwrap_or(self.identity.author),
             prepared.request_policy_binding(author.unwrap_or(self.identity.author))?,
-            effective_read_tier(&opts) >= DurabilityTier::Edge,
+            effective_read_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -946,15 +946,73 @@ where
         authorization_mode: QueryAuthorizationMode,
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
+        let local_first_opts = ReadOpts {
+            empty_opening: super::EmptyOpening::Deliver,
+            ..opts.clone()
+        };
+        // Boxed so this wrapper adds no inline opener frame to its callers.
+        let mut stream = Box::pin(self.open_gated_subscription(
+            prepared,
+            opts,
+            author,
+            authorization_mode,
+            allow_pending_overlay,
+        ))
+        .await?;
+        // A remote window that stops being able to answer before it opens
+        // is served by the plain local-first read of the same window, as the
+        // one-shot read falls back to its local result. That read is opened
+        // now, beside the window, so a warm cache can serve it without a
+        // round trip; the stream drops whichever side it does not serve.
+        if stream.is_remote_window() {
+            let fallback = Box::pin(self.open_gated_subscription(
+                prepared,
+                local_first_opts,
+                author,
+                authorization_mode,
+                allow_pending_overlay,
+            ))
+            .await?;
+            stream.window_fallback = Some(Box::new(fallback));
+        }
+        Ok(stream)
+    }
+
+    async fn open_gated_subscription(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+        allow_pending_overlay: bool,
+    ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_read(&opts).await?;
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
+        let (opts, opening_gate) = self.resolve_empty_opening(prepared, opts, authorization_mode);
         let requested_read_tier = effective_read_tier(&opts);
+        // A non-durable foreground (a browser tab over its worker, an RN
+        // foreground over the relay) registers Local coverage, which settles
+        // at the storage owner's local answer, so its `settled` bit cannot
+        // tell a gated opening that the authority answered. While the gate is
+        // armed it also holds `Global` witness coverage for the same read; the
+        // witness's settled authority answer, relayed by the owner, is what
+        // may release an empty opening. The owner-local coverage still
+        // delivers a warm owner cache at once. The host link hint (the owner's
+        // server link) bounds the wait, and the witness is retired when the
+        // gate releases, leaving an ordinary local-first stream.
+        let mut opening_gate = opening_gate;
+        let authority_witnessed = opts.propagation == Propagation::Full
+            && self.node.upstream_durability_floor.get() == DurabilityTier::Local
+            && opening_gate.is_some_and(|gate| gate.route == super::OpeningRoute::LocalFirst);
+        if authority_witnessed && let Some(gate) = opening_gate.as_mut() {
+            gate.witnessed = true;
+        }
         let read_tier = requested_read_tier;
         let pending_overlay = allow_pending_overlay
             && authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && opts.local_updates == LocalUpdates::Immediate;
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
@@ -1017,6 +1075,7 @@ where
         let mut remote_read_tier = None;
         let mut requires_authority_receipt = false;
         let mut upstream_subscription_handles = Vec::new();
+        let mut authority_witness = Vec::new();
         let mut suppress_provisional_opening = false;
         let remote_propagate_upstream = opts.propagation == Propagation::Full;
         // LocalOnly never sends a query to another node, including a durable
@@ -1040,10 +1099,10 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            // Edge/Global cache possession is never a settlement receipt,
+            // Global cache possession is never a settlement receipt,
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
-            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
+            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Global;
             let opened = self
                 .open_subscription_upstream_coverage(
                     prepared,
@@ -1056,9 +1115,28 @@ where
                 .await?;
             upstream_subscription_handles = opened.handles;
             *opening_upstream.borrow_mut() = upstream_subscription_handles.clone();
+            if authority_witnessed {
+                let witness = self
+                    .open_subscription_upstream_coverage(
+                        prepared,
+                        &shape,
+                        &binding,
+                        self.node.upstream_register_shape_options(
+                            DurabilityTier::Global,
+                            opts.read_view.clone(),
+                        ),
+                        author,
+                        authorization_mode,
+                    )
+                    .await?;
+                opening_upstream
+                    .borrow_mut()
+                    .extend(witness.handles.iter().cloned());
+                authority_witness = witness.handles;
+            }
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
-                && requested_read_tier >= DurabilityTier::Edge
+                && requested_read_tier >= DurabilityTier::Global
                 && opened.awaits_initial_authority_response
                 && snapshot.root_count == 0
                 && snapshot.edges.is_empty();
@@ -1151,16 +1229,21 @@ where
                 remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
-            ) && (!subscription.has_covered_input_sources() || covered_closure_installed)
+            ) && (!subscription.has_covered_input_sources()
+                || (covered_closure_installed
+                    // An installed closure whose evaluation still waits (for
+                    // example on large-value chunks) has not produced its
+                    // rows yet; refresh publishes once it completes (#3349).
+                    && !node.covered_receiver_evaluation_pending(&subscription)))
         };
         // An empty local opening carries no observable result information at
-        // an Edge/Global request.  Until the authority replies, publishing it
+        // a Global request.  Until the authority replies, publishing it
         // would let a public subscription report a provisional empty view as
         // its first delivery.  `awaits_initial_authority_response` is only
         // known while opening a fresh upstream handle, but an already-open
         // link has the same receipt requirement.
         suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Edge
+            && requested_read_tier >= DurabilityTier::Global
             && remote_read_tier.is_some()
             && !settled
             && snapshot.root_count == 0
@@ -1168,7 +1251,12 @@ where
         let (sender, receiver) = unbounded();
         let sender = SubscriptionSender {
             sender,
-            publication: Rc::new(RefCell::new(SubscriptionPublication::default())),
+            publication: Rc::new(RefCell::new(SubscriptionPublication {
+                opening_gate,
+                remote_window: opening_gate
+                    .is_some_and(|gate| gate.route == super::OpeningRoute::RemoteWindow),
+                ..SubscriptionPublication::default()
+            })),
             requested_tier: read_tier,
         };
         let mut root_occurrence_ids = snapshot_index
@@ -1200,13 +1288,14 @@ where
             && propagates_upstream
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         // Even a warm, empty foreground graph is provisional until its owner
-        // has answered. Refresh initializes the published graph from those inputs.
+        // has answered. Refresh drains those inputs through this same graph
+        // and fences its admitted work before publishing the opening snapshot.
         let pending_initial_local_snapshot =
             pending_initial_owner_result || !subscription.initial_snapshot_received();
         let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
-        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
+        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Global
             && remote_read_tier.is_some()
             && remote_propagate_upstream
             && opts.read_view.is_default()
@@ -1241,6 +1330,7 @@ where
             settled,
             pending_initial_local_snapshot,
             pending_initial_owner_result,
+            authority_witness,
             sender,
         }));
         {
@@ -1269,6 +1359,9 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        if opening_gate.is_some() {
+            self.register_opening_gate(&state);
+        }
         // The guard covers fallible opening after the local maintained view
         // exists. On success, replace it with one command carrying local and
         // upstream cleanup so Drop never touches the async node mutex.
@@ -1304,6 +1397,8 @@ where
             cleanup: Some(cleanup),
             finalization: None,
             terminated: false,
+            window_fallback: None,
+            serving_fallback: false,
         })
     }
 

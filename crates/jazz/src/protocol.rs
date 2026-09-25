@@ -27,28 +27,6 @@ use crate::time::TxTime;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
-/// One complete transaction inside an edge-authority publication.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorityCommitUnit {
-    /// Canonical transaction envelope, including generated branch intent.
-    pub tx: Transaction,
-    /// Every row version in the transaction, never a query-scoped subset.
-    pub versions: Vec<VersionRecord>,
-}
-
-/// A coherent edge-authorized frontier for one admitted write.
-///
-/// Core admits every member before reconciling remaining concurrent heads.
-/// The group may include pending-global history dependencies and edge merges;
-/// it is not an additional application transaction or a query result.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorityPublication {
-    /// Admitted write whose upload/acknowledgement owns this publication.
-    pub tx_id: TxId,
-    /// Complete accepted transactions in increasing transaction-id order.
-    pub commits: Vec<AuthorityCommitUnit>,
-}
-
 /// Uninhabited payload preserving retired postcard discriminants.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -252,9 +230,8 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Complete edge-admitted frontier, accepted only on an authenticated
-    /// authority link. Core reconciles after all members have been admitted.
-    AuthorityPublication(AuthorityPublication),
+    /// Retired edge-publication tag. No current message may use this slot.
+    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -304,7 +281,7 @@ pub enum CurrentRowOutcome {
     Unknown,
 }
 
-/// Core evaluation evidence. The authenticated serving Edge may proxy this after
+/// Core evaluation evidence. The authenticated local relay may forward this after
 /// validating its selected upstream nonce/epoch; this is not a signature chain.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CurrentRowsReceipt {
@@ -721,23 +698,14 @@ pub struct CatalogueSnapshot {
 }
 
 impl SyncMessage {
-    /// Complete uploaded versions, including every member of an authority
-    /// publication. Shared by chunk staging and upload validation.
+    /// Complete uploaded versions in an ordinary commit unit.
+    /// Shared by chunk staging and upload validation.
     pub fn uploaded_versions(&self) -> impl Iterator<Item = &VersionRecord> {
-        let single = match self {
-            Self::CommitUnit { versions, .. } => Some(versions),
-            _ => None,
-        };
-        let publication = match self {
-            Self::AuthorityPublication(publication) => Some(publication),
-            _ => None,
-        };
-        single.into_iter().flatten().chain(
-            publication
-                .into_iter()
-                .flat_map(|publication| &publication.commits)
-                .flat_map(|unit| &unit.versions),
-        )
+        match self {
+            Self::CommitUnit { versions, .. } => versions.as_slice(),
+            _ => &[],
+        }
+        .iter()
     }
 
     /// Optional wire capabilities required to serialize this semantic message.
@@ -747,7 +715,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorityPublication(_) => crate::wire::FEATURE_AUTHORITY_PUBLICATIONS,
             Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             }
@@ -771,12 +738,6 @@ impl SyncMessage {
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::CommitUnit { versions, .. } => validate_version_records(versions),
-            Self::AuthorityPublication(publication) => {
-                for unit in &publication.commits {
-                    validate_version_records(&unit.versions)?;
-                }
-                Ok(())
-            }
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
             }
@@ -987,8 +948,17 @@ mod version_record_wire_row {
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
     // untrusted receipt admission is separate from this representation codec.
-    const MAX_DESCRIPTOR_PROOFS: usize = 16;
+    //
+    // Every row of a view update repeats its descriptor, so a miss costs a
+    // full descriptor encode or canonical decode per row. Retain enough
+    // distinct descriptors (tables x schema versions x nested shapes) that a
+    // multi-table stream does not evict itself; lookups are hashed so the
+    // larger bound does not turn each hit into a linear scan.
+    const MAX_DESCRIPTOR_PROOFS: usize = 256;
+    /// Largest single descriptor worth retaining.
     const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
+    /// Total encoded descriptor bytes retained per thread.
+    const MAX_DESCRIPTOR_PROOF_CACHE_BYTES: usize = 1024 * 1024;
 
     #[derive(Clone)]
     struct DescriptorProof {
@@ -997,26 +967,63 @@ mod version_record_wire_row {
         encoded: std::sync::Arc<[u8]>,
     }
 
+    /// Bounded FIFO of descriptor proofs with hashed lookup by source
+    /// descriptor (encode) and by encoded bytes (decode). Index entries point
+    /// at the newest proof for their key and are dropped with that proof.
     #[derive(Default)]
     struct DescriptorProofCache {
-        entries: std::collections::VecDeque<DescriptorProof>,
+        entries: std::collections::VecDeque<(u64, DescriptorProof)>,
+        by_source: rustc_hash::FxHashMap<RecordDescriptor, u64>,
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u64>,
+        next_id: u64,
         bytes: usize,
     }
 
     impl DescriptorProofCache {
+        fn get(&self, id: u64) -> Option<&DescriptorProof> {
+            let front = self.entries.front()?.0;
+            let index = usize::try_from(id.checked_sub(front)?).ok()?;
+            self.entries.get(index).map(|(_, proof)| proof)
+        }
+
+        fn by_source(&self, descriptor: &RecordDescriptor) -> Option<DescriptorProof> {
+            self.get(*self.by_source.get(descriptor)?).cloned()
+        }
+
+        fn by_encoded(&self, encoded: &[u8]) -> Option<DescriptorProof> {
+            // Consecutive rows usually share a descriptor: compare the newest
+            // proof before hashing the whole encoding.
+            if let Some((_, newest)) = self.entries.back()
+                && newest.encoded.as_ref() == encoded
+            {
+                return Some(newest.clone());
+            }
+            self.get(*self.by_encoded.get(encoded)?).cloned()
+        }
+
         fn remember(&mut self, proof: DescriptorProof) {
             // This is a retention limit, never an input acceptance limit.
             if proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES {
                 return;
             }
             while self.entries.len() >= MAX_DESCRIPTOR_PROOFS
-                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES
+                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_CACHE_BYTES
             {
-                let evicted = self.entries.pop_front().expect("nonempty bounded cache");
+                let (id, evicted) = self.entries.pop_front().expect("nonempty bounded cache");
                 self.bytes -= evicted.encoded.len();
+                if self.by_source.get(&evicted.source) == Some(&id) {
+                    self.by_source.remove(&evicted.source);
+                }
+                if self.by_encoded.get(evicted.encoded.as_ref()) == Some(&id) {
+                    self.by_encoded.remove(evicted.encoded.as_ref());
+                }
             }
+            let id = self.next_id;
+            self.next_id += 1;
             self.bytes += proof.encoded.len();
-            self.entries.push_back(proof);
+            self.by_source.insert(proof.source, id);
+            self.by_encoded.insert(proof.encoded.clone(), id);
+            self.entries.push_back((id, proof));
         }
     }
 
@@ -1028,15 +1035,7 @@ mod version_record_wire_row {
     fn descriptor_for_encode(
         descriptor: &RecordDescriptor,
     ) -> Result<DescriptorProof, groove::records::Error> {
-        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
-            cache
-                .borrow()
-                .entries
-                .iter()
-                .rev()
-                .find(|proof| proof.source == *descriptor)
-                .cloned()
-        }) {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_source(descriptor)) {
             return Ok(proof);
         }
         let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
@@ -1051,15 +1050,7 @@ mod version_record_wire_row {
     }
 
     fn descriptor_for_decode(encoded: &[u8]) -> Result<DescriptorProof, groove::records::Error> {
-        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
-            cache
-                .borrow()
-                .entries
-                .iter()
-                .rev()
-                .find(|proof| proof.encoded.as_ref() == encoded)
-                .cloned()
-        }) {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_encoded(encoded)) {
             return Ok(proof);
         }
         let canonical = groove::records::decode_persisted_record_descriptor(encoded)?;
@@ -1258,7 +1249,86 @@ mod version_record_wire_row {
             DESCRIPTOR_PROOFS.with(|cache| {
                 let cache = cache.borrow();
                 assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
-                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_BYTES);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+            });
+        }
+
+        // Large descriptors hit the total byte bound long before the entry
+        // bound. Eviction must keep both indexes pointing at retained entries,
+        // and evicted descriptors must still encode to the same bytes.
+        #[test]
+        fn descriptor_proof_cache_byte_bound_eviction_keeps_indexes_consistent() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let big = (0..40)
+                .map(|index| {
+                    RecordDescriptor::new([(
+                        format!("{index:04}{}", "y".repeat(60 * 1024)),
+                        ValueType::U64,
+                    )])
+                })
+                .collect::<Vec<_>>();
+            let encoded = big
+                .iter()
+                .map(|descriptor| descriptor_for_encode(descriptor).unwrap().encoded)
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+                assert!(cache.entries.len() < big.len());
+                assert_eq!(cache.by_source.len(), cache.entries.len());
+                assert_eq!(cache.by_encoded.len(), cache.entries.len());
+                for (id, proof) in &cache.entries {
+                    assert_eq!(cache.by_source.get(&proof.source), Some(id));
+                    assert_eq!(cache.by_encoded.get(proof.encoded.as_ref()), Some(id));
+                }
+            });
+            for (descriptor, bytes) in big.iter().zip(&encoded) {
+                assert_eq!(
+                    descriptor_for_encode(descriptor).unwrap().encoded.as_ref(),
+                    bytes.as_ref()
+                );
+                assert_eq!(
+                    descriptor_for_decode(bytes).unwrap().canonical,
+                    descriptor_for_encode(descriptor).unwrap().canonical
+                );
+            }
+        }
+
+        // A view update interleaves rows from many tables and schema
+        // versions. The retained set must cover them all, or every row pays a
+        // full descriptor decode (#3380 measured ~24 us per miss vs ~44 ns per hit).
+        #[test]
+        fn descriptor_proof_cache_retains_an_interleaved_multi_table_stream() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let rows = (0..64)
+                .map(|table| {
+                    let descriptor = RecordDescriptor::new([
+                        (format!("table_{table}_id"), ValueType::Uuid),
+                        (format!("table_{table}_title"), ValueType::String),
+                    ]);
+                    let raw = descriptor
+                        .create(&[Value::Uuid(uuid::Uuid::nil()), Value::String("t".into())])
+                        .unwrap();
+                    encode(&OwnedRecord::new(raw, descriptor)).unwrap()
+                })
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            for row in &rows {
+                decode(row).unwrap();
+            }
+            let retained = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().entries.len());
+            for row in rows.iter().chain(rows.iter()) {
+                decode(row).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(retained, rows.len());
+                assert_eq!(
+                    cache.entries.len(),
+                    retained,
+                    "a warm stream must not re-decode"
+                );
+                assert_eq!(cache.by_encoded.len(), retained);
             });
         }
 
@@ -2275,7 +2345,7 @@ fn force_singleton_version_carriers() -> bool {
     if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
         return true;
     }
-    std::env::var_os("JAZZ_FORCE_SINGLETON_VERSION_CARRIERS").is_some()
+    crate::debug_env::force_singleton_version_carriers()
 }
 
 #[cfg(test)]
@@ -3044,7 +3114,7 @@ pub struct RegisterShapeOptions {
     /// LocalOnly is a caller-local setting and never crosses a node boundary.
     #[serde(default = "default_propagate_upstream")]
     pub propagate_upstream: bool,
-    /// Internal ownership of the binding whose ViewUpdates an Edge relay may
+    /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
     /// coverage handle.
@@ -3065,7 +3135,7 @@ impl Default for RegisterShapeOptions {
 
 /// Internal discriminator for otherwise-identical binding views.
 ///
-/// It participates in [`RegisterShapeOptions::read_view_key`], so an Edge
+/// It participates in [`RegisterShapeOptions::read_view_key`], so a local
 /// relay authority receipt cannot be confused with an ordinary Global read.
 #[derive(
     Clone,
@@ -3189,7 +3259,6 @@ fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> 
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
-        DurabilityTier::Edge => 2,
         DurabilityTier::Global => 3,
     });
     bytes.push(u8::from(options.propagate_upstream));
@@ -4709,20 +4778,43 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
     serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
-/// Canonical CATS v1 payload used by catalogue storage and publication identity.
+/// Frozen CATS schema envelope for schemas without composite indexes.
+pub(crate) const CATALOGUE_SCHEMA_V1: u8 = 1;
+/// CATS schema envelope for schemas that declare at least one composite
+/// index. The layout is identical to v1; the version byte exists so a reader
+/// that predates `composite_indexes` rejects the payload by version instead of
+/// silently dropping the unknown public-schema JSON field.
+pub(crate) const CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES: u8 = 2;
+
+/// The only CATS schema envelope version that may carry `schema`.
+///
+/// v1 bytes of every schema without composite indexes are unchanged; v2 is
+/// used exactly when some table declares one, so each schema has one
+/// canonical payload.
+pub(crate) fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
+    if schema
+        .public_schema()
+        .values()
+        .any(|table| !table.composite_indexes.is_empty())
+    {
+        CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES
+    } else {
+        CATALOGUE_SCHEMA_V1
+    }
+}
+
+/// Canonical CATS payload used by catalogue storage and publication identity.
 ///
 /// This is deliberately a small explicit envelope rather than the serde layout
-/// of `SchemaVersion`: version, raw schema UUID, little-endian JSON length, and
-/// the canonical public-schema JSON bytes.
-pub(crate) fn canonical_catalogue_schema_v1_bytes(
-    schema: &SchemaVersion,
-) -> Result<Vec<u8>, String> {
-    const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+/// of `SchemaVersion`: version (see [`catalogue_schema_payload_version`]), raw
+/// schema UUID, little-endian JSON length, and the canonical public-schema
+/// JSON bytes.
+pub(crate) fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
     let public_schema = durable_public_schema_json(&schema.schema)?;
     let length = u32::try_from(public_schema.len())
         .map_err(|_| "catalogue public schema payload too large".to_owned())?;
     let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
-    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.push(catalogue_schema_payload_version(&schema.schema));
     payload.extend_from_slice(schema.id.0.as_bytes());
     payload.extend_from_slice(&length.to_le_bytes());
     payload.extend_from_slice(&public_schema);
@@ -5557,7 +5649,7 @@ impl SchemaLineagePublication {
         put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
         put_bytes(
             &mut bytes,
-            &canonical_catalogue_schema_v1_bytes(&self.schema)
+            &canonical_catalogue_schema_bytes(&self.schema)
                 .expect("schema publication has a canonical CATS v1 payload"),
         );
         put_bytes(&mut bytes, &canonical_lens_bytes(&self.lens));
@@ -7763,18 +7855,18 @@ mod tests {
         // entries, so the exact canonical preimage must be pinned below the
         // public subscription API boundary.
         let options = RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
+            tier: DurabilityTier::Global,
             read_view: ReadViewSpec::branch_view(selector(1), None),
             propagate_upstream: false,
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
             hex::encode(canonical_register_shape_options_v1_bytes(&options)),
-            "4a52564b010200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            "4a52564b010300010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("ab3adac6-1943-535a-8983-1541732f0fb1")
+            uuid::uuid!("7922a41b-d6d5-5918-a7c0-d0ba05062ea4")
         );
     }
 

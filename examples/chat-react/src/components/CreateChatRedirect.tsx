@@ -12,7 +12,7 @@ export const CreateChatRedirect = () => {
   const { navigate } = useRouter();
   const initialized = useRef(false);
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
-    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    () => ({ tier: db.getConfig().serverUrl ? "global" : "local" }),
     [db],
   );
 

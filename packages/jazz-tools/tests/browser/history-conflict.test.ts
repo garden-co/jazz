@@ -353,7 +353,7 @@ describe("History & Conflict Management", () => {
     );
 
     // Both updates start concurrently — creating diverged tips — then settle
-    // at the edge so a fresh peer has an authoritative conflict winner to read.
+    // at Core so a fresh peer has an authoritative conflict winner to read.
     const aliceConflictTitle = "alice-edit";
     const bobConflictTitle = "bob-edit";
     expect(aliceConflictTitle).not.toBe(bobConflictTitle);
@@ -364,15 +364,18 @@ describe("History & Conflict Management", () => {
       bobConflict.txId,
     ]);
     expect(aliceConflictTxId).not.toBe(bobConflictTxId);
-    await Promise.all([aliceConflict.wait({ tier: "edge" }), bobConflict.wait({ tier: "edge" })]);
+    await Promise.all([
+      aliceConflict.wait({ tier: "global" }),
+      bobConflict.wait({ tier: "global" }),
+    ]);
 
-    // Compare edge-tier reads: a local tier may still intentionally include a
+    // Compare global-tier reads: a local tier may still intentionally include a
     // client's own optimistic conflict while upstream reconciliation is pending.
     let convergedTitle = "";
     await waitForCondition(
       async () => {
-        const aliceRows = await dbAlice.all(allTodos, { tier: "edge" });
-        const bobRows = await dbBob.all(allTodos, { tier: "edge" });
+        const aliceRows = await dbAlice.all(allTodos, { tier: "global" });
+        const bobRows = await dbBob.all(allTodos, { tier: "global" });
         const aliceTodo = aliceRows.find((r) => r.id === id);
         const bobTodo = bobRows.find((r) => r.id === id);
         if (!aliceTodo || !bobTodo) return false;
@@ -399,7 +402,7 @@ describe("History & Conflict Management", () => {
       (rows) => rows.some((row) => row.id === id && row.title === convergedTitle),
       "Charlie sees converged title",
       20000,
-      "edge",
+      "global",
     );
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
@@ -492,7 +495,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
   const { id: aliceToBobId } = await withTimeout(
     dbAlice
       .insert(todos, { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "edge" }),
+      .wait({ tier: "global" }),
     10_000,
     `${label} Alice->Bob peer sync insert did not resolve`,
   );
@@ -503,13 +506,13 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
-    "edge",
+    "global",
   );
 
   const { id: bobToAliceId } = await withTimeout(
     dbBob
       .insert(todos, { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "edge" }),
+      .wait({ tier: "global" }),
     10_000,
     `${label} Bob->Alice peer sync insert did not resolve`,
   );
@@ -520,6 +523,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
-    "edge",
+    "global",
   );
 }

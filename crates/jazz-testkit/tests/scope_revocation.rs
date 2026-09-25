@@ -9,7 +9,7 @@ use jazz::tools::{
 };
 use jazz_server::JazzServer;
 use support::{
-    publish_permissions, push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query,
+    publish_permissions, push_catalogue_in_memory, wait_for_query, wait_for_remote_query_ready,
 };
 use uuid::Uuid;
 
@@ -69,11 +69,11 @@ fn canonical_user(user_id: &str) -> String {
 /// Revocation is forward-looking sync narrowing, not post-delivery redaction.
 ///
 /// Bob first receives a row whose owner matches his authenticated `user_id`.
-/// A trusted writer then transfers ownership away. Bob's next Edge-settled
+/// A trusted writer then transfers ownership away. Bob's next Global-settled
 /// one-shot query must remove the row from the settled result set, but Bob's
 /// purely local read may still see the already-delivered copy.
 #[tokio::test(flavor = "current_thread")]
-async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
+async fn scope_revocation_removes_global_results_without_redacting_local_copy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start().await.expect("start test server");
@@ -121,7 +121,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             )
             .await
             .expect("connect trusted writer");
-            wait_for_edge_query_ready(&writer, "docs", READY_TIMEOUT).await;
+            wait_for_remote_query_ready(&writer, "docs", READY_TIMEOUT).await;
 
             let mut bob_context = user_client_context(&server, schema.clone(), &bob_user_id);
             support::enroll_test_context(&mut bob_context).await.expect("enroll bob");
@@ -129,7 +129,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 jazz_testkit::connect(bob_context)
                     .await
                     .expect("connect bob");
-            wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;
+            wait_for_remote_query_ready(&bob, "docs", READY_TIMEOUT).await;
 
             let (doc_id, _, create_tx) = writer
                 .for_session(writer_session.clone())
@@ -142,7 +142,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                     ),
                 )
                 .expect("trusted writer creates bob-visible doc");
-            support::wait_for_edge_txs(&writer, &[create_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[create_tx.expect("ordinary mutation commits immediately")]).await;
 
             let query = jazz::query::Query::from("docs");
             wait_for_query(
@@ -166,20 +166,20 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                     vec![("owner_id".to_owned(), Value::Text(alice_owner_id))],
                 )
                 .expect("narrowly authorized writer transfers ownership away from bob");
-            support::wait_for_edge_txs(&writer, &[revoke_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[revoke_tx.expect("ordinary mutation commits immediately")]).await;
 
-            let edge_rows_after_revoke = wait_for_query(
+            let global_rows_after_revoke = wait_for_query(
                 &bob,
                 query.clone(),
                 jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
-                "bob EdgeServer query excludes doc after revocation",
+                "bob GlobalServer query excludes doc after revocation",
                 |rows| rows.iter().all(|(id, _)| *id != doc_id).then_some(rows),
             )
             .await;
             assert!(
-                edge_rows_after_revoke.iter().all(|(id, _)| *id != doc_id),
-                "revoked row must not remain in Bob's settled EdgeServer result: {edge_rows_after_revoke:?}"
+                global_rows_after_revoke.iter().all(|(id, _)| *id != doc_id),
+                "revoked row must not remain in Bob's settled GlobalServer result: {global_rows_after_revoke:?}"
             );
 
             let local_rows_after_revoke = bob

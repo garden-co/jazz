@@ -20,7 +20,8 @@
     "@types/node": "catalog:default",
     "picocolors": "^1.1.1",
     "tsx": "^4.21.0",
-    "typescript": "catalog:default"
+    "typescript": "catalog:default",
+    "yaml": "2.8.2"
   },
   "engines": {
     "node": ">=22.12"

@@ -137,7 +137,7 @@ pub async fn subscribe_todos(
 pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos");
     let rows = client
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query, Some(DurabilityTier::GlobalServer))
         .await?;
     Ok(rows.len())
 }
@@ -469,7 +469,7 @@ pub async fn load_file_bytes(
             Query::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
-            Some(DurabilityTier::EdgeServer),
+            Some(DurabilityTier::GlobalServer),
         )
         .await?;
 
@@ -485,7 +485,7 @@ pub async fn load_file_bytes(
             Query::from("files")
                 .select(["data"])
                 .filter(eq(col("id"), lit(*file_id.uuid()))),
-            Some(DurabilityTier::EdgeServer),
+            Some(DurabilityTier::GlobalServer),
         )
         .await?;
 
@@ -510,7 +510,7 @@ pub async fn delete_upload_with_file(
             Query::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
-            Some(DurabilityTier::EdgeServer),
+            Some(DurabilityTier::GlobalServer),
         )
         .await?;
 

@@ -76,7 +76,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "edge",
+        tier: "global",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
@@ -111,7 +111,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-2",
         table: "projects",
-        tier: "edge",
+        tier: "global",
         propagation: "local-only",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
@@ -148,7 +148,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-2",
         table: "projects",
-        tier: "edge",
+        tier: "global",
         propagation: "local-only",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",

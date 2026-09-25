@@ -1043,6 +1043,173 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     };
     assert_eq!(fate, Fate::Accepted);
 }
+
+// The local pre-publication check runs inside `commit_exclusive` before any
+// authority sees the unit, and it depends on which versions this node ingested
+// between begin and commit. `JazzClient` cannot pin that interleaving, so
+// these tests drive the node directly and assert the local commit outcome.
+fn watched_title_shape() -> (ValidatedQuery, Binding) {
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit("watched"),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    (shape, binding)
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_remote_matching_phantom() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_title_shape();
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    let (_remote, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    assert!(matches!(
+        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_pending_local_matching_insert() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (shape, binding) = watched_title_shape();
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    // No authority exists: the matching insert stays a pending local write.
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        )
+        .unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    assert!(matches!(
+        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_title_shape();
+    register_shape_binding(&mut core, &shape, &binding);
+
+    let tx_id = OpenTransactionId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
+
+    let (_remote, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("unrelated remote")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(2), 11).cells(title_cells("unrelated local")),
+        )
+        .unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+        .unwrap();
+    // Passing the local check publishes the unit; the authority agrees.
+    let (_committed, unit) = client
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 12)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Accepted);
+}
+
+#[test]
+fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
+    for (name, removal) in [
+        (
+            "moved out of the filter",
+            MergeableCommit::new("todos", row(1), 20).cells(title_cells("moved")),
+        ),
+        (
+            "deleted",
+            MergeableCommit::new("todos", row(1), 20).deletion(DeletionEvent::Deleted),
+        ),
+    ] {
+        let (_client_dir, mut client) = open_node_with_uuid(node(1));
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        let (shape, binding) = watched_title_shape();
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("watched")),
+        );
+
+        let tx_id = OpenTransactionId::new();
+        client.open_exclusive(tx_id).unwrap();
+        assert_eq!(
+            client.tx_query(tx_id, &shape, &binding).unwrap().len(),
+            1,
+            "{name}"
+        );
+
+        // The authority is offline from here on: the removal stays pending.
+        client.commit_mergeable_settled(removal).unwrap();
+
+        client
+            .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
+            .unwrap();
+        assert!(
+            matches!(
+                client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 21),
+                Err(Error::TransactionConflict)
+            ),
+            "{name}"
+        );
+    }
+}
 #[test]
 fn exclusive_shape_predicate_is_binding_sensitive() {
     let author_a = user(0xa1);
@@ -2060,4 +2227,188 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     drop(reopened);
     let reopened = reopen_node_at(&writer_b_dir, node(2), schema());
     assert!(reopened.rejected_transaction(rejected).is_none());
+}
+
+// Internal: the history decode counter is the only observable of how many
+// history scans a transaction table read performs; results alone cannot tell
+// one table-wide scan from a re-scan per row (#3473).
+#[test]
+fn exclusive_table_read_decodes_each_history_version_once() {
+    let (_temp_dir, mut core) = open_node();
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), u64::from(ordinal))
+                .cells(title_cells(format!("first-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    for ordinal in 1..=16 {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(ordinal), 100 + u64::from(ordinal))
+                .cells(title_cells(format!("second-{ordinal}"))),
+        )
+        .unwrap();
+    }
+    core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(3), 200).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    let tx_id = OpenTransactionId::new();
+    core.open_exclusive(tx_id).unwrap();
+    // Arrives after the snapshot, so the transaction must not see it.
+    let late = TxId::new(TxTime::from(300), node(2));
+    ingest_relay_version(&mut core, late, 300, Vec::new(), row(5), "late");
+    core.tx_write(tx_id, "todos", row(7), title_cells("pending"), None)
+        .unwrap();
+    let stored_versions = 16 * 2 + 1 + 1;
+
+    super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+    let rows = core
+        .tx_current_rows(tx_id, "todos")
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
+        stored_versions,
+        "a transaction table read must decode each stored version once"
+    );
+
+    let mut expected = Vec::new();
+    for ordinal in 1..=16 {
+        if let Some(cells) = core.tx_read(tx_id, "todos", row(ordinal)).unwrap() {
+            expected.push((row(ordinal), cells));
+        }
+    }
+    assert_eq!(rows, expected);
+    assert!(!rows.iter().any(|(row_uuid, _)| *row_uuid == row(3)));
+    assert!(rows.contains(&(row(5), title_cells("second-5"))));
+    assert!(rows.contains(&(row(7), title_cells("pending"))));
+}
+
+// Differential: a whole-table read inside an exclusive transaction must equal
+// per-row point reads under concurrent content heads, delete/restore,
+// accepted and pending foreign versions, versions that arrive after the
+// snapshot, and staged writes and deletes.
+#[test]
+fn exclusive_table_read_matches_point_reads_across_seeds() {
+    for seed in 0..60u64 {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut rand = move |n: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let (_temp_dir, mut core) = open_node();
+        let rows = 6u8;
+        let mut heads: BTreeMap<u8, Vec<TxId>> = BTreeMap::new();
+        let mut time = 1u64;
+        let mut global = 10_000u64;
+        let mut ops = |core: &mut NodeState<_>, rand: &mut dyn FnMut(u64) -> u64, after_snapshot: bool| {
+            for _ in 0..30 {
+                let r = 1 + rand(rows as u64) as u8;
+                time += 1;
+                let known = heads.entry(r).or_default();
+                let parents: Vec<TxId> = known.iter().copied().filter(|_| rand(2) == 0).collect();
+                match rand(if after_snapshot { 2 } else { 4 }) {
+                    0 | 1 if !after_snapshot => {
+                        let mut commit = MergeableCommit::new("todos", row(r), time)
+                            .cells(title_cells(format!("s{seed}-{time}")))
+                            .parents(parents);
+                        if rand(5) == 0 {
+                            commit = commit.deletion(if rand(2) == 0 {
+                                DeletionEvent::Deleted
+                            } else {
+                                DeletionEvent::Restored
+                            });
+                        }
+                        if let Ok(tx) = core.commit_mergeable_settled(commit) {
+                            known.push(tx);
+                        }
+                    }
+                    _ => {
+                        let tx = TxId::new(TxTime::from(time), node(2 + rand(2) as u8));
+                        ingest_relay_version(core, tx, time, parents, row(r), &format!("f{seed}-{time}"));
+                        if rand(2) == 0 {
+                            global += 1;
+                            let _ = core.apply_fate_update(
+                                tx,
+                                Fate::Accepted,
+                                Some(GlobalTime(global)),
+                                Some(DurabilityTier::Global),
+                            );
+                        }
+                        known.push(tx);
+                    }
+                }
+            }
+        };
+        ops(&mut core, &mut rand, false);
+        let tx_id = OpenTransactionId::new();
+        core.open_exclusive(tx_id).unwrap();
+        ops(&mut core, &mut rand, true);
+        for r in 1..=rows + 2 {
+            match rand(4) {
+                0 => core
+                    .tx_write(tx_id, "todos", row(r), title_cells(format!("staged-{r}")), None)
+                    .unwrap(),
+                1 => {
+                    let _ = core.tx_write(
+                        tx_id,
+                        "todos",
+                        row(r),
+                        BTreeMap::<String, Value>::new(),
+                        Some(DeletionEvent::Deleted),
+                    );
+                }
+                _ => {}
+            }
+        }
+        let table = core
+            .tx_current_rows(tx_id, "todos")
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for r in 1..=rows + 2 {
+            if let Some(cells) = core.tx_read(tx_id, "todos", row(r)).unwrap() {
+                expected.push((row(r), cells));
+            }
+        }
+        assert_eq!(table, expected, "seed {seed}");
+    }
+}
+
+// Internal: the transaction payload decode counter is the only observable of
+// how snapshot coverage is decided; results alone cannot tell a full stored
+// transaction decode from a global-time projection.
+#[test]
+fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
+    fn decodes(edits: u64) -> usize {
+        let (_temp_dir, mut core) = open_node();
+        for edit in 1..=edits {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("todos", row(1), edit).cells(title_cells(format!("edit-{edit}"))),
+            )
+            .unwrap();
+        }
+        let tx_id = OpenTransactionId::new();
+        core.open_exclusive(tx_id).unwrap();
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
+        assert_eq!(
+            core.tx_read(tx_id, "todos", row(1)).unwrap(),
+            Some(title_cells(format!("edit-{edits}")))
+        );
+        core.tx_write(tx_id, "todos", row(1), title_cells("mine"), None)
+            .unwrap();
+        core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 10_000)
+            .unwrap();
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get())
+    }
+    assert_eq!(
+        decodes(8),
+        decodes(64),
+        "snapshot coverage must not decode a stored transaction per row version"
+    );
 }

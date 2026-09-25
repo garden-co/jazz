@@ -542,18 +542,25 @@ pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String 
     format!("jazz_physical_{}_register", table_id.0)
 }
 
-/// Inverse of the physical history/register name constructors. Resolve the id
-/// once instead of allocating a formatted name for every catalogue candidate.
-pub(super) fn physical_version_table_id(name: &str, is_deletion: bool) -> Option<PhysicalTableId> {
-    let suffix = if is_deletion { "_register" } else { "_history" };
-    let digits = name.strip_prefix("jazz_physical_")?.strip_suffix(suffix)?;
-    // Keep the exact spelling accepted by comparing with the constructors:
-    // unsigned decimal, no sign, no padding, including the single digit zero.
+/// Split a per-table physical name (`jazz_physical_{id}_{suffix}`) into its id
+/// and suffix. Only the exact spelling the name constructors produce is
+/// accepted: unsigned decimal, no sign, no padding, including the single digit
+/// zero. Allocation-free, so callers can resolve names per catalogue candidate.
+pub(super) fn split_physical_table_name(name: &str) -> Option<(PhysicalTableId, &str)> {
+    let (digits, suffix) = name.strip_prefix("jazz_physical_")?.split_once('_')?;
     if digits.is_empty() || !digits.as_bytes()[0].is_ascii_digit()
         || (digits.len() > 1 && digits.starts_with('0')) {
         return None;
     }
-    digits.parse().ok().map(PhysicalTableId)
+    digits.parse().ok().map(|id| (PhysicalTableId(id), suffix))
+}
+
+/// Inverse of the physical history/register name constructors. Resolve the id
+/// once instead of allocating a formatted name for every catalogue candidate.
+pub(super) fn physical_version_table_id(name: &str, is_deletion: bool) -> Option<PhysicalTableId> {
+    let expected = if is_deletion { "register" } else { "history" };
+    split_physical_table_name(name)
+        .and_then(|(table_id, suffix)| (suffix == expected).then_some(table_id))
 }
 
 /// Fixed sparse deletion history shared by every physical content lineage.
@@ -600,6 +607,17 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
 // changing an execution carrier must not rename a persisted index namespace.
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
     format!("by_physical_app_v1_{}", column_id.0)
+}
+
+pub(super) fn physical_current_composite_index_name(column_ids: &[PhysicalColumnId]) -> String {
+    format!(
+        "by_physical_composite_v1_{}",
+        column_ids
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join("_")
+    )
 }
 
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {

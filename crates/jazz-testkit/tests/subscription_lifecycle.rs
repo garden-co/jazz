@@ -14,8 +14,8 @@ use jazz::tools::{
 };
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added_id, has_removed, wait_for_edge_query_ready, wait_for_edge_txs,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, wait_for_global_txs, wait_for_query,
+    wait_for_remote_query_ready, wait_for_rows, wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
@@ -78,7 +78,7 @@ async fn connect_trusted(server: &JazzServer, schema: &Schema, user_id: &str) ->
         jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), user_id))
             .await
             .expect("connect trusted client");
-    wait_for_edge_query_ready(&client, "documents", READY_TIMEOUT).await;
+    wait_for_remote_query_ready(&client, "documents", READY_TIMEOUT).await;
     client
 }
 
@@ -109,7 +109,7 @@ async fn assert_row_stays_absent_locally(
     }
 }
 
-/// A one-shot edge query must be answered once with its full result and must
+/// A one-shot remote query must be answered once with its full result and must
 /// not leave a live server-side delivery behind: a later matching write by
 /// another client is not pushed to the one-shot reader, while a fresh one-shot
 /// still returns it.
@@ -150,7 +150,7 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     let (row1, row1_values, row1_tx) = bob
         .insert("documents", row_input!("title" => "before one-shot"))
         .expect("bob inserts first document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row1_tx.expect("ordinary mutation commits immediately")],
     )
@@ -187,7 +187,7 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     let (row2, _, row2_tx) = bob
         .insert("documents", row_input!("title" => "after one-shot"))
         .expect("bob inserts second document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row2_tx.expect("ordinary mutation commits immediately")],
     )
@@ -278,7 +278,7 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     let (row1, _, row1_tx) = bob
         .insert("documents", row_input!("title" => "while subscribed"))
         .expect("bob inserts while alice is subscribed");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row1_tx.expect("ordinary mutation commits immediately")],
     )
@@ -305,7 +305,7 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     let (row2, _, row2_tx) = bob
         .insert("documents", row_input!("title" => "after unsubscribe"))
         .expect("bob inserts after alice unsubscribed");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row2_tx.expect("ordinary mutation commits immediately")],
     )
@@ -347,7 +347,7 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     let (row3, _, row3_tx) = bob
         .insert("documents", row_input!("title" => "after resubscribe"))
         .expect("bob inserts after alice resubscribed");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row3_tx.expect("ordinary mutation commits immediately")],
     )
@@ -413,7 +413,7 @@ async fn rapid_drop_and_resubscribe_keeps_a_live_subscription_impl() {
             row_input!("title" => "after rapid resubscribe"),
         )
         .expect("bob inserts after alice's rapid resubscribe");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[row_tx.expect("ordinary mutation commits immediately")],
     )
@@ -434,7 +434,7 @@ async fn rapid_drop_and_resubscribe_keeps_a_live_subscription_impl() {
 
 /// Deleting a row a read policy depends on must revoke visibility for both a
 /// live subscriber and a persisted subscriber that was offline during the
-/// deletion: on reconnect the persisted client's edge-settled query must no
+/// deletion: on reconnect the persisted client's remote-settled query must no
 /// longer include the document, even though its local store still holds the
 /// stale membership grant.
 ///
@@ -447,7 +447,7 @@ async fn rapid_drop_and_resubscribe_keeps_a_live_subscription_impl() {
 /// bob (persistent) ──shutdown (offline)
 /// alice ──delete membership_live────────► server ──► bob live stream (doc_live removed)
 /// alice ──delete membership_off─────────► server
-/// bob ──reconnect (same data dir)───────► edge query: doc_keep only
+/// bob ──reconnect (same data dir)───────► remote query: doc_keep only
 /// ```
 #[tokio::test]
 async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscribers() {
@@ -512,7 +512,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
             row_input!("folder_id" => folder_off, "title" => "revoked while offline"),
         )
         .expect("alice creates the offline-revoked document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[
             folder_keep_tx.expect("ordinary mutation commits immediately"),
@@ -578,7 +578,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     let live_delete_tx = alice
         .delete("memberships", membership_live)
         .expect("alice deletes the online membership");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[live_delete_tx.expect("ordinary mutation commits immediately")],
     )
@@ -595,7 +595,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     let off_delete_tx = alice
         .delete("memberships", membership_off)
         .expect("alice deletes a membership while bob's persistent client is offline");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[off_delete_tx.expect("ordinary mutation commits immediately")],
     )
@@ -604,7 +604,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     let reopened_bob = jazz_testkit::connect(bob_context)
         .await
         .expect("bob reconnects with his persisted store");
-    wait_for_edge_query_ready(&reopened_bob, "documents", READY_TIMEOUT).await;
+    wait_for_remote_query_ready(&reopened_bob, "documents", READY_TIMEOUT).await;
     let rows_after_reconnect = wait_for_rows(
         &reopened_bob,
         query,
@@ -665,7 +665,7 @@ async fn deleting_a_subscribed_row_emits_a_removal_delta_impl() {
     let (row_id, _, insert_tx) = bob
         .insert("documents", row_input!("title" => "short-lived"))
         .expect("bob inserts the document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[insert_tx.expect("ordinary mutation commits immediately")],
     )
@@ -682,7 +682,7 @@ async fn deleting_a_subscribed_row_emits_a_removal_delta_impl() {
     let delete_tx = bob
         .delete("documents", row_id)
         .expect("bob deletes the document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &bob,
         &[delete_tx.expect("ordinary mutation commits immediately")],
     )

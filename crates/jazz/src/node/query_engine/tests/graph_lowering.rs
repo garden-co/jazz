@@ -44,12 +44,8 @@ fn shared_row_set_dag_reaches_owned_plan_and_groove_lowering() {
 }
 
 #[test]
-fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs() {
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+fn simple_current_table_root_query_lowers_for_local_and_global_sync_outputs() {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: QueryReadSet::primary(current_read_view_at(tier)),
@@ -386,6 +382,77 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
     )));
 }
 
+/// Source-bound order must be materialized before a descriptor-changing
+/// relation projection, even when no slice consumes the pending order.
+#[test]
+fn source_order_flushes_before_relation_output_projection_without_slice() {
+    let mut input = row_set_input(0x76);
+    let root = input.shape.root.clone();
+    let root_source = source("todos", SourceRole::Root);
+    let order = RowSetNodeId("source-order".to_owned());
+    let project = RowSetNodeId("relation-output-project".to_owned());
+    input.shape.nodes.insert(
+        order.clone(),
+        RowSetExpr::OrderBy {
+            input: root,
+            keys: vec![OrderKey {
+                value: NormalizedValueRef::SourceField {
+                    source: root_source.clone(),
+                    field: "title".to_owned(),
+                },
+                direction: SortDirection::Desc,
+            }],
+        },
+    );
+    input.shape.nodes.insert(
+        project.clone(),
+        RowSetExpr::Project {
+            input: order,
+            columns: vec![
+                RowProjection {
+                    output: TypedOutputField {
+                        name: "row_uuid".to_owned(),
+                        ty: ColumnType::Uuid,
+                    },
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                },
+                RowProjection {
+                    output: TypedOutputField {
+                        name: "public_title".to_owned(),
+                        ty: ColumnType::String,
+                    },
+                    value: NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: "title".to_owned(),
+                    },
+                },
+            ],
+        },
+    );
+    input.shape.root = project;
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("order followed by relation projection should lower");
+    let graph = &program.lowered.terminals[0].graph;
+    assert!(
+        graph_any(graph, &|graph| {
+            matches!(
+                graph,
+                GraphBuilder::Project { input, fields }
+                    if fields.iter().any(|field| field.output_name == "public_title")
+                        && matches!(input.as_ref(), GraphBuilder::TopBy { .. })
+            )
+        }),
+        "source order must be flushed before the output projection: {graph:?}"
+    );
+}
 /// A maintained current-source predicate must lower a bare UUID literal to
 /// the source field's declared nullable shape before Groove evaluates it.
 #[test]

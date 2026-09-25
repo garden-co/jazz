@@ -9,12 +9,16 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) depends_on_context: Option<bool>,
     /// Immutable graph classification, not a proof that runtime state is ready.
     pub(super) has_hydration_state_ancestor: Option<bool>,
+    /// Structural proof obligations, never cached answers about live state.
+    pub(super) readiness_frontier: Option<Arc<[NodeId]>>,
+    pub(super) terminal_lineage: Option<Arc<evaluator::TerminalLineage>>,
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
     pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,
+    pub(super) pipeline: Option<Arc<pipeline::PreparedPipeline>>,
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
-    pub(super) join_output_mapping: Option<Arc<[(usize, usize)]>>,
+    pub(super) join_output: Option<Arc<crate::records::PreparedRecordCopy>>,
     pub(super) aggregate_group_fields: Option<Arc<[String]>>,
 }
 
@@ -50,7 +54,37 @@ impl NodeState {
     pub(super) fn index_source_request(
         input: &IndexSourceOp,
     ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
+        if input.candidate_filter.is_some() && input.row_projection.is_none() {
+            return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+        }
         if input.row_projection.is_some() {
+            if let Some(filter) = &input.candidate_filter {
+                if !input.intersections.is_empty() {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                }
+                let StaticScanBounds::Prefix(prefix) =
+                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                else {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                };
+                let StaticScanBounds::Prefix(candidate_prefix) =
+                    persisted_index_scan_bounds(&filter.table, &filter.index, Some(&filter.scan))?
+                else {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                };
+                return Ok(Some(
+                    super::evaluation_session::StorageRequestKey::IndexedRowsCandidateFilter {
+                        table: input.table.clone(),
+                        index: input.index.clone(),
+                        prefix,
+                        candidate_table: filter.table.clone(),
+                        candidate_index: filter.index.clone(),
+                        candidate_prefix,
+                        source_column: filter.source_column.clone(),
+                        candidate_column: filter.candidate_column.clone(),
+                    },
+                ));
+            }
             if !input.intersections.is_empty() {
                 let StaticScanBounds::Prefix(prefix) =
                     persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
@@ -89,6 +123,7 @@ impl NodeState {
                                 index: input.index.clone(),
                                 prefix,
                                 max_items,
+                                reversed: scan_reversed(input.scan.as_ref()),
                             }
                         } else {
                             super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
@@ -119,6 +154,7 @@ impl NodeState {
                                 family: "indices".to_owned(),
                                 prefix,
                                 max_items,
+                                reversed: scan_reversed(input.scan.as_ref()),
                             }
                         }
                         None => super::evaluation_session::StorageRequestKey::ScanPrefix {
@@ -391,6 +427,11 @@ impl NodeState {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
             let max_items = scan_max_items(input.scan.as_ref());
+            let direction = if scan_reversed(input.scan.as_ref()) {
+                ScanDirection::Reverse
+            } else {
+                ScanDirection::Forward
+            };
             let scan =
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
                 {
@@ -399,7 +440,7 @@ impl NodeState {
                             .scan(ScanRequest {
                                 cf: "indices".to_owned(),
                                 bounds: ScanBounds::Prefix(prefix),
-                                direction: ScanDirection::Forward,
+                                direction,
                                 max_items,
                             })
                             .await?
@@ -412,7 +453,7 @@ impl NodeState {
                             .scan(ScanRequest {
                                 cf: "indices".to_owned(),
                                 bounds: ScanBounds::Range { start, end },
-                                direction: ScanDirection::Forward,
+                                direction,
                                 max_items,
                             })
                             .await?
@@ -527,7 +568,7 @@ impl NodeState {
         input: &BindingSourceOp,
         output_desc: &RecordDescriptor,
         binding_deltas: &[BindingDelta],
-        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
+        binding_snapshots: &BindingSnapshots,
         mode: ArrangementUpdateMode,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if mode == ArrangementUpdateMode::Replace {
@@ -580,10 +621,28 @@ impl NodeState {
         raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        Self::update_map_project_slice(
+            project,
+            output_desc,
+            input.descriptor,
+            &input.deltas,
+            raw_projection,
+            omit_unrepresentable_enum_rows,
+        )
+    }
+
+    pub(super) fn update_map_project_slice(
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input_desc: RecordDescriptor,
+        input: &[RecordDelta],
+        raw_projection: Option<&PreparedProjection>,
+        omit_unrepresentable_enum_rows: bool,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         if raw_projection.is_some_and(|plan| plan.reuses_input) {
             return Ok(RecordDeltas {
                 descriptor: output_desc,
-                deltas: input.deltas.clone(),
+                deltas: input.to_vec(),
             });
         }
         let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
@@ -596,65 +655,21 @@ impl NodeState {
                     }
                 )
             });
-        let estimated_output_bytes = input
-            .deltas
-            .iter()
-            .map(|delta| delta.record.len())
-            .sum::<usize>();
+        let estimated_output_bytes = input.iter().map(|delta| delta.record.len()).sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
-        let mut spans = Vec::with_capacity(input.deltas.len());
-        for delta in &input.deltas {
-            let span = if let Some(fields) = raw_projection {
-                let start = output.len();
-                let result = output_desc.project_raw_fields_into(
-                    &input.descriptor,
-                    delta.raw(),
-                    &fields.fields,
-                    &mut output,
-                    |index, output| {
-                        let value = project_field_value(
-                            &project.expressions[index],
-                            index,
-                            output_desc,
-                            &input.descriptor,
-                            delta.raw(),
-                        )?;
-                        let encoded = encode_projection_field_value(output_desc, index, value)?;
-                        output.extend_from_slice(&encoded);
-                        Ok::<_, IvmRuntimeError>(())
-                    },
-                );
-                match result {
-                    Ok(span) => span,
-                    Err(
-                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
-                        | IvmRuntimeError::EnumProjectionAbsent { .. },
-                    ) if omit_unrepresentable_enum_rows => {
-                        output.truncate(start);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                let start = output.len();
-                let record = match project_record(
-                    &project.expressions,
-                    &project.mapping,
-                    output_desc,
-                    &input.descriptor,
-                    delta.raw(),
-                ) {
-                    Ok(record) => record,
-                    Err(
-                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
-                        | IvmRuntimeError::EnumProjectionAbsent { .. },
-                    ) if omit_unrepresentable_enum_rows => continue,
-                    Err(error) => return Err(error),
-                };
-                output.extend_from_slice(&record);
-                start..output.len()
-            };
-            spans.push((span, delta.weight));
+        let mut spans = Vec::with_capacity(input.len());
+        for delta in input {
+            if let Some(span) = Self::project_row_into(
+                project,
+                output_desc,
+                input_desc,
+                delta.raw(),
+                raw_projection,
+                omit_unrepresentable_enum_rows,
+                &mut output,
+            )? {
+                spans.push((span, delta.weight));
+            }
         }
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_map_buffer(output.capacity(), output.len());
@@ -670,6 +685,68 @@ impl NodeState {
             descriptor: output_desc,
             deltas,
         })
+    }
+
+    pub(super) fn project_row_into(
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input_desc: RecordDescriptor,
+        raw: &[u8],
+        raw_projection: Option<&PreparedProjection>,
+        omit_unrepresentable_enum_rows: bool,
+        output: &mut BytesMut,
+    ) -> Result<Option<std::ops::Range<usize>>, IvmRuntimeError> {
+        let span = if let Some(fields) = raw_projection {
+            let start = output.len();
+            let result = output_desc.project_raw_fields_into(
+                &input_desc,
+                raw,
+                &fields.fields,
+                output,
+                |index, output| {
+                    let value = project_field_value(
+                        &project.expressions[index],
+                        index,
+                        output_desc,
+                        &input_desc,
+                        raw,
+                    )?;
+                    let encoded = encode_projection_field_value(output_desc, index, value)?;
+                    output.extend_from_slice(&encoded);
+                    Ok::<_, IvmRuntimeError>(())
+                },
+            );
+            match result {
+                Ok(span) => span,
+                Err(
+                    IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                    | IvmRuntimeError::EnumProjectionAbsent { .. },
+                ) if omit_unrepresentable_enum_rows => {
+                    output.truncate(start);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let start = output.len();
+            let record = match project_record(
+                &project.expressions,
+                &project.mapping,
+                output_desc,
+                &input_desc,
+                raw,
+            ) {
+                Ok(record) => record,
+                Err(
+                    IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                    | IvmRuntimeError::EnumProjectionAbsent { .. },
+                ) if omit_unrepresentable_enum_rows => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            output.extend_from_slice(&record);
+            start..output.len()
+        };
+        Ok(Some(span))
     }
 
     pub(super) fn update_variant_enum_project(

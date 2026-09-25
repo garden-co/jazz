@@ -69,11 +69,7 @@ fn subscription_publication_waits_only_for_remote_tiers() {
     let rows = fixture_rows();
     let empty = snapshot(Vec::new());
     let current = snapshot(vec![rows[0].clone()]);
-    for tier in [
-        DurabilityTier::Local,
-        DurabilityTier::Edge,
-        DurabilityTier::Global,
-    ] {
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
         let (sender, mut receiver) = sender(tier);
         let immediate = publish(&sender, &empty, &current, tier, false, true, true).unwrap();
         assert_eq!(immediate, tier == DurabilityTier::Local);
@@ -111,52 +107,51 @@ fn subscription_publication_coalesces_from_last_emitted_occurrences() {
     let initial = snapshot(vec![rows[0].clone(), rows[1].clone()]);
     let intermediate = snapshot(vec![rows[2].clone(), rows[1].clone()]);
     let final_rows = snapshot(vec![rows[1].clone(), rows[0].clone()]);
-    for tier in [DurabilityTier::Edge, DurabilityTier::Global] {
-        let (sender, mut receiver) = sender(tier);
-        publish(
-            &sender,
-            &snapshot(Vec::new()),
-            &initial,
-            tier,
-            true,
-            true,
-            true,
-        )
-        .unwrap();
-        receiver.try_recv().unwrap();
-        publish(&sender, &initial, &intermediate, tier, false, false, true).unwrap();
-        publish(
-            &sender,
-            &intermediate,
-            &final_rows,
-            tier,
-            false,
-            false,
-            true,
-        )
-        .unwrap();
-        assert!(receiver.try_recv().is_err());
-        publish(&sender, &final_rows, &final_rows, tier, true, false, true).unwrap();
-        let SubscriptionEvent::Delta {
-            reset,
-            added,
-            updated,
-            removed,
-            terminal_operations,
-            ..
-        } = receiver.try_recv().unwrap()
-        else {
-            panic!("expected delta");
-        };
-        assert!(!reset);
-        assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
-        assert_eq!(updated.len(), 2);
-        assert_eq!((updated[0].previous_index, updated[0].index), (Some(1), 0));
-        assert_eq!((updated[1].previous_index, updated[1].index), (Some(0), 1));
-        assert_eq!(updated[0].row, rows[1]);
-        assert_eq!(updated[1].row, rows[0]);
-        assert!(sender.publication.borrow().deferred.is_none());
-    }
+    let tier = DurabilityTier::Global;
+    let (sender, mut receiver) = sender(tier);
+    publish(
+        &sender,
+        &snapshot(Vec::new()),
+        &initial,
+        tier,
+        true,
+        true,
+        true,
+    )
+    .unwrap();
+    receiver.try_recv().unwrap();
+    publish(&sender, &initial, &intermediate, tier, false, false, true).unwrap();
+    publish(
+        &sender,
+        &intermediate,
+        &final_rows,
+        tier,
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(receiver.try_recv().is_err());
+    publish(&sender, &final_rows, &final_rows, tier, true, false, true).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = receiver.try_recv().unwrap()
+    else {
+        panic!("expected delta");
+    };
+    assert!(!reset);
+    assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
+    assert_eq!(updated.len(), 2);
+    assert_eq!((updated[0].previous_index, updated[0].index), (Some(1), 0));
+    assert_eq!((updated[1].previous_index, updated[1].index), (Some(0), 1));
+    assert_eq!(updated[0].row, rows[1]);
+    assert_eq!(updated[1].row, rows[0]);
+    assert!(sender.publication.borrow().deferred.is_none());
 }
 
 #[test]
@@ -164,12 +159,12 @@ fn subscription_publication_resets_discard_withheld_history() {
     let rows = fixture_rows();
     let initial = snapshot(vec![rows[0].clone()]);
     let replacement = snapshot(vec![rows[1].clone()]);
-    let (sender, mut receiver) = sender(DurabilityTier::Edge);
+    let (sender, mut receiver) = sender(DurabilityTier::Global);
     publish(
         &sender,
         &snapshot(Vec::new()),
         &initial,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         true,
         true,
         true,
@@ -180,7 +175,7 @@ fn subscription_publication_resets_discard_withheld_history() {
         &sender,
         &initial,
         &replacement,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         false,
         true,
         true,
@@ -188,7 +183,7 @@ fn subscription_publication_resets_discard_withheld_history() {
     .unwrap();
     let key = [vec![10], rows[1].row_uuid().0.as_bytes().to_vec()].concat();
     let mut event = subscription_delta_event(
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         false,
         &replacement,
         &replacement,
@@ -219,7 +214,7 @@ fn subscription_publication_resets_discard_withheld_history() {
         &sender,
         &replacement,
         &replacement,
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         true,
         false,
         true,
@@ -325,13 +320,13 @@ fn subscription_publication_coalesces_maintained_child_edits() {
     // models a remote stream whose opening receipt has already settled.
     if let SubscriptionEvent::Delta { settled, tier, .. } = &mut opening {
         *settled = true;
-        *tier = DurabilityTier::Edge;
+        *tier = DurabilityTier::Global;
     }
     let initial = {
         let state = stream._state.borrow();
         SubscriptionPublicationSnapshot::capture(&state.snapshot, &state.snapshot_index).unwrap()
     };
-    let (sender, mut receiver) = sender(DurabilityTier::Edge);
+    let (sender, mut receiver) = sender(DurabilityTier::Global);
     sender
         .publish(
             opening,
@@ -363,11 +358,11 @@ fn subscription_publication_coalesces_maintained_child_edits() {
             "exercise maintained descendant edits"
         );
         *settled = false;
-        *tier = DurabilityTier::Edge;
+        *tier = DurabilityTier::Global;
     }
     let before = sender
         .checkpoint(
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             false,
             &initial.snapshot,
             &RelationSnapshotIndex::from_snapshot(&initial.snapshot),
@@ -380,7 +375,7 @@ fn subscription_publication_coalesces_maintained_child_edits() {
             .unwrap();
         assert!(receiver.try_recv().is_err());
         let empty = subscription_delta_event(
-            DurabilityTier::Edge,
+            DurabilityTier::Global,
             true,
             &state.snapshot,
             &state.snapshot,

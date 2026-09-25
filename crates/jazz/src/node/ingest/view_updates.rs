@@ -1,9 +1,3 @@
-#[derive(Clone, Copy)]
-pub(super) enum MergeAuthority {
-    Edge,
-    Core,
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -13,7 +7,7 @@ where
         records: &[VersionRecord],
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let rows = self.merge_rows_for_versions(records)?;
-        self.create_merge_versions_for_rows(rows, MergeAuthority::Core).await
+        self.create_merge_versions_for_rows(rows).await
     }
 
     fn merge_rows_for_versions(
@@ -47,12 +41,11 @@ where
     pub(super) async fn create_merge_versions_for_rows(
         &mut self,
         rows: Vec<(String, BranchKey, RowUuid)>,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let mut outcome = PublicationOutcome::settled(Vec::new());
         for (table, branch_key, row_uuid) in rows {
             let created = self
-                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid, authority)
+                .create_merge_version_if_needed_in_branch(&table, &branch_key, row_uuid)
                 .await?;
             outcome.append_outcome(created);
         }
@@ -65,7 +58,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
-        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid, MergeAuthority::Core)
+        self.create_merge_version_if_needed_in_branch(table, &BranchKey::default(), row_uuid)
             .await
     }
 
@@ -74,7 +67,6 @@ where
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
-        authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.active_schema.schema, table)?;
@@ -174,18 +166,7 @@ where
             .cells(cells);
         let publication = self.commit_mergeable_at(merge_commit, made_at).await?;
         let merge_tx = publication.tx_id;
-        let work = match authority {
-            MergeAuthority::Core => self.resident_commit_unit(merge_tx).await?,
-            // This is a locally generated, authority-validated merge, not an
-            // unfated remote write. Settle its persistence before accepting it
-            // at Edge durability; never run global admission on an edge.
-            MergeAuthority::Edge => SyncMessage::FateUpdate {
-                tx_id: merge_tx,
-                fate: Fate::Accepted,
-                global_time: None,
-                durability: Some(DurabilityTier::Edge),
-            },
-        };
+        let work = self.resident_commit_unit(merge_tx).await?;
         Ok(PublicationOutcome::published_then(
             Vec::new(),
             publication,
@@ -379,9 +360,9 @@ where
             .into_iter()
             .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
             .collect::<Result<Vec<_>, Error>>()?;
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
-            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
+            version_tx_id_from_aliases(version, aliases).expect("valid version tx id")
         });
         Ok(versions)
     }
@@ -1233,7 +1214,7 @@ where
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         let table = self
-            .table_in_schema(version.table(), schema_version)?
+            .table_in_schema_ref(version.table(), schema_version)?
             .clone();
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
@@ -1384,7 +1365,7 @@ where
                 version.bind_groove_record(
                     owned_record_from_storage_values(
                         &self
-                            .table_in_schema(version.table(), schema_version)?
+                            .table_in_schema_ref(version.table(), schema_version)?
                             .global_current_storage_tables()[1],
                         register_global_current_values(version, Some(global_time))?,
                     )
@@ -1453,7 +1434,7 @@ where
                 version.bind_groove_record(
                     owned_record_from_storage_values(
                         &self
-                            .table_in_schema(version.table(), schema_version)?
+                            .table_in_schema_ref(version.table(), schema_version)?
                             .ahead_current_storage_tables()[1],
                         register_global_current_values(version, None)?,
                     )
@@ -1511,8 +1492,8 @@ where
 
     /// Once a transaction is rejected or globally settled, it must not remain
     /// in the ahead-current overlay: accepted global effects live in current
-    /// tables, and rejected effects are no longer visible. Edge-accepted
-    /// no-global transactions intentionally stay ahead-visible at Edge tier.
+    /// tables, and rejected effects are no longer visible. Pending local
+    /// transactions remain in this overlay until Core supplies a final fate.
     /// Outbox/redelivery may keep the commit unit until fate arrives, so
     /// callers invoke this strictly after the cleanup-triggering fate is durable.
     pub(super) async fn cleanup_fated_ahead_current_for_tx(

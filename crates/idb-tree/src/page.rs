@@ -8,6 +8,49 @@ const MAGIC: &[u8; 8] = b"IDBTREE\0";
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 
+// Exact v1 encoded sizes used to choose a split without repeatedly encoding
+// and cloning candidate pages. Encoding itself remains the final validator.
+pub(crate) const LEAF_BASE_LEN: usize = HEADER_LEN + 1 + 4;
+pub(crate) const INTERNAL_BASE_LEN: usize = HEADER_LEN + 1 + 4 + 4 + 8;
+
+pub(crate) fn leaf_entry_len(key: &[u8], value: &ValueCell) -> usize {
+    4 + key.len()
+        + match value {
+            ValueCell::Inline(bytes) => 1 + 4 + bytes.len(),
+            ValueCell::Overflow { .. } => 1 + 8 + 8,
+        }
+}
+
+pub(crate) fn internal_key_len(key: &[u8]) -> usize {
+    4 + key.len() + 8
+}
+
+/// The exact v1 encoded length of `page`, without encoding or checksumming
+/// it. Writes use this to decide fit and split; [`encode_page`] at commit
+/// remains the final validator of both shape and size.
+pub(crate) fn encoded_len(page: &Page) -> usize {
+    match page {
+        Page::Leaf { entries } => {
+            LEAF_BASE_LEN
+                + entries
+                    .iter()
+                    .map(|(key, value)| leaf_entry_len(key, value))
+                    .sum::<usize>()
+        }
+        Page::Internal { keys, children } => {
+            HEADER_LEN
+                + 1
+                + 4
+                + keys.iter().map(|key| 4 + key.len()).sum::<usize>()
+                + 4
+                + 8 * children.len()
+        }
+        Page::Overflow { next, bytes } => {
+            HEADER_LEN + 1 + if next.is_some() { 9 } else { 1 } + 4 + bytes.len()
+        }
+    }
+}
+
 const PAGE_LEAF_TAG: u8 = 0;
 const PAGE_INTERNAL_TAG: u8 = 1;
 const PAGE_OVERFLOW_TAG: u8 = 2;
@@ -342,6 +385,39 @@ impl<'a> Decoder<'a> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn computed_length_matches_the_encoding_for_every_page_kind() {
+        let pages = [
+            Page::leaf(),
+            Page::Leaf {
+                entries: vec![
+                    (vec![1], ValueCell::Inline(vec![])),
+                    (vec![2, 3], ValueCell::Inline(vec![9; 40])),
+                    (vec![4; 17], ValueCell::Overflow { head: 7, len: 99 }),
+                ],
+            },
+            Page::Internal {
+                keys: vec![vec![5], vec![6; 30]],
+                children: vec![1, 2, 3],
+            },
+            Page::Overflow {
+                next: None,
+                bytes: vec![1; 13],
+            },
+            Page::Overflow {
+                next: Some(4),
+                bytes: vec![2],
+            },
+        ];
+        for page in pages {
+            assert_eq!(
+                encoded_len(&page),
+                encode_page(&page).unwrap().len(),
+                "{page:?}"
+            );
+        }
+    }
+
     fn to_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -419,6 +495,49 @@ mod tests {
         for (page, encoded) in fixtures.iter().zip(encoded) {
             assert_eq!(decode_page(&encoded).unwrap(), *page);
         }
+    }
+
+    // Internal because this pins a sizing calculation to the authoritative v1
+    // encoder, not a separate public tree behavior or a new storage format.
+    #[test]
+    fn split_sizes_match_v1_encoding() {
+        for size in [0, 1, 250, 4000, 20_000] {
+            let entries = vec![
+                (vec![1; size], ValueCell::Inline(vec![9; size])),
+                (vec![2; size + 1], ValueCell::Overflow { head: 7, len: 123 }),
+            ];
+            let expected = LEAF_BASE_LEN
+                + entries
+                    .iter()
+                    .map(|(key, value)| leaf_entry_len(key, value))
+                    .sum::<usize>();
+            assert_eq!(
+                encode_page(&Page::Leaf { entries }).unwrap().len(),
+                expected
+            );
+            let keys = vec![vec![1; size], vec![2; size + 1]];
+            let expected =
+                INTERNAL_BASE_LEN + keys.iter().map(|key| internal_key_len(key)).sum::<usize>();
+            assert_eq!(
+                encode_page(&Page::Internal {
+                    keys,
+                    children: vec![3, 5, 7]
+                })
+                .unwrap()
+                .len(),
+                expected
+            );
+        }
+        assert_eq!(encode_page(&Page::leaf()).unwrap().len(), LEAF_BASE_LEN);
+        assert_eq!(
+            encode_page(&Page::Internal {
+                keys: vec![],
+                children: vec![3]
+            })
+            .unwrap()
+            .len(),
+            INTERNAL_BASE_LEN
+        );
     }
 
     #[test]

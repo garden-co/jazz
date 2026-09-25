@@ -72,7 +72,7 @@ describe("todo permissions", () => {
       .update(app.todos, todo.id, {
         title: "Buy oat milk",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await bob.expectDenied((db) =>
       db.update(app.todos, todo.id, {
@@ -372,11 +372,11 @@ describe("migrations", () => {
         title: "written through old schema",
         done: false,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await vi.waitFor(async () => {
       const rows = await newDb.all(newApp.todos.where({ id: { eq: created.id } }), {
-        tier: "edge",
+        tier: "global",
       });
 
       expect(rows).toEqual([

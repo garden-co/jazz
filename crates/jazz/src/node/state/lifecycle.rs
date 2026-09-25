@@ -167,7 +167,7 @@ where
         .await
     }
 
-    /// Open an edge-local runtime before it has received an authenticated
+    /// Open a downstream runtime before it has received an authenticated
     /// authority catalogue.
     ///
     /// Unlike [`NodeState::new`], this deliberately does *not* create a
@@ -184,7 +184,7 @@ where
         let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage).await?;
         if let Some(schema) = durable_genesis {
             // A fresh process cannot assume the temporary empty schema it
-            // would use for an uninitialized edge.  Recover the authority
+            // would use for an uninitialized runtime.  Recover the authority
             // genesis from the durable catalogue first, then use the normal
             // ready open path so all physical layouts are reconstructed from
             // the real lineage.
@@ -228,7 +228,7 @@ where
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
-        // repurpose as an uninitialized edge.
+        // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
             Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
@@ -473,6 +473,7 @@ where
     /// `requested` when this store's catalogue already holds it, and on a
     /// fresh store. Otherwise reopen with the store's own current schema: its
     /// active selection, else its write pointer, else its genesis.
+    #[cfg(feature = "runtime")]
     pub(crate) async fn select_durable_reopen_schema(
         storage: S,
         requested: JazzSchema,
@@ -568,6 +569,7 @@ where
             catalogue_bootstrap_state,
             database,
             chunk_resolver,
+            detach_covered_chunk_waits,
             history_complete,
             authoritative_scalar_exit_refresh,
             ..
@@ -592,6 +594,7 @@ where
             .set_missing_chunk_resolver(chunk_resolver.clone());
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
+        reopened.detach_covered_chunk_waits = detach_covered_chunk_waits;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         reopened.authoritative_scalar_exit_refresh = authoritative_scalar_exit_refresh;
         Ok(reopened)
@@ -810,6 +813,7 @@ where
                 catalogue_schemas: schemas,
                 catalogue_lenses: lenses,
                 physical_mappings,
+                physical_current_winner_projections: BTreeMap::new(),
                 staged_lineages,
                 pending_lineages,
                 active_lineages_by_target,
@@ -835,11 +839,11 @@ where
             query: QueryServing {
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
-                edge_availability_owners: BTreeMap::new(),
-                edge_availability_retirements: Default::default(),
                 local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
                 compiled_query_program_cache: BTreeMap::new(),
+                query_program_templates: Default::default(),
+                supported_query_program_requests: VecDeque::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
                 policy_authorization_graph_replacements: BTreeMap::new(),
@@ -869,6 +873,7 @@ where
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,
+            detach_covered_chunk_waits: Rc::new(std::cell::Cell::new(false)),
             large_value_staging_policy: LargeValueStagingPolicy::default(),
             large_value_ingress: RefCell::new(LargeValueIngressState::default()),
             content_runtime_provider,
@@ -879,10 +884,10 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
-            edge_query_serving: false,
+            client_local_literal_shapes: std::collections::HashMap::new(),
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
-            node_aliases: BTreeMap::new(),
+            node_aliases: NodeAliases::default(),
             absent_node_alias: None,
             ahead_current_keys: FxHashSet::default(),
             content_version_reachability_cache: BTreeMap::new(),
@@ -997,9 +1002,14 @@ where
         )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
-        Database::new_with_storage_layout(lowered, storage, layout)
-            .await
-            .map_err(Error::from)
+        let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
+        // Jazz publishes plain ordered results from membership and version
+        // deltas and never reads their generic root positions; only root
+        // collectors' own positional edits reach its views. Collecting the
+        // positions would make every write to an ordered subscription
+        // proportional to its result size (#2086).
+        database.set_plain_output_root_positions_enabled(false);
+        Ok(database)
     }
 
     pub(crate) fn committed_global_time(&self) -> GlobalTime {
@@ -1041,7 +1051,7 @@ where
     }
 
     /// Enable only for a host that owns complete current policy inputs. The
-    /// historical-read flag is insufficient: server edge shells also use it.
+    /// historical-read flag alone does not confer authority.
     #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
         if self.client_relay_scope().is_none() {
@@ -1050,7 +1060,7 @@ where
     }
 
     /// Mark this process as the durable half of a browser client/worker relay.
-    /// The marker only selects an internal upstream binding identity for Edge
+    /// The marker only selects an internal upstream binding identity for Core
     /// coverage; it is neither persisted nor an authorization policy input.
     pub(crate) fn configure_scope_isolated_client_relay(
         &mut self,
@@ -1250,6 +1260,16 @@ where
         self.local_chunk_reader
             .refresh_from(&self.database.local_chunk_reader());
         self.content_runtime_provider = runtime_provider;
+    }
+
+    /// The flag `Node` flips when its host drops pending ticks.
+    pub(crate) fn detach_covered_chunk_waits_handle(&self) -> Rc<std::cell::Cell<bool>> {
+        Rc::clone(&self.detach_covered_chunk_waits)
+    }
+
+    /// Whether covered receiver installs detach chunk-waiting evaluation.
+    pub(crate) fn detaches_covered_chunk_waits(&self) -> bool {
+        self.detach_covered_chunk_waits.get()
     }
 
     /// Install Jazz's sync-plane fallback for chunks absent from Groove's
@@ -1871,6 +1891,8 @@ where
     fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.clear_content_version_reachability_cache();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();

@@ -75,6 +75,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
@@ -385,13 +386,17 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
       return;
     }
+    if (message.type === "remote-link") {
+      this.callbacks.onRemoteLinkChange?.(message.state);
+      return;
+    }
     if (message.type === "mutation-error") {
       this.runtime.reportRemoteMutationError(message.event);
       return;
     }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
-      // error before any later port teardown so active Edge/Global waits and
+      // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
       this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;

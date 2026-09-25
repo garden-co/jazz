@@ -33,6 +33,7 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3.27.0"
 jazz-storage-rocksdb.workspace = true
 futures-test = "0.3"
+divan = { workspace = true }
 
 [[bench]]
 name = "scenario"
@@ -44,4 +45,12 @@ harness = false
 
 [[bench]]
 name = "record_validation"
+harness = false
+
+[[bench]]
+name = "pull_vs_snapshot"
+harness = false
+
+[[bench]]
+name = "steady_state"
 harness = false

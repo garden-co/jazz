@@ -709,8 +709,9 @@ where
         }
     }
 
-    /// Resolve a JSON Pointer against the literal source in a string/JSON
-    /// cell, returning an owned host-safe value.
+    /// Resolve a JSON Pointer against a declared JSON column, returning an
+    /// owned host-safe value. Text columns are not JSON, even when their bytes
+    /// happen to parse as JSON.
     pub async fn read_json_pointer(
         &self,
         table: &str,
@@ -720,20 +721,32 @@ where
     ) -> Result<Option<serde_json::Value>, Error> {
         let (value, _) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        let (kind, _) = self.large_value_column_kind(table, column)?;
+        if kind != groove::large_values::LargeValueKind::Json {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "JSON pointer selection requires a JSON column",
+            ));
+        }
         match value {
+            // StoredScalar(Json) retains the literal inline source as a string.
             Value::String(text) => {
                 let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
                     Error::new(ErrorCode::Query, format!("invalid stored JSON: {error}"))
                 })?;
                 Ok(value.pointer(pointer).cloned())
             }
-            Value::Large(value_ref) => Ok(self
-                .node
-                .node
-                .lock()
-                .await
-                .read_large_json_pointer(&value_ref, pointer)
-                .await?),
+            Value::Large(value_ref)
+                if value_ref.kind == groove::large_values::LargeValueKind::Json =>
+            {
+                Ok(self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .read_large_json_pointer(&value_ref, pointer)
+                    .await?)
+            }
             _ => Err(large_value_cell_type_error(table, column)),
         }
     }
@@ -2986,8 +2999,8 @@ where
                         Some(CommitUnitIngestContext {
                             identity: AuthorSubject::SYSTEM,
                             trust: CommitUnitTrust::TrustedBackend,
-                            edge_authority: false,
                             admitted_write_authorization: false,
+                            version_receipts_validated: false,
                         }),
                     )
                     .await?;
@@ -3078,7 +3091,7 @@ where
         if !self.requires_open_schema_admission {
             return Ok(());
         }
-        if effective_read_tier(opts) < DurabilityTier::Edge
+        if effective_read_tier(opts) < DurabilityTier::Global
             || opts.propagation == Propagation::LocalOnly
         {
             return self.ensure_open_schema_admitted();
@@ -3344,6 +3357,17 @@ where
         } else {
             Ok(())
         }
+    }
+
+    /// Decide, without applying anything, the admission failures of a queued
+    /// mutation that NAPI and WASM also report synchronously: a closed or
+    /// non-admitting Db and an unknown table. Row-state failures, such as a
+    /// resident tombstone, are left to the queued apply and its write handle.
+    #[doc(hidden)]
+    pub fn precheck_mutation_admission(&self, table: &str) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
+        self.table_schema(table)?;
+        Ok(())
     }
 
     pub(super) async fn ensure_branch_view_row_not_deleted(

@@ -157,6 +157,102 @@ fn foreground_initial_subscription_completes_empty_owner_answer() {
     assert_foreground_initial_owner_snapshot(false);
 }
 
+// Internal topology receipt: public clients cannot pause the owner transport
+// and inspect runtime compilation work. Results still use the public Db stream.
+// The compilation count is an abstract-work guard, not a timing assertion.
+#[test]
+fn foreground_owner_answer_advances_the_existing_graph() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let owner = open_db(0xd8, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let expected = row(0xd9);
+    owner
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(expected),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    owner.tick().unwrap();
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(&foreground, &Query::from("todos"));
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    for _ in 0..3 {
+        foreground.tick().unwrap();
+        assert!(stream.try_next_event().is_none());
+    }
+    let compilations = foreground.query_program_compilations_for_test();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut first = None;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        owner.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            first = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        settled: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = first
+    else {
+        panic!("owner must publish its complete first answer: {first:?}");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![expected]
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    assert_eq!(
+        foreground.query_program_compilations_for_test(),
+        compilations,
+        "input arrival must not recompile the foreground graph"
+    );
+    owner
+        .update(
+            "todos",
+            expected,
+            BTreeMap::from([("title".into(), Value::String("edited".into()))]),
+            Default::default(),
+        )
+        .unwrap();
+    let mut changed = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            changed = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        ..
+    }) = changed
+    else {
+        panic!("the retained graph must continue delivering edits: {changed:?}");
+    };
+    assert!(added.is_empty() && removed.is_empty());
+    assert_eq!(
+        updated.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![expected]
+    );
+}
+
 // Internal topology receipt: ordinary single-Db subscriptions do not enter
 // the foreground owner's initial reset path. Observe only public stream output.
 #[test]
@@ -2363,12 +2459,12 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 #[test]
 fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
-    let edge = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
-    let (edge_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let relay = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
+    let (relay_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
     let query = Query::from("todos");
-    let mut stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
-    edge.tick().unwrap();
+    let mut stream = prepared_subscribe(&relay, &query, global_subscribe_opts()).unwrap();
+    relay.tick().unwrap();
     let subscription = loop {
         match authority_transport
             .try_recv()
@@ -2396,31 +2492,32 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert!(
         stream.try_next_event().is_none(),
         "pending is neither a result nor a rejection"
     );
-    let authority_result_key = edge
+    let authority_result_key = relay
         .node
         .node
         .borrow()
         .authority_result_key_for_subscription(subscription)
         .unwrap();
     assert!(
-        edge.node
+        relay
+            .node
             .node
             .borrow()
             .opening_pending_for_authority_result(&authority_result_key),
         "normal authority opening must install the pending marker"
     );
-    let before_generation = edge
+    let before_generation = relay
         .node
         .node
         .borrow()
         .applied_authority_result_generation(&authority_result_key);
-    let before_watermark = edge.node.node.borrow().committed_global_time();
-    let before_drops = edge
+    let before_watermark = relay.node.node.borrow().committed_global_time();
+    let before_drops = relay
         .node
         .node
         .borrow()
@@ -2428,12 +2525,12 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         .dropped_peer_request_messages;
     let (mut client_transport, server_transport) = duplex();
     let subscriber =
-        edge.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
+        relay.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
 
     client_transport.send(view_update(false, 100)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
 
-    let node = Rc::clone(&edge.node.node);
+    let node = Rc::clone(&relay.node.node);
     let node = node.borrow();
     assert_eq!(node.committed_global_time(), before_watermark);
     assert_eq!(
@@ -2476,7 +2573,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             });
     }
     authority_transport.send(malformed_pending).unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert!(matches!(
         stream.try_next_event(),
         Some(SubscriptionEvent::Rejected {
@@ -2484,7 +2581,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         })
     ));
     assert_eq!(
-        edge.node
+        relay
+            .node
             .node
             .borrow()
             .applied_authority_result_generation(&authority_result_key),
@@ -2493,8 +2591,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     );
 
     authority_transport.send(view_update(false, 2)).unwrap();
-    edge.tick().unwrap();
-    let node = Rc::clone(&edge.node.node);
+    relay.tick().unwrap();
+    let node = Rc::clone(&relay.node.node);
     let node = node.borrow();
     assert_eq!(
         node.applied_authority_result_generation(&authority_result_key),
@@ -2647,7 +2745,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let attachment = client
-        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .attach_query_with_opts(&query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -2655,7 +2753,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
 
     assert!(client.query_attachment_is_covered(&attachment));
     assert!(
-        block_on(client.all(&query, edge_subscribe_opts()))
+        block_on(client.all(&query, global_subscribe_opts()))
             .unwrap()
             .is_empty(),
         "a resumed empty-claim session must not inherit its sibling's invite claim",
@@ -2735,7 +2833,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let attachment = client
-        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .attach_query_with_opts(&query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -2743,7 +2841,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
 
     assert!(client.query_attachment_is_covered(&attachment));
     assert!(
-        block_on(client.all(&query, edge_subscribe_opts()))
+        block_on(client.all(&query, global_subscribe_opts()))
             .unwrap()
             .is_empty(),
         "a subscriber cannot grant itself an invite claim after host admission",

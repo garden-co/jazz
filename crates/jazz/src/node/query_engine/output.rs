@@ -26,6 +26,8 @@ pub(crate) struct AppRowOutputRequest {
 pub(crate) enum PayloadProjection {
     /// Use the projection implied by the normalized shape root.
     ShapeDefault,
+    /// Explicit output aliases from a relation projection.
+    Relation(Vec<crate::query::RelationProjectColumn>),
     /// Explicit nested app projection tree.
     Tree(AppProjectionTree),
 }

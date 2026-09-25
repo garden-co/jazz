@@ -252,8 +252,9 @@ namespace; it does not erase another account's cache under the same logical base
 is neither the foreground replica/node ID nor a credential; those remain separate identities.
 
 Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
-the worker has one upstream connection, so every attached tab uses local-first fallback for
-`"remote-if-possible"` reads and remote reads wait until any tab calls `db.reconnect()`. This is
+the worker has one upstream connection, so every attached tab stops waiting for the server on
+`"local-first-unless-empty"` reads and remote reads wait until any tab calls `db.reconnect()`.
+The worker also tells attached tabs when its live connection comes up, drops, or fails. This is
 intentional; disconnecting only one tab while continuing to sync its writes through the shared
 worker would give that tab an incoherent offline contract.
 
@@ -385,13 +386,10 @@ Jazz separates two durability questions:
 | `QuerySettled`          | First read delivery                  | "Has the query result settled at tier T?"  |
 | Write tier confirmation | `.wait({ tier })` promise completion | "Has this write been confirmed at tier T?" |
 
-Both use the same tier lattice (`local` < `edge` < `global`), but they answer different
-questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
-`.wait({ tier })` promise resolves when the requested tier confirms the write.
+Reads and write waits answer different questions. A strict remote read waits for
+Core-authorized coverage of its query. A `wait({ tier: "global" })` confirms Core
+acceptance of that particular write; a `local` wait confirms local persistence.
 
-<Callout type="warn">
-  The read durability tier only gates the **first** delivery of a subscription. After the initial
-  snapshot arrives at the requested tier, later updates are delivered as they reach the local node.
-  That means `tier: "global"` gives you a globally settled first snapshot, not globally gated
-  delivery forever after.
-</Callout>
+Strict remote subscriptions continue using Core-authorized state after the first
+snapshot. Local-first subscriptions can also show cached rows and optimistic local
+writes. These read choices do not change how committed writes sync to Core.

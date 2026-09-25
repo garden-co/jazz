@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
-use groove::db::SubscriptionLifetime;
+use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
 /// A first-result consumer owns exactly its subscription and, when needed,
 /// its prepared shape. Dropping a suspended read cannot keep a binding alive
@@ -16,6 +16,9 @@ struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
     subscription: Option<MultisinkSubscription>,
     prepared_shape: Option<PreparedShapeId>,
+    /// The shape came from `prepare_shared`: other retained bindings may hold
+    /// it, so release it only if none does.
+    shared_shape: bool,
 }
 
 impl HydrationSubscription<'_> {
@@ -24,9 +27,13 @@ impl HydrationSubscription<'_> {
             self.database.unsubscribe(subscription.id());
         }
         if let Some(shape) = self.prepared_shape.take() {
-            self.database
-                .retire_prepared_shape(shape)
-                .map_err(Error::Groove)?;
+            if self.shared_shape {
+                self.database.release_shared_prepared_shape(shape);
+            } else {
+                self.database
+                    .retire_prepared_shape(shape)
+                    .map_err(Error::Groove)?;
+            }
         }
         Ok(())
     }
@@ -545,6 +552,33 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
 
+/// Unused admission products kept for their installers. A client opens a
+/// whole screen of subscriptions before any installer runs, so this must
+/// cover a realistic batch: at 32, a 61-list dashboard recompiled the 29
+/// oldest programs. Still well below the 256-proof budget; eviction only
+/// repeats compilation.
+pub(super) const ADMISSION_HANDOFF_MAX_PROGRAMS: usize = 128;
+
+/// An admission proof may hand its immutable compiler output to the first
+/// matching installer. No evaluator, live binding, rows or subscription is retained.
+/// Consuming the program leaves the cheap capability proof resident.
+#[derive(Clone, Debug)]
+pub(crate) struct SupportedQueryProgram {
+    fingerprint: [u8; 32],
+    program: Option<QueryProgram>,
+}
+
+fn admission_program_key(
+    request: &QueryProgramRequest,
+    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+) -> Option<[u8; 32]> {
+    (matches!(
+        request.authorization_mode,
+        QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::ClientLocal
+    ) && query_program_sources_cache_safe(request))
+    .then(|| *blake3::hash(query_program_cache_key(request, access_paths).as_bytes()).as_bytes())
+}
+
 fn query_program_source_cache_safe(source: &RequestedSourceExpr) -> bool {
     match source {
         SourceExpr::VisibleCurrent {
@@ -562,12 +596,16 @@ fn query_program_source_cache_safe(source: &RequestedSourceExpr) -> bool {
 
 fn query_program_cache_safe(request: &QueryProgramRequest) -> bool {
     request.authorization_mode == QueryAuthorizationMode::TrustedServing
-        && request
-            .reads
-            .primary
-            .sources
-            .values()
-            .all(query_program_source_cache_safe)
+        && query_program_sources_cache_safe(request)
+}
+
+fn query_program_sources_cache_safe(request: &QueryProgramRequest) -> bool {
+    request
+        .reads
+        .primary
+        .sources
+        .values()
+        .all(query_program_source_cache_safe)
         && request
             .reads
             .fact_reads
@@ -587,6 +625,95 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Build the request (including strict claims) on every call. Remember a
+    /// successful exact-context proof and hand its compiler output to a matching
+    /// installer, which still owns its own evaluator and binding. Programs with
+    /// per-receiver covered inputs cannot use this handoff.
+    pub(super) async fn ensure_query_program_request_supported(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        // Branches, overlays, inline snapshots and covered inputs
+        // likewise stay on the ordinary path. No data-sensitive source is
+        // admitted from a remembered success.
+        let key = admission_program_key(&request, &access_paths);
+        if key.as_ref().is_some_and(|key| {
+            self.query
+                .supported_query_program_requests
+                .iter()
+                .any(|entry| &entry.fingerprint == key)
+        }) {
+            return Ok(());
+        }
+        let program = self
+            .compile_query_program_request_with_access_paths(request, access_paths)
+            .await?;
+        if let Some(key) = key {
+            self.remember_supported_query_program(key, Some(program));
+        }
+        Ok(())
+    }
+
+    fn remember_supported_query_program(&mut self, key: [u8; 32], program: Option<QueryProgram>) {
+        if let Some(entry) = self
+            .query
+            .supported_query_program_requests
+            .iter_mut()
+            .find(|entry| entry.fingerprint == key)
+        {
+            if program.is_none() {
+                return;
+            }
+            // The compiler already recorded the proof. Release any old product
+            // before attaching this one with the same handoff budget.
+            entry.program = None;
+        } else {
+            // FIFO eviction only causes recompilation. There is no lifetime
+            // admission quota and failed/cancelled compilation is never cached.
+            const MAX_ADMISSIONS: usize = 256;
+            if self.query.supported_query_program_requests.len() == MAX_ADMISSIONS {
+                self.query.supported_query_program_requests.pop_front();
+            }
+            self.query
+                .supported_query_program_requests
+                .push_back(SupportedQueryProgram {
+                    fingerprint: key,
+                    program: None,
+                });
+        }
+        if let Some(program) = program {
+            // Keep a bounded compiled-program budget independently of the
+            // larger proof budget. An abandoned admission cannot retain
+            // arbitrarily many executable descriptions; eviction only repeats
+            // compilation, never rejects a query. The first installer takes
+            // ownership, so used programs do not occupy this handoff budget.
+            if self
+                .query
+                .supported_query_program_requests
+                .iter()
+                .filter(|entry| entry.program.is_some())
+                .count()
+                >= ADMISSION_HANDOFF_MAX_PROGRAMS
+            {
+                if let Some(oldest) = self
+                    .query
+                    .supported_query_program_requests
+                    .iter_mut()
+                    .find(|entry| entry.program.is_some())
+                {
+                    oldest.program = None;
+                }
+            }
+            self.query
+                .supported_query_program_requests
+                .iter_mut()
+                .find(|entry| entry.fingerprint == key)
+                .expect("proof inserted above")
+                .program = Some(program);
+        }
+    }
+
     pub(super) async fn compile_query_program_request(
         &mut self,
         request: QueryProgramRequest,
@@ -600,19 +727,28 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        if !query_program_cache_safe(&request) {
-            return self
-                .compile_query_program_request_with_inline_sources_and_access_paths(
-                    request,
-                    BTreeMap::new(),
-                    access_paths,
-                )
-                .await;
+        let key = admission_program_key(&request, &access_paths);
+        if let Some(key) = key
+            && let Some(program) = self
+                .query
+                .supported_query_program_requests
+                .iter_mut()
+                .find(|entry| entry.fingerprint == key)
+                .and_then(|entry| entry.program.take())
+        {
+            return Ok(program);
         }
-
-        let cache_key = query_program_cache_key(&request, &access_paths);
-        if let Some(program) = self.query.compiled_query_program_cache.get(&cache_key) {
-            return Ok((**program).clone());
+        let cache_key = query_program_cache_safe(&request)
+            .then(|| query_program_cache_key(&request, &access_paths));
+        if let Some(program) = cache_key
+            .as_ref()
+            .and_then(|key| self.query.compiled_query_program_cache.get(key))
+        {
+            let program = (**program).clone();
+            if let Some(key) = key {
+                self.remember_supported_query_program(key, None);
+            }
+            return Ok(program);
         }
         let program = self
             .compile_query_program_request_with_inline_sources_and_access_paths(
@@ -621,21 +757,30 @@ where
                 access_paths,
             )
             .await?;
-        if self.query.compiled_query_program_cache.len() >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
-            && let Some(eviction_key) = self
-                .query
-                .compiled_query_program_cache
-                .keys()
-                .next()
-                .cloned()
-        {
+        if let Some(cache_key) = cache_key {
+            if self.query.compiled_query_program_cache.len()
+                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+                && let Some(eviction_key) = self
+                    .query
+                    .compiled_query_program_cache
+                    .keys()
+                    .next()
+                    .cloned()
+            {
+                self.query
+                    .compiled_query_program_cache
+                    .remove(&eviction_key);
+            }
             self.query
                 .compiled_query_program_cache
-                .remove(&eviction_key);
+                .insert(cache_key, Arc::new(program.clone()));
         }
-        self.query
-            .compiled_query_program_cache
-            .insert(cache_key, Arc::new(program.clone()));
+        // The order can be reversed: a foreground installs locally before it
+        // receives RegisterShape. Its successful compilation is already the
+        // exact capability proof; later admission need not compile it again.
+        if let Some(key) = key {
+            self.remember_supported_query_program(key, None);
+        }
         Ok(program)
     }
 
@@ -675,6 +820,7 @@ where
             covered_input_sources,
             covered_input_descriptors,
             true,
+            None,
         )
         .await
     }
@@ -683,6 +829,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
@@ -691,6 +838,27 @@ where
             BTreeMap::new(),
             BTreeMap::new(),
             false,
+            bounded_deletion_register,
+        )
+        .await
+    }
+
+    pub(super) async fn compile_query_program_request_with_bounded_deletion_register(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: (SourceId, GraphBuilder),
+    ) -> Result<QueryProgram, Error> {
+        // The inline register is bound to this snapshot. A cached program
+        // would retain stale deletion state after a later write.
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            BTreeMap::new(),
+            access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+            Some(bounded_deletion_register),
         )
         .await
     }
@@ -707,27 +875,33 @@ where
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         #[cfg(any(test, feature = "testing"))]
         {
             self.query_program_compilations += 1;
         }
-        // Preflight-only compilation also owns its temporary Edge inputs.
-        // Actual maintained views hold a second owner across their lifetime.
-        let _edge_availability_owner = if request.authorization_mode
-            == QueryAuthorizationMode::EdgeServing
-            || (self.edge_query_serving
-                && request.authorization_mode == QueryAuthorizationMode::ClientLocal)
-        {
-            unavailable_inputs::local_unavailable_policy_binding(&request)
-                .map(|scope| self.pin_edge_availability_scope(scope))
-        } else {
-            None
-        };
+        #[cfg(any(test, feature = "testing"))]
+        if std::env::var_os("JAZZ_COMPILE_SHAPES").is_some() {
+            // Opt-in work classification only. Never emit queries, claims,
+            // literals or row contents; these process-local hashes are not
+            // cache identities and are not a serialization contract.
+            let fingerprint = |value: String| blake3::hash(value.as_bytes()).to_hex().to_string();
+            eprintln!(
+                "JAZZ_COMPILE_SHAPES node={} mode={:?} request={} structure={} sources={} binding={} paths={} inline={} covered={}",
+                fingerprint(format!("{:?}", self.node_uuid)),
+                request.authorization_mode,
+                fingerprint(format!("{request:?}")),
+                fingerprint(format!("{:?}", (&request.input.shape, &request.output))),
+                fingerprint(format!("{:?}", (&request.reads, &request.policy))),
+                fingerprint(format!("{:?}", request.input.binding)),
+                fingerprint(format!("{access_paths:?}")),
+                inline_sources.len(),
+                covered_input_sources.len()
+            );
+        }
         self.restore_expired_policy_compilation_state();
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-            && !covered_input_sources.is_empty()
-        {
+        if crate::debug_env::covered_input_trace() && !covered_input_sources.is_empty() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
                 request.reads.primary.sources.keys().collect::<Vec<_>>(),
@@ -735,9 +909,14 @@ where
             );
         }
         let policy_replacement_lease = std::rc::Rc::new(());
+        let compilation = QueryProgramCompilation::analyze(request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        let request = compilation.request();
         let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
-            &request,
+            request,
+            compilation.sources(),
             &access_paths,
+            bounded_deletion_register.as_ref(),
             &policy_replacement_lease,
         ))
         .await?;
@@ -751,12 +930,26 @@ where
             covered_input_sources,
             covered_input_descriptors,
             access_paths,
+            bounded_deletion_register,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let mut result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        let mut result = match Box::pin(crate::node::query_engine::prepare_query_program_sources(
+            &compilation,
+            &mut resolver,
+        ))
+        .await
+        {
+            Ok((sources, explain)) => resolver.node.query.query_program_templates.lower(
+                compilation,
+                sources,
+                explain,
+                |graph| resolver.node.database.describe_template_input(graph),
+            ),
+            Err(error) => Err(error),
+        };
         if let Ok(program) = result.as_mut() {
             program
                 .lowered
@@ -781,11 +974,11 @@ where
     async fn prepare_query_program_policy_dependencies(
         &mut self,
         request: &QueryProgramRequest,
+        source_requests: &[SourceRequest],
         outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<&(SourceId, GraphBuilder)>,
         lease: &std::rc::Rc<()>,
     ) -> Result<PolicyDependencyFootprint, Error> {
-        let source_requests = query_program_source_requests(request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         // A deletion terminal carries the raw register but must be gated by
         // the same source occurrence resolved with its deleted preimage.
         // Preload that policy dependency before the source preparer reaches
@@ -810,6 +1003,7 @@ where
                 covered_input_sources: BTreeMap::new(),
                 covered_input_descriptors: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
+                bounded_deletion_register: None,
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
             };
@@ -830,7 +1024,10 @@ where
                         // unrelated alias of the same table is not restricted
                         // by this query occurrence's equality.
                         let path = outer_access_paths.get(&source.source).cloned();
-                        dependencies.push((dependency, path));
+                        let register = bounded_deletion_register
+                            .filter(|(source_id, _)| *source_id == source.source)
+                            .map(|(_, graph)| graph.clone());
+                        dependencies.push((dependency, path, register));
                     }
                     None => {
                         // Unsupported policy shapes must not silently become
@@ -845,17 +1042,20 @@ where
             (dependencies, footprint)
         };
         let mut grouped = BTreeMap::new();
-        for (dependency, path) in dependencies {
+        for (dependency, path, register) in dependencies {
             let key = policy_authorization_graph_cache_key(&dependency);
-            let entry = grouped.entry(key).or_insert((dependency, path.clone()));
+            let entry = grouped
+                .entry(key)
+                .or_insert((dependency, path.clone(), register.clone()));
             // The same reusable proof may serve more than one occurrence.
             // Specialize only when every consumer has the same candidate
             // domain; an unrestricted consumer forces the ordinary proof.
-            if entry.1 != path {
+            if entry.1 != path || entry.2 != register {
                 entry.1 = None;
+                entry.2 = None;
             }
         }
-        for (cache_key, (dependency, path)) in grouped {
+        for (cache_key, (dependency, path, register)) in grouped {
             let candidate_paths = match &dependency.policy {
                 PolicyContext::AuthorizationSubplan {
                     protected_source, ..
@@ -868,9 +1068,20 @@ where
                 // scoped replacement is restored after compilation (including
                 // cancellation), leaving reusable policy caches neutral.
                 self.begin_scoped_policy_authorization_graph_replacement(&cache_key, lease);
-                match Box::pin(
-                    self.point_policy_authorization_row_id_graph(dependency, access_paths),
-                )
+                let bounded_register = match (&dependency.policy, register) {
+                    (
+                        PolicyContext::AuthorizationSubplan {
+                            protected_source, ..
+                        },
+                        Some(graph),
+                    ) => Some((protected_source.clone(), graph)),
+                    _ => None,
+                };
+                match Box::pin(self.point_policy_authorization_row_id_graph(
+                    dependency,
+                    access_paths,
+                    bounded_register,
+                ))
                 .await
                 {
                     Ok(graph) => {
@@ -1122,6 +1333,7 @@ where
             prepared_claim_binding_mode,
             progress_waker,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )
         .await
         .map(|(subscription, _)| subscription)
@@ -1137,6 +1349,7 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
@@ -1147,10 +1360,15 @@ where
             let sinks = lowered_program_sinks(&program);
             return self
                 .database
-                .subscribe_with_lifetime(sinks, lifetime, progress_waker)
+                .subscribe_with_lifetime_and_root_values(
+                    sinks,
+                    lifetime,
+                    root_indirect_values,
+                    progress_waker,
+                )
                 .map(|subscription| (subscription, None))
                 .map_err(|error| {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receiver_error error={error:?}"
                         );
@@ -1193,31 +1411,47 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let prepared = self
-            .database
-            .prepare(terminals, binding_source_shape, binding_descriptor)
-            .await
-            .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                    eprintln!(
-                        "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
-                    );
-                }
-                Error::Groove(error)
-            })?;
+        // Retained client-local subscribers of identical terminals share one
+        // prepared shape, which retires itself with its last retained
+        // binding. Serving installs keep a shape per subscriber for now. A
+        // first-result read owns a private shape and retires it on return.
+        let shared_shape = lifetime == SubscriptionLifetime::Retained
+            && binding_source_shape.ends_with(":client-local");
+        let prepared = if shared_shape {
+            self.database
+                .prepare_shared(terminals, binding_source_shape, binding_descriptor)
+                .await
+        } else {
+            self.database
+                .prepare(terminals, binding_source_shape, binding_descriptor)
+                .await
+        }
+        .map_err(|error| {
+            if crate::debug_env::covered_input_trace() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}");
+            }
+            Error::Groove(error)
+        })?;
         // prepare() allocates a caller-owned shape. Own it before the binding
         // await so cancellation during cold hydration also releases it.
         let mut owner = HydrationSubscription {
             database: &mut self.database,
             subscription: None,
             prepared_shape: Some(prepared.id()),
+            shared_shape,
         };
         let subscription = owner
             .database
-            .bind_shape_with_lifetime(prepared.id(), &values, lifetime, progress_waker)
+            .bind_shape_with_lifetime_and_root_values(
+                prepared.id(),
+                &values,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
             .await
             .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
                 }
                 Error::Groove(error)
@@ -1226,10 +1460,14 @@ where
         Ok((subscription, Some(prepared.id())))
     }
 
+    /// `root_indirect_values` decides which root fields the result rebuilds
+    /// into logical large values. Callers that keep a field physical must
+    /// drop it, or hydrate it, before rows cross a public boundary.
     pub(super) async fn hydrate_lowered_program_once(
         &mut self,
         mut program: QueryProgram,
         binding: &Binding,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<RecordDeltas, Error> {
         // Hydrate through the same live installation as a retained consumer.
         // The native CurrentRow boundary still consumes the compiler's
@@ -1260,12 +1498,14 @@ where
                 PreparedClaimBindingMode::Strict,
                 None,
                 SubscriptionLifetime::FirstResult,
+                root_indirect_values,
             )
             .await?;
         let mut owner = HydrationSubscription {
             database: &mut self.database,
             subscription: Some(subscription),
             prepared_shape,
+            shared_shape: false,
         };
         let result = futures::future::poll_fn(|cx| {
             let subscription = owner

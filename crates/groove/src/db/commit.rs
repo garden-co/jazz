@@ -137,8 +137,10 @@ impl Database {
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
             let key = staged_large_value_key(*staged_id);
+            // Read through resident writes: an earlier batch whose persistence
+            // is still pending may already have consumed this id.
             let encoded = self
-                .storage
+                .resident_storage()
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .ok_or_else(|| {
@@ -224,7 +226,7 @@ impl Database {
         for staged_id in accepted_large_values {
             let key = staged_large_value_key(staged_id);
             if self
-                .storage
+                .resident_storage()
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .is_none()
@@ -238,8 +240,11 @@ impl Database {
                 key,
             });
             staged_operations.extend(
-                super::facade::completed_large_value_cleanup_operations(&self.storage, staged_id)
-                    .await?,
+                super::facade::completed_large_value_cleanup_operations(
+                    &self.resident_storage(),
+                    staged_id,
+                )
+                .await?,
             );
         }
         let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
@@ -484,8 +489,19 @@ impl Database {
         &self,
         batch: DatabaseBatch,
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        let mut pending_writes = Vec::with_capacity(batch.operations.len());
-        for operation in batch.operations {
+        let prepared = batch.prepared.into_inner();
+        let mut pending_writes = if prepared
+            .owner
+            .as_ref()
+            .is_some_and(|owner| Rc::ptr_eq(owner, &self.batch_preparation_owner))
+        {
+            prepared.writes
+        } else {
+            Vec::new()
+        };
+        let prepared_count = pending_writes.len();
+        pending_writes.reserve(batch.operations.len() - prepared_count);
+        for operation in batch.operations.into_iter().skip(prepared_count) {
             pending_writes.push(self.pending_write_from_owned_operation(operation)?);
         }
         Ok(pending_writes)
@@ -512,11 +528,23 @@ impl Database {
     }
 
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
+        let mut prepared = batch.prepared.borrow_mut();
         let mut txn_operations = batch.txn_operations.borrow_mut();
+        if !prepared
+            .owner
+            .as_ref()
+            .is_some_and(|owner| Rc::ptr_eq(owner, &self.batch_preparation_owner))
+        {
+            prepared.owner = Some(Rc::clone(&self.batch_preparation_owner));
+            prepared.writes.clear();
+            *txn_operations = StagedWriteState::default();
+            batch.txn_indexed_operations.set(0);
+        }
         while batch.txn_indexed_operations.get() < batch.operations.len() {
             let operation = &batch.operations[batch.txn_indexed_operations.get()];
             let pending = self.pending_write_from_operation(operation)?;
             txn_operations.stage(self.owned_storage_operation_for_pending(&pending)?);
+            prepared.writes.push(pending);
             batch
                 .txn_indexed_operations
                 .set(batch.txn_indexed_operations.get() + 1);

@@ -114,6 +114,7 @@ impl ChannelEndpoint {
                 return Ok(Some(super::ReceivedSyncMessage {
                     message,
                     lease: Some(received.lease),
+                    receipts_validated: self.context.validates_receipts(),
                 }));
             }
             self.routing
@@ -147,7 +148,8 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         // dependency across independently scheduled delivery/write channels.
         FateUpdate { .. } => (ChannelClass::Writes, true),
         RowVersionPayloads { .. } => (ChannelClass::Progress, false),
-        CommitUnit { .. } | AuthorityPublication(_) => (ChannelClass::Writes, false),
+        CommitUnit { .. } => (ChannelClass::Writes, false),
+        Reserved30(retired) => match *retired {},
         RegisterShape { .. }
         | Subscribe(_)
         | Unsubscribe { .. }
@@ -230,21 +232,32 @@ impl AuxiliaryChannelEndpoint {
     }
     /// Admit one immutable auxiliary message without advancing its codec.
     pub fn enqueue(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.try_enqueue(message).map_err(|rejected| rejected.0)
+    }
+    /// Like [`Self::enqueue`], but hands an unadmitted message back to its
+    /// caller so a rejected admission never forces a defensive clone.
+    pub fn try_enqueue(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<(), Box<(TransportError, SyncMessage)>> {
         if message_class(&message).0 != ChannelClass::Auxiliary {
-            return Err(TransportError::Failed(
-                "canonical message attempted auxiliary bypass".into(),
-            ));
+            return Err(Box::new((
+                TransportError::Failed("canonical message attempted auxiliary bypass".into()),
+                message,
+            )));
         }
         if self.message.is_some() {
-            return Err(TransportError::Backpressure);
+            return Err(Box::new((TransportError::Backpressure, message)));
         }
-        self.endpoint.enqueue(
+        if let Err(error) = self.endpoint.enqueue(
             AUXILIARY_CHANNEL,
             0,
             ChannelClass::Auxiliary,
             &message,
             false,
-        )?;
+        ) {
+            return Err(Box::new((error, message)));
+        }
         self.message = Some(message);
         if let Some(waker) = self.waker.take() {
             waker.wake();

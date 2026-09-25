@@ -781,7 +781,9 @@ pub(super) fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestina
     } else if table.starts_with("jazz_")
         && table.ends_with("_global_current")
         && !table.contains("_register_global_current")
-        && (index.starts_with("by_app_") || index.starts_with("by_physical_app_"))
+        && (index.starts_with("by_app_")
+            || index.starts_with("by_physical_app_")
+            || index.starts_with("by_physical_composite_"))
     {
         StorageWriteDestination::GlobalCurrentIndexes
     } else if table.starts_with("jazz_") && table.ends_with("_history") && index == "by_tx" {
@@ -840,6 +842,7 @@ pub(super) fn durable_index_table_and_name(key: &[u8]) -> Option<(&str, &str)> {
     Some((table, index))
 }
 
+#[derive(Clone, Debug)]
 pub(super) enum PendingTableWrite {
     /// Insert and update share the same storage operation after validation.
     /// Delta computation decides whether an old record must be retracted first.
@@ -858,7 +861,7 @@ pub(super) enum PendingTableWrite {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum WriteMode {
     Insert,
     InsertFresh,

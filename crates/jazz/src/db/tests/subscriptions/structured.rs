@@ -670,14 +670,14 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let invite_attachment = invite_client
-        .attach_query_with_opts(&invite_chat_query, edge_subscribe_opts())
+        .attach_query_with_opts(&invite_chat_query, global_subscribe_opts())
         .unwrap();
     invite_client.tick().unwrap();
     server.tick().unwrap();
     invite_client.tick().unwrap();
     assert!(invite_client.query_attachment_is_covered(&invite_attachment));
     assert_eq!(
-        block_on(invite_client.all(&invite_chat_query, edge_subscribe_opts()))
+        block_on(invite_client.all(&invite_chat_query, global_subscribe_opts()))
             .unwrap()
             .len(),
         1,
@@ -693,14 +693,14 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
     let normal_chat_attachment = client
-        .attach_query_with_opts(&normal_chat_query, edge_subscribe_opts())
+        .attach_query_with_opts(&normal_chat_query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&normal_chat_attachment));
     assert!(
-        block_on(client.all(&normal_chat_query, edge_subscribe_opts()))
+        block_on(client.all(&normal_chat_query, global_subscribe_opts()))
             .unwrap()
             .is_empty(),
         "the invite claim must not leak from its connection into Bob's normal session",
@@ -736,14 +736,14 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         &Query::from("chat_members").filter(eq(col("chat_id"), lit(chat.0))),
     );
     let member_attachment = client
-        .attach_query_with_opts(&member_query, edge_subscribe_opts())
+        .attach_query_with_opts(&member_query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&member_attachment));
     assert_eq!(
-        block_on(client.all(&member_query, edge_subscribe_opts()))
+        block_on(client.all(&member_query, global_subscribe_opts()))
             .unwrap()
             .len(),
         1,
@@ -759,14 +759,14 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         &Query::from("messages").filter(eq(col("chat_id"), lit(chat.0))),
     );
     let plain_attachment = client
-        .attach_query_with_opts(&plain_message_query, edge_subscribe_opts())
+        .attach_query_with_opts(&plain_message_query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&plain_attachment));
     assert_eq!(
-        block_on(client.all(&plain_message_query, edge_subscribe_opts()))
+        block_on(client.all(&plain_message_query, global_subscribe_opts()))
             .unwrap()
             .len(),
         1,
@@ -784,14 +784,14 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
         .limit(21);
     let prepared_query = prepared(&client, &query);
     let attachment = client
-        .attach_query_with_opts(&prepared_query, edge_subscribe_opts())
+        .attach_query_with_opts(&prepared_query, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&attachment));
     assert_eq!(
-        block_on(client.all_relation_snapshot(&prepared_query, edge_subscribe_opts()))
+        block_on(client.all_relation_snapshot(&prepared_query, global_subscribe_opts()))
             .unwrap()
             .root_count,
         1,
@@ -802,7 +802,7 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     client.tick().unwrap();
 
     let mut subscription =
-        block_on(client.subscribe(&prepared_query, edge_subscribe_opts())).unwrap();
+        block_on(client.subscribe(&prepared_query, global_subscribe_opts())).unwrap();
     // Client-local subscriptions suppress the provisional empty opening until
     // their authority has supplied a settled result set.
     assert!(subscription.try_next_event().is_none());
@@ -1912,7 +1912,7 @@ fn indexed_root_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() 
     };
 
     let event = subscription_terminal_delta_event(
-        DurabilityTier::Edge,
+        DurabilityTier::Global,
         true,
         &previous,
         &[left.clone(), right.clone()],

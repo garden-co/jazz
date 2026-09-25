@@ -24,24 +24,19 @@ where
     ) -> std::collections::HashSet<String> {
         let shared_deletion_history =
             changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
+        // Parse each changed name back to its table id once, instead of
+        // formatting seven candidate names for every table of every schema.
+        let changed_table_ids = changed_tables
+            .iter()
+            .filter_map(|name| physical_table_id_for_publication_name(name))
+            .collect::<std::collections::HashSet<_>>();
         self.catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
-                    let table_id = table.table_id;
-                    let changed = shared_deletion_history
-                        || [
-                            physical_history_table_name(table_id),
-                            physical_register_table_name(table_id),
-                            physical_global_current_table_name(table_id),
-                            physical_register_global_current_table_name(table_id),
-                            physical_ahead_current_table_name(table_id),
-                            physical_register_ahead_current_table_name(table_id),
-                            physical_rejected_versions_table_name(table_id),
-                        ]
-                        .iter()
-                        .any(|name| changed_tables.contains(name));
+                    let changed =
+                        shared_deletion_history || changed_table_ids.contains(&table.table_id.0);
                     changed.then_some(logical_table.clone())
                 })
             })
@@ -107,7 +102,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -115,7 +110,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(None),
         ))
@@ -128,7 +123,7 @@ where
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -136,7 +131,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(None),
         ))
@@ -150,7 +145,7 @@ where
         projection_target: impl Into<String>,
         branch_key: &BranchKey,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -158,7 +153,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             branch_scan(branch_key, None),
         ))
@@ -179,7 +174,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -187,7 +182,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(Some(scan)),
         ))
@@ -201,7 +196,7 @@ where
         projection_target: impl Into<String>,
         scan: groove::ivm::StaticScanSpec,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -209,7 +204,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(Some(scan)),
         ))
@@ -259,7 +254,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical history source schema alias missing",
             ))?;
-        let binding = physical_history_binding(
+        let storage_table = physical_history_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
@@ -267,7 +262,7 @@ where
             logical_table,
         )?;
         Ok(GraphBuilder::variant_source(
-            binding.storage_table,
+            storage_table,
             physical_history_projection_target(alias, logical_table),
         ))
     }
@@ -294,7 +289,7 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical projection target schema alias missing",
                 ))?;
-            let target_table = self.table_in_schema(&target_table_name, target_schema)?;
+            let target_table = self.table_in_schema_ref(&target_table_name, target_schema)?;
             let projection_target =
                 physical_history_projection_target(target_alias, &target_table_name);
             let logical_output = target_table.history_storage_table().record_schema();
@@ -404,7 +399,7 @@ where
             ];
             for storage_table in &storage_tables {
                 let logical_output =
-                    target_table.global_current_storage_tables()[0].record_schema();
+                    target_table.global_current_content_storage_table().record_schema();
                 let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -552,7 +547,7 @@ where
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = target_table.global_current_storage_tables()[0].record_schema();
+            let logical_output = target_table.global_current_content_storage_table().record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -633,6 +628,14 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
     ) -> Result<(String, Vec<String>), Error> {
+        if let Some(prepared) = self
+            .catalogue
+            .physical_current_winner_projections
+            .get(&target_schema)
+            .and_then(|targets| targets.get(target_table_name))
+        {
+            return Ok(prepared.clone());
+        }
         let target_mapping = self
             .catalogue
             .physical_mappings
@@ -646,7 +649,7 @@ where
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
         let physical_fields = authored_output
             .fields()
@@ -796,7 +799,15 @@ where
                 }
             }
         }
-        Ok((projection_target, output_fields.unwrap_or_default()))
+        let prepared = (projection_target, output_fields.unwrap_or_default());
+        // Publish only after every source variant and both storage layers have
+        // been registered. Failed registration must not become a cache hit.
+        self.catalogue
+            .physical_current_winner_projections
+            .entry(target_schema)
+            .or_default()
+            .insert(target_table_name.to_owned(), prepared.clone());
+        Ok(prepared)
     }
 
     /// Resolve a missing target user field through the migration path before
@@ -816,7 +827,7 @@ where
         output_name: String,
         output_type: records::ValueType,
     ) -> Result<Option<ProjectField>, Error> {
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let mut cells = source_table
             .columns
             .iter()
@@ -877,7 +888,7 @@ where
                             ),
                         )?;
                     let target_column_type = self
-                        .table_in_schema(target_table_name, target_schema)?
+                        .table_in_schema_ref(target_table_name, target_schema)?
                         .columns
                         .iter()
                         .find(|column| column.name == target_column)
@@ -949,7 +960,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "target post-winner physical mapping missing",
             ))?;
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let required_enum_columns = target_table
             .columns
             .iter()
@@ -971,6 +982,10 @@ where
     }
 
     pub(super) async fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+        // The registry can evolve without changing a logical schema key (for
+        // example, an old reader gains a new physical enum case). Rebuild all
+        // successful metadata with the new registry, not only the new schema.
+        self.catalogue.physical_current_winner_projections.clear();
         // A physical schema is a coupled registry: tables, variants, enum
         // registries, indices, and projection cases all become observable by
         // the same live runtime.  Do not leave a prefix behind if any later
@@ -981,6 +996,9 @@ where
         let result = self.synchronize_physical_version_tables_inner().await;
         if result.is_err() {
             self.database.restore_runtime_registry(checkpoint);
+            // A later target may have failed after earlier targets succeeded.
+            // None of those successes describe the restored registry.
+            self.catalogue.physical_current_winner_projections.clear();
         }
         result
     }
@@ -1180,7 +1198,7 @@ where
             Literal(Value),
         }
 
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let mut cells = source_table
             .columns
@@ -1232,9 +1250,10 @@ where
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
-                target_table.global_current_storage_tables()[0].clone()
+                target_table.global_current_content_storage_table()
             }
         };
+        let target_record = target_storage.record_schema();
         let user_cells = match shape {
             ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
             ContentProjectionShape::Current => GlobalCurrentRowRecord::USER_CELLS,
@@ -1269,17 +1288,16 @@ where
                 ContentProjectionShape::History => {
                     authored_history_projection_descriptor(&target_table)
                 }
-                ContentProjectionShape::Current => target_storage.record_schema(),
+                ContentProjectionShape::Current => target_record.clone(),
             }
         } else {
             widened_projection_descriptor(
-                &target_storage.record_schema(),
+                &target_record,
                 &physical_names,
                 self.database.table_schema(&physical_storage)?,
             )?
         };
-        let mut fields = target_storage
-            .record_schema()
+        let mut fields = target_record
             .fields()
             .iter()
             .take(user_cells)
@@ -1445,9 +1463,74 @@ fn branch_scan(
                 max_items,
             }
         }
+        Some(StaticScanSpec::ReversePrefixLimit { prefix, max_items }) => {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: prepend(prefix),
+                max_items,
+            }
+        }
         Some(StaticScanSpec::Range { start, end }) => StaticScanSpec::Range {
             start: prepend(start),
             end: prepend(end),
         },
+    }
+}
+
+/// The table id of a per-table physical publication name, exactly the inverse
+/// of the `physical_*_table_name` spellings consulted by targeted refresh.
+fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
+    const SUFFIXES: [&str; 7] = [
+        "history",
+        "register",
+        "global_current",
+        "register_global_current",
+        "ahead_current",
+        "register_ahead_current",
+        "rejected_versions",
+    ];
+    let (table_id, suffix) = split_physical_table_name(name)?;
+    SUFFIXES.contains(&suffix).then_some(table_id.0)
+}
+
+// Internal test: targeted refresh only works if parsing is the exact inverse of
+// the private name formatters, and a mismatch would silently skip refreshes
+// rather than fail visibly through the public API.
+#[cfg(test)]
+mod publication_name_tests {
+    use super::*;
+
+    #[test]
+    fn publication_name_parsing_inverts_every_physical_name_formatter() {
+        for id in [0, 1, 9, 10, 42, u64::MAX] {
+            let table_id = PhysicalTableId(id);
+            for name in [
+                physical_history_table_name(table_id),
+                physical_register_table_name(table_id),
+                physical_global_current_table_name(table_id),
+                physical_register_global_current_table_name(table_id),
+                physical_ahead_current_table_name(table_id),
+                physical_register_ahead_current_table_name(table_id),
+                physical_rejected_versions_table_name(table_id),
+            ] {
+                assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
+            }
+            let history = physical_history_table_name(table_id);
+            let register = physical_register_table_name(table_id);
+            assert_eq!(physical_version_table_id(&history, false), Some(table_id));
+            assert_eq!(physical_version_table_id(&register, true), Some(table_id));
+            assert_eq!(physical_version_table_id(&history, true), None);
+            assert_eq!(physical_version_table_id(&register, false), None);
+        }
+        for name in [
+            SHARED_DELETION_HISTORY_TABLE,
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_1_histories",
+            "jazz_physical__history",
+            "jazz_physical_1",
+            "other_physical_1_history",
+        ] {
+            assert_eq!(physical_table_id_for_publication_name(name), None, "{name}");
+        }
     }
 }

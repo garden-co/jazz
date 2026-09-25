@@ -326,7 +326,7 @@ where
             }
         }
         for version in versions {
-            self.table_in_schema(version.table(), version.schema_version())?;
+            self.table_in_schema_ref(version.table(), version.schema_version())?;
             let table_id =
                 self.physical_table_id_for_schema(version.schema_version(), version.table())?;
             let current = self.visible_global_layer_tx_id_now_memoized(
@@ -400,6 +400,18 @@ where
         predicate: &PredicateRead,
         snapshot: &Snapshot,
     ) -> Result<bool, Error> {
+        self.shape_predicate_outputs_differ(predicate, snapshot, None)
+            .await
+    }
+
+    /// Authority checks use current global output; local checks include their
+    /// newly visible pending transactions in an explicit comparison snapshot.
+    pub(super) async fn shape_predicate_outputs_differ(
+        &mut self,
+        predicate: &PredicateRead,
+        snapshot: &Snapshot,
+        comparison_snapshot: Option<&Snapshot>,
+    ) -> Result<bool, Error> {
         // Shape IDs include the authoring schema. A migration must not make an
         // unchanged read conflict merely because this authority uses another view.
         let shape = predicate
@@ -432,17 +444,28 @@ where
             let at_base = self
                 .query_rows_at_snapshot(&shape, &binding, snapshot)
                 .await?;
-            let at_now = self
-                .query_rows(&shape, &binding, DurabilityTier::Global)
-                .await?;
-            return Ok(!Self::aggregate_query_outputs_equivalent(
-                &at_base, &at_now,
-            ));
+            let at_now = match comparison_snapshot {
+                Some(current) => {
+                    self.query_rows_at_snapshot(&shape, &binding, current)
+                        .await?
+                }
+                None => {
+                    self.query_rows(&shape, &binding, DurabilityTier::Global)
+                        .await?
+                }
+            };
+            return Ok(!Self::aggregate_query_outputs_equivalent(&at_base, &at_now));
         }
         let at_base = self
             .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
             .await?;
-        let at_now = self.shape_output_tx_set_now(&shape, &binding).await?;
+        let at_now = match comparison_snapshot {
+            Some(current) => {
+                self.shape_output_tx_set_at_snapshot(&shape, &binding, current)
+                    .await?
+            }
+            None => self.shape_output_tx_set_now(&shape, &binding).await?,
+        };
         Ok(at_base != at_now)
     }
 
@@ -692,6 +715,8 @@ where
         candidate_tx_id: TxId,
         candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
+        #[cfg(test)]
+        WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
         self.write_policy_allows_version_record(
             version,
             author,
@@ -728,8 +753,16 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !CommitUnitIngestContext::same_parked_authority(
+                existing.ingest_context,
+                mode.ingest_context,
+            ) {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if let (Some(existing), Some(resent)) =
+                (existing.ingest_context.as_mut(), mode.ingest_context)
+            {
+                existing.version_receipts_validated &= resent.version_receipts_validated;
             }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
@@ -766,8 +799,16 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !CommitUnitIngestContext::same_parked_authority(
+                existing.ingest_context,
+                mode.ingest_context,
+            ) {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if let (Some(existing), Some(resent)) =
+                (existing.ingest_context.as_mut(), mode.ingest_context)
+            {
+                existing.version_receipts_validated &= resent.version_receipts_validated;
             }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
@@ -866,27 +907,12 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                if unit.ingress_role == ParkedIngressRole::EdgeAccepted {
-                    updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                    ).await?);
-                } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
-                    updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                        unit.ingest_context,
-                    ).await?);
-                } else {
-                    updates.extend(self.ingest_commit_unit_once(
-                        unit.tx,
-                        unit.versions,
-                        unit.now_ms,
-                        unit.ingest_context,
-                    ).await?);
-                }
+                updates.extend(self.ingest_commit_unit_once(
+                    unit.tx,
+                    unit.versions,
+                    unit.now_ms,
+                    unit.ingest_context,
+                ).await?);
             }
         }
         Ok(updates)
@@ -1100,7 +1126,7 @@ where
                 let schema_version = self
                     .schema_version_for_alias(version.schema_version_alias())
                     .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-                let table_schema = self.table_in_schema(version.table(), schema_version)?;
+                let table_schema = self.table_in_schema_ref(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
                 let rejected_version_record = owned_record_from_storage_values(

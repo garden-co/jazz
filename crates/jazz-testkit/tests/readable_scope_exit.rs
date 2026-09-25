@@ -55,27 +55,12 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
         .expect("inspect local cache")
 }
 
-async fn run_readable_exit(relayed: bool) {
+async fn run_readable_exit() {
     let schema = schema();
     let authority = JazzServer::start_with_schema(schema.clone())
         .await
         .expect("start test server");
-    let relay = if relayed {
-        Some(
-            JazzServer::builder()
-                .with_schema(schema.clone())
-                .with_app_id(authority.app_id())
-                .with_backend_secret(authority.backend_secret())
-                .with_upstream_url(authority.base_url())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .start()
-                .await
-                .expect("start test server"),
-        )
-    } else {
-        None
-    };
-    let server = relay.as_ref().unwrap_or(&authority);
+    let server = &authority;
     let bob = TestingClient::builder()
         .with_server(&authority)
         .with_schema(schema.clone())
@@ -96,7 +81,7 @@ async fn run_readable_exit(relayed: bool) {
             row_input!("owner" => "alice", "done" => false, "title" => "sibling before"),
         )
         .unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap(), sibling_tx.unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap(), sibling_tx.unwrap()]).await;
     let alice = TestingClient::builder()
         .with_server(server)
         .with_schema(schema)
@@ -158,7 +143,7 @@ async fn run_readable_exit(relayed: bool) {
         )
         .unwrap();
     let tx = bob.commit_transaction(tx).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut remote_log,
@@ -209,7 +194,7 @@ async fn run_readable_exit(relayed: bool) {
         .update("tasks", task, vec![("done".into(), Value::Boolean(false))])
         .unwrap()
         .unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
         &mut local_log,
@@ -220,7 +205,7 @@ async fn run_readable_exit(relayed: bool) {
     .await;
     let start = local_log.len();
     let tx = bob.delete("tasks", task).unwrap().unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
         &mut local_log,
@@ -237,9 +222,6 @@ async fn run_readable_exit(relayed: bool) {
     );
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
-    if let Some(relay) = relay {
-        relay.shutdown().await;
-    }
     authority.shutdown().await;
 }
 
@@ -250,17 +232,7 @@ async fn run_readable_exit(relayed: bool) {
 #[tokio::test]
 async fn readable_scalar_exit_refreshes_local_cache_without_expanding_membership() {
     tokio::task::LocalSet::new()
-        .run_until(run_readable_exit(false))
-        .await;
-}
-
-/// A partial edge repairs readable scalar exits with an ordinary Core query.
-/// Bob's successor reaches alice under her current query authorization.
-/// bob -> authority -> edge -> alice: ordinary point query refreshes exit
-#[tokio::test]
-async fn partial_edge_revalidates_scalar_exit_with_authorized_point_query() {
-    tokio::task::LocalSet::new()
-        .run_until(run_readable_exit(true))
+        .run_until(run_readable_exit())
         .await;
 }
 
@@ -297,40 +269,20 @@ fn revocation_schema(dependency: bool) -> Schema {
     }
 }
 
-async fn run_revoked_exit(dependency: bool, relayed: bool) {
-    run_revoked_exit_case(dependency, relayed, true).await;
+async fn run_revoked_exit(dependency: bool) {
+    run_revoked_exit_case(dependency, true).await;
 }
 
-async fn run_revoked_exit_case(dependency: bool, relayed: bool, changes_filter: bool) {
-    run_revoked_exit_shared_case(dependency, relayed, changes_filter, false).await;
+async fn run_revoked_exit_case(dependency: bool, changes_filter: bool) {
+    run_revoked_exit_shared_case(dependency, changes_filter, false).await;
 }
 
-async fn run_revoked_exit_shared_case(
-    dependency: bool,
-    relayed: bool,
-    changes_filter: bool,
-    shared_cache: bool,
-) {
+async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, shared_cache: bool) {
     let schema = revocation_schema(dependency);
     let authority = JazzServer::start_with_schema(schema.clone())
         .await
         .expect("start test server");
-    let relay = if relayed {
-        Some(
-            JazzServer::builder()
-                .with_schema(schema.clone())
-                .with_app_id(authority.app_id())
-                .with_backend_secret(authority.backend_secret())
-                .with_upstream_url(authority.base_url())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .start()
-                .await
-                .expect("start test server"),
-        )
-    } else {
-        None
-    };
-    let server = relay.as_ref().unwrap_or(&authority);
+    let server = &authority;
     let bob = TestingClient::builder()
         .with_server(&authority)
         .with_schema(schema.clone())
@@ -343,7 +295,7 @@ async fn run_revoked_exit_shared_case(
         let (grant, _, tx) = bob
             .insert("grants", row_input!("owner" => "alice"))
             .unwrap();
-        jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+        jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
         Some(grant)
     } else {
         None
@@ -354,9 +306,9 @@ async fn run_revoked_exit_shared_case(
         input.insert("grant".into(), grant.into());
     }
     let (task, _, tx) = bob.insert("tasks", input).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
-    // A different reader can populate this same Edge's cache with a newer
-    // task. Alice's narrowed scope must not leak that shared-cache successor.
+    jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
+    // Another reader is allowed the successor. Its concurrent subscription
+    // must not widen Alice's independently authorized scope.
     let shared_reader = if shared_cache {
         Some(
             TestingClient::builder()
@@ -379,7 +331,7 @@ async fn run_revoked_exit_shared_case(
             &mut subscription,
             &mut Vec::new(),
             TIMEOUT,
-            "shared Edge cache receives task",
+            "independent trusted reader receives task",
             |log| has_added_id(log, task),
         )
         .await;
@@ -431,7 +383,7 @@ async fn run_revoked_exit_shared_case(
         changes.push(("owner".into(), Value::Text("bob".into())));
     }
     staged.update("tasks", task, changes).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut log,
@@ -453,7 +405,7 @@ async fn run_revoked_exit_shared_case(
         );
     }
     // Restoring access must clear the exact reader's denial, without requiring
-    // a new client or discarding the Edge's shared cache.
+    // a new client or discarding its local cache.
     let start = log.len();
     let tx = bob.begin_transaction().unwrap().transaction_id();
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
@@ -477,12 +429,12 @@ async fn run_revoked_exit_shared_case(
             )
             .unwrap();
     }
-    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut log,
         TIMEOUT,
-        "same Edge readmits task",
+        "same client readmits task",
         |log| has_added_id(&log[start..], task),
     )
     .await;
@@ -491,9 +443,6 @@ async fn run_revoked_exit_shared_case(
         reader.shutdown().await.unwrap();
     }
     bob.shutdown().await.unwrap();
-    if let Some(relay) = relay {
-        relay.shutdown().await;
-    }
     authority.shutdown().await;
 }
 
@@ -503,7 +452,7 @@ async fn run_revoked_exit_shared_case(
 #[tokio::test]
 async fn scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(false, false))
+        .run_until(run_revoked_exit(false))
         .await;
 }
 
@@ -513,46 +462,19 @@ async fn scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
 #[tokio::test]
 async fn scalar_exit_with_simultaneous_dependency_revocation_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(true, false))
-        .await;
-}
-
-/// Alice must not receive a revoked successor through the relay.
-/// bob -> authority -> relay -> alice: done=true + owner=bob
-#[tokio::test]
-async fn relayed_scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
-    tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(false, true))
-        .await;
-}
-
-/// Alice's relay must not use a stale parent grant to authorize exit content.
-/// bob -> authority: grant.owner=bob + task.done=true -> relay -> alice
-#[tokio::test]
-async fn relayed_scalar_exit_with_simultaneous_dependency_revocation_withholds_successor() {
-    tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(true, true))
+        .run_until(run_revoked_exit(true))
         .await;
 }
 
 /// Alice reconnects with a retained scalar result after bob changes its filter.
 /// No upstream predecessor survives the detached subscription. The ordinary
-/// query must revalidate the extra local input through a partial relay.
+/// query must revalidate the extra local input against Core.
 /// alice caches -> disconnect/drop -> bob updates -> alice subscribes/reconnects
 async fn run_reconnect_scalar_query(count: usize) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
             let authority = JazzServer::start_with_schema(schema.clone())
-                .await
-                .expect("start test server");
-            let relay = JazzServer::builder()
-                .with_schema(schema.clone())
-                .with_app_id(authority.app_id())
-                .with_backend_secret(authority.backend_secret())
-                .with_upstream_url(authority.base_url())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .start()
                 .await
                 .expect("start test server");
             let bob = TestingClient::builder()
@@ -571,9 +493,9 @@ async fn run_reconnect_scalar_query(count: usize) {
                 tasks.push(task);
                 txs.push(tx.unwrap());
             }
-            jazz_testkit::wait_for_edge_txs(&bob, &txs).await;
+            jazz_testkit::wait_for_global_txs(&bob, &txs).await;
             let alice = TestingClient::builder()
-                .with_server(&relay)
+                .with_server(&authority)
                 .with_schema(schema)
                 .with_user_id("alice")
                 .as_user()
@@ -608,7 +530,7 @@ async fn run_reconnect_scalar_query(count: usize) {
                     )
                     .unwrap();
             }
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             assert_eq!(local_rows(&alice, filtered()).await.len(), count);
             let mut local = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
@@ -645,16 +567,15 @@ async fn run_reconnect_scalar_query(count: usize) {
             );
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
-            relay.shutdown().await;
             authority.shutdown().await;
         })
         .await;
 }
 
-/// Alice's retained scalar row converges through a partial relay after bob's
+/// Alice's retained scalar row converges from Core after bob's
 /// offline update. alice caches -> disconnect/drop -> bob updates -> reconnect
 #[tokio::test]
-async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
+async fn reconnect_scalar_query_revalidates_extra_local_input_at_core() {
     run_reconnect_scalar_query(1).await;
 }
 
@@ -673,15 +594,6 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             let authority = JazzServer::start_with_schema(schema.clone())
                 .await
                 .expect("start test server");
-            let relay = JazzServer::builder()
-                .with_schema(schema.clone())
-                .with_app_id(authority.app_id())
-                .with_backend_secret(authority.backend_secret())
-                .with_upstream_url(authority.base_url())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .start()
-                .await
-                .expect("start test server");
             let bob = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
@@ -690,10 +602,10 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 .ready_on("tasks", TIMEOUT)
                 .connect()
                 .await;
-            let edge_system = TestingClient::builder()
-                .with_server(&relay)
+            let trusted_reader = TestingClient::builder()
+                .with_server(&authority)
                 .with_schema(schema.clone())
-                .with_user_id("edge-system")
+                .with_user_id("trusted-writer")
                 .as_admin()
                 .connect()
                 .await;
@@ -703,24 +615,24 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 let mut input =
                     row_input!("owner" => "alice", "done" => false, "title" => "before");
                 if dependency {
-                    let (grant, _, tx) = edge_system
+                    let (grant, _, tx) = trusted_reader
                         .insert("grants", row_input!("owner" => "alice"))
                         .unwrap();
-                    jazz_testkit::wait_for_edge_txs(&edge_system, &[tx.unwrap()]).await;
+                    jazz_testkit::wait_for_global_txs(&trusted_reader, &[tx.unwrap()]).await;
                     grants.push(grant);
                     input.insert("grant".into(), grant.into());
                 }
                 let (task, _, tx) = bob.insert("tasks", input).unwrap();
-                jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+                jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
                 tasks.push(task);
             }
-            // Close the separate Edge seed writer before changing its grants
+            // Close the separate seed writer before changing its grants
             // through Core; keep only the independent task reader below.
-            edge_system.shutdown().await.unwrap();
-            let edge_system = TestingClient::builder()
-                .with_server(&relay)
+            trusted_reader.shutdown().await.unwrap();
+            let trusted_reader = TestingClient::builder()
+                .with_server(&authority)
                 .with_schema(schema.clone())
-                .with_user_id("edge-system-reader")
+                .with_user_id("trusted-reader")
                 .as_admin()
                 .connect()
                 .await;
@@ -740,7 +652,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 .await;
             }
             let builder = TestingClient::builder()
-                .with_server(&relay)
+                .with_server(&authority)
                 .with_schema(schema.clone())
                 .with_user_id("alice")
                 .as_user();
@@ -763,10 +675,10 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 |log| tasks.iter().all(|task| has_added_id(log, *task)),
             )
             .await;
-            // An independent trusted scope deliberately fills the Edge's shared
-            // task cache. Its SYSTEM-authorized successors must not become Alice's
-            // authority merely because the Edge still holds an old grant.
-            let mut system_scope = edge_system
+            // An independent trusted reader receives the new task content. Its
+            // authorization must not make those bytes available to Alice
+            // when her old grant no longer permits them.
+            let mut system_scope = trusted_reader
                 .subscribe_with_read_tier(Query::from("tasks"), ReadTier::Remote)
                 .await
                 .unwrap();
@@ -809,18 +721,18 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     ],
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             system_log.clear();
             wait_for_subscription_update(
                 &mut system_scope,
                 &mut system_log,
                 TIMEOUT,
-                "SYSTEM receives successor in Edge shared cache",
+                "trusted reader receives successor",
                 |log| jazz_testkit::has_updated(log, tasks[0]),
             )
             .await;
             assert!(
-                local_rows(&edge_system, Query::from("tasks"))
+                local_rows(&trusted_reader, Query::from("tasks"))
                     .await
                     .iter()
                     .any(|(id, values)| *id == tasks[0]
@@ -919,7 +831,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     ],
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             wait_for_subscription_update(
                 &mut local,
                 &mut local_log,
@@ -935,26 +847,25 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     .any(|(id, values)| *id == tasks[0]
                         && values.contains(&Value::Text("readmitted".into())))
             );
-            edge_system.shutdown().await.unwrap();
+            trusted_reader.shutdown().await.unwrap();
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
-            relay.shutdown().await;
             authority.shutdown().await;
         })
         .await;
 }
 
 /// Bob revokes alice while she is offline and changes a readable control too.
-/// The control proves the relay's point batch completed without disclosing the
-/// revoked successor. alice disconnects -> bob changes -> relay probes -> alice
+/// The control proves Core's point batch completed without disclosing the
+/// revoked successor. alice disconnects -> bob changes -> Core probes -> alice
 #[tokio::test]
 async fn reconnect_scalar_probe_withholds_same_row_revoked_successor() {
     run_reconnect_revoked_input(false, false).await;
 }
 
-/// Bob revokes a related grant while alice is offline. The relay's cached grant
-/// cannot authorize the new task bytes; the same batch repairs a readable task.
-/// alice offline -> bob revokes grant -> relay/Core point batch -> no disclosure
+/// Bob revokes a related grant while alice is offline. Core uses the current
+/// grant when repairing her inputs; the same batch repairs a readable task.
+/// alice offline -> bob revokes grant -> Core point batch -> no disclosure
 #[tokio::test]
 async fn reconnect_scalar_probe_withholds_related_grant_revoked_successor() {
     run_reconnect_revoked_input(true, false).await;
@@ -968,22 +879,13 @@ async fn unavailable_scalar_input_survives_reopen_and_readmits() {
 }
 
 /// Changing only the permissions catalogue must retract a retained local input;
-/// restoring the rule must re-admit the unchanged native row through the Edge.
+/// restoring the rule must re-admit the unchanged native row from Core.
 #[tokio::test]
 async fn scalar_input_policy_rule_change_revokes_and_readmits() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
             let authority = JazzServer::start_with_schema(schema.clone())
-                .await
-                .expect("start test server");
-            let relay = JazzServer::builder()
-                .with_schema(schema.clone())
-                .with_app_id(authority.app_id())
-                .with_backend_secret(authority.backend_secret())
-                .with_upstream_url(authority.base_url())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .start()
                 .await
                 .expect("start test server");
             let writer = TestingClient::builder()
@@ -1000,9 +902,9 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                     row_input!("owner" => "alice", "done" => false, "title" => "unchanged"),
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&writer, &[tx.unwrap()]).await;
             let alice = TestingClient::builder()
-                .with_server(&relay)
+                .with_server(&authority)
                 .with_schema(schema.clone())
                 .with_user_id("alice")
                 .as_user()
@@ -1081,35 +983,34 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
             );
             alice.shutdown().await.unwrap();
             writer.shutdown().await.unwrap();
-            relay.shutdown().await;
             authority.shutdown().await;
         })
         .await;
 }
 
-/// Access alone removes the row; a scalar-filter change cannot hide a stale
-/// Edge authorization decision while trusted repair refreshes the task.
+/// Access alone removes the row; no scalar-filter change is needed to
+/// withhold the forbidden successor during repair.
 #[tokio::test]
-async fn edge_direct_access_loss_without_filter_change_withholds_successor() {
+async fn core_direct_access_loss_without_filter_change_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit_case(false, true, false))
+        .run_until(run_revoked_exit_case(false, false))
         .await;
 }
 
-/// A changed task must not pass an old cached grant while the Edge repairs
-/// inputs on its trusted Core connection.
+/// Core must reevaluate the related grant before returning a changed task
+/// during repair, even though the task still matches the scalar filter.
 #[tokio::test]
-async fn edge_dependency_access_loss_without_filter_change_withholds_successor() {
+async fn core_dependency_access_loss_without_filter_change_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit_case(true, true, false))
+        .run_until(run_revoked_exit_case(true, false))
         .await;
 }
 
-/// Another reader fills the Edge cache with a successor which Alice cannot
-/// read. A task-only shared scope deliberately does not hydrate its grant.
+/// Another reader receives a successor which Alice cannot read. Concurrent
+/// subscriptions must not share one reader's permission to receive it.
 #[tokio::test]
-async fn edge_shared_cache_dependency_revocation_withholds_successor() {
+async fn core_concurrent_reader_dependency_revocation_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit_shared_case(true, true, false, true))
+        .run_until(run_revoked_exit_shared_case(true, false, true))
         .await;
 }

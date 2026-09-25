@@ -4,27 +4,29 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use hdrhistogram::Histogram;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts, RowCells,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
-use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
+use jazz::peer::{
+    MaintainedSubscriptionViewMetrics, MaintainedSubscriptionViewMetricsFootprint, PeerState,
+};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+    ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
+    TableSchema as PublicTableSchema,
 };
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::DurabilityTier;
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
     CellValueGen, EdgeSet, EntitySet, Fixture, FixtureBuilder, FixtureCommit, FixtureCommitApply,
     RefDistribution, apply_fixture_commit, apply_sync_message_settled,
-    commit_mergeable_unit_settled, ingest_commit_unit_settled, settle_outcome,
+    commit_mergeable_unit_settled, ingest_commit_unit_settled,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::view_accounting::version_bundle_refs;
@@ -61,6 +63,10 @@ fn main() {
         return;
     }
     let config = Config::from_env();
+    if std::env::var_os("JAZZ_S1_READ_RECEIPT").is_some() {
+        db_read_receipt(&config);
+        return;
+    }
     let phase_selection = PhaseSelection::from_env();
     let profile = PeerProfile::new(
         config.profile.clone(),
@@ -321,6 +327,202 @@ pub fn db_surface_smoke() {
     let _ = db.one(&prepared_query1).expect("db one q1");
 }
 
+fn db_read_receipt(config: &Config) {
+    let setup_start = Instant::now();
+    let read_policy = std::env::var_os("JAZZ_S1_READ_POLICY").is_some();
+    let mut public_schema = schema().public_schema().clone();
+    for table in public_schema.values_mut() {
+        let policies = TablePolicies::new()
+            .with_insert(PolicyExpr::True)
+            .with_delete(PolicyExpr::True);
+        table.policies = if read_policy {
+            policies.with_select(PolicyExpr::True)
+        } else {
+            policies
+        };
+    }
+    let schema = compile_public_schema(public_schema);
+    let fixture = build_fixture(config);
+    let plan = representative_plan(&fixture);
+    let (_dir, db) = open_db(node(70), AuthorSubject::for_test_uuid(plan.user.0), schema);
+    let mut oracle = DbS1Oracle::default();
+    let seed_start = Instant::now();
+    for batch in fixture.commits.chunks(5_000) {
+        let tx = block_on(db.mergeable_tx()).expect("open fixture transaction");
+        for commit in batch {
+            block_on(tx.insert(
+                &commit.table,
+                commit.cells.clone(),
+                jazz::db::InsertOptions {
+                    row_id: Some(commit.row_uuid),
+                    ..Default::default()
+                },
+            ))
+            .expect("db fixture insert");
+            oracle.apply_insert(commit);
+        }
+        let tx_id = block_on(tx.commit()).expect("commit fixture batch");
+        db.finalize_local_mergeable_commit_for_test(tx_id)
+            .expect("settle fixture batch");
+        assert!(
+            matches!(
+                db.write_state(tx_id).expect("fixture fate").fate,
+                jazz::tx::Fate::Accepted
+            ),
+            "fixture batch must be globally accepted"
+        );
+    }
+    emit_json_line(
+        "s1_saas_read",
+        &json!({
+            "phase": "seed",
+            "read_policy": read_policy,
+            "setup_ms": setup_start.elapsed().as_millis(),
+            "seed_ms": seed_start.elapsed().as_millis(),
+            "rows": fixture.commits.len(),
+            "issues": config.issues(),
+            "issue_tags": fixture.commits.iter().filter(|commit| commit.table == ISSUE_TAGS).count(),
+        })
+        .to_string(),
+    );
+    let tagged_issue = fixture
+        .commits
+        .iter()
+        .find(|commit| commit.table == ISSUE_TAGS)
+        .and_then(|commit| cell_uuid(commit, "issue"))
+        .expect("tagged issue");
+    let tagged_tag = fixture
+        .commits
+        .iter()
+        .find(|commit| commit.table == ISSUE_TAGS)
+        .and_then(|commit| cell_uuid(commit, "tag"))
+        .expect("tagged tag");
+    let unrelated_deletion_count = env_usize("JAZZ_S1_UNRELATED_DELETIONS", 0);
+    if unrelated_deletion_count > 0 {
+        let deletion_start = Instant::now();
+        let unrelated = fixture
+            .commits
+            .iter()
+            .filter(|commit| {
+                commit.table == ISSUE_TAGS && cell_uuid(commit, "issue") != Some(tagged_issue)
+            })
+            .take(unrelated_deletion_count)
+            .collect::<Vec<_>>();
+        assert_eq!(unrelated.len(), unrelated_deletion_count);
+        for batch in unrelated.chunks(5_000) {
+            let tx = block_on(db.mergeable_tx()).expect("open deletion transaction");
+            for commit in batch {
+                block_on(tx.delete(ISSUE_TAGS, commit.row_uuid, Default::default()))
+                    .expect("delete unrelated issue tag");
+                oracle.apply_delete(ISSUE_TAGS, commit.row_uuid);
+            }
+            let tx_id = block_on(tx.commit()).expect("commit unrelated deletions");
+            db.finalize_local_mergeable_commit_for_test(tx_id)
+                .expect("settle unrelated deletions");
+            assert!(matches!(
+                db.write_state(tx_id).expect("deletion fate").fate,
+                jazz::tx::Fate::Accepted
+            ));
+        }
+        emit_json_line(
+            "s1_saas_read",
+            &json!({
+                "phase": "delete",
+                "unrelated_deletions": unrelated.len(),
+                "delete_ms": deletion_start.elapsed().as_millis(),
+            })
+            .to_string(),
+        );
+    }
+    let point_join = Query::from(ISSUES)
+        .filter(eq(col("id"), lit(Value::Uuid(tagged_issue.0))))
+        .join_via(
+            ISSUE_TAGS,
+            "issue",
+            [eq(col("tag"), lit(Value::Uuid(tagged_tag.0)))],
+        )
+        .include("project");
+    for (name, query, expected) in [
+        (
+            "point_join",
+            point_join,
+            BTreeSet::from([(ISSUES.to_owned(), tagged_issue)]),
+        ),
+        ("q1", db_query1(&plan), oracle.query1(&plan)),
+        ("q2_join", db_query2(&plan), oracle.query2(&plan)),
+    ] {
+        let start = Instant::now();
+        let prepared = db.prepare_query(&query).expect("prepare receipt query");
+        let prepare_us = start.elapsed().as_micros();
+        for sample in 0..7 {
+            db.reset_storage_read_metrics_for_test();
+            let start = Instant::now();
+            let global_rows = block_on(db.all_for_identity(
+                &prepared,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Deferred,
+                    propagation: Propagation::LocalOnly,
+                    ..ReadOpts::default()
+                },
+                AuthorSubject::for_test_uuid(plan.user.0),
+            ))
+            .expect("global receipt query");
+            let global_us = start.elapsed().as_micros();
+            let global_reads = db.take_storage_read_metrics_for_test();
+            let actual = row_set(global_rows);
+            assert!(
+                actual == expected,
+                "global receipt {name} mismatch: expected {} rows, got {}",
+                expected.len(),
+                actual.len()
+            );
+            db.reset_storage_read_metrics_for_test();
+            let start = Instant::now();
+            let (rows, p) = db.read_profiled(&prepared).expect("profile receipt query");
+            let outer_us = start.elapsed().as_micros();
+            let local_reads = db.take_storage_read_metrics_for_test();
+            let actual = row_set(rows);
+            assert!(
+                actual == expected,
+                "profiled receipt {name} mismatch: expected {} rows, got {}",
+                expected.len(),
+                actual.len()
+            );
+            emit_json_line(
+                "s1_saas_read",
+                &json!({
+                    "phase": "read",
+                    "read_policy": read_policy,
+                    "query": name,
+                    "sample": sample,
+                    "expected_rows": expected.len(),
+                    "prepare_us": prepare_us,
+                    "global_us": global_us,
+                    "global_current_rows_read": global_reads.global_current_rows.reads,
+                    "global_current_indexes_read": global_reads.global_current_indexes.reads,
+                    "global_deletion_registers_read": global_reads.register_global_current_rows.reads,
+                    "global_storage_ranges": global_reads.total.ranges,
+                    "local_profiled_us": outer_us,
+                    "local_current_rows_read": local_reads.global_current_rows.reads,
+                    "local_current_indexes_read": local_reads.global_current_indexes.reads,
+                    "local_deletion_registers_read": local_reads.register_global_current_rows.reads,
+                    "local_storage_ranges": local_reads.total.ranges,
+                    "total_us": p.total.as_micros(),
+                    "resolve_us": p.resolve_view.as_micros(),
+                    "compile_us": p.compile_program.as_micros(),
+                    "select_us": p.select_plan.as_micros(),
+                    "execute_us": p.execute_plan.as_micros(),
+                    "decode_us": p.decode_materialize.as_micros(),
+                    "finish_us": p.finish_rows.as_micros(),
+                    "projection_us": p.apply_projection.as_micros(),
+                })
+                .to_string(),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Config {
     seed: u64,
@@ -434,10 +636,6 @@ struct Summary {
     result_set_rows: usize,
     closure_rows: usize,
     writes_applied: usize,
-    edge_acceptance: Histogram<u64>,
-    edge_hydration_bytes: u64,
-    edge_hydration_floor_bytes: u64,
-    edge_hydration_rows: usize,
 }
 
 #[derive(Clone)]
@@ -490,71 +688,8 @@ struct HighFanOutSummary {
     by_tx_index_seeks: u64,
     history_scan_fallbacks: u64,
     maintained_subscription_view_metrics: MaintainedSubscriptionViewMetrics,
+    maintained_subscription_view_footprint: Option<MaintainedSubscriptionViewMetricsFootprint>,
     full_diff_recomputes: u64,
-}
-
-struct EdgeRoute {
-    name: String,
-    node: NodeState<RocksDbStorage>,
-    _dir: tempfile::TempDir,
-    core_peer: PeerState,
-}
-
-fn edge_acceptance_phase(
-    ctx: &mut dyn DriverContext,
-    client: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
-) -> Histogram<u64> {
-    let mut acceptance = Histogram::new(3).unwrap();
-    let issue = row(9_500_000);
-    let start = ctx.now_ms();
-    let (tx_id, unit) = commit_mergeable_unit_settled(
-        client,
-        MergeableCommit::new(ISSUES, issue, 950_000)
-            .made_by(AuthorSubject::SYSTEM)
-            .cells(BTreeMap::from([(
-                "title".to_owned(),
-                Value::String("edge-acceptance-probe".to_owned()),
-            )])),
-    )
-    .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        unreachable!();
-    };
-    ctx.send(
-        "client_0",
-        &edge.name,
-        SyncMessage::CommitUnit { tx, versions },
-    );
-    let delivered = ctx.recv(&edge.name);
-    let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
-        unreachable!();
-    };
-    // This direct edge probe uses the unadmitted SYSTEM peer, whose immutable
-    // request snapshot is the empty claim object.
-    let policy_claims = BTreeMap::new();
-    let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
-        &mut edge.node,
-        tx,
-        versions,
-        u64::MAX,
-        u64::MAX,
-        policy_claims,
-    ))
-    .unwrap();
-    let updates = settle_outcome(&mut edge.node, outcome).unwrap();
-    let _accepted = updates.iter().any(|message| {
-        matches!(
-            message,
-            SyncMessage::FateUpdate {
-                tx_id: seen,
-                fate: Fate::Accepted,
-                ..
-            } if *seen == tx_id
-        )
-    });
-    acceptance.record((ctx.now_ms() - start) * 1_000).unwrap();
-    acceptance
 }
 
 fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
@@ -563,18 +698,10 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
     let (_core_dir, mut core) = open_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
     let mut clients = Vec::new();
-    let mut edges = Vec::new();
     let mut dirs = Vec::new();
     for idx in 0..config.clients {
         let (dir, client) = open_node(node(20 + idx as u8), schema.clone());
-        let (edge_dir, edge_node) = open_node(node(120 + idx as u8), schema.clone());
         dirs.push(dir);
-        edges.push(EdgeRoute {
-            name: format!("client_{idx}_edge"),
-            node: edge_node,
-            _dir: edge_dir,
-            core_peer: PeerState::new(),
-        });
         clients.push(client);
     }
 
@@ -612,18 +739,10 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
     let mut warm_settled = Vec::new();
     let mut cold_bytes = 0_u64;
     let mut cold_floor = 0_u64;
-    let mut edge_hydration_bytes = 0_u64;
-    let mut edge_hydration_floor_bytes = 0_u64;
-    let mut edge_hydration_rows = 0_usize;
     let mut result_set_rows = 0_usize;
     let mut total_closure_rows = BTreeSet::<(String, RowUuid)>::new();
 
-    for (((client_idx, client), edge), plan) in clients
-        .iter_mut()
-        .enumerate()
-        .zip(edges.iter_mut())
-        .zip(plans.iter())
-    {
+    for ((client_idx, client), plan) in clients.iter_mut().enumerate().zip(plans.iter()) {
         let mut peer = PeerState::new();
         let mut client_closure_rows = BTreeSet::<(String, RowUuid)>::new();
         let binding1 = query1
@@ -650,32 +769,21 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             ]))
             .expect("binding 2");
 
-        register_binding(ctx, &mut core, &edge.name, &query1, &binding1);
-        register_binding(ctx, &mut core, &edge.name, &query2, &binding2);
-        apply_binding(&mut edge.node, &query1, &binding1);
-        apply_binding(&mut edge.node, &query2, &binding2);
+        register_binding(ctx, &mut core, &plan.name, &query1, &binding1);
+        register_binding(ctx, &mut core, &plan.name, &query2, &binding2);
         apply_binding(client, &query1, &binding1);
         apply_binding(client, &query2, &binding2);
 
         for (shape, binding) in [(&query1, &binding1), (&query2, &binding2)] {
             let start_ms = ctx.now_ms();
-            let core_update = block_on(edge.core_peer.rehydrate_query(&mut core, shape, binding))
-                .expect("rehydrate query");
-            edge_hydration_bytes += view_update_bytes(&core_update);
-            edge_hydration_floor_bytes += bytes_floor(&core_update);
-            edge_hydration_rows += result_output_count(&core_update, ISSUES);
-            ctx.send("core", &edge.name, core_update);
-            let delivered_to_edge = ctx.recv(&edge.name);
-            apply_sync_message_settled(&mut edge.node, delivered_to_edge.message)
-                .expect("edge apply view");
-            let update = block_on(peer.rehydrate_query(&mut edge.node, shape, binding))
-                .expect("edge rehydrate query");
+            let update = block_on(peer.rehydrate_query(&mut core, shape, binding))
+                .expect("Core rehydrate query");
             let bytes = view_update_bytes(&update);
             cold_bytes += bytes;
             cold_floor += bytes_floor(&update);
             collect_result_rows(&update, &mut client_closure_rows);
             result_set_rows += result_output_count(&update, ISSUES);
-            ctx.send(&edge.name, &plan.name, update);
+            ctx.send("core", &plan.name, update);
             let delivered = ctx.recv(&plan.name);
             apply_sync_message_settled(client, delivered.message).expect("client apply view");
             cold_latencies.push((ctx.now_ms() - start_ms) * 1_000);
@@ -722,10 +830,6 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         result_set_rows,
         closure_rows: total_closure_rows.len(),
         writes_applied: config.writes,
-        edge_acceptance: edge_acceptance_phase(ctx, &mut clients[0], &mut edges[0]),
-        edge_hydration_bytes,
-        edge_hydration_floor_bytes,
-        edge_hydration_rows,
     }
 }
 
@@ -1202,12 +1306,26 @@ fn high_fan_out_hydration_summary(
         assert_eq!(local, oracle, "high fan-out child result mismatch");
     }
 
+    // Inspect after stopping the timer. Explicitly select the last hydrated
+    // child (or the parent for an empty fixture), matching the old last-updated
+    // diagnostic without making every publication scan retained state.
+    let hydration_complete_us = start.elapsed().as_micros() as u64;
+    let (footprint_shape, footprint_binding) = active_bindings
+        .last()
+        .map(|binding| (&child_shape, binding))
+        .unwrap_or((&parent_shape, &parent_binding));
+    let maintained_subscription_view_footprint = peer
+        .inspect_maintained_subscription_view_footprint(SubscriptionKey {
+            shape_id: footprint_shape.shape_id(),
+            binding_id: footprint_binding.binding_id(),
+            read_view: Default::default(),
+        });
     HighFanOutSummary {
         fanout,
         parents: parents.len(),
         children: parents.len() * fanout,
         subscriptions: parents.len() + 1,
-        hydration_complete_us: start.elapsed().as_micros() as u64,
+        hydration_complete_us,
         hydration_bytes,
         hydration_floor_bytes,
         result_set_rows,
@@ -1216,7 +1334,11 @@ fn high_fan_out_hydration_summary(
         by_tx_index_seeks,
         history_scan_fallbacks,
         maintained_subscription_view_metrics: peer.maintained_subscription_view_metrics(),
-        full_diff_recomputes: 0,
+        maintained_subscription_view_footprint,
+        full_diff_recomputes: peer
+            .maintained_subscription_view_metrics()
+            .full_diff_fallbacks
+            .total(),
     }
 }
 
@@ -2017,43 +2139,19 @@ fn cell_uuid(commit: &FixtureCommit, column: &str) -> Option<RowUuid> {
 
 fn topology(config: &Config, profile: PeerProfile) -> Topology {
     let schema = schema();
-    let (client_edge_ms, edge_core_ms) = profile_leg_ms();
-    let client_edge = PeerProfile::new(
-        format!("{}:client-edge", profile.name),
-        client_edge_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
-    let edge_core = PeerProfile::new(
-        format!("{}:edge-core", profile.name),
-        edge_core_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
     let mut topology = Topology::default()
         .node("writer", schema.clone(), NodeRole::Writer)
         .node("core", schema.clone(), NodeRole::Core)
-        .link("writer", "core", edge_core.clone())
-        .link("core", "writer", edge_core.clone());
+        .link("writer", "core", profile.clone())
+        .link("core", "writer", profile.clone());
     for idx in 0..config.clients {
         let name = format!("client_{idx}");
-        let edge = format!("{name}_edge");
         topology = topology
             .node(&name, schema.clone(), NodeRole::Reader)
-            .node(&edge, schema.clone(), NodeRole::Edge)
-            .client_edge_core_line(&name, &edge, "core", client_edge.clone(), edge_core.clone());
+            .link(&name, "core", profile.clone())
+            .link("core", &name, profile.clone());
     }
     topology
-}
-
-fn profile_leg_ms() -> (u64, u64) {
-    let total = env_u64("JAZZ_LINK_ONE_WAY_MS", 1);
-    let client_edge = env_u64("JAZZ_CLIENT_EDGE_ONE_WAY_MS", total.min(1));
-    let edge_core = env_u64(
-        "JAZZ_EDGE_CORE_ONE_WAY_MS",
-        total.saturating_sub(client_edge).max(1),
-    );
-    (client_edge, edge_core)
 }
 
 fn schema() -> JazzSchema {
@@ -2064,6 +2162,7 @@ fn schema() -> JazzSchema {
             "todo".to_owned(),
             "in_progress".to_owned(),
             "done".to_owned(),
+            "archived".to_owned(),
         ],
     };
     compile_public_schema(
@@ -2223,6 +2322,14 @@ impl DbS1Oracle {
             .insert(commit.row_uuid, commit.cells.clone());
     }
 
+    fn apply_delete(&mut self, table: &str, row_uuid: RowUuid) {
+        self.tables
+            .get_mut(table)
+            .expect("oracle deletion table")
+            .remove(&row_uuid)
+            .expect("oracle deleted row");
+    }
+
     fn apply_patch(&mut self, table: &str, row_uuid: RowUuid, patch: RowCells) {
         self.tables
             .entry(table.to_owned())
@@ -2329,6 +2436,7 @@ fn emit_summary(driver: &str, config: &Config, summary: &Summary) {
     fields.insert("fixture_hash".to_owned(), json!(summary.fixture_hash));
     fields.insert("fixture_rows".to_owned(), json!(summary.fixture_rows));
     fields.insert("clients".to_owned(), json!(summary.clients));
+    fields.insert("topology".to_owned(), json!("core_clients"));
     fields.insert(
         "cold_complete_p50_us".to_owned(),
         json!(summary.cold_complete_p50_us),
@@ -2370,36 +2478,6 @@ fn emit_summary(driver: &str, config: &Config, summary: &Summary) {
         json!(transport_codec_name(config.transport_codec)),
     );
     emit_object(fields);
-
-    let mut edge_acceptance = metadata_fields("s1_saas", driver, config.seed, &config.profile);
-    edge_acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
-    edge_acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.50)),
-    );
-    edge_acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(summary.edge_acceptance.value_at_quantile(0.95)),
-    );
-    edge_acceptance.insert("durability_tier".to_owned(), json!("Edge"));
-    emit_object(edge_acceptance);
-
-    let mut edge_hydration = metadata_fields("s1_saas", driver, config.seed, &config.profile);
-    edge_hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
-    edge_hydration.insert("scope".to_owned(), json!("saas_query_closure"));
-    edge_hydration.insert(
-        "hydration_bytes".to_owned(),
-        json!(summary.edge_hydration_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_floor_bytes".to_owned(),
-        json!(summary.edge_hydration_floor_bytes),
-    );
-    edge_hydration.insert(
-        "hydration_rows".to_owned(),
-        json!(summary.edge_hydration_rows),
-    );
-    emit_object(edge_hydration);
 }
 
 fn emit_reconnect_summary(config: &Config, summary: &ReconnectSummary) {
@@ -2530,7 +2608,26 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
     );
     fields.insert(
         "maintained_subscription_view_full_recomputes_out".to_owned(),
-        json!(0),
+        json!(summary.full_diff_recomputes),
+    );
+    let fallbacks = summary
+        .maintained_subscription_view_metrics
+        .full_diff_fallbacks;
+    fields.insert(
+        "maintained_subscription_view_membership_reconciliations_out".to_owned(),
+        json!(fallbacks.membership_reconciliations),
+    );
+    fields.insert(
+        "maintained_subscription_view_query_reopens_out".to_owned(),
+        json!(fallbacks.query_reopens),
+    );
+    fields.insert(
+        "maintained_subscription_view_authorization_support_reopens_out".to_owned(),
+        json!(fallbacks.authorization_support_reopens),
+    );
+    fields.insert(
+        "maintained_subscription_view_runtime_resets_out".to_owned(),
+        json!(fallbacks.runtime_resets),
     );
     fields.insert(
         "maintained_subscription_view_delta_batches_in".to_owned(),
@@ -2544,36 +2641,32 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
         "maintained_subscription_view_footprint_result_rows".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .result_rows
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.result_rows)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_version_identities".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .version_identities
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.version_identities)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_version_tx_entries".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .version_tx_entries
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.version_tx_entries)
         ),
     );
     fields.insert(
         "maintained_subscription_view_footprint_replacement_entries".to_owned(),
         json!(
             summary
-                .maintained_subscription_view_metrics
-                .footprint
-                .replacement_entries
+                .maintained_subscription_view_footprint
+                .map(|footprint| footprint.replacement_entries)
         ),
     );
     fields.insert(

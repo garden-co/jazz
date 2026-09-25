@@ -219,14 +219,14 @@ fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_h
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     let scheduler = Rc::new(RecordingScheduler::default());
@@ -328,14 +328,14 @@ fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
             tx_id,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .expect("authority fate reaches fixture");
     db.tick().expect("persist authority rejection");
 
     let outcome = Rc::new(RefCell::new(None));
     let callback = Rc::clone(&outcome);
-    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
         *callback.borrow_mut() = Some(result);
     });
     control.take_observed();
@@ -405,31 +405,32 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
 }
 
 /// Internal topology canary: exact push-before-row ordering on both relay legs
-/// and pull forwarding after edge chunk eviction are protocol/runtime
+/// and pull forwarding after relay chunk eviction are protocol/runtime
 /// properties that are not observable through the public client API alone.
 /// The accepted write and reconstructed value are still asserted through that
 /// API. Every node is opened with its own storage directory.
 #[test]
-fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_eviction() {
+fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_eviction() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc4; 16]);
     let core = open_core(0xc5, AuthorSubject::SYSTEM, &schema);
-    let upload_edge = open_db(0xc6, AuthorSubject::SYSTEM, &schema);
+    let upload_relay = open_db(0xc6, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xc7, author, &schema);
 
-    let (upload_edge_transport, core_upload_transport, upload_edge_to_core) =
+    let (upload_relay_transport, core_upload_transport, upload_relay_to_core) =
         duplex_with_client_outbound_tap();
-    let _upload_edge_upstream =
-        crate::db::block_on(upload_edge.connect_upstream(upload_edge_transport));
-    let _core_upload_edge = core.accept_subscriber_with_trust(
+    let _upload_relay_upstream =
+        crate::db::block_on(upload_relay.connect_upstream(upload_relay_transport));
+    let _core_upload_relay = core.accept_subscriber_with_trust(
         core_upload_transport,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
-    let (writer_transport, upload_edge_client_transport, writer_to_upload_edge) =
+    let (writer_transport, upload_relay_client_transport, writer_to_upload_relay) =
         duplex_with_client_outbound_tap();
     let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
-    let _upload_edge_writer = upload_edge.accept_subscriber(upload_edge_client_transport, author);
+    let _upload_relay_writer =
+        upload_relay.accept_subscriber(upload_relay_client_transport, author);
 
     let title = "multi-hop-large-value/".repeat(8_000);
     let write = writer
@@ -445,14 +446,14 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         .unwrap();
 
     let mut writer_messages = Vec::new();
-    let mut upload_edge_messages = Vec::new();
+    let mut upload_relay_messages = Vec::new();
     for _ in 0..64 {
         writer.tick().unwrap();
-        writer_messages.extend(writer_to_upload_edge.borrow().iter().cloned());
-        upload_edge.tick().unwrap();
-        upload_edge_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        writer_messages.extend(writer_to_upload_relay.borrow().iter().cloned());
+        upload_relay.tick().unwrap();
+        upload_relay_messages.extend(upload_relay_to_core.borrow().iter().cloned());
         core.tick().unwrap();
-        upload_edge.tick().unwrap();
+        upload_relay.tick().unwrap();
         writer.tick().unwrap();
         if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
             break;
@@ -468,8 +469,8 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     );
 
     for (leg, messages) in [
-        ("writer-to-upload-edge", writer_messages),
-        ("upload-edge-to-core", upload_edge_messages),
+        ("writer-to-upload-relay", writer_messages),
+        ("upload-relay-to-core", upload_relay_messages),
     ] {
         let staged = messages
             .iter()
@@ -484,22 +485,22 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         assert!(staged < row, "{leg} stages the chunks before the row");
     }
     assert_eq!(
-        prepared_read(&upload_edge, &upload_edge.table("todos")).len(),
+        prepared_read(&upload_relay, &upload_relay.table("todos")).len(),
         1,
-        "the upload edge retained the accepted row"
+        "the upload relay retained the accepted row"
     );
 
     // Retain the accepted row and its disclosed locator, but replace only the
-    // edge's Groove chunk backend with an empty independent store. Its only
-    // route to the value bytes is now to forward this edge-local access to Core.
-    upload_edge
+    // relay's Groove chunk backend with an empty independent store. Its only
+    // route to the value bytes is now to forward this relay-local access to Core.
+    upload_relay
         .node
         .node
         .borrow_mut()
         .set_chunk_storage(Rc::new(groove::chunks::MemoryChunkStorage::new()));
-    let query = upload_edge.table("todos");
+    let query = upload_relay.table("todos");
     let mut subscription = prepared_subscribe(
-        &upload_edge,
+        &upload_relay,
         &query,
         ReadOpts {
             tier: DurabilityTier::Local,
@@ -513,10 +514,10 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     let mut pull_messages = Vec::new();
     let mut pending_event = None;
     for _ in 0..128 {
-        upload_edge.tick().unwrap();
-        pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        upload_relay.tick().unwrap();
+        pull_messages.extend(upload_relay_to_core.borrow().iter().cloned());
         core.tick().unwrap();
-        upload_edge.tick().unwrap();
+        upload_relay.tick().unwrap();
         if pending_event.is_none() {
             pending_event = subscription.try_next_event();
         }
@@ -525,7 +526,8 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
             .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_)))
             && let Some(event) = pending_event.as_mut()
         {
-            crate::db::block_on(upload_edge.hydrate_subscription_event_for_binding(event)).unwrap();
+            crate::db::block_on(upload_relay.hydrate_subscription_event_for_binding(event))
+                .unwrap();
             apply_subscription_event(&mut snapshot, pending_event.take().unwrap());
         }
         received = snapshot.rows.first().and_then(|row| row.cell_at(0));
@@ -536,18 +538,18 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     assert_eq!(
         snapshot.rows.len(),
         1,
-        "the empty edge delivers the referencing row",
+        "the empty relay delivers the referencing row",
     );
     assert!(
         pull_messages
             .iter()
             .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_))),
-        "the empty edge requests missing chunks from Core"
+        "the empty relay requests missing chunks from Core"
     );
     assert_eq!(
         received,
         Some(Value::String(title)),
-        "the empty edge forwards the missing chunk pull to Core"
+        "the empty relay forwards the missing chunk pull to Core"
     );
 }
 
@@ -943,16 +945,16 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
     );
 }
 
-/// A Core schedules a fresh owner turn for a peer-edge subscriber that was
+/// A Core schedules a fresh owner turn for a relay subscriber that was
 /// visited before a later client upload, so Bob receives Alice's later
 /// canonical row without an unrelated next websocket frame.
 ///
 /// ```text
-/// bob --empty Global subscribe--> peer edge --> Core
+/// bob --empty Global subscribe--> relay ------> Core
 /// alice --later CommitUnit----------------------> Core
 ///                                                |
 ///                 Core ViewUpdate <--------------+
-/// bob <--- peer-edge local IVM refresh <---------+
+/// bob <--- relay local IVM refresh <-------------+
 /// ```
 ///
 /// The peer connection is deliberately accepted before Alice's connection.
@@ -969,13 +971,13 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     let core = open_core(0xd1, AuthorSubject::SYSTEM, &schema);
     let core_scheduler = Rc::new(RecordingScheduler::default());
     core.server.set_scheduler(Some(core_scheduler.clone()));
-    let peer_edge = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
     let bob = open_db(0xd3, bob_author, &schema);
 
     // Keep the Core-to-peer queue observable, and accept this peer before
     // Alice so the ordering under test is fixed.
     let (peer_transport, core_transport, core_to_peer) = duplex_with_server_outbound_tap();
-    let _peer_upstream = crate::db::block_on(peer_edge.connect_upstream(peer_transport));
+    let _peer_upstream = crate::db::block_on(relay.connect_upstream(peer_transport));
     let _core_peer = core.accept_subscriber_with_trust(
         core_transport,
         AuthorSubject::SYSTEM,
@@ -983,16 +985,16 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
     let (bob_transport, peer_client_transport) = duplex();
     let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
-    let _peer_client = peer_edge.accept_subscriber(peer_client_transport, bob_author);
+    let _peer_client = relay.accept_subscriber(peer_client_transport, bob_author);
 
     let query = bob.table("todos");
     let mut subscription = prepared_subscribe(&bob, &query, global_subscribe_opts()).unwrap();
     let opening = (0..32)
         .find_map(|_| {
             bob.tick().unwrap();
-            peer_edge.tick().unwrap();
+            relay.tick().unwrap();
             core.tick().unwrap();
-            peer_edge.tick().unwrap();
+            relay.tick().unwrap();
             bob.tick().unwrap();
             subscription.try_next_event()
         })
@@ -1005,11 +1007,11 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
     core_scheduler.take();
 
-    let alice_edge = open_db(0xd4, alice, &schema);
+    let alice_client = open_db(0xd4, alice, &schema);
     let (alice_transport, core_alice_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_edge.connect_upstream(alice_transport));
+    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
     let _core_alice = core.accept_subscriber(core_alice_transport, alice);
-    let write = alice_edge
+    let write = alice_client
         .insert(
             "todos",
             cells("later row", false, alice),
@@ -1020,9 +1022,9 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
         )
         .unwrap();
 
-    // One edge tick uploads Alice's local commit; one Core tick finalizes it
+    // One client tick uploads Alice's local commit; one Core tick finalizes it
     // and asks the host for a fresh turn to serve the earlier peer connection.
-    alice_edge.tick().unwrap();
+    alice_client.tick().unwrap();
     core.tick().unwrap();
     let wakes = core_scheduler.take();
     assert!(
@@ -1062,8 +1064,8 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
 
     // Applying that upstream ViewUpdate must dirty and refresh the existing
-    // Bob connection in the same peer-edge service pass.
-    peer_edge.tick().unwrap();
+    // Bob connection in the same relay service pass.
+    relay.tick().unwrap();
     bob.tick().unwrap();
     let delivered = subscription
         .try_next_event()
@@ -1082,25 +1084,25 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     );
 }
 
-/// An Edge immediately flushes an upload queued by a later client connection
+/// A relay immediately flushes an upload queued by a later client connection
 /// through the upstream connection that was already visited in the same pass.
 ///
 /// The upstream connection is deliberately installed first. One client tick
-/// places the commit on the Edge subscriber transport; one Edge tick must both
+/// places the commit on the relay subscriber transport; one relay tick must both
 /// ingest it and emit the corresponding Core-bound `CommitUnit`.
 #[test]
-fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
+fn relay_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let edge = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xd2, alice, &schema);
 
-    let (edge_transport, _core_transport, edge_to_core) = duplex_with_client_outbound_tap();
-    let _edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let (relay_transport, _core_transport, relay_to_core) = duplex_with_client_outbound_tap();
+    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
 
-    let (client_transport, edge_client_transport) = duplex();
+    let (client_transport, relay_client_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge.accept_subscriber(edge_client_transport, alice);
+    let _relay_client = relay.accept_subscriber(relay_client_transport, alice);
 
     let write = client
         .insert(
@@ -1113,9 +1115,9 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
         )
         .unwrap();
     client.tick().unwrap();
-    edge.tick().unwrap();
+    relay.tick().unwrap();
 
-    let uploads = edge_to_core
+    let uploads = relay_to_core
         .borrow()
         .iter()
         .filter(|message| {
@@ -1127,12 +1129,12 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
         .count();
     assert_eq!(
         uploads, 1,
-        "one Edge service pass flushes the later client upload through the earlier upstream link"
+        "one relay service pass flushes the later client upload through the earlier upstream link"
     );
 
-    edge.tick().unwrap();
+    relay.tick().unwrap();
     assert_eq!(
-        edge_to_core
+        relay_to_core
             .borrow()
             .iter()
             .filter(|message| {
@@ -1144,118 +1146,6 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
             .count(),
         1,
         "a quiet follow-up tick does not replay the same upload"
-    );
-}
-
-/// Edge admission compares a client HLC's Unix-millisecond physical component
-/// with the authority wall clock, not with the process-relative retry timer.
-/// This needs the real connection topology: direct NodeState admission never
-/// exercises the served-client edge path where retry timing is also available.
-#[test]
-fn edge_admits_client_write_with_current_unix_timestamp() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
-    let edge = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xd7, alice, &schema);
-
-    let (client_transport, edge_client_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge
-        .server
-        .accept_edge_authority_subscriber_with_claims_and_trust(
-            edge_client_transport,
-            alice,
-            test_provider_claims(alice),
-            CommitUnitTrust::Session,
-        );
-
-    let unix_now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test clock is after Unix epoch")
-        .as_millis()
-        .try_into()
-        .expect("Unix milliseconds fit u64");
-    let write = client
-        .insert(
-            "todos",
-            cells("current timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd8)),
-                updated_at_ms: Some(unix_now_ms),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a current-time local write");
-
-    client.tick().expect("client uploads the write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the client write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id)),
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ) {
-            break;
-        }
-    }
-
-    let edge_state = crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id));
-    assert!(
-        matches!(
-            edge_state,
-            Some((Fate::Accepted, None, DurabilityTier::Edge))
-        ),
-        "a current Unix-time client write becomes Edge durable instead of being compared to the retry timer; observed {edge_state:?}"
-    );
-    assert!(
-        edge.server
-            .outbox
-            .borrow()
-            .iter()
-            .any(|pending| pending.tx_id == write.tx_id),
-        "the admitted Edge write is retained for its upstream authority"
-    );
-
-    let future = client
-        .insert(
-            "todos",
-            cells("future timestamp", false, alice),
-            crate::db::InsertOptions {
-                row_id: Some(row(0xd9)),
-                updated_at_ms: Some(
-                    unix_now_ms
-                        .saturating_add(crate::node::SKEW_TOLERANCE_MS)
-                        .saturating_add(10_000),
-                ),
-                ..Default::default()
-            },
-        )
-        .expect("client creates a far-future local write");
-    client.tick().expect("client uploads the far-future write");
-    for _ in 0..8 {
-        edge.tick().expect("edge services the far-future write");
-        if matches!(
-            crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id)),
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ) {
-            break;
-        }
-    }
-    let future_state =
-        crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id));
-    assert!(
-        matches!(
-            future_state,
-            Some((
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                None,
-                DurabilityTier::Local
-            ))
-        ),
-        "the same Edge path retains forward-skew rejection; observed {future_state:?}"
     );
 }
 
@@ -1361,9 +1251,9 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         block_on(
             client
                 .node
-                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
         )
-        .expect("Accepted Edge durability does not require a Global timestamp")
+        .expect("Local durability does not require a Global timestamp")
         .unwrap(),
         tx_id
     );
@@ -1759,7 +1649,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
 }
 
 #[test]
-fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
+fn db_sync_surface_client_session_read_policy_filters_private_table_query() {
     let schema = owner_id_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -1809,13 +1699,13 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
         )]),
     );
     let query = Query::from("messages");
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     reader.tick().unwrap();
     server.tick().unwrap();
     reader.tick().unwrap();
     assert!(opened_rows(next_settled_opening(&mut subscription)).is_empty());
-    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    assert!(prepared_all(&reader, &query, global_subscribe_opts()).is_empty());
 }
 
 /// A real client commonly reads its self-membership grant before querying the
@@ -1933,12 +1823,12 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     let grant_query =
         Query::from("members").filter(eq(col("id"), lit(Value::Uuid(grant.row_uuid().0))));
     let mut grant_subscription =
-        prepared_subscribe(&client, &grant_query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&client, &grant_query, global_subscribe_opts()).unwrap();
     for _ in 0..16 {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
-        if !prepared_all(&client, &grant_query, edge_subscribe_opts()).is_empty() {
+        if !prepared_all(&client, &grant_query, global_subscribe_opts()).is_empty() {
             break;
         }
     }
@@ -1954,7 +1844,7 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
         );
     }
     assert_eq!(
-        prepared_all(&client, &grant_query, edge_subscribe_opts()).len(),
+        prepared_all(&client, &grant_query, global_subscribe_opts()).len(),
         1
     );
     while grant_subscription.try_next_event().is_some() {}
@@ -1962,17 +1852,17 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     let workspace_query =
         Query::from("workspaces").filter(eq(col("id"), lit(Value::Uuid(workspace.row_uuid().0))));
     let mut workspace_subscription =
-        prepared_subscribe(&client, &workspace_query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&client, &workspace_query, global_subscribe_opts()).unwrap();
     for _ in 0..16 {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
-        if !prepared_all(&client, &workspace_query, edge_subscribe_opts()).is_empty() {
+        if !prepared_all(&client, &workspace_query, global_subscribe_opts()).is_empty() {
             break;
         }
     }
     assert_eq!(
-        prepared_all(&client, &workspace_query, edge_subscribe_opts())
+        prepared_all(&client, &workspace_query, global_subscribe_opts())
             .iter()
             .map(CurrentRow::row_uuid)
             .collect::<Vec<_>>(),
@@ -2077,7 +1967,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
 }
 
 #[test]
-fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
+fn db_sync_surface_client_session_read_policy_filters_after_runtime_schema_publish() {
     let public_schema = owner_id_public_schema();
     let permission_schema = owner_id_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -2129,7 +2019,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     );
     let query = Query::from("messages");
     let mut alice_subscription =
-        prepared_subscribe(&alice_reader, &query, edge_subscribe_opts()).unwrap();
+        prepared_subscribe(&alice_reader, &query, global_subscribe_opts()).unwrap();
     assert!(alice_subscription.try_next_event().is_none());
     alice_reader.tick().unwrap();
     server.tick().unwrap();
@@ -2143,7 +2033,11 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(
-        row_ids(&prepared_all(&alice_reader, &query, edge_subscribe_opts())),
+        row_ids(&prepared_all(
+            &alice_reader,
+            &query,
+            global_subscribe_opts()
+        )),
         vec![added[0].row_uuid()],
     );
 
@@ -2157,14 +2051,14 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
             Value::String(bob.test_uuid().to_string()),
         )]),
     );
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
 
     reader.tick().unwrap();
     server.tick().unwrap();
     reader.tick().unwrap();
     assert!(opened_rows(next_settled_opening(&mut subscription)).is_empty());
-    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    assert!(prepared_all(&reader, &query, global_subscribe_opts()).is_empty());
 }
 
 #[test]
@@ -3061,7 +2955,7 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
 
 /// Upload entries remain replayable until an applied terminal fate either
 /// rejects them or carries accepted Global durability plus authority time. An
-/// Accepted fate at Local, Edge, or Global-without-time is only progress:
+/// Accepted fate at Local or Global-without-time is only progress:
 /// reconnect must resend it until a later time-bearing Global fate releases the
 /// shared outbox entry.
 #[test]
@@ -3096,7 +2990,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_ti
             |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
         )
     );
-    for durability in [DurabilityTier::Local, DurabilityTier::Edge] {
+    for durability in [DurabilityTier::Local, DurabilityTier::Global] {
         authority
             .send(SyncMessage::FateUpdate {
                 tx_id,
@@ -3688,14 +3582,7 @@ fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
 
     assert!(worker.detach_connection(&worker_upstream));
     assert!(core.server.detach_connection(&core_subscriber));
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(
         eviction.row_versions_evictable > 0,
         "the accepted parent must be evictable while the pending child remains pinned"
@@ -3876,14 +3763,7 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
         .unwrap();
     let child_tx = child.mergeable_tx_id();
     assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
-    let eviction = block_on(
-        worker
-            .node
-            .node
-            .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
-    )
-    .unwrap();
+    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
     assert!(eviction.row_versions_evictable > 0);
 
     let foreground = open_db(0xcd, author, &schema);
@@ -4456,7 +4336,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         tx_id: rejected_id,
         fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
         global_time: None,
-        durability: Some(DurabilityTier::Edge),
+        durability: Some(DurabilityTier::Global),
     };
     route_local_fate(&routes, rejected_id, &rejected);
     assert!(matches!(
@@ -4686,4 +4566,558 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
         0,
         "successful refresh must acknowledge the retained generation"
     );
+}
+
+/// Only the retired receipt is planted internally: current APIs cannot create
+/// it. Everything after that uses durable reopen, ordinary connections and
+/// transaction waits, with no query that could independently trigger repair.
+fn assert_legacy_edge_receipt_replays_to_core(known_to_core: bool, permission_revoked: bool) {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc6; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = |author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            DbIdentity { author, ..identity },
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open(author);
+    let tx_id = client
+        .insert(
+            "todos",
+            cells("original offline payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe6)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let pump = |client: &Db<RocksDbStorage>| {
+        client.tick().unwrap();
+        core.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let settle = |client: &Db<RocksDbStorage>| {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
+            *observed.borrow_mut() = Some(outcome)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.borrow().is_none() && std::time::Instant::now() < deadline {
+            pump(client);
+            std::thread::yield_now();
+        }
+        let outcome = result
+            .borrow_mut()
+            .take()
+            .expect("reopen must settle the original write without a query");
+        outcome
+    };
+    let original_global_time = if known_to_core {
+        let (up, down) = duplex();
+        let upstream = block_on(client.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, author);
+        assert_eq!(settle(&client).unwrap(), tx_id);
+        drop(upstream);
+        drop(subscriber);
+        core.node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .global_time
+    } else {
+        None
+    };
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(tx_id),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    // Sharing a durable store does not let another account replay this author.
+    let other = open(other_author);
+    {
+        let (up, down) = duplex();
+        let _upstream = block_on(other.connect_upstream(up));
+        let _subscriber = core.accept_subscriber(down, other_author);
+        for _ in 0..16 {
+            pump(&other);
+        }
+        assert!(
+            other.node.outbox.borrow().iter().next().is_none(),
+            "recovery must remain author-scoped"
+        );
+        if !known_to_core {
+            assert!(core.node().borrow_mut().transaction_record(tx_id).is_none());
+        }
+    }
+    block_on(other.close()).unwrap();
+    drop(other);
+
+    let client = open(author);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .transaction_state_settled(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    // A changed provider claim represents permission loss since the old receipt.
+    let claims = test_provider_claims(if permission_revoked {
+        other_author
+    } else {
+        author
+    });
+    let _subscriber = core.accept_subscriber_with_claims(down, author, claims);
+    let outcome = settle(&client);
+    if permission_revoked {
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+        assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+    } else {
+        assert_eq!(outcome.unwrap(), tx_id);
+        let audit = core.node().borrow_mut().transaction_record(tx_id).unwrap();
+        assert_eq!(audit.made_by, author);
+        assert_eq!(audit.tx_id, tx_id);
+        assert_eq!(audit.n_total_writes, 1);
+        assert_eq!(audit.fate, Fate::Accepted);
+        assert_eq!(audit.durability, DurabilityTier::Global);
+        assert!(audit.global_time.is_some());
+        if known_to_core {
+            assert_eq!(audit.global_time, original_global_time);
+        }
+        let rows = core.read(&Query::from("todos")).unwrap();
+        assert_eq!(row_ids(&rows), vec![row(0xe6)]);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "title"),
+            Some(Value::String("original offline payload".to_owned()))
+        );
+    }
+    block_on(client.close()).unwrap();
+}
+
+#[test]
+fn legacy_edge_receipt_reopens_and_uploads_without_query() {
+    assert_legacy_edge_receipt_replays_to_core(false, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_preserves_existing_core_acceptance() {
+    assert_legacy_edge_receipt_replays_to_core(true, false);
+}
+
+#[test]
+fn legacy_edge_receipt_replay_obeys_current_core_permissions() {
+    assert_legacy_edge_receipt_replays_to_core(false, true);
+}
+
+/// What the application sees when Core rejects a replayed legacy edge receipt:
+/// the unhandled-rejection callback fires with Core's reason, exactly as for
+/// an ordinary rejected write, and the optimistic row leaves local reads and
+/// live subscriptions. As above, only the retired receipt is planted
+/// internally, because no current API can author it.
+#[test]
+fn rejected_legacy_edge_receipt_replay_reaches_the_application_like_an_ordinary_rejection() {
+    let schema = owner_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc7; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = || {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            identity,
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd7, AuthorSubject::SYSTEM, &schema);
+    let client = open();
+    let legacy_tx = client
+        .insert(
+            "todos",
+            cells("legacy edge-accepted payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe7)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(
+        client
+            .node
+            .node
+            .borrow_mut()
+            .persist_legacy_edge_receipt_for_test(legacy_tx),
+    );
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    let client = open();
+    let events = Rc::new(RefCell::new(Vec::<MutationErrorEvent>::new()));
+    let observed = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        observed.borrow_mut().push(event.clone())
+    }));
+    let todos = client.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(client.subscribe(&todos, ReadOpts::default())).unwrap();
+    let mut visible = BTreeSet::new();
+    let mut drain = |subscription: &mut SubscriptionStream, visible: &mut BTreeSet<RowUuid>| {
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    visible.clear();
+                }
+                visible.extend(added.iter().chain(&updated).map(|row| row.row.row_uuid()));
+                for gone in &removed {
+                    visible.remove(&gone.row_uuid);
+                }
+            }
+        }
+    };
+    for _ in 0..16 {
+        client.tick().unwrap();
+        client.refresh_subscriptions().unwrap();
+        drain(&mut subscription, &mut visible);
+    }
+    // Reopened as Pending/Local, the legacy write is still an optimistic row.
+    assert_eq!(row_ids(&client.read(&todos).unwrap()), vec![row(0xe7)]);
+    assert_eq!(visible, BTreeSet::from([row(0xe7)]));
+    assert!(events.borrow().is_empty());
+
+    // Permission loss since the old receipt: Core now rejects this author.
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    let _subscriber =
+        core.accept_subscriber_with_claims(down, author, test_provider_claims(other_author));
+    let pump_until = |count: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while events.borrow().len() < count && std::time::Instant::now() < deadline {
+            client.tick().unwrap();
+            core.tick().unwrap();
+            client.tick().unwrap();
+            std::thread::yield_now();
+        }
+    };
+    pump_until(1);
+    let legacy = events.borrow().first().cloned().expect(
+        "a rejected replay without an active waiter must reach the mutation-error callback",
+    );
+    assert_eq!(
+        legacy.transaction.transaction_id,
+        TransactionId::from_committed_tx(legacy_tx)
+    );
+    assert!(!legacy.reason.is_empty());
+    assert_eq!(
+        legacy.transaction.latest_settlement,
+        TransactionFate::Rejected {
+            transaction_id: TransactionId::from_committed_tx(legacy_tx),
+            code: legacy.code.clone(),
+            reason: legacy.reason.clone(),
+        }
+    );
+    client.refresh_subscriptions().unwrap();
+    drain(&mut subscription, &mut visible);
+    assert!(client.read(&todos).unwrap().is_empty());
+    assert!(
+        visible.is_empty(),
+        "the rejected optimistic row leaves the subscription"
+    );
+    assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+
+    // An ordinary write rejected on the same link reports the same surface.
+    let ordinary_tx = client
+        .insert(
+            "todos",
+            cells("ordinary payload", false, author),
+            InsertOptions {
+                row_id: Some(row(0xe8)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    pump_until(2);
+    let events = events.borrow();
+    assert_eq!(events.len(), 2, "each rejection is reported exactly once");
+    let ordinary = &events[1];
+    assert_eq!(
+        ordinary.transaction.transaction_id,
+        TransactionId::from_committed_tx(ordinary_tx)
+    );
+    assert_eq!(
+        (
+            &legacy.code,
+            &legacy.reason,
+            legacy.transaction.kind,
+            legacy.transaction.sealed
+        ),
+        (
+            &ordinary.code,
+            &ordinary.reason,
+            ordinary.transaction.kind,
+            ordinary.transaction.sealed
+        )
+    );
+    drop(events);
+    client.refresh_subscriptions().unwrap();
+    drain(&mut subscription, &mut visible);
+    assert!(client.read(&todos).unwrap().is_empty());
+    assert!(visible.is_empty());
+}
+
+/// A root authority settles every subscriber upload itself: its Accepted,
+/// Global-durable fate is terminal and nobody sits above it to ask again.
+/// So it must not retain those uploads in its own upload outbox, which is
+/// only drained by an upstream fate and would otherwise grow with every
+/// client write for the life of the process.
+///
+/// alice ──CommitUnit×N──► core ──Accepted(Global)──► alice
+///                          │
+///                          └── outbox stays empty; bob still sees all N rows
+///
+/// Internal: outbox retention is process memory, which no public API exposes.
+#[test]
+fn root_authority_does_not_retain_settled_subscriber_uploads() {
+    const WRITES: usize = 12;
+    let schema = schema();
+    let alice_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let core = open_core(0xa0, AuthorSubject::SYSTEM, &schema);
+    // What a Core server shell declares at startup.
+    core.server.declare_upload_root();
+    let alice = open_db(0xa1, alice_author, &schema);
+    let bob = open_db(0xb1, bob_author, &schema);
+    let (alice_transport, core_alice) = duplex();
+    let (bob_transport, core_bob) = duplex();
+    let _alice_upstream = crate::db::block_on(alice.connect_upstream(alice_transport));
+    let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
+    let _alice_link = core.accept_subscriber(core_alice, alice_author);
+    let _bob_link = core.accept_subscriber(core_bob, bob_author);
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let _bob_rows = crate::db::block_on(bob.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let settle = || {
+        for _ in 0..8 {
+            alice.tick().unwrap();
+            core.tick().unwrap();
+            bob.tick().unwrap();
+        }
+    };
+    settle();
+
+    let mut writes = Vec::new();
+    for index in 0..WRITES {
+        writes.push(
+            alice
+                .insert(
+                    "todos",
+                    cells(&format!("alice {index}"), false, alice_author),
+                    Default::default(),
+                )
+                .unwrap(),
+        );
+        settle();
+    }
+
+    for write in &writes {
+        crate::db::block_on(write.wait(DurabilityTier::Global))
+            .expect("the root authority settles each upload globally");
+    }
+    assert_eq!(core.read(&core.table("todos")).unwrap().len(), WRITES);
+    let bob_rows = crate::db::block_on(bob.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(bob_rows.len(), WRITES);
+    assert_eq!(alice.node.outbox.borrow().len(), 0);
+    assert_eq!(
+        core.server.outbox.borrow().len(),
+        0,
+        "a root authority has no upstream to drain settled uploads"
+    );
+}
+
+/// A history-complete node validates as its own authority, so its ingest
+/// reports every subscriber upload Accepted at Global. When it has an upstream
+/// it is not the root, and must still relay those uploads, even if it was
+/// declared a root before the upstream attached (as a Core server shell is).
+///
+/// alice ──CommitUnit×3──► mid (history-complete) ──CommitUnit×3──► root
+///
+/// Internal: the mid's root declaration is a shell-owned runtime flag.
+#[test]
+fn history_complete_node_with_an_upstream_still_relays_subscriber_uploads() {
+    const WRITES: usize = 3;
+    let schema = schema();
+    let alice_author = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let root = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
+    root.server.declare_upload_root();
+    let mid = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    mid.server.declare_upload_root();
+    let alice = open_db(0xa5, alice_author, &schema);
+
+    let (mid_transport, root_mid) = duplex();
+    let _mid_upstream = crate::db::block_on(mid.server.connect_upstream(mid_transport));
+    let _root_mid = root.accept_subscriber_with_trust(
+        root_mid,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (alice_transport, mid_alice) = duplex();
+    let _alice_upstream = crate::db::block_on(alice.connect_upstream(alice_transport));
+    let _mid_alice = mid.accept_subscriber(mid_alice, alice_author);
+    let settle = || {
+        for _ in 0..8 {
+            alice.tick().unwrap();
+            mid.tick().unwrap();
+            root.tick().unwrap();
+            mid.tick().unwrap();
+        }
+    };
+    settle();
+
+    for index in 0..WRITES {
+        alice
+            .insert(
+                "todos",
+                cells(&format!("alice {index}"), false, alice_author),
+                Default::default(),
+            )
+            .unwrap();
+        settle();
+    }
+    for _ in 0..8 {
+        settle();
+    }
+
+    assert_eq!(mid.read(&mid.table("todos")).unwrap().len(), WRITES);
+    assert_eq!(
+        root.read(&root.table("todos")).unwrap().len(),
+        WRITES,
+        "the mid must relay its subscribers' uploads to its upstream"
+    );
+}
+
+/// Timing receipt for #3378: the server tick that serves one opening
+/// snapshot, plus (with `cold-settle-attribution`) the diagnostic encode that
+/// only fills `last_resume_bytes`. Run manually with `--ignored --nocapture`.
+#[test]
+#[ignore = "#3378: timing probe, run manually with --ignored"]
+fn probe_3378_opening_snapshot_serve_cost() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    for rows in [1_000usize, 10_000] {
+        for byte_wire in [false, true] {
+            let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+            for chunk in 0..rows.div_ceil(500) {
+                let tx = server.exclusive_tx().unwrap();
+                for index in chunk * 500..((chunk + 1) * 500).min(rows) {
+                    let mut id = [0u8; 16];
+                    id[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                    tx.insert_with_id(
+                        "todos",
+                        RowUuid::from_bytes(id),
+                        cells(
+                            &format!("task {index:06} with a realistic title"),
+                            false,
+                            owner,
+                        ),
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let client = open_db(0xc1, client_author, &schema);
+            let (client_transport, server_transport) =
+                if byte_wire { byte_duplex() } else { duplex() };
+            let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+            let subscriber = server.accept_subscriber(server_transport, client_author);
+            let query = Query::from("todos");
+            let mut subscription =
+                prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+            client.tick().unwrap();
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::reset();
+            // The opening may span many ticks (chunking, credit); sum the
+            // server's share until the client sees the settled opening.
+            let mut serve = std::time::Duration::ZERO;
+            let mut rounds = 0;
+            let opening = loop {
+                let started = std::time::Instant::now();
+                server.tick().unwrap();
+                serve += started.elapsed();
+                client.tick().unwrap();
+                rounds += 1;
+                if let Some(event) = subscription.try_next_event() {
+                    break event;
+                }
+                assert!(rounds < 10_000, "opening never arrived");
+            };
+            #[cfg(feature = "cold-settle-attribution")]
+            let attribution = crate::cold_settle_attribution::snapshot();
+            #[cfg(not(feature = "cold-settle-attribution"))]
+            let attribution = "n/a (build with cold-settle-attribution)";
+            assert!(
+                matches!(
+                    &opening,
+                    SubscriptionEvent::Delta {
+                        reset: true,
+                        settled: true,
+                        ..
+                    }
+                ),
+                "expected a settled opening, got {opening:?}"
+            );
+            let (added, _, _) = delta_rows(opening);
+            assert_eq!(added.len(), rows);
+            println!(
+                "probe_3378 rows={rows} byte_wire={byte_wire} rounds={rounds} serve_tick_us={} last_resume_bytes={:?} attribution={attribution:?}",
+                serve.as_micros(),
+                subscriber.borrow().last_resume_bytes(),
+            );
+        }
+    }
 }

@@ -17,7 +17,7 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
-- `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
+- `INV-SYNC-30`: A fresh `Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 - `INV-SYNC-36`: An authority synchronizes an exact, authorized input closure, never its application-output terminal. The receiver reconciles that closure with the local inputs permitted by the requested tier and runs the same maintained Groove program used for local changes. Only that receiver-local terminal may publish application rows or ordered structural edits.
 
 ## Details
@@ -90,8 +90,8 @@ Subscription membership, source-closure generations, live settlement and
 body-dedup cursors are process-local. Reopen does not recover any authority
 scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
-remote-if-possible does the same online and uses local knowledge only after
-explicit disconnect. Retaining native bytes does not prove remote membership.
+local-first-unless-empty is local-first and waits for that snapshot only to
+replace an empty opening while a remote can answer (ch. 13). Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -211,7 +211,7 @@ are reviewed with the corresponding reader and rejection tests.
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
-node's own pending committed writes. Edge and global subscriptions are maintained
+node's own pending committed writes. Global subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
 settlement/completeness requirements. Tiers select the source/frontier
 expression and runtime consumption policy; they must not select a different
@@ -312,16 +312,17 @@ answer may be published; it does not select another evaluator:
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- online `remote-if-possible` evaluates the exact authority inputs with pending
-  edits/deletes applied to those inputs, plus eligible pending new inserts.
-  An edit alone does not admit an existing out-of-scope row. Relationships use
-  only these inputs, without expanding into cached dependency rows. Inserts
-  participate in the ordinary query, including its joins, filters and windows;
-- offline `remote-if-possible` evaluates local knowledge plus pending changes,
-  like `local-first`. It may therefore show cached rows excluded by the last
-  remote closure. Returning online replaces that fallback with fresh authority
-  inputs and the bounded pending overlay. Do not reuse a detached receipt as
-  fresh authority coverage;
+- `local-first-unless-empty` evaluates exactly
+  like `local-first`; it differs only in publishing an empty first answer after
+  the usage's first settled authority closure while a remote can answer, and in
+  reading an `offset > 0` window as the strict remote view (ch. 13);
+- a core `Global` read with immediate local updates (no longer a product tier)
+  evaluates the exact authority inputs with pending edits/deletes applied to
+  those inputs, plus eligible pending new inserts. An edit alone does not
+  admit an existing out-of-scope row. Relationships use only these inputs,
+  without expanding into cached dependency rows. Inserts participate in the
+  ordinary query, including its joins, filters and windows. Do not reuse a
+  detached receipt as fresh authority coverage;
 - a local-only internal execution suppresses upstream registration but still
   uses the same lowered graph over its local source.
 
@@ -330,7 +331,7 @@ data is local knowledge too. A one-shot local-first read from a newly opened
 memory-only foreground must receive the owner's query answer (including a
 confirmed empty answer) before returning. This is local storage delivery, not
 authority settlement: it completes while the owner is offline or while its
-edge/core connection is stalled. Ordinary upstream propagation remains enabled
+Core connection is stalled. Ordinary upstream propagation remains enabled
 when requested. A standalone durable runtime can read its local storage directly
 and does not acquire this foreground delivery prerequisite.
 
@@ -376,12 +377,13 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence in a remote-scoped result. The client does not
   re-evaluate the hidden policy, and the authority sends no presentation-level
-  remove. Local-first may still show the cached row; offline fallback may show
-  it again after an online remote-if-possible result excluded it.
+  remove. Local-first and local-first-unless-empty may still show the cached
+  row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
-  from local-first knowledge. Online remote-if-possible instead uses C plus B
-  (if B matches using available query inputs); remote uses only C.
+  from local-first knowledge. A `Global` read with immediate local updates
+  instead uses C plus B (if B matches using available query inputs); remote
+  uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
   predecessor's result or terminal sequence. It verifies a fresh exact closure,
   installs it, and lets the local graph publish the corresponding reset.
@@ -470,7 +472,7 @@ application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 
 A new remote settled one-shot is a new usage site, not a request to inspect
 whatever equal-shape state happens to be materialized locally. Each fresh
-`Edge`/`Global` one-shot registers a current `SubscriptionKey` and completes
+`Global` one-shot registers a current `SubscriptionKey` and completes
 only after an authority-backed settled update covers that exact key. Binding-view
 generation advancement alone is insufficient: a late update addressed to an
 already detached equal-shape predecessor must not acknowledge its replacement
@@ -561,7 +563,7 @@ the serving boundary (`INV-SYNC-23`).
 The current maintained-subscription surface supports ordinary live query
 subscriptions whose lowered policy-composed shape can be maintained by groove,
 with the strongest production coverage on the global frontier. The target
-surface is tier-agnostic: local, edge, and global subscriptions use the same
+surface is tier-agnostic: local and global subscriptions use the same
 lowering and maintained terminal contracts, differing only in source/frontier
 selection and settlement/completeness rules. Supported maintained shapes include
 unordered `limit(1)` with offset `0` lowered through `ArgMinBy` over `row_uuid`,
@@ -739,7 +741,6 @@ that occurrence without dropping its independently maintained descendants.
   covered by `global_subscription_registers_array_subquery_upstream_coverage`,
   `array_subquery_attachment_registers_upstream_coverage`, and
   `array_subquery_remote_subscription_hydrates_edge_referenced_child_rows`.
-  Edge-tier maintained array-subquery semantics are not yet separately named.
 
 ### 16.6 Aggressive maintained support: ordered windows and `Aggregate`
 
@@ -810,8 +811,9 @@ a fallback. A narrower remote query requires its own coverage receipt.
 A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
-16–17. Use `remote` for authority-relative pagination, or `remote-if-possible`
-for authority-relative pagination online and literal local fallback offline.
+16–17. Use `remote` for authority-relative pagination. `local-first-unless-empty`
+reads an `offset > 0` window as the strict remote view while a remote can
+answer, and otherwise paginates locally like `local-first` (ch. 13).
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.
 
@@ -950,7 +952,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand online remote-if-possible inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the `Global` + immediate-local-updates inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

@@ -36,12 +36,17 @@ export interface WasmRow {
 
 export type FFIRow = WasmRow;
 
-export type NativeTerminalPathSegment = { Collection: string } | { Key: number[] };
+/**
+ * Terminal byte strings as a binding hands them over: NAPI and WASM pass one
+ * `Uint8Array` each; React Native's JSON carrier yields number arrays.
+ */
+export type NativeTerminalBytes = Uint8Array | number[];
+export type NativeTerminalPathSegment = { Collection: string } | { Key: NativeTerminalBytes };
 export type NativeTerminalEdit =
-  | { Insert: { index: number; key: number[]; value: number[] } }
-  | { Update: { key: number[]; value: number[] } }
-  | { Remove: { key: number[] } }
-  | { Move: { key: number[]; index: number } };
+  | { Insert: { index: number; key: NativeTerminalBytes; value: NativeTerminalBytes } }
+  | { Update: { key: NativeTerminalBytes; value: NativeTerminalBytes } }
+  | { Remove: { key: NativeTerminalBytes } }
+  | { Move: { key: NativeTerminalBytes; index: number } };
 /** Immutable producer-owned root descriptor contract retained for codec compatibility. */
 export interface NativeTerminalRootLayout {
   id: string;
@@ -59,7 +64,7 @@ export interface NativeTerminalRootLayout {
 export interface NativeTerminalOperation {
   rootLayoutId?: string;
   rootDescriptor?: number[];
-  root_key: number[];
+  root_key: NativeTerminalBytes;
   path: NativeTerminalPathSegment[];
   edit: NativeTerminalEdit;
 }
@@ -188,6 +193,7 @@ export interface TableSchema {
   relations?: import("../relationships.js").Relationships;
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
+  composite_indexes?: string[][];
   policies?: TablePolicies;
   /** Ordinary immutable columns that form this table's branch key. */
   branchBy?: string[];

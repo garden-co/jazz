@@ -921,6 +921,7 @@ where
         cells: RowCells,
         mut options: InsertOptions,
     ) -> Result<RowUuid, Error> {
+        let explicit_row_id = options.row_id.is_some();
         let row = options
             .row_id
             .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
@@ -931,9 +932,19 @@ where
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
-                    db.exclusive_tx_ref(id)
-                        .insert(&table, cells, options)
-                        .await?;
+                    // The id is fixed here so it can be returned synchronously;
+                    // only a caller-supplied id gets the create-only check.
+                    ensure_transaction_identity(options.identity)?;
+                    ensure_exclusive_target(&options.target)?;
+                    db.stage_exclusive_insert(
+                        id,
+                        &table,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                        explicit_row_id,
+                    )
+                    .await?;
                 } else {
                     db.mergeable_tx_ref(id)
                         .insert(&table, cells, options)
@@ -1219,7 +1230,7 @@ where
                 )
                 .await
                 .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => node
+            QueryAuthorizationMode::TrustedServing => node
                 .tx_relation_snapshot_for_identity_with_options(
                     tx_id,
                     &prepared.shape,
@@ -1255,7 +1266,7 @@ where
                 )
                 .await
                 .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => node
+            QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
                     tx_id,
                     &prepared.shape,
@@ -1288,22 +1299,43 @@ where
         row: RowUuid,
         cells: RowCells,
         updated_at_ms: Option<u64>,
+        explicit_row_id: bool,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.lock_for_transaction_operation(tx_id)
-            .await?
-            .tx_write_in_schema_at_ms(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Some(now_ms),
-            )
-            .await
-            .map_err(Into::into)
+        if explicit_row_id {
+            // An explicit-id insert only creates. Deciding whether the target
+            // exists is a user read (ch. 7), so resolve it exactly as UPSERT
+            // does: a row hidden by read policy is rejected with UPSERT's
+            // error, never disclosed as an existing row.
+            if self
+                .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
+                .await?
+                .is_some()
+            {
+                return Err(row_already_exists(table, row));
+            }
+        }
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        if explicit_row_id
+            && node
+                .tx_insert_target_state_in_schema(tx_id, self.schema_version_id, table, row)
+                .await?
+                == TransactionInsertTargetState::Deleted
+        {
+            return Err(row_already_deleted(row));
+        }
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(super) async fn stage_exclusive_update(

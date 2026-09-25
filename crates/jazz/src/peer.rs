@@ -15,7 +15,7 @@ use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::records::Value;
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use groove::storage::OrderedKvStorage;
 use web_time::Instant;
 
 use crate::authorization_scope::AuthorityScopeAggregate;
@@ -24,7 +24,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     ResultTransitions,
 };
-use crate::node::{Error, NodeState, PublicationOutcome};
+use crate::node::{Error, NodeState};
 #[cfg(test)]
 use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
@@ -39,20 +39,19 @@ use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;
-use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
+use crate::tx::{DurabilityTier, TxId};
 
 mod subscription_state;
 
+pub use subscription_state::PeerRole;
 #[cfg(test)]
 use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
-    CachedPeerQueryPlan, DeferredEdgeFate, MaintainedRehydrateRequest,
-    MaintainedSubscriptionViewSubscription, MemberIndexKey, MemberSlot, PeerSubscriptionState,
-    RehydratePurpose, RowKey, edge_scope_ttl_ms, fast_authorization_progress,
-    fast_current_membership_position, fast_cursor_requires_authoritative_reset,
-    member_settle_position,
+    CachedPeerQueryPlan, MaintainedRehydrateRequest, MaintainedSubscriptionViewSubscription,
+    MemberIndexKey, MemberSlot, PeerSubscriptionState, RehydratePurpose, RowKey,
+    fast_authorization_progress, fast_current_membership_position,
+    fast_cursor_requires_authoritative_reset, member_settle_position,
 };
-pub use subscription_state::{PeerEvictionPins, PeerRole};
 
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
@@ -78,9 +77,6 @@ pub struct PeerState {
     /// that declared them. A shared canonical coverage output must never adopt
     /// one subscriber's cursor.
     downstream_known_states: BTreeMap<SubscriptionKey, KnownStateDeclaration>,
-    deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
-    edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
-    idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
     /// Completed authority-local aggregate proofs used by terminal commit
     /// admission.  This is intentionally separate from ordinary views.
     authority_scope_proofs: u64,
@@ -107,9 +103,6 @@ impl Default for PeerState {
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
             downstream_known_states: BTreeMap::new(),
-            deferred_edge_fates: BTreeMap::new(),
-            edge_scope_subscription_refs: BTreeMap::new(),
-            idle_edge_scope_subscriptions: BTreeMap::new(),
             authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
@@ -154,11 +147,11 @@ pub struct PeerMetrics {
     pub result_adds_out: u64,
     /// Result-set removals emitted.
     pub result_removes_out: u64,
-    /// Maintained subscription view counters and latest index footprint.
+    /// Cheap maintained subscription view counters; footprint inspection is opt-in.
     pub maintained_subscription_view: Box<MaintainedSubscriptionViewMetrics>,
 }
 
-/// Latest maintained subscription view index sizes observed for one peer.
+/// On-demand maintained subscription view index sizes for one subscription.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintainedSubscriptionViewMetricsFootprint {
     /// Active result-current rows in the maintained index.
@@ -200,11 +193,48 @@ pub struct MaintainedSubscriptionViewMetrics {
     pub unsupported_skips_out: u64,
     /// Non-empty Groove delta batches drained by maintained subscription views.
     pub delta_batches_in: u64,
+    /// Full rehydrate-and-diff recomputes of an already-published maintained view.
+    pub full_diff_fallbacks: FullDiffFallbackMetrics,
     /// New maintained subscription rehydrations started after readiness.
     #[cfg(any(test, feature = "testing"))]
     pub rehydrate_attempts: u64,
-    /// Latest maintained subscription view index sizes observed for this peer.
-    pub footprint: MaintainedSubscriptionViewMetricsFootprint,
+}
+
+/// Full rehydrate-and-diff recomputes, split by why the incremental path was left.
+///
+/// Opening a maintained view is not counted: only a recompute that replaces or
+/// reconciles a view whose initial result was already published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FullDiffFallbackMetrics {
+    /// A silent incremental result with a deletion witness forced a one-shot
+    /// membership reconciliation.
+    pub membership_reconciliations: u64,
+    /// A published query view was retired and rehydrated, e.g. after a claim
+    /// or policy change.
+    pub query_reopens: u64,
+    /// A published authorization-support view was retired and rehydrated.
+    pub authorization_support_reopens: u64,
+    /// A published view was republished as a complete successor closure
+    /// because the Groove runtime or physical row identities changed.
+    pub runtime_resets: u64,
+}
+
+impl FullDiffFallbackMetrics {
+    /// All full-diff fallbacks regardless of purpose.
+    pub fn total(&self) -> u64 {
+        self.membership_reconciliations
+            + self.query_reopens
+            + self.authorization_support_reopens
+            + self.runtime_resets
+    }
+
+    /// Accumulate another peer's counters.
+    pub fn add(&mut self, other: Self) {
+        self.membership_reconciliations += other.membership_reconciliations;
+        self.query_reopens += other.query_reopens;
+        self.authorization_support_reopens += other.authorization_support_reopens;
+        self.runtime_resets += other.runtime_resets;
+    }
 }
 
 impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionViewMetricsFootprint {

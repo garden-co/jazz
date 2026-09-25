@@ -41,7 +41,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
   per core authority but not dense. A
   persisted `settled_through: GlobalTime` is known-state possession for
   payload dedup/repair, not proof of a live authority connection or a settled
-  Edge/Global subscription (ch. 8, `INV-SYNC-30`).
+  Global subscription (ch. 8, `INV-SYNC-30`).
 
 ### Schema (ch. 2, ch. 10)
 
@@ -62,7 +62,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
   pre-commit local state.
 - **commit unit** — the atomic `CommitUnit { tx, versions }` shipped at commit.
 - **fate** (`Fate::{Pending, Accepted, Rejected}`) — an authority's verdict.
-- **durability tier** (`DurabilityTier::{None, Local, Edge, Global}`) — how far a
+- **durability tier** (`DurabilityTier::{None, Local, Global}`) — how far a
   write has settled. _Fate and durability are separate axes._
 - **snapshot** (`Snapshot`) · **read sets** (`RowRead`/`AbsentRead`/`PredicateRead`).
 
@@ -99,15 +99,11 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
 - **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
-  role; **relay** (explicit transport capability, no permission subject or
-  fate), **edge** (terminates a
-  client identity; mergeable fate authority), **core** (exclusive authority,
-  history-complete), **client**. The sync participant type is `Node`: a local
-  `NodeState` engine plus connections and serving. Relay, edge, and core are
-  node-level roles, **not** `Db` roles.
-  **Implementation status (verified).**
-  `edge_defers_mergeable_fate_until_permission_scope_settles` verifies that the
-  edge assigns mergeable fate after its permission scope settles.
+  role. A local **relay** owns persistence and transport without independent
+  authorization or fate authority. **Core** is history-complete and authorizes
+  both mergeable and exclusive transactions. A **client** retains authorized
+  history and optimistic local edits. These roles share the same query and
+  transaction machinery; there is no intermediary server tier.
 - **scope-isolated client relay** — a non-authority persistent relay whose store
   and attached foreground runtimes belong to exactly one app/environment/auth
   scope. It serves retained authorized knowledge to those foregrounds without
@@ -121,7 +117,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   Partial mergeable and view-complete exclusive payloads are not represented by
   today's complete-tx payload tier and must not be described as broad "known
   versions". Add row-version or maintained-view-complete coverage facts only if
-  partial payload dedup needs them · **deferred edge fate**.
+  partial payload dedup needs them.
 
 ### API & branch views (ch. 13, ch. 11)
 

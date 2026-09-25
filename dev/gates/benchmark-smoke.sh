@@ -39,6 +39,7 @@ if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
     cargo test -p jazz --features testing --test legacy_benchmark_smoke
   run_phase jazz-sim-scenario-correctness cargo test -p jazz-sim --test scenario_smoke
   run_phase policy-document-pages cargo test -p jazz-example-policy-scoped-documents-benchmark --test pages
+  run_phase permissioned-subscription-fanout cargo test -p jazz-example-benchmark-w1 --lib subscription_fanout::tests::fanout_preserves_exact_membership_updates_and_revocation -- --exact
   exit 0
 fi
 

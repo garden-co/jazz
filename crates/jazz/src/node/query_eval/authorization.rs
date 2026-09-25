@@ -265,7 +265,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         let access_paths = BTreeMap::from([(
             root_source_id(policy_shape.query().table.as_str()),
@@ -287,7 +287,7 @@ where
         if let Some(graph) = self.policy_authorization_graph_cache_get(&cache_key) {
             return Ok(graph);
         }
-        self.policy_authorization_row_id_graph_inner(request, None, true)
+        self.policy_authorization_row_id_graph_inner(request, None, true, None)
             .await
     }
 
@@ -295,10 +295,16 @@ where
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
-        self.policy_authorization_row_id_graph_inner(request, Some(access_paths), false)
-            .await
+        self.policy_authorization_row_id_graph_inner(
+            request,
+            Some(access_paths),
+            false,
+            bounded_deletion_register,
+        )
+        .await
     }
 
     async fn policy_authorization_row_id_graph_inner(
@@ -306,6 +312,7 @@ where
         request: QueryProgramRequest,
         forced_access_paths: Option<BTreeMap<SourceId, CurrentAccessPath>>,
         cache: bool,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         let cache_key = policy_authorization_graph_cache_key(&request);
         self.restore_expired_policy_compilation_state();
@@ -360,6 +367,7 @@ where
                     Box::pin(self.compile_query_program_request_with_shared_access_paths(
                         request,
                         access_paths.clone(),
+                        bounded_deletion_register,
                     ))
                     .await?
                 };
@@ -490,7 +498,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         // A primary-key access path addresses the physical row UUID without
         // overloading public `id`, which may be a declared user column.
@@ -743,7 +751,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-            ),
+            )?,
         };
         let candidate = current_row_from_cells_with_explicit_provenance(
             table, row_uuid, cells, provenance, None,
@@ -1111,7 +1119,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-            ),
+            )?,
         })
     }
 
@@ -1306,7 +1314,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-            ),
+            )?,
         };
         self.query
             .read_policy_authorization_request_cache
@@ -1350,21 +1358,11 @@ where
                 &table.name,
                 PhysicalCurrentClass::Ahead,
             )?;
-            let ahead_content = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead_content, content_fields.clone())
-            } else {
-                ahead_content.project(content_fields.clone())
-            };
+            let ahead_content = ahead_content.project(content_fields.clone());
             let ahead_deletion =
                 GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-            let ahead_deletion = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(
-                    ahead_deletion,
-                    register_storage_field_names(),
-                )
-            } else {
-                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""))
-            };
+            let ahead_deletion =
+                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""));
             (
                 GraphBuilder::arg_max_by(
                     GraphBuilder::union([global_content, ahead_content]),
@@ -1415,7 +1413,7 @@ where
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.active_schema.schema;
-        let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
+        let has_policy_table = self.table_in_schema_ref(table, write_schema).is_ok();
         if has_policy_table {
             write_schema
         } else {
@@ -2071,6 +2069,7 @@ mod authorization_scope_compiler_tests {
             futures::executor::block_on(node.point_policy_authorization_row_id_graph(
                 request,
                 BTreeMap::new(),
+                None,
             )),
             Err(Error::PolicyProofCycle { table, depth }) if table == "resources" && depth == 1
         ));

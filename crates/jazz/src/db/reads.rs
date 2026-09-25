@@ -125,9 +125,34 @@ where
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
     pub async fn prepare_query_async(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.prepare_query_async_for(query, self.schema_view_is_fixed)
+            .await
+    }
+
+    /// Prepare a query against the schema this database handle was opened
+    /// with, after asynchronously acquiring the node owner.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    /// They prepare while their sync pump may be suspended inside a node
+    /// operation (for example awaiting large-value chunks), so they must wait
+    /// for the owner rather than use the synchronous entry point.
+    #[cfg(feature = "runtime")]
+    pub(crate) async fn prepare_query_for_open_schema_async(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_async_for(query, true).await
+    }
+
+    async fn prepare_query_async_for(
+        &self,
+        query: &Query,
+        open_schema: bool,
+    ) -> Result<PreparedQuery, Error> {
         self.ensure_open_schema_admitted()?;
         let mut node = self.node.node.lock().await;
-        let (schema, schema_version) = if self.schema_view_is_fixed {
+        let (schema, schema_version) = if open_schema {
             (self.schema.clone(), self.schema_version_id)
         } else {
             let current = node.current_write_schema()?;
@@ -218,12 +243,19 @@ where
     /// execution, and binding hydration all remain owned by the core. The
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
+    ///
+    /// An [`EmptyOpening::AwaitRemote`] request from a client-local read
+    /// outside a transaction applies the shared one-shot rule of
+    /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
+    /// the caller's coverage requirement, and the strict remote read (Global
+    /// tier, immediate local updates) always requires coverage. Each phase
+    /// releases its own attachment through `release_coverage`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub async fn all_serialized_query<F, E>(
         &self,
         query: &[u8],
-        opts: ReadOpts,
+        mut opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
@@ -232,9 +264,91 @@ where
         release_coverage: F,
     ) -> Result<SerializedReadResult, Error>
     where
-        F: FnOnce(QueryAttachment),
+        F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
+        let await_remote = std::mem::take(&mut opts.empty_opening) == EmptyOpening::AwaitRemote
+            && open_tx.is_none()
+            && author.is_none()
+            && opts.propagation == Propagation::Full
+            && effective_read_tier(&opts) == DurabilityTier::Local;
+        if !await_remote {
+            return self
+                .all_serialized_query_once(
+                    query,
+                    opts,
+                    open_tx,
+                    request_scope,
+                    author,
+                    require_coverage,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+                .await;
+        }
+        let windowed = crate::wire::decode_postcard_exact::<Query>(query)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?
+            .offset
+            > 0;
+        let remote_opts = ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Immediate,
+            ..opts.clone()
+        };
+        let remote_scope = request_scope.clone();
+        // Boxed: the gated read nests two full one-shot reads, which would
+        // otherwise multiply this future's size and every host poll frame.
+        Box::pin(self.read_local_first_unless_empty(
+            windowed,
+            || {
+                self.all_serialized_query_once(
+                    query,
+                    opts,
+                    None,
+                    request_scope,
+                    None,
+                    require_coverage,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+            },
+            || {
+                self.all_serialized_query_once(
+                    query,
+                    remote_opts,
+                    None,
+                    remote_scope,
+                    None,
+                    true,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+            },
+            |result| match result {
+                SerializedReadResult::Rows(rows) => rows.is_empty(),
+                SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
+            },
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn all_serialized_query_once<F, E>(
+        &self,
+        query: &[u8],
+        opts: ReadOpts,
+        open_tx: Option<OpenTransactionId>,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_expired: &E,
+        release_coverage: &F,
+    ) -> Result<SerializedReadResult, Error>
+    where
+        F: Fn(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        let release_coverage = |attachment| release_coverage(attachment);
         {
             let admission = self.await_open_schema_for_read(&opts);
             let mut admission = std::pin::pin!(admission);
@@ -423,24 +537,6 @@ where
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
         self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
-    }
-
-    /// Prepare a query against the schema this database handle was opened with.
-    ///
-    /// Typed client facades are pinned to that schema even when a catalogue
-    /// snapshot advances or rolls back the separate current-write pointer.
-    #[cfg(feature = "runtime")]
-    pub(crate) fn prepare_query_for_open_schema(
-        &self,
-        query: &Query,
-    ) -> Result<PreparedQuery, Error> {
-        self.ensure_open_schema_admitted()?;
-        self.prepare_query_bound_for_schema(
-            query,
-            BTreeMap::new(),
-            &self.schema,
-            self.schema_version_id,
-        )
     }
 
     fn prepare_query_bound_for_schema(
@@ -677,8 +773,8 @@ where
         let tier = effective_read_tier(&opts);
         // Follow the same host-selected authority route as subscription
         // registration. Storage durability alone cannot identify that route:
-        // a direct core connection may raise Edge to Global, while a relay
-        // connection retains Edge. Local knowledge stays local in either case.
+        // authority-tier reads are floored at the host's upstream durability
+        // tier. Local knowledge stays local in either case.
         let tier = if authorization_mode == QueryAuthorizationMode::ClientLocal {
             self.client_authority_read_tier(tier)
         } else {
@@ -695,7 +791,7 @@ where
                 ));
             }
             let snapshot = match authorization_mode {
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
+                QueryAuthorizationMode::TrustedServing => {
                     node.query_relation_snapshot_for_serving_in_read_view(
                         &prepared.shape,
                         &prepared.binding,
@@ -734,10 +830,7 @@ where
                 )
                 .await
             }
-            (
-                false,
-                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing,
-            ) => {
+            (false, QueryAuthorizationMode::TrustedServing) => {
                 node.query_rows_with_prepared_plan_for_identity(
                     &prepared.shape,
                     &prepared.binding,
@@ -856,7 +949,7 @@ where
     /// Use the host-selected authority tier, matching subscription registration.
     /// Local reads remain local regardless of the upstream durability floor.
     fn client_authority_read_tier(&self, tier: DurabilityTier) -> DurabilityTier {
-        if tier >= DurabilityTier::Edge {
+        if tier >= DurabilityTier::Global {
             remote_subscription_tier(tier, self.node.upstream_durability_floor.get())
         } else {
             tier
@@ -943,10 +1036,9 @@ where
         self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
-        // Output-changing relation queries currently normalize to a single
-        // root row set. They have no array payload edges, so request ordinary
-        // app rows instead of the relation-snapshot fact output (which is
-        // reserved for correlated array/path materialization).
+        // The relation terminal already emits the requested aliases and row
+        // identity. Re-projecting those rows against the physical source
+        // schema would reinterpret alias positions as source columns.
         let rows = self.all(&prepared, opts).await?;
         Ok(RelationSnapshot {
             root_count: rows.len(),
@@ -965,10 +1057,9 @@ where
         self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
-        // Output-changing relation queries currently normalize to a single
-        // root row set.  They have no array payload edges, so request ordinary
-        // app rows instead of the relation-snapshot fact output (which is
-        // reserved for correlated array/path materialization).
+        // The relation terminal already emits the requested aliases and row
+        // identity. Re-projecting those rows against the physical source
+        // schema would reinterpret alias positions as source columns.
         let rows = self.all_for_identity(&prepared, opts, author).await?;
         Ok(RelationSnapshot {
             root_count: rows.len(),

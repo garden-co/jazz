@@ -100,6 +100,12 @@ where
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
     }
 
+    /// Core-shell capability: see `Node::declare_upload_root`.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn declare_upload_root(&self) {
+        self.node.declare_upload_root();
+    }
+
     /// Core-shell capability; partial caches and relays must leave it disabled.
     #[cfg(feature = "runtime")]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
@@ -244,6 +250,22 @@ where
     pub async fn open_with_receipt_for_test(
         config: DbConfig<S>,
     ) -> Result<(Self, DbOpenReceipt), Error> {
+        Self::open_with_receipt_inner_for_test(config, false).await
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a history-complete serving core and return its node-open phase timings.
+    pub async fn open_history_complete_with_receipt_for_test(
+        config: DbConfig<S>,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
+        Self::open_with_receipt_inner_for_test(config, true).await
+    }
+
+    #[cfg(feature = "testing")]
+    async fn open_with_receipt_inner_for_test(
+        config: DbConfig<S>,
+        history_complete: bool,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
@@ -253,18 +275,25 @@ where
             config.identity.node,
             config.schema.clone(),
             config.storage,
-            false,
+            history_complete,
         )
         .await?;
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
+        let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         let db = Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
-            requires_open_schema_admission: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
-            node: Rc::new(Node::new(node)),
+            node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
@@ -365,53 +394,6 @@ where
         Ok(db)
     }
 
-    /// Open an edge whose durable store has no authority catalogue yet.
-    ///
-    /// This is deliberately narrower than [`Db::open`]: callers may only use
-    /// it to receive one connection-authenticated catalogue snapshot and then
-    /// select one of the snapshot's admitted schema views.  Until then the
-    /// node has no application schema and rejects ordinary data/sync work.
-    #[cfg(feature = "runtime")]
-    pub(crate) async fn open_catalogue_uninitialized_edge(
-        config: DbConfig<S>,
-    ) -> Result<Self, Error> {
-        let bootstrap_schema = JazzSchema::empty();
-        let schema_version_id = bootstrap_schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&bootstrap_schema),
-            bootstrap_schema.clone(),
-        )])));
-        let node =
-            NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
-        let node = Node::new(node);
-        node.restore_pending_uploads(config.identity).await?;
-        node.restore_edge_authority_uploads().await?;
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: bootstrap_schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
-    }
-
     /// Install a complete catalogue received over the authenticated upstream
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.
@@ -447,23 +429,6 @@ where
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
         Ok(self.node.node.borrow().catalogue_snapshot()?)
-    }
-
-    /// Return the active authority-admitted schema, failing closed when this
-    /// dynamic edge still has no bootstrap receipt.
-    #[cfg(feature = "runtime")]
-    pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
-        let node = self.node.node.borrow();
-        let pointer = node.current_write_schema()?;
-        node.schema_with_active_permissions(pointer.schema)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
-    }
-
-    #[cfg(feature = "runtime")]
-    pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
-        self.node.node.borrow().catalogue_bootstrap_state()
-            == crate::node::CatalogueBootstrapState::Ready
     }
 
     /// Register a typed schema view on this database owner.
@@ -643,6 +608,9 @@ where
         // remains ordered after every accepted mutation and wait observer.
         self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
+        // Query evaluation detached on a remote chunk (#3349) cannot finish
+        // once this runtime closes; end it rather than wait for a reconnect.
+        self.node.chunk_resolver.fail_local_demand_for_close();
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
         Ok(())
@@ -688,6 +656,14 @@ where
     #[doc(hidden)]
     pub fn drive_queued_mutation_once(&self) {
         self.node.poll_queued_mutation_once();
+    }
+
+    /// Number of admitted owner operations (mutations, fenced reads and
+    /// cleanups) that have not finished yet. Bindings bound their direct
+    /// mutation admission with it.
+    #[doc(hidden)]
+    pub fn queued_mutation_count(&self) -> usize {
+        self.node.queued_mutation_count()
     }
 
     /// Order a binding read after mutations already admitted on this owner.
@@ -1145,6 +1121,14 @@ where
     }
 
     #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    /// Model a host that polls ticks once and drops them while pending (see
+    /// [`TickScheduler::drops_pending_ticks`]) without installing a scheduler.
+    pub fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.node.set_drops_pending_ticks_for_test(drops);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
     /// Test-only access to the same host waker passed to Groove query
     /// evaluation. Native relay receipts use this to model a storage future
     /// becoming ready without introducing a second wake path.
@@ -1161,14 +1145,6 @@ where
         self.node
             .mark_subscriber_connections_dirty_after_query_runtime_wake();
     }
-    /// Configure automatic edge-cache byte-budget eviction.
-    ///
-    /// `None` disables automatic eviction and preserves the historical manual
-    /// `evict_cold` behavior.
-    pub fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        self.node.set_edge_cache_budget(budget);
-    }
-
     /// Ask the installed scheduler to service pending peer-connection work.
     pub fn schedule_tick(&self, urgency: TickUrgency) {
         self.node.schedule_tick(urgency);
@@ -1306,31 +1282,6 @@ where
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
-    }
-
-    /// Accept an edge-terminated subscriber with session claims.
-    pub fn accept_edge_subscriber_with_claims(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-    ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node
-            .accept_edge_subscriber_with_claims(transport, identity, claims)
-    }
-
-    /// Accept a subscriber whose host shell is wired as an edge fate authority.
-    pub fn accept_edge_authority_subscriber_with_claims_and_trust(
-        &self,
-        transport: Box<dyn Transport>,
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        trust: CommitUnitTrust,
-    ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node
-            .accept_edge_authority_subscriber_with_claims_and_trust(
-                transport, identity, claims, trust,
-            )
     }
 
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
@@ -1535,6 +1486,15 @@ where
     }
 
     #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only count of compiler executions, excluding cache hits.
+    pub fn query_program_compilations_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .query_program_compilations_for_test()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
     /// Test-only count of maintained subscription rehydrate entrypoints.
     pub fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
         self.node
@@ -1647,6 +1607,7 @@ fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool 
             right.tables.iter().any(|right_table| {
                 left_table.name == right_table.name
                     && left_table.indexed_columns == right_table.indexed_columns
+                    && left_table.composite_indexes == right_table.composite_indexes
             })
         })
 }

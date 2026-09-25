@@ -15,9 +15,10 @@ use std::time::Duration;
 use futures::task::{ArcWake, waker};
 
 use crate::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
-    PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    EmptyOpening as CoreEmptyOpening, Error as CoreDbError, ErrorCode as CoreDbErrorCode,
+    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
     WriteIdentity as CoreWriteIdentity,
@@ -641,6 +642,10 @@ impl Backend {
         self.0.detach_connection(connection)
     }
 
+    fn set_remote_link_hint(&self, hint: CoreRemoteLinkHint) {
+        self.0.set_remote_link_hint(hint);
+    }
+
     fn set_identity_claims(&self, identity: CoreAuthorSubject, claims: HashMap<String, CoreValue>) {
         self.0
             .set_identity_claims(identity, claims.into_iter().collect());
@@ -799,11 +804,11 @@ impl Backend {
         )
     }
 
-    fn prepare_query(
+    async fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema(query)
+        self.0.prepare_query_for_open_schema_async(query).await
     }
 
     async fn row_provenance_for_subscription(
@@ -892,6 +897,21 @@ impl Backend {
             },
         ))
         .map(|_| ())
+    }
+
+    fn exclusive_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: crate::db::RowCells,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
+            table,
+            row_id,
+            cells,
+            Default::default(),
+        ))
     }
 
     fn exclusive_update(
@@ -1083,6 +1103,10 @@ impl TickScheduler for TickSchedulerImpl {
 }
 
 impl ClientDb {
+    fn backend(&self) -> Result<Backend> {
+        self.inner.borrow().backend_clone()
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         public_schema: Schema,
@@ -1219,13 +1243,11 @@ impl ClientDb {
         transaction_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let prepared = {
-            let inner = self.inner.borrow();
-            inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?
-        };
+        let prepared = self
+            .backend()?
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
@@ -1362,7 +1384,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .exclusive_upsert(tx_id, &table, CoreRowUuid(row_id), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -1735,6 +1757,12 @@ impl ClientDbInner {
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
+        if let Some(db) = self.db.as_ref() {
+            // Explicit disconnects and recovery starts are not live, and
+            // recovery retries keep reporting `Failed`: nothing waits on a
+            // backoff. Only a fresh connect reports an attempt.
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         let Some(connection) = self.upstream.take() else {
             return false;
         };
@@ -1783,6 +1811,9 @@ impl ClientDbInner {
     }
 
     fn record_tick_driver_failure(&mut self, error: String) {
+        if let Some(db) = self.db.as_ref() {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
         self.tick_driver_error = Some(error);
@@ -1970,7 +2001,7 @@ impl ClientDbInner {
         inner: &Weak<RefCell<Self>>,
         expected_generation: u64,
     ) -> Result<bool> {
-        let (db, identity, scheduler, config, state_notify) = {
+        let (db, identity, scheduler, config, state_notify, recovering) = {
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -1991,9 +2022,17 @@ impl ClientDbInner {
                 Rc::clone(&inner_state.scheduler),
                 config,
                 Arc::clone(&inner_state.upstream_state_notify),
+                inner_state.upstream_recovery_generation == Some(expected_generation),
             )
         };
 
+        // The core empty-opening gate waits on an attempt, bounded from its
+        // start; a failed attempt or a backoff between retries never waits.
+        // A recovery retry after a lost link keeps the `Failed` reported at
+        // the loss, as the TS and RN hosts do.
+        if !recovering {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Attempting);
+        }
         let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,
@@ -2004,7 +2043,12 @@ impl ClientDbInner {
             state_notify,
             Arc::clone(&wire_wake),
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            if Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+                db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+            }
+        })?;
         let Some(connected) = connected else {
             return Ok(false);
         };
@@ -2056,6 +2100,7 @@ impl ClientDbInner {
             }
             inner_state.upstream_generation = inner_state.upstream_generation.wrapping_add(1);
             inner_state.upstream = Some(connection);
+            db.set_remote_link_hint(CoreRemoteLinkHint::Live);
             if inner_state.upstream_recovery_generation == Some(expected_generation) {
                 inner_state.upstream_recovery_generation = None;
             }
@@ -2163,16 +2208,11 @@ impl ClientDbInner {
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            (
-                inner.backend_clone()?,
-                inner
-                    .backend()?
-                    .prepare_query(&query)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            )
-        };
+        let db = inner.borrow().backend_clone()?;
+        let prepared = db
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -2212,7 +2252,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2240,14 +2280,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        if crate::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -2300,13 +2340,13 @@ impl ClientDbInner {
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
         let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            let prepared = inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?;
-            (inner.backend_clone()?, prepared)
+        let db = inner.borrow().backend_clone()?;
+        let prepared = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            prepared = db.prepare_query(&query) => {
+                prepared.map_err(|error| JazzError::Query(error.to_string()))?
+            }
         };
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
@@ -3200,7 +3240,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3233,7 +3273,6 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
 fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer => CoreDurabilityTier::Edge,
         DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
@@ -3241,7 +3280,7 @@ fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
 fn core_legacy_read_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer | DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
+        DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
 
@@ -3383,6 +3422,7 @@ impl JazzClient {
             propagation: CorePropagation::Full,
             include_deleted: false,
             read_view: CoreReadViewSpec::default(),
+            empty_opening: CoreEmptyOpening::Deliver,
         }
     }
 
@@ -3390,8 +3430,11 @@ impl JazzClient {
         let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
         opts.local_updates = match tier {
             ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+            ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
         };
+        if tier == ReadTier::LocalFirstUnlessEmpty {
+            opts.empty_opening = CoreEmptyOpening::AwaitRemote;
+        }
         opts
     }
 }
@@ -3644,7 +3687,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
@@ -3887,9 +3930,11 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
-    /// facade because it has no public explicit-disconnect state; host bindings
-    /// can lower it to local only after their caller explicitly disconnects.
+    /// `LocalFirstUnlessEmpty` passes the core `EmptyOpening::AwaitRemote`
+    /// option through: the core stream withholds only an empty, unsettled
+    /// local opening while the server could answer, and then behaves exactly
+    /// like `LocalFirst`. An offset window is read as a strict remote view
+    /// while the server could answer.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3914,8 +3959,36 @@ impl JazzClient {
     }
 
     /// One-shot query with read tier.
+    ///
+    /// `LocalFirstUnlessEmpty` uses the core one-shot rule: a non-empty local
+    /// result is returned as is; an empty one is replaced by the strict remote
+    /// result while the server could answer, falling back to the empty local
+    /// result (and dropping the pending remote read) if it cannot. An offset
+    /// window reads remote first while the server could answer.
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
-        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if tier != ReadTier::LocalFirstUnlessEmpty || in_transaction {
+            return self
+                .query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+                .await;
+        }
+        let backend = self.db.backend()?;
+        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        let mut remote_opts = Self::core_read_opts_for_read_tier(ReadTier::Remote);
+        remote_opts.local_updates = CoreLocalUpdates::Immediate;
+        let windowed = query.offset > 0;
+        let remote_query = query.clone();
+        backend
+            .0
+            .read_local_first_unless_empty(
+                windowed,
+                || self.query_with_opts(query, local_opts),
+                || self.query_with_opts(remote_query, remote_opts),
+                |rows: &Vec<QueryResult>| rows.is_empty(),
+            )
             .await
     }
 
@@ -3937,11 +4010,11 @@ impl JazzClient {
                 .query_transaction_rows(query.clone(), opts, transaction_id, author)
                 .await?
         } else {
-            // A product `Remote` read lowers to the legacy Edge tier. Both
-            // Edge and Global are strict remote one-shots: they must own a
+            // A product `Remote` read lowers to Global. Strict remote
+            // one-shots must own a
             // fresh coverage lifetime and return only after the receiver's
             // local maintained graph has settled that exact coverage.
-            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
+            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Global;
             self.db
                 .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
@@ -4217,8 +4290,8 @@ mod tests {
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::native_transport_connector::{
-        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportError,
-        NativeTransportFuture, NativeTransportTerminal, NativeTransportTerminalFuture,
+        ConnectedNativeTransport, NativeTransportError, NativeTransportFuture,
+        NativeTransportTerminal, NativeTransportTerminalFuture,
     };
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
@@ -4349,17 +4422,6 @@ mod tests {
                         Err(NativeTransportError::Terminal(error))
                     }
                 }
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(NativeTransportError::Terminal(
-                    "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                ))
             })
         }
     }
@@ -4584,19 +4646,6 @@ mod tests {
                             NativeTransportTerminal::OwnerDropped
                         }),
                     },
-                )
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(
-                    crate::tools::native_transport_connector::NativeTransportError::Terminal(
-                        "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                    ),
                 )
             })
         }
@@ -4847,12 +4896,12 @@ mod tests {
         );
         assert_eq!(
             ReadTier::Remote.legacy_durability_tier(),
-            DurabilityTier::EdgeServer
+            DurabilityTier::GlobalServer
         );
         assert_eq!(
-            ReadTier::RemoteIfPossible.legacy_durability_tier(),
-            DurabilityTier::EdgeServer,
-            "the native facade has no explicit offline boundary"
+            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
+            DurabilityTier::Local,
+            "the empty-opening gate is a read option, not a tier"
         );
         assert_eq!(
             JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
@@ -4863,25 +4912,25 @@ mod tests {
             CoreLocalUpdates::Deferred
         );
         assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).local_updates,
             CoreLocalUpdates::Immediate
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).empty_opening,
+            CoreEmptyOpening::AwaitRemote
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),
             CoreDurabilityTier::Local
         );
         assert_eq!(
-            core_legacy_read_tier(DurabilityTier::EdgeServer),
+            core_legacy_read_tier(DurabilityTier::GlobalServer),
             CoreDurabilityTier::Global,
-            "legacy EdgeServer reads retain the ordinary settled remote view"
+            "remote reads use the Core-confirmed view"
         );
         assert_eq!(
             core_write_tier(DurabilityTier::Local),
             CoreDurabilityTier::Local
-        );
-        assert_eq!(
-            core_write_tier(DurabilityTier::EdgeServer),
-            CoreDurabilityTier::Edge
         );
         assert_eq!(
             core_write_tier(DurabilityTier::GlobalServer),
@@ -5444,6 +5493,52 @@ mod tests {
             (0, 0),
             "cancelling the remote one-shot must release its coverage owner"
         );
+    }
+
+    // This is an internal test because the suspended node operation it needs
+    // (the client's sync turn awaiting large-value chunks or cold storage) is
+    // timing-dependent through the public API; #3514 hit it only under load.
+    // Holding the owner makes that suspension deterministic. The assertion is
+    // public: `JazzClient::query` waits for the owner instead of panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_waits_for_a_suspended_node_operation() {
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
+            AppId::from_name("query-waits-for-suspended-owner"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        )))
+        .await
+        .expect("connect offline client");
+        client
+            .upsert(
+                "todos",
+                Uuid::from_u128(0x3514),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("held".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write local row");
+        let backend = client
+            .db
+            .inner
+            .borrow()
+            .backend_clone()
+            .expect("client is open");
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut owner = Box::pin(backend.0.hold_node_owner_for_test());
+        assert!(owner.as_mut().poll(&mut context).is_pending());
+
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::LocalFirst));
+        assert!(
+            query.as_mut().poll(&mut context).is_pending(),
+            "a query must wait while another operation owns the node"
+        );
+
+        drop(owner);
+        let rows = query.await.expect("query after the owner is released");
+        assert_eq!(rows.len(), 1);
     }
 
     // This is an internal fault-injection test because a real fatal tick error
@@ -6330,7 +6425,7 @@ mod tests {
         let unknown_error = client
             .wait_for_transaction_with_timeout_for_test(
                 unknown,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
@@ -6350,21 +6445,21 @@ mod tests {
         let timeout_error = client
             .wait_for_transaction_with_timeout_for_test(
                 transaction_id,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
-            .expect_err("offline transaction cannot reach edge");
+            .expect_err("offline transaction cannot reach the global server");
         assert!(
-            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach EdgeServer"),
+            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach GlobalServer"),
             "unexpected transaction timeout error: {timeout_error}"
         );
         assert_eq!(
             transaction_rejected_before_tier_message(
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 &CoreRejectionReason::AuthorizationDenied,
             ),
-            "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+            "transaction was rejected before reaching GlobalServer durability: authorization_denied",
         );
     }
 

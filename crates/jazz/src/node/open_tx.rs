@@ -185,7 +185,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        self.table_in_schema(table, schema_version)?;
+        self.table_in_schema_ref(table, schema_version)?;
         self.tx_read_unchecked(tx_id, schema_version, table, row_uuid)
             .await
     }
@@ -239,6 +239,44 @@ where
         Ok(result)
     }
 
+    /// Classify an explicit exclusive insert target that the transaction's
+    /// overlaid point read reports as absent: a committed or staged deletion
+    /// still occupies the id. The staged overlay is keyed by `(table, row)`,
+    /// so the same row UUID in another table never counts.
+    pub(crate) async fn tx_insert_target_state_in_schema(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<TransactionInsertTargetState, Error> {
+        let cached = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&(schema_version, table.to_owned(), row_uuid))
+            .cloned();
+        let snapshot_row = match cached {
+            Some(snapshot_row) => snapshot_row,
+            None => {
+                let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                    .await?
+            }
+        };
+        let staged = self
+            .open_tx(tx_id)?
+            .writes
+            .iter()
+            .any(|write| write.table == table && write.row_uuid == row_uuid);
+        Ok(
+            if snapshot_row.content_cells.is_some() || snapshot_row.deleted || staged {
+                TransactionInsertTargetState::Deleted
+            } else {
+                TransactionInsertTargetState::Absent
+            },
+        )
+    }
+
     /// Read all current rows inside an exclusive transaction.
     pub async fn tx_current_rows(
         &mut self,
@@ -286,13 +324,10 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let mut rows = BTreeSet::new();
-        for version in self
-            .query_versions_in_schema(schema_version, table, None)
-            .await?
-        {
-            rows.insert(version.row_uuid());
-        }
+        let mut snapshot_rows = self
+            .snapshot_rows_in_schema(schema_version, table, &snapshot)
+            .await?;
+        let mut rows = snapshot_rows.keys().copied().collect::<BTreeSet<_>>();
         rows.extend(
             self.open_tx(tx_id)?
                 .writes
@@ -302,9 +337,11 @@ where
         );
         let mut current = Vec::new();
         for row_uuid in rows {
-            let snapshot_row = self
-                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
-                .await?;
+            let snapshot_row = match snapshot_rows.remove(&row_uuid) {
+                Some(snapshot_row) => snapshot_row,
+                // A row staged by this transaction with no history at all.
+                None => self.snapshot_row_from_winners(schema_version, table, None, None)?,
+            };
             let snapshot_provenance = snapshot_row.provenance.clone();
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
@@ -450,7 +487,7 @@ where
                 "open transaction is not exclusive",
             ));
         }
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        self.table_in_schema_ref(table, write_schema_version)?;
         let cells = cells
             .into_iter()
             .map(|(column, value)| (column, value.into()))
@@ -476,7 +513,10 @@ where
             Some(_) => snapshot_row.deletion_version,
             None => snapshot_row.content_version,
         };
-        positional_cells_from_map(&table_schema, &cells)?;
+        positional_cells_from_map(
+            self.table_in_schema_ref(table, write_schema_version)?,
+            &cells,
+        )?;
         let pending = PendingWrite {
             table: table.to_owned(),
             row_uuid,
@@ -628,7 +668,7 @@ where
             ));
         }
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &cells)?;
         self.stage_mergeable_write(
             tx_id,
@@ -718,7 +758,7 @@ where
             .unwrap_or_default();
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
-        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &patch)?;
         self.stage_mergeable_write(
             tx_id,
@@ -1012,7 +1052,7 @@ where
                     &provenance_snapshot,
                 )
                 .await;
-            let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
+            self.table_in_schema_ref(&write.table, write.schema_version)?;
             let PendingCells::Replace(mut cells) = write.cells else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
@@ -1026,6 +1066,7 @@ where
                     &provenance_snapshot,
                 )
                 .await?;
+            let table_schema = self.table_in_schema_ref(&write.table, write.schema_version)?;
             let inherited = table_schema
                 .columns
                 .iter()
@@ -1040,17 +1081,23 @@ where
                     ));
                 }
             }
-            for (column, value) in &mut cells {
-                let semantic_kind = table_schema
-                    .columns
-                    .iter()
-                    .find(|candidate| candidate.name == *column)
-                    .map(|column| column.large_value_kind)
-                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+            let semantic_kinds = cells
+                .keys()
+                .map(|column| {
+                    table_schema
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == *column)
+                        .map(|column| column.large_value_kind)
+                        .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge)
+                })
+                .collect::<Vec<_>>();
+            for ((_, value), semantic_kind) in cells.iter_mut().zip(semantic_kinds) {
                 self.prepare_and_stage_large_scalar(value, semantic_kind)
                     .await?;
             }
-            let cells = positional_cells_from_map(&table_schema, &cells)?;
+            let table_schema = self.table_in_schema_ref(&write.table, write.schema_version)?;
+            let cells = positional_cells_from_map(table_schema, &cells)?;
             let provenance_at =
                 TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
                     Error::InvalidMergeableCommit(
@@ -1062,7 +1109,7 @@ where
                 .map(|version| (version.created_by(), version.created_at()))
                 .unwrap_or((made_by, provenance_at));
             versions.push(VersionRecord::encode(
-                &table_schema,
+                table_schema,
                 write.schema_version,
                 write.row_uuid,
                 write.parents,
@@ -1112,9 +1159,9 @@ where
             for version in self.query_row_versions(&read.table, read.row_uuid).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
@@ -1127,9 +1174,9 @@ where
             {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
@@ -1142,22 +1189,62 @@ where
             {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
             }
         }
         for predicate in &open_tx.predicate_reads {
+            let mut comparison: Option<Snapshot> = None;
             for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
+                    if comparison.is_none() {
+                        let query = &predicate.shape;
+                        // This comparison advances only root-table history.
+                        // Preserve conservative rejection for relational reads
+                        // and aggregates, whose output hides input rewrites.
+                        if query.aggregate.is_some()
+                            || !query.joins.is_empty()
+                            || query.flat_join.is_some()
+                            || !query.policy_branches.is_empty()
+                            || !query.reachable.is_empty()
+                            || !query.inherits.is_empty()
+                            || !query.includes.is_empty()
+                            || !query.array_subqueries.is_empty()
+                            || query.relation.is_some()
+                            || self.predicate_read_is_degenerate_whole_table(predicate)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    comparison
+                        .get_or_insert_with(|| open_tx.base_snapshot.clone())
+                        .dots
+                        .push(tx_id);
+                }
+            }
+            if let Some(mut current) = comparison {
+                current.dots.sort_unstable();
+                current.dots.dedup();
+                // A newer row outside the filter is not a phantom. Retain the
+                // fixed base and compare against every newly visible version,
+                // including local writes that have no authority receipt yet.
+                if self
+                    .shape_predicate_outputs_differ(
+                        predicate,
+                        &open_tx.base_snapshot,
+                        Some(&current),
+                    )
+                    .await?
+                {
                     return Ok(false);
                 }
             }
@@ -1232,7 +1319,7 @@ where
                     .ok_or(Error::InvalidStoredValue("write schema is missing"))?
                     .schema
                     .clone();
-                let table = self.table_in_schema(&write.table, write.schema_version)?;
+                let table = self.table_in_schema_ref(&write.table, write.schema_version)?;
                 let (head, _) = schema
                     .project_branch_view_selector(&table, &write.branch)
                     .map_err(Error::InvalidBranchKey)?;
@@ -1553,14 +1640,14 @@ where
     }
 
     pub(super) async fn snapshot_covers(&mut self, tx_id: TxId, snapshot: &Snapshot) -> bool {
-        self.query_transaction(tx_id)
+        // Coverage needs only the transaction's existence and global time, so
+        // read that projection instead of decoding the whole stored payload.
+        self.query_transaction_global_time(tx_id)
             .await
             .ok()
             .flatten()
-            .is_some_and(|stored| {
-                stored
-                    .global_time
-                    .is_some_and(|global_time| global_time <= snapshot.global_base)
+            .is_some_and(|global_time| {
+                global_time.is_some_and(|global_time| global_time <= snapshot.global_base)
                     || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
                     || snapshot.dots.contains(&tx_id)
             })
@@ -1591,24 +1678,94 @@ where
                 snapshot,
             )
             .await;
+        self.snapshot_row_from_winners(schema_version, table, content, deletion)
+    }
+
+    /// Derive every row's snapshot state from one scan of the table's history.
+    ///
+    /// Equivalent to calling [`Self::snapshot_row_in_schema`] for each row
+    /// with history: the row-prefixed scans that call performs select exactly
+    /// the row's slice of this table-wide scan, and the winner is chosen by
+    /// the same rule over the same snapshot-covered candidates. Coverage is
+    /// decided once per transaction rather than once per version.
+    async fn snapshot_rows_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        snapshot: &Snapshot,
+    ) -> Result<BTreeMap<RowUuid, SnapshotRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, None)
+            .await?;
+        let mut covered = std::collections::HashMap::<TxId, bool>::new();
+        let mut rows = BTreeMap::new();
+        for group in versions.chunk_by(|left, right| left.row_uuid() == right.row_uuid()) {
+            let row_uuid = group[0].row_uuid();
+            let mut winners = [None, None];
+            'layers: for (slot, layer) in [VersionLayer::Content, VersionLayer::Deletion]
+                .into_iter()
+                .enumerate()
+            {
+                let mut candidate_indices = Vec::new();
+                for (idx, version) in group.iter().enumerate() {
+                    // A per-row read treats an undecodable identity as "no
+                    // winner" for that layer; keep that outcome.
+                    let Ok(tx_id) = self.version_tx_id(version) else {
+                        continue 'layers;
+                    };
+                    if version.layer() != layer {
+                        continue;
+                    }
+                    let is_covered = match covered.get(&tx_id) {
+                        Some(is_covered) => *is_covered,
+                        None => {
+                            let is_covered = self.snapshot_covers(tx_id, snapshot).await;
+                            covered.insert(tx_id, is_covered);
+                            is_covered
+                        }
+                    };
+                    if is_covered {
+                        candidate_indices.push(idx);
+                    }
+                }
+                winners[slot] =
+                    current_version_index(group, &candidate_indices, layer, &self.node_aliases)
+                        .map(|idx| group[idx].clone());
+            }
+            let [content, deletion] = winners;
+            rows.insert(
+                row_uuid,
+                self.snapshot_row_from_winners(schema_version, table, content, deletion)?,
+            );
+        }
+        Ok(rows)
+    }
+
+    fn snapshot_row_from_winners(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        content: Option<VersionRow>,
+        deletion: Option<VersionRow>,
+    ) -> Result<SnapshotRow, Error> {
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
             Some(DeletionEvent::Deleted)
         );
-        let target_table = self.table_in_schema(table, schema_version)?;
+        self.table_in_schema_ref(table, schema_version)?;
         let content_cells = if let Some(version) = content.as_ref() {
             let source_schema = self
                 .schema_version_for_alias(version.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue(
                     "history schema version alias must exist",
                 ))?;
-            let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(&source_table, version)?;
+            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(source_table, version)?;
             let projected_table =
                 self.translate_cells(source_schema, schema_version, version.table(), &mut cells)?;
             if projected_table.as_deref() == Some(table) {
                 Some(
-                    target_table
+                    self.table_in_schema_ref(table, schema_version)?
                         .columns
                         .iter()
                         .map(|column| cells.get(&column.name).cloned())
@@ -1714,7 +1871,7 @@ where
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let table_schema = self.table_in_schema(table, schema_version)?;
+        let table_schema = self.table_in_schema_ref(table, schema_version)?;
         self.overlay_pending_writes_with_table(tx_id, &table_schema, table, row_uuid, snapshot_row)
     }
 
@@ -1787,6 +1944,12 @@ pub(crate) enum TransactionBranchRowState {
     PendingDeletion,
     /// Neither committed nor staged content exists in the exact branch.
     Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionInsertTargetState {
+    Absent,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

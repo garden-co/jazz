@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { constants } from "node:fs";
+import { constants, mkdtempSync } from "node:fs";
 import {
   access,
   chmod,
@@ -16,7 +16,7 @@ import {
 import { dirname, join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { afterEach, assert, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import {
   createMigration as createCatalogueMigration,
@@ -47,7 +47,8 @@ const bootstrapVerifierPath = fileURLToPath(
 );
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
-const tmpBase = join(tmpdir(), "jazz-tools-cli-tests");
+const tmpBase = mkdtempSync(join(tmpdir(), "jazz-tools-cli-tests-"));
+afterAll(() => rm(tmpBase, { recursive: true, force: true }));
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
 
@@ -2724,13 +2725,16 @@ describe("cli deploy", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
-    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    // Like a real server, the mock returns the structural hash of the schema it
+    // stored; deploy verifies it against its own.
+    let schemaHash = "";
     let schemaPublishBody: any;
     let permissionsPublishBody: any;
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         schemaPublishBody = JSON.parse(String(init?.body));
+        schemaHash = await computeTestSchemaHash(schemaPublishBody.schema.tables);
         return new Response(
           JSON.stringify({
             objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -2850,7 +2854,7 @@ describe("cli deploy", () => {
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
     const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let nextSchemaHash = "";
     let schemaPublishBody: any;
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -2866,6 +2870,7 @@ describe("cli deploy", () => {
 
       if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         schemaPublishBody = JSON.parse(String(init?.body));
+        nextSchemaHash = await computeTestSchemaHash(schemaPublishBody.schema.tables);
         return new Response(
           JSON.stringify({
             objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -3347,9 +3352,10 @@ export default s.defineMigration({
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
-    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
-    const fetchMock = vi.fn(async (input: string) => {
+    let schemaHash = "";
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        schemaHash = await computeTestSchemaHash(JSON.parse(String(init?.body)).schema.tables);
         return new Response(
           JSON.stringify({ objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", hash: schemaHash }),
           { status: 201 },

@@ -5,7 +5,7 @@
 //! [`super::ingest`] and [`super::policy`], and query execution in
 //! [`super::query_eval`]. It is the node layer's boundary to groove storage.
 
-use super::query_engine::{left_field, user_column_field};
+use super::query_engine::user_column_field;
 use super::*;
 use crate::protocol::{ResultRowLayer, SnapshotRef};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
@@ -126,12 +126,69 @@ groove::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
     TxKind::Exclusive = 1,
 });
-groove::impl_record_field_enum!(DurabilityTier {
-    DurabilityTier::None = 0,
-    DurabilityTier::Local = 1,
-    DurabilityTier::Edge = 2,
-    DurabilityTier::Global = 3,
-});
+// Storage tags are independent of the public enum: 2 is a decode-only legacy
+// alias for Local, while Global remains 3.
+impl DurabilityTier {
+    #[doc(hidden)]
+    pub fn from_discriminant(tag: u8) -> Result<Self, groove::records::Error> {
+        match tag {
+            0 => Ok(Self::None),
+            1 | 2 => Ok(Self::Local),
+            3 => Ok(Self::Global),
+            tag => Err(groove::records::Error::InvalidEnumDiscriminant {
+                enum_name: "DurabilityTier".to_owned(),
+                discriminant: tag,
+            }),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn discriminant(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Local => 1,
+            Self::Global => 3,
+        }
+    }
+}
+
+impl groove::records::RecordField for DurabilityTier {
+    fn read(
+        record: &groove::records::BorrowedRecord<'_>,
+        idx: usize,
+    ) -> Result<Self, groove::records::Error> {
+        Self::from_discriminant(record.get_enum(idx)?)
+    }
+    fn to_value(&self) -> Value {
+        Value::EnumTag(self.discriminant())
+    }
+    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Enum;
+    fn read_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        match value_type {
+            groove::records::ValueType::EnumTag(schema) => {
+                let tag = <u8 as groove::records::RecordField>::read_raw(
+                    bytes,
+                    &groove::records::ValueType::U8,
+                )?;
+                schema.variant(tag)?;
+                Self::from_discriminant(tag)
+            }
+            _ => Err(groove::records::Error::TypeMismatch {
+                expected: groove::records::ValueType::U8,
+            }),
+        }
+    }
+    fn read_tuple_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        Self::read_raw(bytes, value_type)
+    }
+}
+
 groove::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
     DeletionEvent::Restored = 1,
@@ -474,7 +531,7 @@ impl records::RecordField for CatalogueRecordKind {
 // durable bytes depend on Rust field layout and accept trailing data in some
 // configurations.  Every payload below starts with its own permanent format
 // version and consumes exactly its input.
-const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+use crate::protocol::{CATALOGUE_SCHEMA_V1, CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES};
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
@@ -990,16 +1047,21 @@ fn require_strictly_increasing(
 }
 
 pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
-    crate::protocol::canonical_catalogue_schema_v1_bytes(schema)
+    crate::protocol::canonical_catalogue_schema_bytes(schema)
         .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))
 }
 
 pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
-    let mut cursor = CataloguePayloadCursor::new(
-        payload,
-        CATALOGUE_SCHEMA_VERSION,
-        "invalid catalogue schema payload",
-    )?;
+    let version = match payload.first().copied() {
+        Some(version @ (CATALOGUE_SCHEMA_V1 | CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES)) => version,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "invalid catalogue schema payload",
+            ));
+        }
+    };
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, version, "invalid catalogue schema payload")?;
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
@@ -1015,6 +1077,11 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     if schema.version_id() != id {
         return Err(Error::InvalidStoredValue(
             "catalogue schema content id mismatch",
+        ));
+    }
+    if crate::protocol::catalogue_schema_payload_version(&schema) != version {
+        return Err(Error::InvalidStoredValue(
+            "catalogue schema payload version does not match its composite indexes",
         ));
     }
     Ok(SchemaVersion { id, schema })
@@ -1774,7 +1841,7 @@ mod catalogue_payload_tests {
     fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
         // Internal format receipt: publication content addressing consumes this
         // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
@@ -1783,6 +1850,65 @@ mod catalogue_payload_tests {
             "0117e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
         );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
+    }
+
+    fn composite_index_schema(declared: &[[&str; 2]]) -> SchemaVersion {
+        use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        let mut table = TableSchema::builder("docs")
+            .column("owner", ColumnType::Text)
+            .column("updated", ColumnType::Text);
+        for columns in declared {
+            table = table.composite_index(*columns);
+        }
+        let public = SchemaBuilder::new().table(table).build();
+        SchemaVersion::new(JazzSchema::new(&public).expect("composite schema compiles"))
+    }
+
+    #[test]
+    fn catalogue_schema_payload_uses_v2_envelope_for_composite_indexes() {
+        let schema = composite_index_schema(&[["updated", "owner"], ["owner", "updated"]]);
+        let encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES);
+        assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        // Internal format receipt: the CATS v2 envelope is byte-identical to
+        // v1 apart from its version, and the embedded public schema lists
+        // composite indexes in canonical (UTF-8 lexicographic) order
+        // regardless of declaration order. Bytes 1..17 are the schema id,
+        // which includes composite indexes under the
+        // `jazz-schema-v2-composite-indexes` id domain.
+        assert_eq!(
+            hex::encode(&encoded),
+            "02d3b863fd713d56779925512650209402e10000007b227461626c6573223a7b22646f6373223a7b22636f6c756d6e73223a5b7b226e616d65223a226f776e6572222c22636f6c756d6e5f74797065223a7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d2c7b226e616d65223a2275706461746564222c22636f6c756d6e5f74797065223a7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d5d2c22636f6d706f736974655f696e6465786573223a5b5b226f776e6572222c2275706461746564225d2c5b2275706461746564222c226f776e6572225d5d7d7d7d"
+        );
+        assert_eq!(
+            encode_catalogue_schema(&composite_index_schema(&[
+                ["owner", "updated"],
+                ["updated", "owner"],
+            ]))
+            .unwrap(),
+            encoded,
+            "declaration order does not change the canonical payload"
+        );
+        let decoded = decode_catalogue_schema(&encoded).unwrap();
+        assert_eq!(decoded, schema);
+        assert_eq!(encode_catalogue_schema(&decoded).unwrap(), encoded);
+
+        // A v1 label on a composite schema is not an alias: a reader that
+        // predates composite indexes must never be handed this schema as v1.
+        let mut mislabelled = encoded.clone();
+        mislabelled[0] = CATALOGUE_SCHEMA_V1;
+        assert!(decode_catalogue_schema(&mislabelled).is_err());
+    }
+
+    #[test]
+    fn catalogue_schema_payload_rejects_v2_label_without_composite_indexes() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let mut encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
+        encoded[0] = CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES;
+        assert!(decode_catalogue_schema(&encoded).is_err());
+        encoded[0] = 3;
+        assert!(decode_catalogue_schema(&encoded).is_err());
     }
 
     #[test]
@@ -2641,18 +2767,14 @@ pub(super) fn owned_record_from_storage_values_with_descriptor(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ParkedIngressRole {
     Relay,
-    EdgeAuthority,
     Authority,
-    EdgeAccepted,
 }
 
 impl ParkedIngressRole {
     pub(super) fn strongest(self, other: Self) -> Self {
-        use ParkedIngressRole::{Authority, EdgeAccepted, EdgeAuthority, Relay};
+        use ParkedIngressRole::{Authority, Relay};
         match (self, other) {
-            (EdgeAccepted, _) | (_, EdgeAccepted) => EdgeAccepted,
             (Authority, _) | (_, Authority) => Authority,
-            (EdgeAuthority, _) | (_, EdgeAuthority) => EdgeAuthority,
             (Relay, Relay) => Relay,
         }
     }
@@ -2671,7 +2793,7 @@ pub(super) fn current_version_index(
     versions: &[VersionRow],
     candidate_indices: &[usize],
     layer: VersionLayer,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<usize> {
     match layer {
         VersionLayer::Content => {
@@ -2709,7 +2831,7 @@ pub(super) fn version_wins_over_open_winner(
 pub(super) fn content_head_indices(
     versions: &[VersionRow],
     candidate_indices: &[usize],
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Vec<usize> {
     let txs = candidate_indices
         .iter()
@@ -2725,26 +2847,27 @@ pub(super) fn content_head_indices(
             (tx_id, versions[*idx].parents())
         })
         .collect::<BTreeMap<_, _>>();
-    let dominated = candidate_indices
+    // A candidate is dominated when it is reachable through parent edges from
+    // any candidate. One walk with a shared visited set expands each ancestor
+    // once; a walk per candidate re-walked the whole chain behind every
+    // version, which is quadratic in a row's history.
+    let mut dominated = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = candidate_indices
         .iter()
-        .flat_map(|idx| {
-            let mut dominated = Vec::new();
-            let mut stack = versions[*idx].parents();
-            let mut seen = std::collections::BTreeSet::new();
-            while let Some(parent) = stack.pop() {
-                if !seen.insert(parent) {
-                    continue;
-                }
-                if txs.contains(&parent) {
-                    dominated.push(parent);
-                }
-                if let Some(parents) = parents_by_tx.get(&parent) {
-                    stack.extend(parents.iter().copied());
-                }
-            }
-            dominated
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+        .flat_map(|idx| versions[*idx].parents())
+        .collect::<Vec<_>>();
+    while let Some(parent) = stack.pop() {
+        if !seen.insert(parent) {
+            continue;
+        }
+        if txs.contains(&parent) {
+            dominated.insert(parent);
+        }
+        if let Some(parents) = parents_by_tx.get(&parent) {
+            stack.extend(parents.iter().copied());
+        }
+    }
     candidate_indices
         .iter()
         .copied()
@@ -2758,11 +2881,10 @@ pub(super) fn content_head_indices(
 
 pub(super) fn version_tx_id_from_aliases(
     version: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Option<TxId> {
     node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == version.tx_node_alias()).then_some(*node))
+        .node_for_alias(version.tx_node_alias())
         .map(|node| TxId::new(version.tx_time(), node))
 }
 
@@ -3735,7 +3857,6 @@ pub(super) fn durability_string(durability: DurabilityTier) -> &'static str {
     match durability {
         DurabilityTier::None => "none",
         DurabilityTier::Local => "local",
-        DurabilityTier::Edge => "edge",
         DurabilityTier::Global => "global",
     }
 }
@@ -4243,31 +4364,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     ]);
     content_fields.push("tx_time".to_owned());
     content_fields.push("tx_node_id".to_owned());
-    let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
-        GraphBuilder::join(
-            GraphBuilder::table(table_name).project(fields.clone()),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                        PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::EnumTag(2)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
-                        ])
-                        .canonicalize(),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field)),
-        )
-    };
+
     let (content_current, deleted_winners) = if settled == DurabilityTier::Global {
         // The global-current table now carries every user cell, so current rows
         // resolve directly from it in O(current rows) — no join against the full
@@ -4279,12 +4376,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             .project(["row_uuid"]);
         (content, deleted)
     } else {
-        let ahead_content = if settled == DurabilityTier::Edge {
-            edge_visible_ahead(
-                ahead_current_table_name(&table.name),
-                content_fields.clone(),
-            )
-        } else {
+        let ahead_content = {
             GraphBuilder::table(ahead_current_table_name(&table.name))
                 .project(content_fields.clone())
         };
@@ -4298,12 +4390,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
-        let ahead_deleted = if settled == DurabilityTier::Edge {
-            edge_visible_ahead(
-                register_ahead_current_table_name(&table.name),
-                deletion_fields.clone(),
-            )
-        } else {
+        let ahead_deleted = {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
                 .project(deletion_fields.clone())
         };
@@ -4810,6 +4897,15 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {
     match record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)? {
         0 => Ok(Fate::Pending),
+        1 if record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)? == 2
+            && record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .is_none() =>
+        {
+            // Legacy edge acceptance is not Core confirmation. Preserve the
+            // authored unit and let normal local-author replay recover its fate.
+            Ok(Fate::Pending)
+        }
         1 => Ok(Fate::Accepted),
         2 => Ok(Fate::Rejected(rejection_reason_from_encoded_fields(
             record,
@@ -4856,13 +4952,8 @@ pub(super) fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, Error> 
 }
 
 pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, Error> {
-    match value {
-        0 => Ok(DurabilityTier::None),
-        1 => Ok(DurabilityTier::Local),
-        2 => Ok(DurabilityTier::Edge),
-        3 => Ok(DurabilityTier::Global),
-        _ => Err(Error::InvalidStoredValue("unknown durability")),
-    }
+    DurabilityTier::from_discriminant(value)
+        .map_err(|_| Error::InvalidStoredValue("unknown durability"))
 }
 
 pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, Error> {

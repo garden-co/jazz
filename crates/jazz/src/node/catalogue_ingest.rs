@@ -287,7 +287,7 @@ where
         // why this in-place checkpoint exists.
         let runtime_registry_checkpoint =
             (!runtime_semantics_changed).then(|| self.database.runtime_registry_checkpoint());
-        // Snapshot replay can install widened mappings after a persistent edge
+        // Snapshot replay can install widened mappings after a persistent runtime
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
         // trusted prefix is idempotent and must retain maintained/query state.
@@ -345,7 +345,7 @@ where
         {
             // This is intentionally in the same batch as every imported
             // schema, physical mapping, lineage activation, and write
-            // pointer.  A dynamic edge must never recover an empty local
+            // pointer.  A dynamic runtime must never recover an empty local
             // schema as a durable genesis if it crashes before the first
             // authority snapshot completes.  Existing bootstrap markers are
             // refreshed on every later trusted snapshot so a fresh process
@@ -431,9 +431,12 @@ where
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.catalogue.physical_write_plan_cache.clear();
+        self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.compiled_query_program_cache.clear();
+        self.query.query_program_templates.clear();
+        self.query.supported_query_program_requests.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -559,6 +562,7 @@ where
                     catalogue_schemas: BTreeMap::from([(genesis_id, genesis.clone())]),
                     catalogue_lenses: BTreeMap::new(),
                     physical_mappings: BTreeMap::from([(genesis_id, mapping)]),
+                    physical_current_winner_projections: BTreeMap::new(),
                     staged_lineages: BTreeMap::new(),
                     pending_lineages: BTreeMap::new(),
                     active_lineages_by_target: BTreeMap::new(),

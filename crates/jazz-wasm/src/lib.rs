@@ -19,11 +19,12 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RowCells, SeededRowIdSource, SerializedReadResult,
-    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
-    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
+    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
+    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
+    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -1826,7 +1827,7 @@ impl WasmDb {
             }
             let requires_coverage = tier_is_explicit
                 && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Edge
+                    || (opts.tier >= DurabilityTier::Global
                         && opts.propagation == Propagation::Full));
             let result = inner
                 .all_serialized_query(
@@ -2247,6 +2248,25 @@ impl WasmDb {
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
         self.non_durable_client.set(true);
+        Ok(())
+    }
+
+    /// Report what the host knows about the path to the authoritative server
+    /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
+    /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
+    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// `"attempting"` report as the start of a new attempt; until this is
+    /// first called, reachability is derived from this runtime's own upstream.
+    #[wasm_bindgen(js_name = setRemoteLinkHint)]
+    pub fn set_remote_link_hint(&self, state: String) -> Result<(), JsValue> {
+        let hint = RemoteLinkHint::from_host_str(&state)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown remote link state {state}")))?;
+        match &self.open_inner()? {
+            WasmDbInner::Memory(db) => db.set_remote_link_hint(hint),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_remote_link_hint(hint),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
         Ok(())
     }
 
@@ -3208,7 +3228,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        opts.tier = read_tier_from_str(&tier)?;
+        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -3234,7 +3254,6 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
     match tier {
         "None" | "none" => Ok(DurabilityTier::None),
         "Local" | "local" => Ok(DurabilityTier::Local),
-        "Edge" | "edge" => Ok(DurabilityTier::Edge),
         "Global" | "global" => Ok(DurabilityTier::Global),
         other => Err(JsValue::from_str(&format!(
             "unknown durability tier {other}"
@@ -3244,15 +3263,26 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
-    match tier {
-        "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
-        // The host connection manager applies the explicit-offline decision
-        // before invoking this ABI. A direct WASM caller therefore gets the
-        // strict remote behavior for RemoteIfPossible.
-        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => Ok(DurabilityTier::Edge),
-        _ => durability_tier_from_str(tier),
+fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
+    if let Some(message) = removed_read_tier(tier) {
+        return Err(JsValue::from_str(message));
     }
+    match tier {
+        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
+        }
+        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
+        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+    }
+}
+
+/// Error message for a read tier name that was removed, if `tier` is one.
+fn removed_read_tier(tier: &str) -> Option<&'static str> {
+    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
+        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -3515,12 +3545,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                jazz::binding_codec::terminal_operations_to_json(&terminal_operations)
-                    .map_err(to_js_error)?
-                    .serialize(
-                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
-                    )
-                    .map_err(to_js_error)?,
+                terminal_operations_to_js(&terminal_operations)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -3575,6 +3600,71 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Build terminal operations in the JavaScript object shape, with every key and
+/// payload as one `Uint8Array` rather than a JSON number per byte (#3369). The
+/// producer-only root descriptor is omitted, as on every binding.
+fn terminal_operations_to_js(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> Result<JsValue, JsValue> {
+    use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    fn bytes(value: &[u8]) -> JsValue {
+        js_sys::Uint8Array::from(value).into()
+    }
+    fn object(fields: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
+        let object = js_sys::Object::new();
+        for (name, value) in fields {
+            set_prop(&object, name, value.clone())?;
+        }
+        Ok(object.into())
+    }
+
+    let encoded = js_sys::Array::new_with_length(operations.len() as u32);
+    for (index, operation) in operations.iter().enumerate() {
+        let path = js_sys::Array::new_with_length(operation.path.len() as u32);
+        for (segment_index, segment) in operation.path.iter().enumerate() {
+            let segment = match segment {
+                TerminalPathSegment::Collection(collection) => {
+                    object(&[("Collection", JsValue::from_str(collection))])?
+                }
+                TerminalPathSegment::Key(key) => object(&[("Key", bytes(key))])?,
+            };
+            path.set(segment_index as u32, segment);
+        }
+        let edit = match &operation.edit {
+            TerminalEdit::Insert { index, key, value } => object(&[(
+                "Insert",
+                object(&[
+                    ("index", JsValue::from_f64(*index as f64)),
+                    ("key", bytes(key)),
+                    ("value", bytes(value)),
+                ])?,
+            )])?,
+            TerminalEdit::Update { key, value } => object(&[(
+                "Update",
+                object(&[("key", bytes(key)), ("value", bytes(value))])?,
+            )])?,
+            TerminalEdit::Remove { key } => object(&[("Remove", object(&[("key", bytes(key))])?)])?,
+            TerminalEdit::Move { key, index } => object(&[(
+                "Move",
+                object(&[
+                    ("key", bytes(key)),
+                    ("index", JsValue::from_f64(*index as f64)),
+                ])?,
+            )])?,
+        };
+        encoded.set(
+            index as u32,
+            object(&[
+                ("root_key", bytes(&operation.root_key)),
+                ("path", path.into()),
+                ("edit", edit),
+            ])?,
+        );
+    }
+    Ok(encoded.into())
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
@@ -3952,12 +4042,22 @@ mod dynamic_schema_view_tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            DurabilityTier::Local
+            (DurabilityTier::Local, EmptyOpening::Deliver)
         );
         assert_eq!(
-            read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            DurabilityTier::Edge
+            read_tier_from_str("remote").expect("strict remote read tier"),
+            (DurabilityTier::Global, EmptyOpening::Deliver)
         );
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(removed_read_tier(name).is_some(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+            assert_eq!(
+                read_tier_from_str(name).expect("local-first-unless-empty read tier"),
+                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
+                "{name} reads local-first with the core empty-opening gate"
+            );
+        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,

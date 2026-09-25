@@ -8,6 +8,7 @@ import {
   resolveDefaultDurabilityTier,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
+  publicQueryExecutionOptions,
   type Runtime,
   type TransactionalRuntime,
   type TxId,
@@ -605,23 +606,33 @@ describe("resolveDefaultDurabilityTier", () => {
     expect(resolveDefaultDurabilityTier({})).toBe("local");
   });
 
-  it("still prefers edge when a server is configured outside the browser runtime", () => {
-    expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
+  it("still prefers global when a server is configured outside the browser runtime", () => {
+    expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("global");
   });
 });
 
 describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
     expect(resolveReadTier("local-first")).toBe("local");
-    expect(resolveReadTier("remote")).toBe("edge");
-    expect(resolveReadTier("remote-if-possible")).toBe("edge");
+    expect(resolveReadTier("remote")).toBe("global");
+    // The core Db gates the empty opening.
+    expect(resolveReadTier("local-first-unless-empty")).toBe("local-first-unless-empty");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
-    expect(resolveReadTier(ReadTier.Remote)).toBe("edge");
-    expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("edge");
+    expect(resolveReadTier(ReadTier.Remote)).toBe("global");
+    expect(resolveReadTier(ReadTier.LocalFirstUnlessEmpty)).toBe("local-first-unless-empty");
+  });
+
+  it("rejects the removed remote-if-possible tier", () => {
+    expect("RemoteIfPossible" in ReadTier).toBe(false);
+    const removed = "remote-if-possible" as never;
+    expect(() => resolveReadTier(removed)).toThrow('The "remote-if-possible" tier was removed');
+    expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
+      'The "remote-if-possible" tier was removed',
+    );
   });
 
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
-    for (const tier of ["local", "edge", "global"] as const) {
+    for (const tier of ["local", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
       expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
         tier,
@@ -636,21 +647,21 @@ describe("public read tiers", () => {
       localUpdates: "immediate",
     });
     expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.Remote })).toMatchObject({
-      tier: "edge",
+      tier: "global",
       localUpdates: "deferred",
     });
     expect(
-      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
+      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirstUnlessEmpty }),
     ).toMatchObject({
-      tier: "edge",
+      tier: "local-first-unless-empty",
       localUpdates: "immediate",
     });
   });
 
   it.each([
     [ReadTier.LocalFirst, "local", undefined],
-    [ReadTier.Remote, "edge", JSON.stringify({ local_updates: "deferred" })],
-    [ReadTier.RemoteIfPossible, "edge", undefined],
+    [ReadTier.Remote, "global", JSON.stringify({ local_updates: "deferred" })],
+    [ReadTier.LocalFirstUnlessEmpty, "local-first-unless-empty", undefined],
   ] as const)(
     "keeps public %s reads full and derives their own-write policy",
     async (tier, nativeTier, expectedOptionsJson) => {
@@ -873,8 +884,8 @@ describe("JazzClient runtime transaction waits", () => {
       );
       const handle = mapped ? original.mapValue((value) => value.toUpperCase()) : original;
       const completed = vi.fn();
-      const waiting = handle.wait({ tier: "edge" }).then(completed);
-      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "edge", { ready });
+      const waiting = handle.wait({ tier: "global" }).then(completed);
+      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "global", { ready });
       await Promise.resolve();
       await Promise.resolve();
       expect(completed).not.toHaveBeenCalled();
@@ -895,7 +906,7 @@ describe("JazzClient runtime transaction waits", () => {
       new WriteResult("result", "transaction-readiness-failure" as TxId, client),
       () => ready,
     );
-    const waiting = handle.wait({ tier: "edge" });
+    const waiting = handle.wait({ tier: "global" });
     expect(runtime.waitForTransaction).toHaveBeenCalledOnce();
     const error = new Error("connection readiness failed");
     failReadiness(error);
@@ -908,10 +919,10 @@ describe("JazzClient runtime transaction waits", () => {
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
     await expect(
-      client.waitForTransaction("transaction-runtime" as TxId, "edge"),
+      client.waitForTransaction("transaction-runtime" as TxId, "global"),
     ).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "edge");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global");
   });
 
   it("waits for connected exclusive transactions at the global tier", async () => {
@@ -949,7 +960,7 @@ describe("JazzClient runtime transaction waits", () => {
     );
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    const waitPromise = client.waitForTransaction(txId, "edge");
+    const waitPromise = client.waitForTransaction(txId, "global");
     await Promise.resolve();
 
     rejectWait({
@@ -1014,4 +1025,12 @@ describe("JazzClient mutation error handling", () => {
 
     expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
   });
+});
+
+it("rejects the removed edge read tier instead of silently choosing a local read", () => {
+  const legacy = "edge" as "global";
+  expect(() => resolveReadTier(legacy)).toThrow('The "edge" tier was removed');
+  expect(() => publicQueryExecutionOptions({ tier: legacy })).toThrow(
+    'The "edge" tier was removed',
+  );
 });

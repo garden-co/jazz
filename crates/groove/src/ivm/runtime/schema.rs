@@ -244,6 +244,12 @@ impl IvmRuntime {
         }
         self.table_storage_descriptors
             .insert(table.to_owned(), table_schema.record_schema());
+        if !table_schema.has_variants() {
+            // Registry evolution changes column types; the plain-table
+            // descriptor must follow, as registration keeps it.
+            self.table_descriptors
+                .insert(table.to_owned(), table_schema.record_schema());
+        }
         let mut descriptors = HashMap::default();
         for variant in &table_schema.variants {
             let descriptor = table_schema
@@ -861,6 +867,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.query_snapshot_with_root_values(graph, storage, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::query_snapshot`], choosing how the result presents
+    /// indirect root values; see [`RootIndirectValues`].
+    pub async fn query_snapshot_with_root_values<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &S,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
@@ -874,7 +895,12 @@ impl IvmRuntime {
             ..
         } = runtime.add_dedup_graph(&graph)?;
         let records = runtime
-            .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
+            .hydration_snapshot_with_root_values(
+                output_node,
+                storage,
+                HydrationMode::Ordinary,
+                root_indirect_values,
+            )
             .await?;
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);

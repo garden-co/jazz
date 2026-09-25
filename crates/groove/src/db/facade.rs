@@ -393,6 +393,7 @@ impl Database {
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             immutable_batch_owner: Rc::new(()),
+            batch_preparation_owner: Rc::new(()),
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
@@ -538,7 +539,10 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let runtime = IvmRuntime::new(schema)?;
+        let mut runtime = IvmRuntime::new(schema)?;
+        runtime.set_plain_output_root_positions_enabled(
+            self.ivm_runtime.plain_output_root_positions_enabled(),
+        );
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -590,6 +594,15 @@ impl Database {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Enable or disable generic root positions (insert indices and moves in
+    /// terminal deltas) for plain ordered outputs. On by default. A consumer
+    /// that ignores those positions should turn them off: collecting them
+    /// makes every write to an ordered result proportional to its size.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime
+            .set_plain_output_root_positions_enabled(enabled);
     }
 
     /// Install the immutable-chunk provider used by indirect scalar evaluation.
@@ -1941,10 +1954,7 @@ impl Database {
         value: &crate::large_values::LargeValueRef,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        if !matches!(
-            value.kind,
-            crate::large_values::LargeValueKind::Json | crate::large_values::LargeValueKind::String
-        ) {
+        if value.kind != crate::large_values::LargeValueKind::Json {
             return Err(crate::ivm::runtime::IvmRuntimeError::from(
                 crate::large_values::Error::InvalidJson,
             )
@@ -2011,6 +2021,11 @@ impl Database {
         self.ivm_runtime.stats()
     }
 
+    /// Lifetime topology-cache counters, independent of transactional state.
+    pub fn execution_layout_stats(&self) -> crate::ivm::ExecutionLayoutStats {
+        self.ivm_runtime.execution_layout_stats()
+    }
+
     pub(super) fn durable_indices_store_with_storage<'a, T>(
         &'a self,
         storage: &'a T,
@@ -2024,6 +2039,19 @@ impl Database {
 
     pub fn open_batch(&self) -> DatabaseBatch {
         DatabaseBatch::default()
+    }
+
+    /// Whether any binding currently holds the prepared binding source named
+    /// `shape` (see [`crate::ivm::IvmRuntime::prepared_binding_source_is_bound`]).
+    pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
+        self.ivm_runtime.prepared_binding_source_is_bound(shape)
+    }
+
+    /// Test helper: bindings admitted onto a live prepared shape without a
+    /// full hydration. Result equality alone cannot show which path ran.
+    #[cfg(test)]
+    pub(crate) fn live_attaches(&self) -> u64 {
+        self.ivm_runtime.live_attaches()
     }
 
     /// Test helper whose reads observe writes already added to the batch.

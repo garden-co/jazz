@@ -25,7 +25,7 @@ use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
-use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
+use groove::records::{self, BorrowedRecord, OwnedRecord, Value, ValueType};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
@@ -325,6 +325,8 @@ mod descriptor_roles;
 mod eviction;
 mod global_state;
 mod ingest;
+mod node_aliases;
+pub(crate) use node_aliases::NodeAliases;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
 pub(crate) mod physical;
@@ -336,7 +338,7 @@ mod row_availability;
 mod source_resolution;
 pub(crate) mod supporting_frontier;
 mod views;
-pub(crate) use open_tx::TransactionBranchRowState;
+pub(crate) use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
@@ -353,7 +355,7 @@ use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
 
-pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
+pub use eviction::{ClientCacheBudget, ClientCacheBudgetReport, ClientCacheClass, EvictColdReport};
 
 /// Test/bench-only attribution for durable-state work performed while opening a node.
 #[cfg(feature = "testing")]
@@ -514,13 +516,13 @@ pub struct NodeState<S> {
     /// Schema catalogue, migration lenses, and logical-to-physical mappings.
     catalogue: SchemaCatalogue,
     /// Whether this runtime has an authoritative catalogue lineage that may
-    /// safely describe application data.  A dynamic edge starts
+    /// safely describe application data.  A dynamically catalogued node starts
     /// `Uninitialized`: its temporary system-only runtime schema is never a
     /// database genesis and no query or write may use it.  The first trusted
     /// catalogue snapshot installs the authority's exact genesis together
     /// with its mappings and write pointer in one durable batch.
     catalogue_bootstrap_state: CatalogueBootstrapState,
-    /// Whether this durable catalogue was installed through the dynamic-edge
+    /// Whether this durable catalogue was installed through the dynamic-catalogue
     /// bootstrap snapshot boundary and therefore carries a completion record
     /// that must be refreshed with later trusted snapshots.
     catalogue_bootstrap_marker: bool,
@@ -538,6 +540,10 @@ pub struct NodeState<S> {
     database: DatabaseSlot,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    /// Shared with the owning `Node`: whether covered receiver installs hand
+    /// a chunk-waiting evaluation to a later turn (#3349). Set for hosts that
+    /// drop a pending tick; hosts that await ticks keep installs complete.
+    detach_covered_chunk_waits: Rc<std::cell::Cell<bool>>,
     large_value_staging_policy: LargeValueStagingPolicy,
     large_value_ingress: RefCell<LargeValueIngressState>,
     /// Groove-owned verified cache retained across internal database rebuilds.
@@ -556,22 +562,27 @@ pub struct NodeState<S> {
     /// Disabled unless a core serving shell owns the complete policy inputs.
     /// This is runtime capability, never wire or durable authorization evidence.
     authoritative_scalar_exit_refresh: bool,
-    /// Host-selected Edge query serving; never inferred from peer declarations.
-    edge_query_serving: bool,
+    /// Local-tier client-local subscriptions that kept their literal graph
+    /// because no sibling of their shape was open, keyed by the prepared
+    /// binding-source name they would share, with the binding they hold. A
+    /// live token tells the next subscriber with a different binding to
+    /// prepare the shared shape instead.
+    client_local_literal_shapes:
+        std::collections::HashMap<String, (std::sync::Weak<()>, crate::query::Binding)>,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
-    /// This process is the durable browser relay that owns upstream Edge
+    /// This process is the durable browser relay that owns upstream Core
     /// authority sessions for a non-durable client. This is process-local
     /// topology, never schema policy or persisted state.
     relay_authority_session_owner: Option<crate::db::ClientRelayScope>,
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
-    pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    pub(crate) node_aliases: NodeAliases,
     /// One completed catalogue scan proved this UUID absent. The sole alias
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
@@ -684,6 +695,10 @@ struct SchemaCatalogue {
     catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
     /// Resolved logical-to-physical identity mapping for every known schema.
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    /// Successfully registered raw-current projection metadata. Derived from
+    /// the catalogue and live registry, never persisted or shared across nodes.
+    physical_current_winner_projections:
+        BTreeMap<SchemaVersionId, BTreeMap<String, (String, Vec<String>)>>,
     /// Durable, not-yet-visible schema bundles awaiting ordered activation.
     staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
     /// Ordered bundle payloads waiting for an earlier sequence or active source.
@@ -807,7 +822,7 @@ impl ActiveSchema {
 /// This is deliberately separate from the catalogue's current-write pointer.
 /// A pointer is meaningful only after a durable authority lineage exists;
 /// treating an empty constructor schema as that lineage manufactures a false
-/// genesis on an edge that has not yet heard from its core.
+/// genesis on a node that has not yet heard from its Core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogueBootstrapState {
     /// No authority catalogue has been installed.  Application state must
@@ -917,6 +932,13 @@ where
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl<S: OrderedKvStorage> NodeState<S> {
+    pub(crate) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
+    }
+}
+
 #[cfg(test)]
 impl<S> NodeState<S>
 where
@@ -937,10 +959,6 @@ where
 
     pub(super) fn reset_query_program_compilations_for_test(&mut self) {
         self.query_program_compilations = 0;
-    }
-
-    pub(super) fn query_program_compilations_for_test(&self) -> usize {
-        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
@@ -1049,10 +1067,6 @@ struct QueryServing {
         query_eval::LocalAvailabilityRecord,
     >,
     local_availability_authorities: BTreeMap<PolicyBindingKey, (NodeUuid, u64)>,
-    /// A serving scope remains live while any maintained Edge view uses it.
-    edge_availability_owners:
-        BTreeMap<PolicyBindingKey, std::sync::Weak<query_eval::EdgeAvailabilityOwner>>,
-    edge_availability_retirements: std::sync::Arc<std::sync::Mutex<VecDeque<PolicyBindingKey>>>,
     /// Runtime-only, exact-context app-read exclusions. These do not change
     /// stored payloads or serving-side permission proofs.
     local_unavailable_inputs: BTreeMap<
@@ -1069,6 +1083,10 @@ struct QueryServing {
     /// Lowered cache-safe storage-backed query programs keyed by their complete
     /// request and access-path identity. Dynamic source graphs never enter it.
     compiled_query_program_cache: BTreeMap<String, Arc<query_engine::QueryProgram>>,
+    query_program_templates: query_engine::QueryProgramTemplateCache,
+    /// Bounded exact-context admission proofs with optional immutable compiler
+    /// output for a one-use handoff. No evaluator, rows or permission decisions.
+    supported_query_program_requests: VecDeque<query_eval::SupportedQueryProgram>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
     /// Temporary point-policy replacements required by one compiler turn. The
@@ -1134,7 +1152,7 @@ struct QueryServing {
     /// Bounded, receiver-local source pages retained by a non-durable client
     /// after the matching authority usage site detached. This is not an
     /// authority receipt: only an exact compatible Local lowering may use it;
-    /// Edge/Global must open fresh coverage.
+    /// Remote/Global reads must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
 }
 
@@ -1516,13 +1534,44 @@ pub struct CommitUnitIngestContext {
     pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
-    /// Whether this subscriber link is hosted by an edge authority.
-    pub edge_authority: bool,
     /// The authenticated connection admission path has already proved every
     /// terminal write clause against its immutable delegated session binding.
     /// This may only be set by the peer-connection authority path immediately
     /// after that proof; wire messages cannot carry it.
     pub(crate) admitted_write_authorization: bool,
+    /// The connection's checked wire decoder has already validated every
+    /// version receipt in this upload. Set only by a peer connection whose
+    /// transport reports that it admits all inbound messages that way; wire
+    /// messages cannot carry it.
+    pub(crate) version_receipts_validated: bool,
+}
+
+impl CommitUnitIngestContext {
+    /// Same authenticated authority, ignoring how the receipts were checked.
+    ///
+    /// A parked unit resent over a different transport (checked wire vs. an
+    /// in-process semantic link) carries identical versions under the same
+    /// identity and trust, so it must not read as a conflicting unit. When
+    /// both deliveries are merged, "receipts already validated" is kept only
+    /// if both established it, so the unit never skips a validation it owes.
+    pub(crate) fn same_parked_authority(existing: Option<Self>, resent: Option<Self>) -> bool {
+        match (existing, resent) {
+            (Some(existing), Some(resent)) => {
+                Self {
+                    version_receipts_validated: resent.version_receipts_validated,
+                    ..existing
+                } == resent
+            }
+            (existing, resent) => existing == resent,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-version write-policy evaluations, for work-accounting tests.
+    pub(crate) static WRITE_POLICY_VERSION_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Trust mode for an inbound commit-unit upload.
@@ -1536,9 +1585,8 @@ pub enum CommitUnitTrust {
     Relay,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
-    /// Authenticated authority control-plane link. Ordinary writes retain
-    /// their permission subject; only complete authority publications carry
-    /// a prior edge-admission proof. Never inferred from a wire identity.
+    /// Authenticated authority control-plane link. Never inferred from a
+    /// wire identity. This does not authorize retired edge publications.
     TrustedAuthority,
     /// Administrators may preserve provenance and bypass application write policies.
     TrustedAdmin,
@@ -2043,7 +2091,27 @@ impl CurrentRow {
     /// Cell value by application column name using the table schema to resolve position.
     pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
         let idx = self.application_column_index(table, column)?;
-        match self.record.borrowed().get_idx(idx).ok()? {
+        let value = self.record.borrowed().get_idx(idx).ok()?;
+        // Relation terminals may emit a selected nullable column directly in
+        // its logical schema, without CurrentRow's additional presence cell.
+        // Preserve that value instead of unwrapping the column's own nullable
+        // representation. Physical current rows and maintained projections
+        // declare one extra nullable carrier and still take the path below.
+        let declared = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        if matches!(declared.column_type, ValueType::Nullable(_))
+            && self
+                .record
+                .descriptor()
+                .fields()
+                .get(idx)
+                .is_some_and(|field| field.value_type == declared.column_type)
+        {
+            return Some(value);
+        }
+        match value {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => Some(*value),
             value => Some(value),
@@ -2313,6 +2381,84 @@ impl CurrentRow {
             }
         }
         Ok(projected)
+    }
+    /// Project a source row into an explicit relation output, preserving the
+    /// aliases chosen by the relation facade.
+    ///
+    /// Each alias carries the declared type of its source column exactly, so
+    /// nullability comes from the source schema. This is the same logical
+    /// descriptor the one-shot relation terminal emits; maintained and
+    /// one-shot reads of one relation must never disagree on result types.
+    pub(crate) fn project_relation(
+        &self,
+        table: &TableSchema,
+        columns: &[crate::query::RelationProjectColumn],
+    ) -> Result<Self, Error> {
+        let mut descriptor_fields = vec![records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        )];
+        let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
+            name: "row_uuid".to_owned(),
+            visibility: CurrentRowResultVisibility::HiddenMetadata,
+        }];
+        for projection in columns {
+            let (value, field_type) = match &projection.expr {
+                crate::query::RelationProjectExpr::RowId(
+                    crate::query::RelationRowIdRef::Current,
+                ) => (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid),
+                crate::query::RelationProjectExpr::Column(reference)
+                    if reference.column == "id" =>
+                {
+                    (Value::Uuid(self.row_uuid().0), records::ValueType::Uuid)
+                }
+                crate::query::RelationProjectExpr::Column(reference) => {
+                    let column_position = table
+                        .columns
+                        .iter()
+                        .position(|column| column.name == reference.column)
+                        .ok_or(Error::InvalidStoredValue(
+                            "relation output column is absent from the read schema",
+                        ))?;
+                    let column_type = table.columns[column_position].column_type.clone();
+                    // `cell_at` strips the physical presence carrier, leaving
+                    // the column's own logical value (itself `Nullable` for a
+                    // nullable column).
+                    let value = match (self.cell_at(column_position), &column_type) {
+                        (Some(value), _) => value,
+                        (None, records::ValueType::Nullable(_)) => Value::Nullable(None),
+                        (None, _) => {
+                            return Err(Error::InvalidStoredValue(
+                                "relation output of a non-nullable column has no value",
+                            ));
+                        }
+                    };
+                    (value, column_type)
+                }
+                crate::query::RelationProjectExpr::RowId(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "relation output contains an unsupported expression",
+                    ));
+                }
+            };
+            values.push(value);
+            descriptor_fields.push(
+                records::DescriptorField::new(projection.alias.clone(), field_type)
+                    .with_identity(records::FieldIdentity::Name(projection.alias.clone())),
+            );
+            publication_fields.push(CurrentRowPublicationField::ResultField {
+                name: projection.alias.clone(),
+                visibility: CurrentRowResultVisibility::ApplicationCell,
+            });
+        }
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
+        let raw = descriptor.create(&values)?;
+        Ok(Self::new_with_publication_fields(
+            table.name.clone(),
+            OwnedRecord::new(raw, descriptor),
+            publication_fields,
+        ))
     }
 
     pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {
@@ -2979,7 +3125,7 @@ struct SchemaLineageActivation {
 }
 
 /// Durable completion receipt for an authority snapshot installed by an
-/// initially unconfigured dynamic edge.  Its record is the atomic boundary:
+/// initially unconfigured dynamically catalogued node.  Its record is the atomic boundary:
 /// discovery never repairs a prefix that lacks this exact join.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 struct CatalogueBootstrapReady {

@@ -3969,7 +3969,25 @@ pub(crate) fn materialize_attempt(
     {
         return Err(Error::DescriptorMismatch.into());
     }
+    #[cfg(feature = "test")]
+    FULL_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     Ok(bytes)
+}
+
+#[cfg(feature = "test")]
+thread_local! {
+    static FULL_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only count of complete large-value rebuilds on this thread.
+///
+/// A complete rebuild reads every chunk of a value and rejoins it into one
+/// logical scalar. Range reads and descriptor-only paths never count. Tests
+/// use deltas of this counter to prove that a path does not scale with value
+/// size, which elapsed time cannot establish robustly.
+#[cfg(feature = "test")]
+pub fn full_materializations_for_test() -> u64 {
+    FULL_MATERIALIZATIONS.with(std::cell::Cell::get)
 }
 
 fn apply_edits(bytes: &mut Vec<u8>, edits: &[ReplaceEdit]) -> Result<(), Error> {
@@ -3990,23 +4008,34 @@ pub(crate) fn materialize_record_attempt(
     raw: &[u8],
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    materialize_record_borrowed_attempt(descriptor, raw, inputs).map(Cow::into_owned)
+    materialize_record_borrowed_attempt(descriptor, raw, None, inputs).map(Cow::into_owned)
 }
 
 /// Preserve admitted inline bytes for callers that already own their input.
 /// Indirect values retain the same chunk requests and complete-row rebuild.
+///
+/// `fields` limits materialization to those top-level field indices; `None`
+/// materializes every field. Unselected indirect arms stay physical.
 pub(crate) fn materialize_record_borrowed_attempt<'a>(
     descriptor: &RecordDescriptor,
     raw: &'a [u8],
+    fields: Option<&[usize]>,
     inputs: &mut EvaluationInputs,
 ) -> Result<Cow<'a, [u8]>, IvmRuntimeError> {
-    if !descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())? {
+    let contains_indirect = match fields {
+        None => descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())?,
+        Some(fields) => descriptor.fields_contain_indirect_values(raw, fields.iter().copied())?,
+    };
+    if !contains_indirect {
         return Ok(Cow::Borrowed(raw));
     }
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
     let mut changed = false;
-    for value in &mut values {
+    for (index, value) in values.iter_mut().enumerate() {
+        if fields.is_some_and(|fields| !fields.contains(&index)) {
+            continue;
+        }
         changed |= materialize_value_attempt(value, inputs, &mut blocked)?;
     }
     if blocked {
@@ -4692,6 +4721,7 @@ pub(crate) fn json_pointer_prefix(
                     serde_json::Value::Array(array) => component
                         .parse::<usize>()
                         .ok()
+                        .filter(|index| component == &index.to_string())
                         .and_then(|index| array.get(index)),
                     _ => None,
                 });
@@ -8137,7 +8167,8 @@ mod tests {
             .create(&[Value::U64(7), Value::String("inline body".repeat(100))])
             .unwrap();
         let mut inputs = EvaluationInputs::default();
-        let result = materialize_record_borrowed_attempt(&descriptor, &raw, &mut inputs).unwrap();
+        let result =
+            materialize_record_borrowed_attempt(&descriptor, &raw, None, &mut inputs).unwrap();
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ptr(), raw.as_ptr());
         assert_eq!(result.as_ref(), raw.as_slice());

@@ -60,8 +60,8 @@ describe("vue/useAll", () => {
   it("forwards QueryOptions with tier to makeQueryKey", () => {
     const query = makeQuery();
     const scope = effectScope();
-    scope.run(() => useAll(query, { tier: "edge" }));
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+    scope.run(() => useAll(query, { tier: "global" }));
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
     scope.stop();
   });
 
@@ -81,7 +81,7 @@ describe("vue/useAll", () => {
     const query = makeQuery();
     const options = ref<any>({ tier: "local" });
 
-    mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-edge");
+    mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-global");
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "fulfilled", data: [] },
       subscribe: mocks.subscribe,
@@ -93,10 +93,10 @@ describe("vue/useAll", () => {
     expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
     expect(mocks.subscribe).toHaveBeenCalledTimes(1);
 
-    options.value = { tier: "edge" };
+    options.value = { tier: "global" };
     await nextTick();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
     expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
     expect(mocks.subscribe).toHaveBeenCalledTimes(2);
 
