@@ -65,6 +65,8 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Only first-result subscription hydration may omit maintenance state.
+    first_result: bool,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
@@ -1702,6 +1704,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            first_result: false,
             borrowed: HashSet::default(),
         })
     }
@@ -1750,11 +1753,12 @@ impl<'a> EvaluationSession<'a> {
                     return Poll::Pending;
                 }
                 remaining_runnable_nodes -= 1;
-                let context = if hydrate_arrangements {
+                let mut context = if hydrate_arrangements {
                     EvalContext::root_subscription_snapshot()
                 } else {
                     EvalContext::root_snapshot()
                 };
+                context.first_result = self.first_result;
                 let result = if let Some(records) = self.pending_outputs.remove(&node) {
                     Ok(records)
                 } else {
@@ -2040,6 +2044,7 @@ impl IvmRuntime {
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         session.root_indirect_values = root_indirect_values;
+        session.first_result = lifetime == SubscriptionLifetime::FirstResult;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same

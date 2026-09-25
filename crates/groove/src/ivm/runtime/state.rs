@@ -319,6 +319,9 @@ pub(super) struct EvalContext {
     pub(super) arrangement_update_mode: ArrangementUpdateMode,
     pub(super) eval_mode: EvalMode,
     pub(super) hydrate_arrangements: bool,
+    /// This private hydration session will be discarded after its first result.
+    /// Recursive evaluators deliberately do not inherit this flag.
+    pub(super) first_result: bool,
 }
 
 impl EvalContext {
@@ -331,6 +334,7 @@ impl EvalContext {
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
             hydrate_arrangements: false,
+            first_result: false,
         }
     }
 
@@ -343,6 +347,7 @@ impl EvalContext {
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
             hydrate_arrangements: false,
+            first_result: false,
         }
     }
 
@@ -355,6 +360,7 @@ impl EvalContext {
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
             hydrate_arrangements: true,
+            first_result: false,
         }
     }
 
@@ -377,6 +383,7 @@ impl EvalContext {
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
             hydrate_arrangements: false,
+            first_result: false,
         }
     }
 
@@ -400,6 +407,7 @@ impl EvalContext {
             arrangement_update_mode,
             eval_mode: EvalMode::Tick,
             hydrate_arrangements: false,
+            first_result: false,
         }
     }
 }
