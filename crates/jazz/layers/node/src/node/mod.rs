@@ -319,6 +319,11 @@ fn hydrate_nested_payload_enum_cases(
 
 pub mod api_error;
 mod catalogue_ingest;
+#[doc(hidden)]
+pub use catalogue_ingest::validate_catalogue_snapshot_replacement;
+pub(crate) use catalogue_ingest::{
+    rebind_cached_catalogue_snapshot, validate_cached_catalogue_identities,
+};
 mod codec;
 mod currency;
 mod database_slot;
@@ -354,6 +359,16 @@ mod views;
 #[doc(hidden)]
 pub use open_tx::StagedTransactionCell;
 pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitializationTransactionStatus {
+    NotObserved,
+    Incomplete,
+    Complete {
+        fate: Fate,
+        durability: DurabilityTier,
+    },
+}
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
 };
@@ -543,6 +558,9 @@ pub struct NodeState<S = BoxedStorage> {
     /// bootstrap snapshot boundary and therefore carries a completion record
     /// that must be refreshed with later trusted snapshots.
     catalogue_bootstrap_marker: bool,
+    /// A cache capture exists only after eligible authenticated snapshot ingest.
+    pub(crate) authenticated_catalogue_capture: Option<Vec<u8>>,
+    pub(crate) authenticated_catalogue_ready: bool,
     /// Local logical time and global-application progress counters.
     clock: Clock,
     /// Commit-unit and shape-registration payloads waiting for missing context.

@@ -81,3 +81,28 @@ keep their existing selection semantics.
 The shared helper merges retained roots inside that transaction, so a stale
 manager cannot erase another manager's offline key. Selection follows the
 last successful operation; external provider credentials are never persisted.
+
+New local-first roots retain private **generated-here provenance** in the same
+atomic write as the root. Reopening that store preserves it; restoring an
+imported secret or loading a legacy selection does not create it. This is local
+eligibility to propose an initial encrypted identity, not accepted membership.
+The versioned `jazz-account-selection-v2` inventory retains that provenance with
+the secret roots and selection. Legacy v1 inventories migrate without founder
+provenance; older v1-only writers refuse the v2 envelope rather than dropping it.
+
+With an authenticated application catalogue cached by the runtime host, a
+generated-here account can open an encrypted database and create its first
+spaces offline without a separate initialisation call. Its device, account epoch,
+space roots and explicit grants remain provisional until authority acceptance.
+The SDK journals sealed envelopes and reserved transaction identities before
+publication; it does not copy message or image payloads into the key store.
+An explicit self grant is required for ordinary local reads and later writes:
+possession of the author's sealed envelope alone is not membership.
+
+Local durability acknowledges the original pending transaction, not eventual
+authorisation. Restart checks those exact identities with the durable runtime
+owner. A missing acknowledged transaction is corruption; an interrupted
+unacknowledged reservation is never resubmitted under a replacement identity.
+Rejection or known revocation disables dependent provisional key use. Unknown
+explicit recipients produce retryable `e2ee_initialization_not_ready` before a
+stream is consumed; requested recipients are never silently omitted.

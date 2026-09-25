@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "include": [
+    "src/types/**/*.d.ts",
     "src/runtime/write-handle-public-api.typecheck.ts",
     "src/explicit-relationships.typecheck.ts",
     "src/payload-enum-init.typecheck.ts"

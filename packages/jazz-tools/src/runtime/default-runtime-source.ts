@@ -1,3 +1,9 @@
+import {
+  BrowserCatalogueCache,
+  ephemeralCatalogueCache,
+  type CatalogueCache,
+  type CatalogueCacheScope,
+} from "./catalogue-cache.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import type { AppContext } from "./context.js";
@@ -172,6 +178,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
   private ownerRuntime: NativeRuntimeAdapter | null = null;
 
+  private catalogueCache?: { cache: CatalogueCache; scope: CatalogueCacheScope };
+  private cachedCatalogue?: Uint8Array;
   private get wasmModule(): WasmModule {
     if (!this.module) {
       throw new Error("Default runtime source is not loaded");
@@ -181,6 +189,34 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
   override async load(config: DbConfig): Promise<void> {
     this.module ??= await loadWasmModule(config.runtimeSources);
+    if (
+      this.catalogueCache &&
+      (this.catalogueCache.scope.registryAuthority !== config.accountRegistryAuthority ||
+        this.catalogueCache.scope.appId !== config.appId ||
+        this.catalogueCache.scope.environment !== (config.env ?? "dev"))
+    )
+      throw new Error("Runtime source cannot change its authenticated catalogue scope");
+    if (config.accountRegistryAuthority && !this.catalogueCache) {
+      const scope = {
+        registryAuthority: config.accountRegistryAuthority,
+        appId: config.appId,
+        environment: config.env ?? "dev",
+      };
+      let cache: CatalogueCache;
+      if ((config.driver?.type ?? "persistent") === "memory") cache = ephemeralCatalogueCache;
+      else if (isPersistentBrowserConfig(config)) cache = new BrowserCatalogueCache();
+      else if (isNodeRuntime()) {
+        // Node filesystem imports cannot be statically loaded in browser/RN bundles.
+        const { NodeCatalogueCache } = await import("./catalogue-cache-node.js");
+        cache = new NodeCatalogueCache(".jazz/authenticated-catalogues/v1");
+      } else throw new Error("Persistent catalogue cache is unavailable on this host");
+      const cached = await cache.load(scope);
+      this.catalogueCache = { cache, scope };
+      this.cachedCatalogue = cached ?? undefined;
+    } else if (this.catalogueCache) {
+      this.cachedCatalogue =
+        (await this.catalogueCache.cache.load(this.catalogueCache.scope)) ?? undefined;
+    }
   }
 
   override admitConfig(config: DbConfig): void {
@@ -216,9 +252,9 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       node,
       author,
       flushEvery,
-      !browserMode,
-      selfSignedClientProof,
       backendMode,
+      selfSignedClientProof,
+      config,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -340,6 +376,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
+        catalogueCacheScope: this.catalogueCache?.scope,
         appId: config.appId,
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
@@ -400,8 +437,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     author: Uint8Array,
     flushEvery: number,
     historyComplete: boolean,
-    selfSignedClientProof?: NativeSelfSignedClientProof,
-    backendMode = false,
+    selfSignedClientProof: NativeSelfSignedClientProof | undefined,
+    config: DbConfig,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -411,7 +448,15 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode },
+        {
+          initialSyncFlushEvery: flushEvery,
+          selfSignedClientProof,
+          backendMode: isBackendRuntime(config),
+          cachedCatalogue: this.cachedCatalogue,
+          // The persistent worker owns publication; its foreground peer only
+          // installs cached identities and delegates durable readiness.
+          catalogueCache: isPersistentBrowserConfig(config) ? undefined : this.catalogueCache,
+        },
       );
       return this.ownerRuntime;
     }

@@ -19,18 +19,21 @@ export interface AccountStore {
   update(transform: (current: string | null) => string): Promise<void>;
 }
 
-// Local helper preferences, not a database/wire codec. Keep every local root:
-// logout clears selection but must never destroy the only key to offline data.
+// Versioned private root inventory and founder provenance. Older writers must
+// refuse v2 instead of silently dropping provenance when changing selection.
 interface StoredAccounts {
-  format: "jazz-account-selection-v1";
+  format: "jazz-account-selection-v2";
   roots: string[];
   selected: number | null;
+  generatedHere: string[];
 }
 function decode(value: string | null): StoredAccounts {
-  if (value === null) return { format: "jazz-account-selection-v1", roots: [], selected: null };
-  const parsed = JSON.parse(value) as StoredAccounts;
+  if (value === null)
+    return { format: "jazz-account-selection-v2", roots: [], selected: null, generatedHere: [] };
+  const parsed = JSON.parse(value) as Omit<StoredAccounts, "format"> & { format: string };
   if (
-    parsed?.format !== "jazz-account-selection-v1" ||
+    (parsed?.format !== "jazz-account-selection-v1" &&
+      parsed?.format !== "jazz-account-selection-v2") ||
     !Array.isArray(parsed.roots) ||
     parsed.roots.some((root) => typeof root !== "string") ||
     (parsed.selected !== null &&
@@ -41,7 +44,21 @@ function decode(value: string | null): StoredAccounts {
     throw new Error("Invalid persisted account selection");
   }
   for (const root of parsed.roots) parseAuthSecret(root);
-  return { format: parsed.format, roots: [...parsed.roots], selected: parsed.selected };
+  // A v1 inventory never proves local creation, even if an unknown extension
+  // claims otherwise. Migration retains its selection and every secret root.
+  const generatedHere = parsed.format === "jazz-account-selection-v1" ? [] : parsed.generatedHere;
+  if (
+    !Array.isArray(generatedHere) ||
+    generatedHere.some((root) => typeof root !== "string" || !parsed.roots.includes(root)) ||
+    new Set(generatedHere).size !== generatedHere.length
+  )
+    throw new Error("Invalid persisted account creation provenance");
+  return {
+    format: "jazz-account-selection-v2",
+    roots: [...parsed.roots],
+    selected: parsed.selected,
+    generatedHere: [...generatedHere],
+  };
 }
 
 const automaticInitializers = new WeakMap<AccountManager<JWTAuth>, () => Promise<AccountHandle>>();
@@ -70,6 +87,7 @@ export async function prepareAccountManager(options: {
   let adoptingSecret: string | undefined;
   const save = () => {
     const roots = [...stored.roots];
+    const generatedHere = [...stored.generatedHere];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
     // Serialize snapshots even for an asynchronous native secure store. A
     // rejected save does not prevent a later explicit selection from retrying.
@@ -81,6 +99,7 @@ export async function prepareAccountManager(options: {
           // Independent managers may have discovered roots since we loaded. Never
           // replace their key inventory with this manager's older snapshot.
           for (const root of roots) if (!latest.roots.includes(root)) latest.roots.push(root);
+          latest.generatedHere = [...new Set([...latest.generatedHere, ...generatedHere])];
           latest.selected = selected === null ? null : latest.roots.indexOf(selected);
           return JSON.stringify(latest);
         }),
@@ -98,7 +117,10 @@ export async function prepareAccountManager(options: {
       mintToken: options.mintToken,
       generateSecret: options.generateSecret,
       isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
-      retainSecret(secret) {
+      isGeneratedHere: async (secret) =>
+        decode(await options.store.read()).generatedHere.includes(secret),
+      retainSecret(secret, generatedHere) {
+        if (generatedHere) stored.generatedHere = [...new Set([...stored.generatedHere, secret])];
         if (adoptingSecret === secret) {
           // Suppress only the one retention callback caused by adoption. Any
           // re-entrant explicit selection must retain and persist normally.
@@ -143,6 +165,9 @@ export async function prepareAccountManager(options: {
             if (selected === undefined) {
               const index = latest.roots.indexOf(candidate);
               latest.selected = index >= 0 ? index : latest.roots.push(candidate) - 1;
+              // Only a newly retained local candidate proves generation here.
+              // Reusing an imported or legacy root must not grant provenance.
+              if (index < 0) latest.generatedHere.push(candidate);
               winner = candidate;
             } else {
               winner = selected;

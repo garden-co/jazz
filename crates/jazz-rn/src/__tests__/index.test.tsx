@@ -4,10 +4,12 @@ type FixtureNativeRelay = {
 };
 
 import { NATIVE_RELAY_ABI_V1 } from "../native-relay-abi";
+import type { NativeInitializationAction } from "../relay";
 
 const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV1";
 
 type NativeForegroundCommand =
+  | { type: "initializationV1"; version: 1; action: NativeInitializationAction }
   | "probe"
   | "tick"
   | "close"
@@ -546,4 +548,27 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
   );
+});
+
+it("pins initialization V1 command tags and rejects oversized status batches", () => {
+  const relay = loadRelay({ getAbiVersion: () => NATIVE_RELAY_ABI_V1, execute: jest.fn() });
+  const encode = (action: NativeInitializationAction) =>
+    relay.encodeNativeForegroundCommand({ type: "initializationV1", version: 1, action });
+  expect(encode({ type: "seal", transaction: 129 })).toEqual(Uint8Array.of(37, 1, 0, 129, 1));
+  expect(encode({ type: "publish", token: "x" })).toEqual(Uint8Array.of(37, 1, 1, 1, 120));
+  expect(encode({ type: "cancel", token: "x" })).toEqual(Uint8Array.of(37, 1, 2, 1, 120));
+  expect(
+    encode({
+      type: "recordAbsence",
+      transaction: 3,
+      table: "t",
+      rowId: new Uint8Array(16).fill(7),
+    }),
+  ).toEqual(Uint8Array.of(37, 1, 3, 3, 1, 116, ...new Array(16).fill(7)));
+  expect(encode({ type: "status", ids: ["x"] })).toEqual(Uint8Array.of(37, 1, 4, 1, 1, 120));
+  expect(encode({ type: "hasAuthenticatedCatalogue" })).toEqual(Uint8Array.of(37, 1, 5));
+  expect(() => encode({ type: "status", ids: new Array(65).fill("x") })).toThrow("at most 64");
+  expect(() =>
+    encode({ type: "recordAbsence", transaction: 3, table: "t", rowId: new Uint8Array(15) }),
+  ).toThrow("16-byte");
 });

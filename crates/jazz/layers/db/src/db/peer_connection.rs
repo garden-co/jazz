@@ -2771,7 +2771,25 @@ where
                                     });
                                     break;
                                 }
+                                let message = SyncMessage::CatalogueSnapshot(snapshot);
+                                let capture = if authority_receipt_eligible {
+                                    self.admitted_upstream_authority.borrow().as_ref()
+                                        .map(|authority| super::initialization::encode_catalogue_capture(NodeUuid::from_bytes(authority.authority), &message))
+                                        .transpose()?
+                                } else {
+                                    None
+                                };
+                                if let (Some(previous), Some(next)) = (
+                                    catalogue_owner.authenticated_catalogue_capture(),
+                                    capture.as_deref(),
+                                ) {
+                                    super::initialization::validate_catalogue_capture_replacement(previous, next)?;
+                                }
+                                let SyncMessage::CatalogueSnapshot(snapshot) = message else { unreachable!() };
                                 let outcome = catalogue_owner.apply_trusted_catalogue_snapshot(*snapshot).await?;
+                                if let Some(capture) = capture {
+                                    catalogue_owner.set_authenticated_catalogue_capture(capture);
+                                }
                                 drop(catalogue_owner);
                                 let requested = self.open_schema_admission.borrow()
                                     .as_ref().map(|pending| pending.schema);

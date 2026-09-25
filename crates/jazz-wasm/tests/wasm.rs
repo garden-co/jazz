@@ -133,6 +133,7 @@ fn fixture_db() -> WasmDb {
     WasmDb::open_memory(
         serde_json::to_vec(&schema).expect("encode public schema JSON"),
         postcard::to_allocvec(&config).expect("encode open config postcard"),
+        None,
     )
     .expect("open public WASM memory binding")
 }
@@ -185,6 +186,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
         token.clone(),
         app_id.to_owned(),
         claimed_author.clone(),
+        None,
     )
     .expect("open with a verified local-first proof");
 
@@ -417,4 +419,209 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
     assert_eq!(read_values.get("text"), Some(&Value::String(text)));
     assert_eq!(read_values.get("bytes"), Some(&Value::Bytes(bytes)));
     assert_eq!(read_values.get("json"), Some(&Value::String(json)));
+}
+
+#[wasm_bindgen_test(async)]
+async fn wasm_initialization_seals_are_owner_bound_single_use_and_unpublished() {
+    let db = fixture_db();
+    let foreign = fixture_db();
+    let open = jazz::tools::OpenTransactionId::new().to_string();
+    db.begin_transaction(open.clone(), "exclusive".into(), None, None)
+        .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("text", jazz::groove::records::ValueType::String),
+        ("bytes", jazz::groove::records::ValueType::Bytes),
+        ("json", jazz::groove::records::ValueType::String),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::String("sealed payload".into()),
+            Value::Bytes(vec![1, 2, 3]),
+            Value::String("{\"sealed\":true}".into()),
+        ])
+        .unwrap();
+    let cells = jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+        raw, descriptor,
+    ))
+    .unwrap();
+    let row = db
+        .insert_in_transaction(open.clone(), "values".into(), cells.clone(), JsValue::NULL)
+        .unwrap();
+    let seal = await_promise(db.seal_initialization_transaction(open.clone()).unwrap()).await;
+    let token = js_sys::Reflect::get(&seal, &"token".into())
+        .unwrap()
+        .as_string()
+        .unwrap();
+    let reserved = js_sys::Reflect::get(&seal, &"reservedTxId".into())
+        .unwrap()
+        .as_string()
+        .unwrap();
+    assert!(foreign
+        .publish_initialization_transaction(token.clone())
+        .is_err());
+    let rows = db.local_current_row("values".into(), row.clone()).unwrap();
+    assert!(postcard::from_bytes::<Vec<DecodedRowBatch>>(&rows)
+        .unwrap()
+        .is_empty());
+    let status = await_promise(
+        db.initialization_transaction_status(vec![reserved])
+            .unwrap(),
+    )
+    .await
+    .as_string()
+    .unwrap();
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["statuses"][0]["kind"], "not-observed");
+    await_promise(
+        db.publish_initialization_transaction(token.clone())
+            .unwrap(),
+    )
+    .await;
+    assert!(db.publish_initialization_transaction(token).is_err());
+    await_promise(db.tick()).await;
+    let rows = db.local_current_row("values".into(), row).unwrap();
+    let values = values_from_batches(&postcard::from_bytes::<Vec<DecodedRowBatch>>(&rows).unwrap());
+    assert_eq!(values["text"], Value::String("sealed payload".into()));
+    assert_eq!(values["bytes"], Value::Bytes(vec![1, 2, 3]));
+    await_promise(db.close()).await;
+    await_promise(foreign.close()).await;
+}
+
+#[wasm_bindgen_test(async)]
+async fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner() {
+    fn invoke(target: &JsValue, method: &str, argument: Option<&JsValue>) -> JsValue {
+        let method = js_sys::Reflect::get(target, &JsValue::from_str(method))
+            .unwrap()
+            .dyn_into::<js_sys::Function>()
+            .unwrap();
+        match argument {
+            Some(argument) => method.call1(target, argument).unwrap(),
+            None => method.call0(target).unwrap(),
+        }
+    }
+    let schema = serde_json::to_vec(
+        &SchemaBuilder::new()
+            .table(
+                TableSchema::builder("capture_items")
+                    .column("label", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .build(),
+    )
+    .unwrap();
+    let author = AuthorSubject::authenticated("https://issuer.example", "capture-owner").unwrap();
+    let client_node = NodeUuid::from_bytes([0xc4; 16]);
+    let authority_node = NodeUuid::from_bytes([0xc5; 16]);
+    let config = |node, history_complete| {
+        postcard::to_allocvec(&OpenDbConfigFixture {
+            identity: OpenDbIdentityFixture { node, author },
+            row_id_seed: None,
+            history_complete,
+            initial_sync_flush_every: None,
+        })
+        .unwrap()
+    };
+    let owner = WasmDb::open_memory(schema.clone(), config(client_node, false), None).unwrap();
+    let authority =
+        WasmDb::open_memory_as_backend(schema.clone(), config(authority_node, true)).unwrap();
+    let upstream = await_promise(
+        owner
+            .connect_upstream_with_session(
+                jazz::wire::WIRE_PROTOCOL_VERSION,
+                jazz::wire::current_wire_features() as u32,
+                authority_node.0.as_bytes().to_vec(),
+                2,
+                client_node.0.as_bytes().to_vec(),
+                1,
+            )
+            .unwrap(),
+    )
+    .await;
+    let downstream = await_promise(
+        authority
+            .accept_subscriber(
+                author.canonical().as_bytes().to_vec(),
+                JsValue::NULL,
+                Some(2),
+            )
+            .unwrap(),
+    )
+    .await;
+    // Exercise the real generated transport objects and production wire codec:
+    // neither a cached install nor a test-injected capture can satisfy this.
+    for _ in 0..32 {
+        let frames = invoke(&upstream, "recvWireFrames", None);
+        invoke(&downstream, "sendWireFrames", Some(&frames));
+        let frames = invoke(&downstream, "recvWireFrames", None);
+        invoke(&upstream, "sendWireFrames", Some(&frames));
+        await_promise(owner.tick()).await;
+        await_promise(authority.tick()).await;
+        await_promise(
+            invoke(&upstream, "tick", None)
+                .dyn_into::<js_sys::Promise>()
+                .unwrap(),
+        )
+        .await;
+        await_promise(
+            invoke(&downstream, "tick", None)
+                .dyn_into::<js_sys::Promise>()
+                .unwrap(),
+        )
+        .await;
+    }
+    let alias = owner.register_schema(schema.clone()).unwrap();
+    assert!(alias.take_authenticated_catalogue_state().is_err());
+    let state = await_promise(owner.take_authenticated_catalogue_state().unwrap()).await;
+    assert_eq!(
+        js_sys::Reflect::get(&state, &"ready".into())
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    let capture = js_sys::Reflect::get(&state, &"capture".into())
+        .unwrap()
+        .dyn_into::<js_sys::Uint8Array>()
+        .expect("the owner retains its upstream capture")
+        .to_vec();
+    owner
+        .validate_catalogue_capture_replacement(capture.clone(), capture.clone())
+        .unwrap();
+    let offline = WasmDb::open_memory(
+        schema,
+        config(NodeUuid::from_bytes([0xc6; 16]), false),
+        Some(capture),
+    )
+    .unwrap();
+    let offline_state = await_promise(offline.take_authenticated_catalogue_state().unwrap()).await;
+    assert_eq!(
+        js_sys::Reflect::get(&offline_state, &"ready".into())
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert!(
+        js_sys::Reflect::get(&offline_state, &"capture".into())
+            .unwrap()
+            .is_undefined(),
+        "cache installation must not manufacture a live capture"
+    );
+    let drained = await_promise(owner.take_authenticated_catalogue_state().unwrap()).await;
+    assert_eq!(
+        js_sys::Reflect::get(&drained, &"ready".into())
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert!(
+        js_sys::Reflect::get(&drained, &"capture".into())
+            .unwrap()
+            .is_undefined(),
+        "the runtime owner drains exactly once"
+    );
+    invoke(&upstream, "close", None);
+    invoke(&downstream, "close", None);
+    await_promise(alias.close()).await;
+    await_promise(offline.close()).await;
+    await_promise(owner.close()).await;
+    await_promise(authority.close()).await;
 }
