@@ -4,7 +4,11 @@ use jazz_example_big_label_benchmark::{Fixture, IngestFixture};
 // the examples page matches results by exact name. The 10k-row import lives in
 // ingest_walltime.rs as ingest_walltime_10k.
 
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     divan::main();
 }
 

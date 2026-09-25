@@ -6,10 +6,6 @@ benchmark variant intentionally duplicates the app's schema and workload shape
 instead of importing a shared app-runtime helper: it must stay understandable
 when opened in isolation and keep its measurement inputs explicit.
 
-The `smoke` crate proves the common Rust/Divan plumbing locally only; CodSpeed
-does not measure it. It is not an app workload and must not become a place for
-shared application fixtures.
-
 ## Add an app benchmark variant
 
 1. Add a small Rust package under `examples/<app>/benchmarks/` (or another

@@ -21,12 +21,13 @@ for (const stops of [128, 4096]) {
       name: `world_tour_member_calendar_window[${stops}]`,
       title: "WorldTour · band member's calendar",
       description:
-        "Open the next three weeks of the tour as a band member: the first 12 stops in date order, each with its venue.",
+        "Open the next three weeks of the tour as a band member: the first 12 stops in date order, each with its venue. Today the cost grows with the whole table, not just the page (#1962).",
       includes: ["One prepared read: date range, date order, limit 12, venue included"],
       work: {
         count: 1,
         unit: "calendar views/s",
-        explanation: "One 12-stop calendar window per iteration; total stops are load context.",
+        explanation:
+          "One calendar window of at most 12 stops per iteration. The window holds 22 stops at every scale, but the cost currently grows with the total stop count (#1962).",
       },
     },
     {
@@ -34,14 +35,15 @@ for (const stops of [128, 4096]) {
       name: `world_tour_public_calendar_window[${stops}]`,
       title: "WorldTour · public calendar",
       description:
-        "Open the same three weeks as a fan: only confirmed stops, first 12 in date order, each with its venue.",
+        "Open the same three weeks as a fan: only confirmed stops, first 12 in date order, each with its venue. Today the cost grows with the whole table, not just the page (#1962).",
       includes: [
         "One prepared read: confirmed filter, date range, date order, limit 12, venue included",
       ],
       work: {
         count: 1,
         unit: "calendar views/s",
-        explanation: "One 12-stop calendar window per iteration; total stops are load context.",
+        explanation:
+          "One calendar window of at most 12 stops per iteration. The window holds 22 stops at every scale, but the cost currently grows with the total stop count (#1962).",
       },
     },
   );

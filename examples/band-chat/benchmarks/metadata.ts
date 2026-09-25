@@ -21,13 +21,14 @@ for (const messages of [1024, 4096]) {
       name: `band_chat_timeline_second_page[${messages}]`,
       title: "BandChat · scroll back in a room",
       description:
-        "Load the second page of a busy room's timeline: 25 messages, newest first, after skipping the latest 25.",
+        "Load the second page of a busy room's timeline: 25 messages, newest first, after skipping the latest 25. Today the cost grows with the whole table, not just the page (#1962).",
       fixture: fixture(messages),
       includes: ["One prepared read: room filter, sent-at order, offset 25, limit 25"],
       work: {
         count: 1,
         unit: "pages/s",
-        explanation: "One 25-message page per iteration; the room size is load context.",
+        explanation:
+          "One 25-message page per iteration. The room holds 100 messages at every scale, but the cost currently grows with the total message count (#1962).",
       },
     },
     {
