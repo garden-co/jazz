@@ -62,11 +62,13 @@ struct VersionDecodePlan {
 /// a clone that outlives that subscription must not keep the next subscriber
 /// of the shape on the shared path, so clones start without it.
 #[derive(Debug, Default)]
-struct ClientLocalLiteralToken(Option<std::sync::Arc<()>>);
+struct ClientLocalLiteralToken {
+    _held: Option<std::sync::Arc<()>>,
+}
 
 impl Clone for ClientLocalLiteralToken {
     fn clone(&self) -> Self {
-        Self(None)
+        Self::default()
     }
 }
 
@@ -566,7 +568,7 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 
 impl MaintainedSubscriptionView {
     pub(crate) fn hold_client_local_literal_token(&mut self, token: std::sync::Arc<()>) {
-        self.client_local_literal_token = ClientLocalLiteralToken(Some(token));
+        self.client_local_literal_token = ClientLocalLiteralToken { _held: Some(token) };
     }
 
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {

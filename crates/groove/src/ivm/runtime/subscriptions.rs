@@ -5015,10 +5015,10 @@ impl IvmRuntime {
     /// Its binding source stays: a queued retraction may still name it, and
     /// the next preparation of the same source reuses the entry.
     fn remove_unreferenced_shared_shape(&mut self, shape_id: PreparedShapeId) {
-        if !self
+        if self
             .prepared_shapes
             .get(&shape_id)
-            .is_some_and(|shape| shape.shared_key.is_some())
+            .is_none_or(|shape| shape.shared_key.is_none())
         {
             return;
         }

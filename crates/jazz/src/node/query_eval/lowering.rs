@@ -1413,13 +1413,11 @@ where
                 .await
         }
         .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                    eprintln!(
-                        "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
-                    );
-                }
-                Error::Groove(error)
-            })?;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}");
+            }
+            Error::Groove(error)
+        })?;
         // prepare() allocates a caller-owned shape. Own it before the binding
         // await so cancellation during cold hydration also releases it.
         let mut owner = HydrationSubscription {
