@@ -1188,15 +1188,22 @@ where
                 }
             }
         }
+        // Every version that can change a predicate's answer belongs to a
+        // visible transaction the base snapshot does not cover. Enumerate those
+        // once per commit instead of rescanning each predicate table's history.
+        let uncovered = if open_tx.predicate_reads.is_empty() {
+            Vec::new()
+        } else {
+            self.visible_transactions_outside_snapshot(&open_tx.base_snapshot)
+                .await?
+        };
         for predicate in &open_tx.predicate_reads {
             let mut comparison: Option<Snapshot> = None;
-            for version in self.query_table_versions(&predicate.table).await? {
-                let tx_id = self.version_tx_id(&version)?;
-                let visible = self
-                    .query_transaction(tx_id)
+            for &tx_id in &uncovered {
+                if self
+                    .table_has_versions_for_tx(&predicate.table, tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
-                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
+                {
                     if comparison.is_none() {
                         let query = &predicate.shape;
                         // This comparison advances only root-table history.
@@ -1241,6 +1248,127 @@ where
             }
         }
         Ok(true)
+    }
+
+    /// Visible transactions that `snapshot` does not cover, in `TxId` order.
+    /// A transaction outside the snapshot either has a global time after its
+    /// base or has none yet, so the `by_global_time` index finds every one
+    /// without reading version history.
+    async fn visible_transactions_outside_snapshot(
+        &mut self,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<TxId>, Error> {
+        let pending = Value::Nullable(None);
+        let after_base = Value::Nullable(Some(Box::new(Value::U64(
+            snapshot.global_base.0.saturating_add(1),
+        ))));
+        let last = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+        let mut raws = self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_time",
+                std::slice::from_ref(&pending),
+            )
+            .await?;
+        raws.extend(
+            self.database
+                .index_scan_range_raw(
+                    "jazz_transactions",
+                    "by_global_time",
+                    std::slice::from_ref(&after_base),
+                    std::slice::from_ref(&last),
+                )
+                .await?,
+        );
+        raws.extend(
+            self.database
+                .index_scan_raw(
+                    "jazz_transactions",
+                    "by_global_time",
+                    std::slice::from_ref(&last),
+                )
+                .await?,
+        );
+        let mut candidates = BTreeSet::new();
+        for raw in raws {
+            let record = raw.record();
+            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node = self
+                .node_for_alias(node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction node alias must exist",
+                ))?;
+            let tx_id = TxId::new(
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                node,
+            );
+            // The snapshot's own-node bound covers these without a lookup.
+            if tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base {
+                continue;
+            }
+            candidates.insert(tx_id);
+        }
+        let mut uncovered = Vec::new();
+        for tx_id in candidates {
+            let visible = self
+                .query_transaction(tx_id)
+                .await?
+                .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+            if visible && !self.snapshot_covers(tx_id, snapshot).await {
+                uncovered.push(tx_id);
+            }
+        }
+        Ok(uncovered)
+    }
+
+    /// Whether `tx_id` wrote any version of `table`, in the same history
+    /// sources `query_table_versions` reads.
+    async fn table_has_versions_for_tx(&mut self, table: &str, tx_id: TxId) -> Result<bool, Error> {
+        let Some(stored) = self.query_transaction(tx_id).await? else {
+            return Ok(false);
+        };
+        let key = [Value::U64(tx_id.time.0), Value::U64(stored.node_alias.0)];
+        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
+            if !self
+                .database
+                .index_scan_raw(&storage_table, "by_tx", &key)
+                .await?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        let deletion_sources =
+            self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?;
+        if deletion_sources.is_empty() {
+            return Ok(false);
+        }
+        let schema_version = if self
+            .table_in_schema(table, self.catalogue.active_schema.schema)
+            .is_ok()
+        {
+            self.catalogue.active_schema.schema
+        } else {
+            self.catalogue.local_schema_version_id
+        };
+        let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        for storage_table in deletion_sources {
+            let records = self
+                .database
+                .index_scan_raw(&storage_table, "by_tx", &key)
+                .await?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for record in records {
+                let version = self.decode_history_owned_record("", &storage_table, record)?;
+                if self.physical_table_id_for_version(&version)? == requested_table_id {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.

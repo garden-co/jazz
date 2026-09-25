@@ -2228,3 +2228,36 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     let reopened = reopen_node_at(&writer_b_dir, node(2), schema());
     assert!(reopened.rejected_transaction(rejected).is_none());
 }
+
+// Internal: the history decode counter is the only observable of whether
+// commit validation rescans a predicate table's history; the fate alone
+// cannot tell a full-history scan from a lookup of newer transactions.
+#[test]
+fn exclusive_commit_predicate_validation_is_independent_of_table_history() {
+    fn commit_decodes(rows: u8) -> usize {
+        let (_temp_dir, mut core) = open_node();
+        for round in 0..2u64 {
+            for ordinal in 1..=rows {
+                core.commit_mergeable_settled(
+                    MergeableCommit::new("todos", row(ordinal), round * 1_000 + u64::from(ordinal))
+                        .cells(title_cells(format!("v{round}-{ordinal}"))),
+                )
+                .unwrap();
+            }
+        }
+        let tx_id = OpenTransactionId::new();
+        core.open_exclusive(tx_id).unwrap();
+        assert_eq!(core.tx_current_rows(tx_id, "todos").unwrap().len(), usize::from(rows));
+        core.tx_write(tx_id, "todos", row(1), title_cells("mine"), None)
+            .unwrap();
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+        core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 5_000)
+            .unwrap();
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get())
+    }
+    assert_eq!(
+        commit_decodes(8),
+        commit_decodes(64),
+        "committing a whole-table read must not decode the table's history"
+    );
+}
