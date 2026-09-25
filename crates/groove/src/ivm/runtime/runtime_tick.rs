@@ -1974,6 +1974,22 @@ impl<'a> EvaluationSession<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
+        // Retainers are owned by graph lifecycle operations, not by this
+        // session's snapshot: a subscription may subscribe or unsubscribe
+        // while the hydration is suspended. Keep their live value, as the
+        // incremental install does.
+        for node in &self.relevant_nodes {
+            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
+                (Some(meta), Some(live)) => {
+                    meta.retainers = live.retainers.clone();
+                    meta.input_generation = meta.input_generation.max(live.input_generation);
+                }
+                (None, Some(live)) => {
+                    self.node_meta.insert(*node, live.clone());
+                }
+                _ => {}
+            }
+        }
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
