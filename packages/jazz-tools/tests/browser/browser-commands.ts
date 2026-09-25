@@ -3,7 +3,11 @@ import { commands } from "vitest/browser";
 import type { JazzServerInfo } from "./testing-server.js";
 
 export interface JazzServerBrowserCommands {
-  jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
+  jazzServerInfo(
+    appId?: string | null,
+    schema?: number[] | null,
+    gated?: boolean,
+  ): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
   jazzServerBlockNetwork(serverUrl: string): Promise<void>;
   jazzServerUnblockNetwork(serverUrl: string): Promise<void>;
