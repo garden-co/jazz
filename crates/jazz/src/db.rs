@@ -45,10 +45,11 @@ use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
+    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationSnapshot, RowProvenance,
+    TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
+use crate::positional_order::PositionalOrder;
 pub use crate::protocol::PermissionAdvice;
 use crate::protocol::{
     AuthorizationScopeReceipt, BindingSource, BindingViewKey, BranchSelector, BranchViewBase,
@@ -5157,9 +5158,12 @@ impl SubscriptionSender {
 
 #[derive(Clone, Default)]
 struct RelationSnapshotIndex {
-    roots: BTreeMap<OutputOccurrenceId, usize>,
-    related: BTreeMap<(String, RowUuid), usize>,
-    edges: BTreeSet<RelationEdge>,
+    /// Root occurrence identities in snapshot row order. Positional edits and
+    /// identity-to-position lookups are logarithmic, so a single-root terminal
+    /// edit does not renumber every unchanged root. A row-derived index can
+    /// hold an anonymous position where public rows collapse two occurrences
+    /// (hidden flat-join identities omitted); only the last one is addressable.
+    roots: PositionalOrder<OutputOccurrenceId>,
     /// Decoded descendants supersede the encoded root seed until a complete
     /// snapshot is requested. Ordinary delta delivery must not re-encode it.
     terminal_records: BTreeMap<OutputOccurrenceId, terminal_record::TerminalRecordState>,
@@ -5167,20 +5171,29 @@ struct RelationSnapshotIndex {
 
 impl RelationSnapshotIndex {
     fn from_snapshot(snapshot: &RelationSnapshot) -> Self {
-        let mut index = Self::default();
-        for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
-            index
-                .roots
-                .insert(subscription_row_occurrence_id(row), position);
+        Self::with_root_occurrences(
+            snapshot
+                .rows
+                .iter()
+                .take(snapshot.root_count)
+                .map(subscription_row_occurrence_id),
+        )
+    }
+
+    /// Index roots in sequence order. A repeated identity keeps its earlier
+    /// position occupied but anonymous: the later occurrence owns the
+    /// identity, exactly as a keyed identity-to-position map would.
+    fn with_root_occurrences(occurrences: impl IntoIterator<Item = OutputOccurrenceId>) -> Self {
+        let mut roots = PositionalOrder::default();
+        for occurrence in occurrences {
+            roots.anonymize(&occurrence);
+            let position = roots.len();
+            roots.insert(position, occurrence);
         }
-        for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
-            index.related.insert(
-                (row.table().to_owned(), row.row_uuid()),
-                snapshot.root_count + offset,
-            );
+        Self {
+            roots,
+            terminal_records: BTreeMap::new(),
         }
-        index.edges = snapshot.edges.iter().cloned().collect();
-        index
     }
 }
 
@@ -6061,7 +6074,7 @@ fn apply_maintained_update_to_snapshot(
                 unreachable!("maintained updates always emit deltas")
             };
             for output in added.iter_mut().chain(updated.iter_mut()) {
-                let Some(index) = snapshot_index.roots.get(&output.occurrence_id).copied() else {
+                let Some(index) = snapshot_index.roots.position(&output.occurrence_id) else {
                     continue;
                 };
                 output.row = snapshot.rows[index].clone();
@@ -6090,7 +6103,6 @@ fn apply_maintained_update_to_snapshot(
                     "structured terminal operation arrived without a prepared root layout",
                 )
             })?;
-            let known_occurrences = snapshot_index.roots.keys().cloned().collect::<Vec<_>>();
             let mut occurrence_overrides = BTreeMap::new();
             for operation in terminal_operations
                 .iter()
@@ -6108,8 +6120,10 @@ fn apply_maintained_update_to_snapshot(
                     .root_key
                     .get(1..17)
                     .filter(|_| operation.root_key.first().copied() == Some(10));
-                let candidates = known_occurrences
-                    .iter()
+                // Only a key hiding internal join identities reaches this scan.
+                let candidates = snapshot_index
+                    .roots
+                    .keys_unordered()
                     .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
                     .cloned()
                     .collect::<Vec<_>>();
@@ -6163,11 +6177,13 @@ fn apply_maintained_membership_update_to_snapshot(
         snapshot
             .rows
             .extend(update_added.iter().map(|(_, row)| row.clone()));
-        snapshot_index.roots = update_added
-            .iter()
-            .enumerate()
-            .map(|(index, (occurrence, _))| (occurrence.clone(), index))
-            .collect();
+        // Later duplicates replace earlier ones, as in a keyed map.
+        snapshot_index.roots = RelationSnapshotIndex::with_root_occurrences(
+            update_added
+                .iter()
+                .map(|(occurrence, _)| occurrence.clone()),
+        )
+        .roots;
         return SubscriptionEvent::Delta {
             reset: false,
             publishable: true,
@@ -6194,7 +6210,7 @@ fn apply_maintained_membership_update_to_snapshot(
     let mut removed = Vec::new();
 
     for (key, row) in &update_added {
-        if let Some(position) = snapshot_index.roots.get(&key).copied() {
+        if let Some(position) = snapshot_index.roots.position(key) {
             let equivalent = snapshot.rows[position].subscription_equivalent(row);
             if crate::debug_env::covered_input_trace() {
                 eprintln!(
@@ -6214,10 +6230,7 @@ fn apply_maintained_membership_update_to_snapshot(
         } else {
             let index = snapshot.root_count;
             snapshot.rows.insert(index, row.clone());
-            for position in snapshot_index.related.values_mut() {
-                *position += 1;
-            }
-            snapshot_index.roots.insert(key.clone(), index);
+            snapshot_index.roots.insert(index, key.clone());
             snapshot.root_count += 1;
             added.push(SubscriptionOutputRow {
                 occurrence_id: key.clone(),
@@ -6240,8 +6253,7 @@ fn apply_maintained_membership_update_to_snapshot(
             .filter_map(|occurrence| {
                 snapshot_index
                     .roots
-                    .get(*occurrence)
-                    .copied()
+                    .position(*occurrence)
                     .map(|position| ((*occurrence).clone(), position))
             })
             .collect::<Vec<_>>();
@@ -6256,10 +6268,6 @@ fn apply_maintained_membership_update_to_snapshot(
                 .iter()
                 .map(|(_, position)| *position)
                 .collect::<Vec<_>>();
-            let removal_ids = removals
-                .iter()
-                .map(|(occurrence, _)| occurrence)
-                .collect::<BTreeSet<_>>();
             removed.extend(removals.iter().map(|(occurrence_id, index)| {
                 let row = &snapshot.rows[*index];
                 RemovedRow {
@@ -6278,14 +6286,8 @@ fn apply_maintained_membership_update_to_snapshot(
                 keep
             });
             snapshot.root_count -= removed_positions.len();
-            snapshot_index
-                .roots
-                .retain(|occurrence, _| !removal_ids.contains(occurrence));
-            for position in snapshot_index.roots.values_mut() {
-                *position -= removed_positions.partition_point(|removed| removed < position);
-            }
-            for position in snapshot_index.related.values_mut() {
-                *position -= removed_positions.len();
+            for (occurrence, _) in &removals {
+                snapshot_index.roots.remove(occurrence);
             }
         }
     }
@@ -6357,7 +6359,16 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
-    let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
+    // Every root must be addressable before positional edits are applied;
+    // a gap would silently misplace the edits below.
+    if snapshot_index.roots.len() != snapshot.root_count
+        || snapshot_index.roots.anonymous_len() != 0
+    {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained snapshot root is missing an occurrence identity",
+        ));
+    }
     let affected = root_operations
         .iter()
         .map(|(occurrence_id, _)| occurrence_id.clone())
@@ -6368,7 +6379,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
-            let index = *snapshot_index.roots.get(occurrence_id)?;
+            let index = snapshot_index.roots.position(occurrence_id)?;
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
@@ -6413,18 +6424,13 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
-    // Membership remains valid across positional edits; positions do not.
-    // Avoid searching the growing vector for a provably fresh insertion.
-    let mut present = occurrences.iter().cloned().collect::<BTreeSet<_>>();
+    // Apply Groove's positional edits directly to the root order: each edit
+    // costs O(log n) index work plus one row-vector shift, and unchanged
+    // roots are never renumbered or revisited.
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
-                if !present.insert(occurrence_id.clone()) {
-                    let existing = occurrences
-                        .iter()
-                        .position(|current| current == &occurrence_id)
-                        .expect("present occurrence has a snapshot position");
-                    occurrences.remove(existing);
+                if let Some(existing) = snapshot_index.roots.remove(&occurrence_id) {
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
                 }
@@ -6438,15 +6444,12 @@ fn apply_terminal_operations_to_subscription_snapshot(
                     index,
                 )?
                 .row;
-                occurrences.insert(index, occurrence_id);
+                snapshot_index.roots.insert(index, occurrence_id);
                 snapshot.rows.insert(index, row);
                 snapshot.root_count += 1;
             }
             groove::ivm::TerminalEdit::Update { value, .. } => {
-                let Some(index) = occurrences
-                    .iter()
-                    .position(|current| current == &occurrence_id)
-                else {
+                let Some(index) = snapshot_index.roots.position(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
                         "terminal root update addressed a missing result",
@@ -6463,34 +6466,25 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .row;
             }
             groove::ivm::TerminalEdit::Remove { .. } => {
-                let Some(index) = occurrences
-                    .iter()
-                    .position(|current| current == &occurrence_id)
-                else {
+                let Some(index) = snapshot_index.roots.remove(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
                         "terminal root removal addressed a missing result",
                     ));
                 };
-                present.remove(&occurrence_id);
-                occurrences.remove(index);
                 snapshot.rows.remove(index);
                 snapshot.root_count -= 1;
             }
             groove::ivm::TerminalEdit::Move { index, .. } => {
-                let Some(previous_index) = occurrences
-                    .iter()
-                    .position(|current| current == &occurrence_id)
-                else {
+                let Some(previous_index) = snapshot_index.roots.remove(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
                         "terminal root move addressed a missing result",
                     ));
                 };
-                let occurrence_id = occurrences.remove(previous_index);
                 let row = snapshot.rows.remove(previous_index);
                 let index = index.min(snapshot.root_count.saturating_sub(1));
-                occurrences.insert(index, occurrence_id);
+                snapshot_index.roots.insert(index, occurrence_id);
                 snapshot.rows.insert(index, row);
             }
         }
@@ -6505,16 +6499,10 @@ fn apply_terminal_operations_to_subscription_snapshot(
     apply_descendant_terminal_operations_to_snapshot(
         snapshot,
         snapshot_index,
-        &occurrences,
         &affected,
         &descendant_operations,
         layout.root_union_arm,
     )?;
-
-    let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
-    *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
-    snapshot_index.terminal_records = terminal_records;
-    snapshot_index.roots = root_occurrence_positions(&occurrences);
 
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6527,8 +6515,8 @@ fn apply_terminal_operations_to_subscription_snapshot(
         let previous = before.get(&occurrence_id);
         let current = snapshot_index
             .roots
-            .get(&occurrence_id)
-            .map(|&index| (index, &snapshot.rows[index]));
+            .position(&occurrence_id)
+            .map(|index| (index, &snapshot.rows[index]));
         match (previous, current) {
             (None, Some((index, row))) => added.push(SubscriptionOutputRow {
                 occurrence_id,
@@ -6576,7 +6564,6 @@ fn apply_terminal_operations_to_subscription_snapshot(
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
-    occurrences: &[OutputOccurrenceId],
     roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
     root_union_arm: bool,
@@ -6587,10 +6574,7 @@ fn apply_descendant_terminal_operations_to_snapshot(
         }
         let occurrence =
             terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
-        let Some(root_index) = occurrences
-            .iter()
-            .position(|candidate| candidate == &occurrence)
-        else {
+        let Some(root_index) = snapshot_index.roots.position(&occurrence) else {
             // A collector can emit the child retractions belonging to a root
             // it retracts in the same terminal batch.  The public operation
             // remains useful to a consumer which folds its child state before
@@ -6656,13 +6640,13 @@ fn materialize_subscription_terminal_record(
     occurrence: &OutputOccurrenceId,
 ) -> Result<(), Error> {
     if let Some(record) = index.terminal_records.get(occurrence) {
-        let position = index.roots.get(occurrence).ok_or_else(|| {
+        let position = index.roots.position(occurrence).ok_or_else(|| {
             Error::new(
                 ErrorCode::Protocol,
                 "retained terminal record has no root occurrence",
             )
         })?;
-        let root = snapshot.rows.get_mut(*position).ok_or_else(|| {
+        let root = snapshot.rows.get_mut(position).ok_or_else(|| {
             Error::new(
                 ErrorCode::Protocol,
                 "retained terminal root position is outside snapshot",
@@ -6960,36 +6944,21 @@ fn snapshot_root_occurrences(
     snapshot: &RelationSnapshot,
     snapshot_index: &RelationSnapshotIndex,
 ) -> Result<Vec<OutputOccurrenceId>, Error> {
-    let mut occurrences = vec![None; snapshot.root_count];
-    for (occurrence, position) in &snapshot_index.roots {
-        let slot = occurrences.get_mut(*position).ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "maintained root occurrence index exceeds snapshot roots",
-            )
-        })?;
-        *slot = Some(occurrence.clone());
+    if snapshot_index.roots.len() > snapshot.root_count {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained root occurrence index exceeds snapshot roots",
+        ));
     }
-    occurrences
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "maintained snapshot root is missing an occurrence identity",
-            )
-        })
-}
-
-fn root_occurrence_positions(
-    occurrences: &[OutputOccurrenceId],
-) -> BTreeMap<OutputOccurrenceId, usize> {
-    occurrences
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(position, occurrence)| (occurrence, position))
-        .collect()
+    if snapshot_index.roots.len() != snapshot.root_count
+        || snapshot_index.roots.anonymous_len() != 0
+    {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained snapshot root is missing an occurrence identity",
+        ));
+    }
+    Ok(snapshot_index.roots.iter().flatten().cloned().collect())
 }
 
 fn relation_snapshot_index_with_root_occurrences(
@@ -7002,15 +6971,15 @@ fn relation_snapshot_index_with_root_occurrences(
             "maintained terminal occurrence sidecar length does not match root rows",
         ));
     }
-    let mut index = RelationSnapshotIndex::from_snapshot(snapshot);
-    index.roots = root_occurrence_positions(occurrences);
-    if index.roots.len() != occurrences.len() {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "maintained terminal occurrence sidecar contains duplicate identity",
-        ));
-    }
-    Ok(index)
+    Ok(RelationSnapshotIndex {
+        roots: PositionalOrder::from_ordered(occurrences.iter().cloned()).map_err(|_| {
+            Error::new(
+                ErrorCode::Protocol,
+                "maintained terminal occurrence sidecar contains duplicate identity",
+            )
+        })?,
+        terminal_records: BTreeMap::new(),
+    })
 }
 
 /// Flat tuple identity is carried by the maintained terminal sidecar, not the
@@ -7165,17 +7134,23 @@ fn reset_removed_roots(
     current_occurrences: &[OutputOccurrenceId],
 ) -> Vec<RemovedRow> {
     let current = current_occurrences.iter().collect::<BTreeSet<_>>();
+    // Keyed (not positional) order, as before: consumers see removals in
+    // occurrence-identity order with their pre-frame positions.
     previous_index
         .roots
-        .iter()
-        .filter(|(occurrence, _)| !current.contains(occurrence))
-        .map(|(occurrence_id, position)| {
-            let row = &previous.rows[*position];
+        .keys_unordered()
+        .filter(|occurrence| !current.contains(occurrence))
+        .map(|occurrence_id| {
+            let position = previous_index
+                .roots
+                .position(occurrence_id)
+                .expect("indexed root occurrence has a position");
+            let row = &previous.rows[position];
             RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
                 occurrence_id: occurrence_id.clone(),
-                index: *position,
+                index: position,
             }
         })
         .collect()

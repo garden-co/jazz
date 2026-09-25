@@ -4220,11 +4220,12 @@ where
             // Preserve the graph's complete tuple identities and their current
             // positions, including any terminal edits drained during this reset.
             // Public root UUIDs alone cannot distinguish flat-join occurrences.
-            let mut positioned_roots = snapshot_index.roots.iter().collect::<Vec<_>>();
-            positioned_roots.sort_by_key(|(_, position)| **position);
-            let root_occurrence_ids = positioned_roots
-                .into_iter()
-                .map(|(occurrence, _)| occurrence.clone())
+            // Anonymous (collapsed row-derived) positions carry no identity.
+            let root_occurrence_ids = snapshot_index
+                .roots
+                .iter()
+                .flatten()
+                .cloned()
                 .collect::<Vec<_>>();
             let settled = subscription_is_settled(
                 &node.borrow(),
@@ -4274,12 +4275,8 @@ where
             )?;
             state_ref.groove_runtime_token = groove_runtime_token;
             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-            state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
-            state_ref.snapshot_index.roots = root_occurrence_ids
-                .into_iter()
-                .enumerate()
-                .map(|(index, occurrence)| (occurrence, index))
-                .collect();
+            state_ref.snapshot_index =
+                RelationSnapshotIndex::with_root_occurrences(root_occurrence_ids);
             let SubscriptionKind::Prepared {
                 maintained_subscription,
                 ..
