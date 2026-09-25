@@ -173,7 +173,11 @@ function shouldApplyDeltaInBulk<T extends { id: string }>(delta: RowDelta<T>[]):
   return true;
 }
 
-function normalizeRowDelta<T extends { id: string }>(delta: RowDelta<T>[]): RowDelta<T>[] {
+/**
+ * Drop removals of ids that the same delta adds or updates; those rows stay in
+ * the result, and applying the removal would lose their position.
+ */
+export function normalizeRowDelta<T extends { id: string }>(delta: RowDelta<T>[]): RowDelta<T>[] {
   if (delta.length < 2) return delta;
   const materializedIds = new Set<string>();
   for (const change of delta) {
@@ -266,7 +270,8 @@ function withResultIdentity<T extends { id: string }>(item: T, key: string): T {
   return item;
 }
 
-function resultIdentity(item: { id: string }): string {
+/** The result key of a delivered item: its occurrence key when it has one, else its id. */
+export function resultIdentity(item: { id: string }): string {
   return (item as { __jazzResultKey?: string }).__jazzResultKey ?? item.id;
 }
 
