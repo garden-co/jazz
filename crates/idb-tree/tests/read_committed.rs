@@ -136,6 +136,10 @@ fn the_view_never_hydrates_and_cannot_write() {
             Err(Error::NotResident(_))
         ));
         assert!(matches!(
+            ready(committed.range(b"", b"\xff")),
+            Err(Error::NotResident(_))
+        ));
+        assert!(matches!(
             ready(committed.put(b"b".to_vec(), b"2".to_vec())),
             Err(Error::ReadOnlyView)
         ));
