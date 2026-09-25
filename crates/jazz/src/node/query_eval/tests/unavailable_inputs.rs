@@ -266,6 +266,46 @@ fn dashboard_sized_admission_batch_hands_every_program_to_its_installer() {
     assert_eq!(node.query_program_compilations_for_test(), compiled);
 }
 
+fn installs_without_compiling(
+    node: &mut NodeState<RocksDbStorage>,
+    alice: AuthorSubject,
+    (shape, binding): &(ValidatedQuery, Binding),
+) -> bool {
+    let compiled = node.query_program_compilations_for_test();
+    let (subscription, rows) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            shape,
+            binding,
+            alice,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert!(rows.rows.is_empty());
+    node.database.unsubscribe(subscription.subscription.id());
+    node.query_program_compilations_for_test() == compiled
+}
+
+/// The handoff keeps exactly its budget: a batch of that size hands the
+/// oldest admission to its installer, and one admission more evicts only the
+/// oldest.
+#[test]
+fn admission_handoff_budget_edge_evicts_only_the_oldest_program() {
+    let budget = crate::node::query_eval::lowering::ADMISSION_HANDOFF_MAX_PROGRAMS;
+
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let queries = admit_label_queries(&mut node, &schema, alice, budget);
+    assert!(installs_without_compiling(&mut node, alice, &queries[0]));
+
+    let (_dir, mut node, schema) = fixture();
+    let queries = admit_label_queries(&mut node, &schema, alice, budget + 1);
+    assert!(installs_without_compiling(&mut node, alice, &queries[1]));
+    assert!(!installs_without_compiling(&mut node, alice, &queries[0]));
+}
+
 /// Exercise abandoned admissions beyond the executable budget through real
 /// compilation/installation, rather than asserting the cache's representation.
 #[test]
