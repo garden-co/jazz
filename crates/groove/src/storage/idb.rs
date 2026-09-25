@@ -24,7 +24,8 @@ const MAX_CONFLICT_BACKOFF_YIELDS: usize = 16;
 /// A write future dropped part-way (a cancelled task, a torn-down page) may
 /// leave staged writes, or a commit of unknown outcome, in the tree. Force the
 /// next operation to reload from the store instead of serving or committing
-/// that state. Errors returned normally are handled by the caller.
+/// that state. An error returned through `?` also drops the armed guard; that
+/// is harmless, because every caller already reloads after a failed write.
 struct ResetIfCancelled<'a>(Option<&'a Cell<bool>>);
 
 impl<'a> ResetIfCancelled<'a> {
