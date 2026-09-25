@@ -43,7 +43,7 @@ impl IvmRuntime {
                 input.output.fields()[*index].value_type.clone(),
             )
         }));
-        let expressions = selected
+        let mut expressions = selected
             .iter()
             .zip(&names)
             .map(|(index, name)| ProjectionExpr {
@@ -51,15 +51,31 @@ impl IvmRuntime {
                 output_name: Some(name.clone()),
                 output_identity: crate::records::FieldIdentity::Name(name.clone()),
             })
-            .collect();
-        let mapping = selected.iter().map(|index| (0, *index)).collect();
+            .collect::<Vec<_>>();
+        let source = self.prepare_projected_input(input.node, &mut expressions)?;
+        let source_output = self
+            .graph
+            .node(source)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(source))?
+            .descriptor
+            .output
+            .records();
+        let mapping = expressions
+            .iter()
+            .map(|expr| {
+                let ProjectExpr::Field(field) = &expr.expression else {
+                    unreachable!("column selection contains only field references")
+                };
+                resolve_field_ref(&source_output, field).map(|index| (0, index))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let node = self.graph.dedup_node(
             NodeDescriptor::new(
                 OpType::MapProject(MapProjectOp {
                     expressions,
                     mapping,
                 }),
-                [input.node],
+                [source],
                 output,
             ),
             NodeDurability::Ephemeral,
@@ -70,6 +86,213 @@ impl IvmRuntime {
             node,
             root_ordering_node: input.root_ordering_node,
         })
+    }
+
+    /// Apply the same consumer-local field demand to user projections and to
+    /// the selections introduced while narrowing a join. Fallible expressions
+    /// remain in place even when none of their outputs are requested.
+    fn prepare_projected_input(
+        &mut self,
+        mut input: NodeId,
+        expressions: &mut [ProjectionExpr],
+    ) -> Result<NodeId, IvmRuntimeError> {
+        while expressions
+            .iter()
+            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+        {
+            let parent = self
+                .graph
+                .node(input)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?;
+            let OpType::MapProject(project) = &parent.descriptor.operator else {
+                break;
+            };
+            if project.expressions.is_empty()
+                || !project
+                    .expressions
+                    .iter()
+                    .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+            {
+                break;
+            }
+            for expr in expressions.iter_mut() {
+                let ProjectExpr::Field(field) = &expr.expression else {
+                    unreachable!();
+                };
+                let index = resolve_field_ref(&parent.descriptor.output.records(), field)?;
+                expr.expression = project.expressions[index].expression.clone();
+            }
+            input = parent.descriptor.inputs[0];
+        }
+        match &self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor
+            .operator
+        {
+            OpType::SemiJoin(_) => self.narrow_projected_existence(input, expressions),
+            OpType::UnwrapNullable(_) => self.narrow_projected_unwrap(input, expressions),
+            _ => self.narrow_projected_join(input, expressions),
+        }
+    }
+
+    /// Existence tests need matching keys and downstream fields, not the rest
+    /// of the left payload. Projection is linear in the left bag: preserve its
+    /// weights, including when distinct wide rows become the same narrow row.
+    fn narrow_projected_existence(
+        &mut self,
+        input: NodeId,
+        expressions: &mut [ProjectionExpr],
+    ) -> Result<NodeId, IvmRuntimeError> {
+        let descriptor = self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor
+            .clone();
+        let OpType::SemiJoin(join) = &descriptor.operator else {
+            unreachable!();
+        };
+        if join.residual_predicate.is_some() || !matches!(join.kind, JoinOpKind::Inner) {
+            return Ok(input);
+        }
+        let original = descriptor.output.records();
+        let keys = plan_expr_names(&join.left_key)
+            .iter()
+            .map(|name| resolve_field_ref(&original, &FieldRef::name(name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut selected = keys.clone();
+        for expression in expressions.iter() {
+            if let Some(field) = projection_source_ref(&expression.expression) {
+                selected.push(resolve_field_ref(&original, field)?);
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        if selected.len() == original.fields().len() {
+            return Ok(input);
+        }
+        let source = self
+            .graph
+            .node(descriptor.inputs[0])
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(descriptor.inputs[0]))?
+            .descriptor
+            .inputs[0];
+        let left = self.compile_selected_columns(
+            CompiledNode {
+                node: source,
+                output: original,
+                root_ordering_node: None,
+            },
+            &selected,
+        )?;
+        let left_key = keys
+            .iter()
+            .map(|key| {
+                field_ref_name(
+                    &left.output,
+                    &FieldRef::Resolved(selected.binary_search(key).expect("join key retained")),
+                )
+                .map(PlanExpr::field)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let arrangement = self.add_arrangement_node(
+            left.node,
+            left.output,
+            plan_expr_names(&left_key),
+            join.comparison,
+        );
+        for expression in expressions {
+            if let Some(field) = projection_source_ref_mut(&mut expression.expression) {
+                let old = resolve_field_ref(&original, field)?;
+                *field = FieldRef::Resolved(selected.binary_search(&old).expect("field retained"));
+            }
+        }
+        let join = JoinOp {
+            left_descriptor: left.output,
+            left_key,
+            ..join.clone()
+        };
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::SemiJoin(join),
+                [arrangement, descriptor.inputs[1]],
+                left.output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(node)
+    }
+
+    /// Keep the nullable test in the graph, including when the consumer drops
+    /// that field. Only the other unused payload columns move below the test.
+    fn narrow_projected_unwrap(
+        &mut self,
+        input: NodeId,
+        expressions: &mut [ProjectionExpr],
+    ) -> Result<NodeId, IvmRuntimeError> {
+        let descriptor = self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor
+            .clone();
+        let OpType::UnwrapNullable(unwrap) = &descriptor.operator else {
+            unreachable!();
+        };
+        let original = descriptor.output.records();
+        let mut selected = vec![unwrap.field_idx];
+        for expression in expressions.iter() {
+            if let Some(field) = projection_source_ref(&expression.expression) {
+                selected.push(resolve_field_ref(&original, field)?);
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        if selected.len() == original.fields().len() {
+            return Ok(input);
+        }
+        let source = descriptor.inputs[0];
+        let source_output = self
+            .graph
+            .node(source)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(source))?
+            .descriptor
+            .output
+            .records();
+        let narrowed = self.compile_selected_columns(
+            CompiledNode {
+                node: source,
+                output: source_output,
+                root_ordering_node: None,
+            },
+            &selected,
+        )?;
+        let field_idx = selected
+            .binary_search(&unwrap.field_idx)
+            .expect("unwrap field retained");
+        let output = unwrap_nullable_descriptor(&narrowed.output, field_idx)?;
+        for expression in expressions {
+            if let Some(field) = projection_source_ref_mut(&mut expression.expression) {
+                let old = resolve_field_ref(&original, field)?;
+                *field = FieldRef::Resolved(selected.binary_search(&old).expect("field retained"));
+            }
+        }
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::UnwrapNullable(UnwrapNullableOp {
+                    field: field_ref_name(&narrowed.output, &FieldRef::Resolved(field_idx))?,
+                    field_idx,
+                }),
+                [narrowed.node],
+                output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(node)
     }
 
     /// Semi/anti joins observe right-key multiplicities, not right payloads.
@@ -1060,39 +1283,7 @@ impl IvmRuntime {
                 let output = inferred_output;
                 let plan = self.projection_plan(input_output, fields)?;
                 let mut expressions = plan.expressions()?.to_vec();
-                // Compose only total field selections. Dropping an unselected
-                // enum conversion or constant expression could change whether
-                // a row is omitted or an error is raised. Never cross those,
-                // filters, joins, winner selection or other semantic operators.
-                while expressions
-                    .iter()
-                    .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
-                {
-                    let parent = self
-                        .graph
-                        .node(input_node)
-                        .ok_or(IvmRuntimeError::GraphNodeNotFound(input_node))?;
-                    let OpType::MapProject(parent_project) = &parent.descriptor.operator else {
-                        break;
-                    };
-                    if parent_project.expressions.is_empty()
-                        || !parent_project
-                            .expressions
-                            .iter()
-                            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
-                    {
-                        break;
-                    }
-                    for expr in &mut expressions {
-                        let ProjectExpr::Field(field) = &expr.expression else {
-                            unreachable!();
-                        };
-                        let index = resolve_field_ref(&parent.descriptor.output.records(), field)?;
-                        expr.expression = parent_project.expressions[index].expression.clone();
-                    }
-                    input_node = parent.descriptor.inputs[0];
-                }
-                input_node = self.narrow_projected_join(input_node, &mut expressions)?;
+                input_node = self.prepare_projected_input(input_node, &mut expressions)?;
                 let source_output = self
                     .graph
                     .node(input_node)

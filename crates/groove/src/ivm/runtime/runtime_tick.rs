@@ -1579,6 +1579,44 @@ impl<'a> EvaluationSession<'a> {
             roots.iter().copied(),
             true,
         )?;
+        #[cfg(feature = "cold-settle-attribution")]
+        if std::env::var_os("GROOVE_TRACE_READ_GRAPH").is_some() {
+            for (slot, id) in work_queue.layout.nodes.iter().enumerate() {
+                let node = runtime.graph.node(*id).expect("hydration graph node");
+                let operator = match &node.descriptor.operator {
+                    OpType::TableSource(_) => "table",
+                    OpType::IndexSource(_) => "index",
+                    OpType::InlineRecords(_) => "inline",
+                    OpType::BindingSource(_) => "binding",
+                    OpType::MapProject(_) => "project",
+                    OpType::Filter(_) => "filter",
+                    OpType::Arrange(_) => "arrange",
+                    OpType::Join(_) => "join",
+                    OpType::SemiJoin(_) => "semi_join",
+                    OpType::AntiJoin(_) => "anti_join",
+                    OpType::Union => "union",
+                    OpType::Distinct => "distinct",
+                    OpType::UnwrapNullable(_) => "unwrap_nullable",
+                    OpType::Recursive(_) => "recursive",
+                    OpType::VariantProject(_) => "variant_project",
+                    OpType::Aggregate(_) => "aggregate",
+                    _ => "other",
+                };
+                eprintln!(
+                    "READ_GRAPH {}",
+                    serde_json::json!({
+                        "node": id.0,
+                        "operator": operator,
+                        "inputs": node.descriptor.inputs.iter().map(|id| id.0).collect::<Vec<_>>(),
+                        "consumers": work_queue.layout.dependents(slot).iter().map(|slot| work_queue.layout.nodes[*slot].0).collect::<Vec<_>>(),
+                        "global_consumers": node.children.len(),
+                        "retainers": runtime.node_meta.get(id).map_or(0, |meta| meta.retainers.len()),
+                        "root": roots.contains(id),
+                        "durable": node.is_durable(),
+                    })
+                );
+            }
+        }
         // Installed operator state is root-scoped. Recursive child scopes are
         // scratch state and are cleared before an evaluation is installed.
         // Probe by reachable node instead of scanning state owned by unrelated

@@ -423,6 +423,8 @@ impl TickEvaluator<'_> {
             self.context.eval_mode == EvalMode::Hydrate,
             batch.input.deltas.len(),
             batch.stage_visits,
+            batch.output.capacity(),
+            batch.output.len(),
         );
         Poll::Ready(
             pending
