@@ -467,6 +467,8 @@ pub mod binding_codec;
 pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
+/// Diagnostic environment switches, read once per process.
+mod debug_env;
 /// Host-facing exclusive lifecycle for foreground transaction-node identities.
 pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.

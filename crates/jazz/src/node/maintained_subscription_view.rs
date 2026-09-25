@@ -103,6 +103,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    /// Counts key comparisons made while scanning `structured_root_key_order`
+    /// for membership. Any such scan on an insert path must bump it, so tests
+    /// can pin that opening N fresh rows stays linear.
     #[cfg(test)]
     root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
@@ -681,9 +684,7 @@ impl MaintainedSubscriptionView {
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
         for (sink, terminal) in deltas.terminal_sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-                && !terminal.operations.is_empty()
-            {
+            if crate::debug_env::covered_input_trace() && !terminal.operations.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
                     schemas.get(&sink)?,
@@ -765,7 +766,7 @@ impl MaintainedSubscriptionView {
             }
         }
         for (sink, deltas) in deltas.sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() && !deltas.is_empty() {
+            if crate::debug_env::covered_input_trace() && !deltas.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",
                     schemas.get(&sink)?,
@@ -806,7 +807,7 @@ impl MaintainedSubscriptionView {
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+        if crate::debug_env::covered_input_trace()
             && (!transitions.adds.is_empty()
                 || !transitions.program_fact_adds.is_empty()
                 || !transitions.program_fact_removes.is_empty())
@@ -934,7 +935,7 @@ impl MaintainedSubscriptionView {
             if weight == 0 {
                 continue;
             }
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=apply_decoded_event event={event:?} weight={weight}"
                 );
@@ -1011,11 +1012,24 @@ impl MaintainedSubscriptionView {
                         // Root-collector rows never reach this branch; they
                         // retain the exact opaque terminal key above.
                         let terminal_key = root.0.as_bytes().to_vec();
-                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        // Direct-row keys enter `structured_root_keys` and the
+                        // order together and are only removed together, so a
+                        // fresh key map entry is exactly a key not yet
+                        // ordered. Scanning the order instead made opening N
+                        // rows quadratic.
+                        let first_occurrence = self
+                            .structured_root_keys
+                            .insert(terminal_key.clone(), root)
+                            .is_none();
                         self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
-                        if !self.structured_root_key_order.contains(&terminal_key) {
+                        if first_occurrence {
                             self.structured_root_key_order.push(terminal_key);
                         }
+                        debug_assert_eq!(
+                            self.structured_root_keys.len(),
+                            self.structured_root_key_order.len(),
+                            "direct app-row key map and order must hold the same keys"
+                        );
                     }
                 }
             }
@@ -1811,7 +1825,7 @@ fn rebind_terminal_operation_to_layout(
     if operation.root_descriptor == layout.root_descriptor {
         return Ok(operation);
     }
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE terminal_descriptor_mismatch operation={:?} layout={:?}",
             operation.root_descriptor, layout.root_descriptor,
@@ -4043,6 +4057,55 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // Internal mechanism test, like the collector one above: the public
+    // result cannot reveal a scan of the order for each direct app row.
+    #[test]
+    fn fresh_direct_app_rows_skip_order_scans_and_keep_first_occurrence_order() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = |i: u16| {
+            let mut bytes = [0_u8; 16];
+            bytes[..2].copy_from_slice(&i.to_be_bytes());
+            RowUuid::from_bytes(bytes)
+        };
+        let event = |i: u16, weight| {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: root(i),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(root(i).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                weight,
+            )
+        };
+        let mut maintained = test_maintained();
+        for i in 0..2000 {
+            maintained
+                .apply_decoded_deltas([event(i, 1)], &aliases())
+                .unwrap();
+        }
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+
+        // A root that leaves and returns keeps its first-occurrence slot and
+        // is never ordered twice.
+        maintained
+            .apply_decoded_deltas([event(7, -1)], &aliases())
+            .unwrap();
+        maintained
+            .apply_decoded_deltas([event(7, 1)], &aliases())
+            .unwrap();
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+        let roots: Vec<RowUuid> = maintained
+            .structured_app_rows()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect();
+        assert_eq!(roots, (0..2000).map(root).collect::<Vec<_>>());
     }
 
     #[test]

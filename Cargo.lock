@@ -2118,18 +2118,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
-]
-
-[[package]]
-name = "jazz-example-benchmark-smoke"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2138,6 +2142,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
  "jazz-storage-rocksdb",
  "tempfile",
 ]
@@ -2148,6 +2153,17 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
+]
+
+[[package]]
+name = "jazz-example-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
 ]
 
 [[package]]
@@ -2214,6 +2230,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2222,6 +2239,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
  "serde_json",
 ]
 
@@ -2245,6 +2263,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2253,6 +2272,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]

@@ -2041,6 +2041,13 @@ impl Database {
         DatabaseBatch::default()
     }
 
+    /// Test helper: bindings admitted onto a live prepared shape without a
+    /// full hydration. Result equality alone cannot show which path ran.
+    #[cfg(test)]
+    pub(crate) fn live_attaches(&self) -> u64 {
+        self.ivm_runtime.live_attaches()
+    }
+
     /// Test helper whose reads observe writes already added to the batch.
     #[cfg(test)]
     pub(crate) fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_> {

@@ -103,6 +103,11 @@ pub enum Error {
     OwnershipExpired,
     #[error("an IDBTree commit is already in flight")]
     CommitInFlight,
+    /// A flush was cancelled mid-commit. Every operation except reads through
+    /// a read-committed view fails until [`IdbTree::reload`] resolves the
+    /// commit's outcome from the store.
+    #[error("an IDBTree commit was abandoned; reload before using the tree")]
+    CommitAbandoned,
     /// A read-committed view needed a page that is not resident. It never
     /// hydrates: the caller retries through the ordinary tree instead.
     #[error("IDBTree page {0} is not resident for a read-committed view")]
@@ -161,6 +166,23 @@ struct TreeCore<S> {
     deleted: BTreeSet<PageId>,
     retirement_undo: Vec<PageId>,
     commit_in_flight: bool,
+    /// A flush was dropped while its commit was in flight, so whether that
+    /// commit landed is unknown, and the live root may name pages that never
+    /// became durable. Only [`IdbTree::reload`] recovers: the store is the
+    /// sole authority on the outcome.
+    commit_abandoned: bool,
+}
+
+struct AbandonOnDrop<'a, S>(Option<&'a RefCell<TreeCore<S>>>);
+
+impl<S> Drop for AbandonOnDrop<'_, S> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.take() {
+            let mut tree = inner.borrow_mut();
+            tree.commit_in_flight = false;
+            tree.commit_abandoned = true;
+        }
+    }
 }
 
 /// A write only appends fresh COW page ids and advances root/allocation
@@ -272,17 +294,23 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     fn ensure_live(&self) -> Result<(), Error> {
-        if self._ownership.is_live() {
-            Ok(())
-        } else {
-            Err(Error::OwnershipExpired)
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
         }
+        // The durable root is still a committed generation after an abandoned
+        // commit, so the read-committed view keeps serving it.
+        if !self.read_committed && self.inner.borrow().commit_abandoned {
+            return Err(Error::CommitAbandoned);
+        }
+        Ok(())
     }
 
     /// Discard staged writes and reload the durable root while retaining this
     /// handle's ownership. Callers must serialize this with writes/flushes.
     pub async fn reload(&self) -> Result<(), Error> {
-        self.ensure_live()?;
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
         self.ensure_writable()?;
         let (store, options) = {
             let tree = self.inner.borrow();
@@ -292,7 +320,9 @@ impl<S: PageStore + Clone> IdbTree<S> {
             (tree.store.clone(), tree.options)
         };
         let fresh = TreeCore::open(store, options).await?;
-        self.ensure_live()?;
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
         *self.inner.borrow_mut() = fresh;
         self.reload_epoch
             .set(self.reload_epoch.get().wrapping_add(1));
@@ -454,7 +484,12 @@ impl<S: PageStore + Clone> IdbTree<S> {
         let Some(prepared) = prepared else {
             return Ok(());
         };
+        // If this future is dropped while the store commit is pending, nothing
+        // would ever complete it: the tree would refuse every later commit and
+        // keep serving the uncommitted root. Mark the commit abandoned instead.
+        let mut abandon = AbandonOnDrop(Some(&self.inner));
         let outcome = store.commit(prepared.commit()).await;
+        abandon.0 = None;
         self.inner.borrow_mut().complete_commit(prepared, outcome)
     }
 
@@ -651,6 +686,7 @@ impl<S: PageStore> TreeCore<S> {
             deleted: BTreeSet::new(),
             retirement_undo: Vec::new(),
             commit_in_flight: false,
+            commit_abandoned: false,
         };
         if tree.metadata.page_size != options.page_size {
             return Err(Error::InvalidOptions(format!(
