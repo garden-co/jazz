@@ -199,6 +199,11 @@ function Hero({
       <h3 className="mt-10 text-sm font-medium uppercase tracking-wider text-fd-muted-foreground">
         Key metrics
       </h3>
+      {example.plannedMetrics && (
+        <div className="mt-3">
+          <Placeholder title="Benchmarks coming" body={example.plannedMetrics} />
+        </div>
+      )}
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {example.metrics.map((metric) => (
           <MetricCard

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { composeWindows, stageFont } from "./encode.mjs";
+import { composeWindows } from "./encode.mjs";
 
 const exampleDir = fileURLToPath(
   new URL("../../../examples/todo-client-localfirst-react/", import.meta.url),
@@ -64,18 +64,10 @@ function installCursor({ color, glideMs }) {
   else mount();
 }
 
-// Render the app in the docs site's font (served to the page by a route) and
-// hide the dev-only inspector overlay, which isn't part of the app.
-function styleApp({ family }) {
+// The dev-only inspector overlay (a floating toggle) isn't part of the app.
+function hideDevOverlay() {
   const style = document.createElement("style");
-  style.textContent = [400, 700]
-    .map(
-      (w) =>
-        `@font-face{font-family:${family};font-weight:${w};src:url(/__video-font/${w}.woff2) format("woff2")}`,
-    )
-    .concat(`body,input,button{font-family:${family},system-ui,sans-serif}`)
-    .concat("jazz-inspector-overlay{display:none!important}")
-    .join("");
+  style.textContent = "jazz-inspector-overlay{display:none!important}";
   // Init scripts can run before the document has a root element.
   if (document.documentElement) document.documentElement.append(style);
   else addEventListener("DOMContentLoaded", () => document.head.append(style));
@@ -135,15 +127,7 @@ try {
       recordVideo: { dir: join(recordingDir, String(devices.length)), size },
     });
     await context.addInitScript(installCursor, { color, glideMs });
-    await context.addInitScript(styleApp, { family: stageFont.family });
-    await context.route("**/__video-font/*.woff2", (route) =>
-      route.fulfill({
-        path: fileURLToPath(
-          stageFont.files[new URL(route.request().url()).pathname.match(/(\d+)\.woff2$/)[1]],
-        ),
-        contentType: "font/woff2",
-      }),
-    );
+    await context.addInitScript(hideDevOverlay);
     const page = await context.newPage();
     devices.push({ label, context, page, startedAt: Date.now() });
     await page.goto(url);
@@ -154,16 +138,11 @@ try {
       .getByRole("button", { name: "Add" })
       .and(page.locator(":enabled"))
       .waitFor({ timeout: 60_000 });
-    const styled = await page.evaluate(async (family) => {
-      await document.fonts.ready;
+    const hidden = await page.evaluate(() => {
       const overlay = document.querySelector("jazz-inspector-overlay");
-      return (
-        getComputedStyle(document.body).fontFamily.includes(family) &&
-        document.fonts.check(`16px ${family}`) &&
-        (!overlay || getComputedStyle(overlay).display === "none")
-      );
-    }, stageFont.family);
-    if (!styled) throw new Error("The recording font or overlay styles did not apply");
+      return !overlay || getComputedStyle(overlay).display === "none";
+    });
+    if (!hidden) throw new Error("The dev overlay is still visible");
   }
   const origin = Date.now();
   const captions = [];

@@ -12,8 +12,8 @@ export const MAX_BYTES = 5_000_000;
 
 const fontFile = (weight) =>
   new URL(`../../public/fonts/body-font-latin-${weight}-normal.woff2`, import.meta.url);
-/** The docs site's body font (Akkurat), for the stage and for the recorded app. */
-export const stageFont = { family: "Akkurat", files: { 400: fontFile(400), 700: fontFile(700) } };
+/** The docs site's body font (Akkurat), for the stage around the recordings. */
+const stageFont = { family: "Akkurat", files: { 400: fontFile(400), 700: fontFile(700) } };
 
 const background = "#0b0d10";
 const layout = { pad: 32, gap: 28, captionBar: 84, label: 26, titleBar: 44, radius: 12 };

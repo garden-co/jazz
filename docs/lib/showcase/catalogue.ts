@@ -36,6 +36,8 @@ export type HeroExample = {
   /** What the placeholder should promise until a capture exists. */
   plannedVideo?: string;
   metrics: HeroMetric[];
+  /** Shown instead of metric cards while an example has no wallclock benchmarks on CodSpeed. */
+  plannedMetrics?: string;
 };
 
 const rate = (count: number, seconds: number) =>
@@ -95,6 +97,187 @@ export const heroExamples: HeroExample[] = [
           `Opening the app again and showing all 1,500 stored todos takes ${formatTime(s)}, including the fixed cost of opening storage.`,
       },
     ],
+  },
+  {
+    id: "chat",
+    title: "Chat",
+    tagline: "Rooms, invites, reactions and shared drawing canvases, synced live.",
+    description:
+      "A React chat app with public rooms and private chats joined by invite code, emoji reactions and collaborative drawing canvases attached to a chat. Every message, reaction and stroke is a local write that Jazz replicates in the background; row-level policies in the schema decide who can read and change what, so components carry no auth logic.",
+    highlights: [
+      "Messages and reactions appear on every member's screen as they're sent",
+      "Join a private chat with its invite code",
+      "Draw together on a canvas attached to the chat",
+    ],
+    sources: [{ label: "React app", path: "examples/chat-react" }],
+    video: null,
+    plannedVideo:
+      "Walkthrough capture is planned: two people chatting, reacting and drawing together.",
+    metrics: [],
+    plannedMetrics: "This example has no benchmark variant yet.",
+  },
+  {
+    id: "band-chat",
+    title: "BandChat",
+    tagline: "Private rooms with membership boundaries, attachments and fast resume.",
+    description:
+      "A Next.js app with Better Auth sign-in, where a room's creator admits or removes members and only members can read or post. Messages carry inline attachments and are created local-first. Its benchmark covers the reads a chat does constantly: a room's timeline page, unread rooms by recent activity, one author's history, and resuming a caught-up client.",
+    highlights: [
+      "Create a room and admit a bandmate",
+      "Send a message with an inline attachment",
+      "Removing a member stops their later writes",
+    ],
+    sources: [
+      { label: "Next.js app", path: "examples/band-chat/apps/nextjs-betterauth" },
+      { label: "Benchmarks", path: "examples/band-chat/benchmarks" },
+    ],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: two bandmates in a private room.",
+    metrics: [],
+    plannedMetrics:
+      "Benchmarked on CodSpeed in simulation mode (instruction counts), which this page doesn't show yet.",
+  },
+  {
+    id: "world-tour",
+    title: "World Tour",
+    tagline: "Tour management on a live globe: dates, venues and a public calendar.",
+    description:
+      "A Vue app for planning a band's tour, with the schedule drawn on a dot-art globe. Members see the full calendar; the public sees confirmed dates only. Both are ordered, bounded three-week itinerary reads that include each stop's venue.",
+    highlights: [
+      "The tour's stops are drawn on the globe",
+      "Members see every date; the public calendar shows confirmed dates only",
+    ],
+    sources: [{ label: "Vue app and benchmarks", path: "examples/world-tour" }],
+    video: null,
+    plannedVideo:
+      "Walkthrough capture is planned: planning a tour stop and checking the public calendar.",
+    metrics: [],
+    plannedMetrics:
+      "Benchmarked on CodSpeed in simulation mode (instruction counts), which this page doesn't show yet.",
+  },
+  {
+    id: "wequencer",
+    title: "Wequencer",
+    tagline: "A collaborative step sequencer: many small subscriptions, many concurrent edits.",
+    description:
+      "Bandmates edit a shared pattern together, watch its transport state and see who else is around. It makes hard local-first shapes concrete: an ordered, windowed step grid with many small subscriptions, concurrent edits to nearby and identical steps, and editor and viewer roles on one shared session.",
+    highlights: [
+      "Two bandmates toggle steps in the same pattern at once",
+      "Go offline, keep editing, and reconnect",
+      "A viewer's edit is refused",
+    ],
+    sources: [
+      { label: "Next.js app", path: "examples/wequencer/apps/next-betterauth" },
+      { label: "Benchmarks", path: "examples/wequencer/benchmarks" },
+    ],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: two bandmates editing one pattern.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "poster-shop",
+    title: "PosterShop",
+    tagline: "A collaborative gig-poster canvas with layers, shapes and live cursors.",
+    description:
+      "The durable data a tldraw-like canvas needs, without tying it to a renderer: canvases, ordered layers, shapes, asset metadata and checkpoints. Layers, canvas, cursors, assets and checkpoints are independently subscribed, so a stream of cursor updates never re-runs the whole canvas query.",
+    highlights: [
+      "Two editors add shapes to the same canvas",
+      "Cursors move live without touching history",
+      "Offline edits replay to peers after reconnecting",
+    ],
+    sources: [
+      { label: "Next.js app", path: "examples/poster-shop/apps/nextjs-betterauth" },
+      { label: "Benchmarks", path: "examples/poster-shop/benchmarks" },
+    ],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: two editors designing one poster.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "record-player",
+    title: "RecordPlayer",
+    tagline: "Shared playlists over streamed audio, with listener and editor invitations.",
+    description:
+      "Albums are browsed in a CoverFlow view and collected into shared playlists. Audio is uploaded as streamed bytes, and invitations grant listener or editor access to a playlist. Concurrent additions from two people converge on the same list.",
+    highlights: [
+      "Invite a friend to listen, or to edit",
+      "Two people add tracks to one playlist at once",
+      "Offline additions flush on reconnect",
+    ],
+    sources: [
+      { label: "Next.js app", path: "examples/record-player/apps/next-betterauth" },
+      { label: "Benchmarks", path: "examples/record-player/benchmarks" },
+    ],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: browsing albums and sharing a playlist.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "epic-drop",
+    title: "EpicDrop",
+    tagline: "A file browser for large binary values, streamed straight from the browser.",
+    description:
+      "Uploads stream a browser File directly into Jazz, and a folder lists each file's name, type and size without loading any file contents. A cancelled upload publishes nothing, and a retry starts clean.",
+    highlights: [
+      "Drop a large file and watch it stream in",
+      "Browse a folder without downloading its files",
+    ],
+    sources: [{ label: "App and benchmarks", path: "examples/epic-drop" }],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: uploading and browsing files.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "jamazon-warehouse",
+    title: "Jamazon Warehouse",
+    tagline: "An operations console for an instrument store, shaped like TPC-C.",
+    description:
+      "Warehouses, districts, stock, customers, orders and payments, with multi-row checkout, ordered and bounded operational reads, local-first retry, and an idempotent hand-off to external effects. Anyone can watch stock and orders; only a warehouse's operator can change them.",
+    highlights: [
+      "Place an order that reserves stock across several rows",
+      "Watch stock levels update live on the console",
+    ],
+    sources: [{ label: "App and benchmarks", path: "examples/jamazon-warehouse" }],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: checkout and the live stock console.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "music-agent",
+    title: "MusicAgent",
+    tagline: "An LLM agent transcript: streamed turns, tool calls and audio attachments.",
+    description:
+      "A provider-free agent harness that records a conversation, streams a long assistant turn, logs tool invocations and keeps uploaded audio as bytes. A deterministic fake agent makes the whole flow run without an API key.",
+    highlights: [
+      "A long assistant reply streams in as it's written",
+      "Tool calls and attachments are part of the transcript",
+    ],
+    sources: [
+      { label: "TypeScript app", path: "examples/music-agent/apps/ts-localfirst" },
+      { label: "Benchmarks", path: "examples/music-agent/benchmarks" },
+    ],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: one agent conversation with a tool call.",
+    metrics: [],
+    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+  },
+  {
+    id: "moon-lander",
+    title: "Moon Lander",
+    tagline: "A multiplayer game: positions, fuel and inventory synced with no netcode.",
+    description:
+      "Players descend onto a shared lunar surface, collect fuel, share it with nearby astronauts and launch back into space. Positions, fuel deposits, inventory and chat all sync through Jazz, with no custom networking code.",
+    highlights: ["Two players land on the same moon", "Share fuel with a nearby astronaut"],
+    sources: [{ label: "React app", path: "examples/moon-lander-react" }],
+    video: null,
+    plannedVideo: "Walkthrough capture is planned: two players landing and sharing fuel.",
+    metrics: [],
+    plannedMetrics: "This example has no benchmark variant yet.",
   },
   {
     id: "task-board",
