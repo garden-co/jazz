@@ -793,7 +793,9 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query())?,
         };
-        self.compile_query_program_request(request).await
+        let access_paths = self.open_tx_program_access_paths(&request)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     fn current_query_program_request(

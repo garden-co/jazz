@@ -1165,6 +1165,44 @@ where
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
             let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
+            // An access path only narrows which rows are derived; the full
+            // program still filters them. Without one, derive every row.
+            let probe = match self.access_paths.get(&request.source) {
+                Some(CurrentAccessPath::PrimaryKey(values)) => values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Uuid(uuid) => Some(RowUuid(*uuid)),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(TxCandidateProbe::RowIds),
+                Some(CurrentAccessPath::Index {
+                    column,
+                    order_column,
+                    prefix,
+                    ..
+                }) => Some(TxCandidateProbe::Index {
+                    column: column.clone(),
+                    order_column: order_column.clone(),
+                    prefix: prefix.clone(),
+                }),
+                None => None,
+            };
+            let candidates = match probe {
+                Some(probe) => self
+                    .node
+                    .tx_access_path_candidate_rows(
+                        tx_id,
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        &probe,
+                    )
+                    .await
+                    .map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?,
+                None => None,
+            };
             let rows = self
                 .node
                 .tx_current_rows_in_schema_with_options(
@@ -1172,6 +1210,7 @@ where
                     self.read_view.read_schema,
                     &request.source.table,
                     include_deleted,
+                    candidates.as_ref(),
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
@@ -4065,6 +4104,53 @@ where
             false,
             allow_secondary_indexes,
         )
+    }
+
+    /// Access paths for an open transaction's query program. Its sources are
+    /// all snapshot-plus-overlay sources, which use a path only to choose
+    /// candidate rows (see `NodeState::tx_access_path_candidate_rows`), so
+    /// no durability-tier guard applies. Relational programs keep full
+    /// sources, as in [`Self::query_program_access_paths`].
+    pub(super) fn open_tx_program_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        if request.input.shape.nodes.values().any(|node| {
+            matches!(
+                node,
+                RowSetExpr::Union { .. }
+                    | RowSetExpr::Join { .. }
+                    | RowSetExpr::RecursiveRelation { .. }
+            )
+        }) {
+            return Ok(BTreeMap::new());
+        }
+        let mut equalities_by_source = BTreeMap::new();
+        for node_id in request.input.shape.nodes.keys() {
+            let Some(equalities) = normalized_program_equalities(
+                &request.input.shape,
+                node_id,
+                &request.input.binding,
+                &request.policy,
+            )?
+            else {
+                continue;
+            };
+            for (source, equalities) in equalities {
+                equalities_by_source
+                    .entry(source)
+                    .or_insert_with(BTreeMap::new)
+                    .extend(equalities);
+            }
+        }
+        let mut paths = BTreeMap::new();
+        for (source, equalities) in equalities_by_source {
+            let table = self.table_in_schema(&source.table, request.reads.primary.read_schema)?;
+            if let Some(path) = select_current_access_path(&table, &equalities) {
+                paths.insert(source, path);
+            }
+        }
+        Ok(paths)
     }
 
     fn normalized_program_access_paths(

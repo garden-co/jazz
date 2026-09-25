@@ -303,16 +303,29 @@ where
 
     /// Read transaction rows through a registered schema view, optionally
     /// retaining root rows whose deletion register wins.
+    ///
+    /// With `candidates`, only those rows (and rows this transaction staged)
+    /// are derived. The caller must supply a superset of every row whose
+    /// snapshot-plus-overlay state can satisfy the query's access path; see
+    /// [`Self::tx_access_path_candidate_rows`].
     pub(crate) async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         include_deleted: bool,
+        candidates: Option<&BTreeSet<RowUuid>>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
-            .await
+        self.tx_current_rows_with_table_and_candidates(
+            tx_id,
+            schema_version,
+            table,
+            table_schema,
+            include_deleted,
+            candidates,
+        )
+        .await
     }
 
     async fn tx_current_rows_with_table(
@@ -323,10 +336,43 @@ where
         table_schema: TableSchema,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_current_rows_with_table_and_candidates(
+            tx_id,
+            schema_version,
+            table,
+            table_schema,
+            include_deleted,
+            None,
+        )
+        .await
+    }
+
+    async fn tx_current_rows_with_table_and_candidates(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        table_schema: TableSchema,
+        include_deleted: bool,
+        candidates: Option<&BTreeSet<RowUuid>>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let mut snapshot_rows = self
-            .snapshot_rows_in_schema(schema_version, table, &snapshot)
-            .await?;
+        let mut snapshot_rows = match candidates {
+            None => {
+                self.snapshot_rows_in_schema(schema_version, table, &snapshot)
+                    .await?
+            }
+            Some(candidates) => {
+                let mut rows = BTreeMap::new();
+                for row_uuid in candidates {
+                    let row = self
+                        .snapshot_row_in_schema(schema_version, table, *row_uuid, &snapshot)
+                        .await?;
+                    rows.insert(*row_uuid, row);
+                }
+                rows
+            }
+        };
         let mut rows = snapshot_rows.keys().copied().collect::<BTreeSet<_>>();
         rows.extend(
             self.open_tx(tx_id)?
@@ -1643,6 +1689,130 @@ where
             })
     }
 
+    /// Rows an open transaction's table source must derive exactly so that a
+    /// query restricted by `access_path` loses no row.
+    ///
+    /// The transaction reads its fixed base snapshot plus its own staged
+    /// writes. For a row every one of whose stored versions is globally
+    /// settled, accepted and covered by the snapshot, the snapshot winner is
+    /// the global-current winner, so the global-current index finds it
+    /// exactly when its snapshot state satisfies the access path. Every other
+    /// row is added unconditionally:
+    ///
+    /// - rows with a version in the ahead-current tables (local writes, and
+    ///   any other version not yet settled into global-current);
+    /// - rows touched by a transaction settled after the snapshot's global
+    ///   base, including the snapshot's own dots;
+    /// - rows this transaction staged.
+    ///
+    /// Rejected versions leave history when they are fated, so they are
+    /// invisible to both the snapshot and global-current. The result is a
+    /// superset; each candidate is still derived from the snapshot.
+    pub(crate) async fn tx_access_path_candidate_rows(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        probe: &TxCandidateProbe,
+    ) -> Result<Option<BTreeSet<RowUuid>>, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "transaction candidate table mapping missing",
+            ))?
+            .clone();
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let mut candidates = BTreeSet::new();
+        match probe {
+            TxCandidateProbe::RowIds(rows) => candidates.extend(rows.iter().copied()),
+            TxCandidateProbe::Index {
+                column,
+                order_column,
+                prefix,
+            } => {
+                let Some(column_id) = mapping.columns.get(column).copied() else {
+                    return Ok(None);
+                };
+                let index = match order_column {
+                    Some(order_column) => {
+                        let Some(order_id) = mapping.columns.get(order_column).copied() else {
+                            return Ok(None);
+                        };
+                        physical_current_composite_index_name(&[column_id, order_id])
+                    }
+                    None => physical_current_index_name(column_id),
+                };
+                let index_prefix = std::iter::once(branch.clone())
+                    .chain(prefix.iter().cloned())
+                    .collect::<Vec<_>>();
+                for raw in self
+                    .database
+                    .index_scan_raw(
+                        &physical_global_current_table_name(mapping.table_id),
+                        &index,
+                        &index_prefix,
+                    )
+                    .await?
+                {
+                    candidates.insert(RowUuid(
+                        raw.record()
+                            .get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
+                    ));
+                }
+            }
+        }
+        for ahead in [
+            physical_ahead_current_table_name(mapping.table_id),
+            physical_register_ahead_current_table_name(mapping.table_id),
+        ] {
+            // Current and register tables all lead with (branch_key, row_uuid).
+            for raw in self
+                .database
+                .primary_key_scan_raw(&ahead, std::slice::from_ref(&branch))
+                .await?
+            {
+                candidates.insert(RowUuid(
+                    raw.record()
+                        .get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
+                ));
+            }
+        }
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut settled_after = snapshot.dots.clone();
+        let mut global_time = snapshot.global_base.0;
+        while global_time < self.clock.committed_global_time.0 {
+            global_time += 1;
+            settled_after.extend(
+                self.transaction_ids_for_global_time(GlobalTime(global_time))
+                    .await?,
+            );
+        }
+        for applied in self.clock.applied_global_times_after_frontier.clone() {
+            settled_after.extend(self.transaction_ids_for_global_time(applied).await?);
+        }
+        settled_after.sort_unstable();
+        settled_after.dedup();
+        for settled in settled_after {
+            candidates.extend(
+                self.query_versions_for_tx(settled)
+                    .await?
+                    .iter()
+                    .map(VersionRow::row_uuid),
+            );
+        }
+        candidates.extend(
+            self.open_tx(tx_id)?
+                .writes
+                .iter()
+                .filter(|write| write.table == table)
+                .map(|write| write.row_uuid),
+        );
+        Ok(Some(candidates))
+    }
+
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
@@ -1918,6 +2088,20 @@ where
         }
         Ok((cells, deleted))
     }
+}
+
+/// How an open transaction's query narrows its source to candidate rows.
+#[derive(Clone, Debug)]
+pub(crate) enum TxCandidateProbe {
+    /// The query addresses these row ids directly.
+    RowIds(Vec<RowUuid>),
+    /// An equality prefix on one global-current secondary index (or on the
+    /// composite `column`, `order_column` index), in physical index values.
+    Index {
+        column: String,
+        order_column: Option<String>,
+        prefix: Vec<Value>,
+    },
 }
 
 /// Exact-branch row state after applying one open transaction's staged writes.
