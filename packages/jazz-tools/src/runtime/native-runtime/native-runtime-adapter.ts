@@ -1261,7 +1261,17 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.serverTransportError) throw this.serverTransportError;
       return;
     }
-    await this.serverCarrierPromise;
+    // Reconnects continue through an outage; once it is published, callers
+    // waiting for the link reject instead of waiting for the recovery.
+    if (this.serverOutageReported && this.serverTransportError) throw this.serverTransportError;
+    const outage = this.networkRetryCount > 0 ? this.waitForServerTransportError("global") : null;
+    try {
+      await (outage
+        ? Promise.race([this.serverCarrierPromise, outage.promise])
+        : this.serverCarrierPromise);
+    } finally {
+      outage?.cancel();
+    }
   }
 
   /** @internal */
