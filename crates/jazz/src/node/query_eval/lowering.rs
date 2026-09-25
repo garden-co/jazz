@@ -552,6 +552,13 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
 
+/// Unused admission products kept for their installers. A client opens a
+/// whole screen of subscriptions before any installer runs, so this must
+/// cover a realistic batch: at 32, a 61-list dashboard recompiled the 29
+/// oldest programs. Still well below the 256-proof budget; eviction only
+/// repeats compilation.
+pub(super) const ADMISSION_HANDOFF_MAX_PROGRAMS: usize = 128;
+
 /// An admission proof may hand its immutable compiler output to the first
 /// matching installer. No evaluator, live binding, rows or subscription is retained.
 /// Consuming the program leaves the cheap capability proof resident.
@@ -676,8 +683,8 @@ where
                 });
         }
         if let Some(program) = program {
-            // Keep the existing small compiled-program budget independently
-            // of the larger proof budget. An abandoned admission cannot retain
+            // Keep a bounded compiled-program budget independently of the
+            // larger proof budget. An abandoned admission cannot retain
             // arbitrarily many executable descriptions; eviction only repeats
             // compilation, never rejects a query. The first installer takes
             // ownership, so used programs do not occupy this handoff budget.
@@ -687,7 +694,7 @@ where
                 .iter()
                 .filter(|entry| entry.program.is_some())
                 .count()
-                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+                >= ADMISSION_HANDOFF_MAX_PROGRAMS
             {
                 if let Some(oldest) = self
                     .query
