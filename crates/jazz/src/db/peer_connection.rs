@@ -6470,8 +6470,8 @@ where
                 .await
         }
         PermissionAdviceAction::Update { table, row, patch } => {
-            match node.current_rows(&table, DurabilityTier::Local).await {
-                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => {
+            match node.local_current_row_exists(&table, row).await {
+                Ok(true) => {
                     node.dry_run_insert_allows(
                         MergeableCommit::new(table, row, 0)
                             .made_by(identity)
@@ -6480,7 +6480,7 @@ where
                     )
                     .await
                 }
-                Ok(_) => Ok(false),
+                Ok(false) => Ok(false),
                 Err(error) => Err(error),
             }
         }

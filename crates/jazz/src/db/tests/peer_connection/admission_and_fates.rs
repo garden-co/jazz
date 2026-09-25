@@ -3774,6 +3774,78 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
 }
 
 #[test]
+#[ignore = "#3386: timing probe, run manually with --ignored"]
+/// Server tick for one Update permission advice against a growing table,
+/// next to an idle tick. Before #3386 the row-existence check decoded the
+/// whole table, so the advice tick grew linearly with it.
+fn probe_3386_update_advice_latency() {
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    // No update policy: an update policy's support scope is hydrated over
+    // the whole table on every request and would mask the row lookup.
+    let policies = PublicTablePolicies::new().with_insert(policy);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(policies),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x60; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut inserted = 0usize;
+    for size in [100usize, 1_000, 5_000] {
+        while inserted < size {
+            server
+                .insert("todos", cells(&format!("row {inserted}"), false, author))
+                .unwrap();
+            inserted += 1;
+        }
+        let mut total = std::time::Duration::ZERO;
+        const ASKS: u32 = 20;
+        for _ in 0..ASKS {
+            let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+                table: "todos".to_owned(),
+                row: row(0xef),
+                patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            });
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            total += started.elapsed();
+            client.tick().unwrap();
+            assert_eq!(block_on(advice), PermissionAdvice::Denied);
+        }
+        eprintln!(
+            "PROBE rows={size} server_tick_us={}",
+            (total / ASKS).as_micros()
+        );
+        let mut idle = std::time::Duration::ZERO;
+        for _ in 0..ASKS {
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            idle += started.elapsed();
+        }
+        eprintln!(
+            "PROBE rows={size} idle_tick_us={}",
+            (idle / ASKS).as_micros()
+        );
+    }
+}
+
+#[test]
 fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
     let request_id = PermissionAdviceRequestId([7; 16]);
     let message = SyncMessage::PermissionAdviceResponse {
