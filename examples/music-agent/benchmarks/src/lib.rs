@@ -16,11 +16,16 @@ use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<TestStorage>;
 
+const SEEK_BYTES: u64 = 64 * 1024;
+const SHORT_REPLY: &str = "try a late-night quartet with brushed drums, upright bass and a tenor \
+saxophone carrying the melody; start with a ballad, then something with a slow swing.";
+
 pub struct Fixture {
     db: BenchDb,
     storage: TestStorage,
     assistant: RowUuid,
     attachment: RowUuid,
+    attachment_bytes: usize,
     transcript: PreparedQuery,
     turns: TableSchema,
 }
@@ -32,7 +37,22 @@ impl Default for Fixture {
 }
 
 impl Fixture {
+    /// One user prompt followed by one streamed assistant turn, plus a small
+    /// audio attachment on that turn.
     pub fn new() -> Self {
+        Self::with_shape(2, INLINE_VALUE_MAX_BYTES * 2)
+    }
+
+    /// A conversation of `turn_count` turns. Earlier turns alternate short
+    /// user and assistant messages; the final turn is a long assistant reply
+    /// streamed in as a large value, carrying an audio attachment of
+    /// `attachment_bytes`.
+    pub fn with_shape(turn_count: usize, attachment_bytes: usize) -> Self {
+        assert!(turn_count >= 2, "fixture requires a prompt and a reply");
+        assert!(
+            attachment_bytes > INLINE_VALUE_MAX_BYTES,
+            "exercise the indirect large-value path"
+        );
         let schema = schema();
         let refs = schema.column_families();
         let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
@@ -57,13 +77,34 @@ impl Fixture {
                 ("body".into(), Value::String("warm saxophone".into())),
             ]),
         );
+        for ordinal in 1..turn_count - 1 {
+            let (role, body) = if ordinal % 2 == 1 {
+                (
+                    "assistant",
+                    format!("Suggestion {ordinal}: {}", SHORT_REPLY),
+                )
+            } else {
+                ("user", format!("Follow-up {ordinal}: something slower?"))
+            };
+            insert(
+                &db,
+                "turns",
+                history_turn_id(ordinal),
+                BTreeMap::from([
+                    ("conversation".into(), Value::Uuid(conversation.0)),
+                    ("ordinal".into(), Value::I32(ordinal as i32)),
+                    ("role".into(), Value::String(role.into())),
+                    ("body".into(), Value::String(body)),
+                ]),
+            );
+        }
         let text = format!("{}final chorus", "a".repeat(INLINE_VALUE_MAX_BYTES * 2));
         let assistant_write = block_on(db.insert_streaming_value_with_id(
             "turns",
             assistant,
             BTreeMap::from([
                 ("conversation".into(), Value::Uuid(conversation.0)),
-                ("ordinal".into(), Value::I32(1)),
+                ("ordinal".into(), Value::I32(turn_count as i32 - 1)),
                 ("role".into(), Value::String("assistant".into())),
             ]),
             "body",
@@ -76,25 +117,61 @@ impl Fixture {
             attachment,
             BTreeMap::from([("turn".into(), Value::Uuid(assistant.0))]),
             "payload",
-            Cursor::new(vec![7_u8; INLINE_VALUE_MAX_BYTES * 2]),
+            Cursor::new(attachment_pattern(0..attachment_bytes)),
         ))
         .expect("stream audio attachment");
         block_on(attachment_write.wait(DurabilityTier::Local)).expect("durable attachment");
         let transcript = db
-            .prepare_query(
-                &Query::from("turns")
-                    .filter(eq(col("conversation"), lit(conversation.0)))
-                    .order_by("ordinal", OrderDirection::Asc),
-            )
+            .prepare_query(&transcript_query())
             .expect("prepare transcript");
         Self {
             db,
             storage,
             assistant,
             attachment,
+            attachment_bytes,
             transcript,
             turns: table(&schema, "turns"),
         }
+    }
+
+    /// Stream `chunk_count` chunks of `chunk_bytes` onto the assistant turn,
+    /// one append per chunk as a token stream arrives, and wait until the
+    /// last one is locally durable.
+    pub fn stream_reply(&self, chunk_count: usize, chunk_bytes: usize) -> usize {
+        let chunk = "x".repeat(chunk_bytes).into_bytes();
+        let mut last = None;
+        for _ in 0..chunk_count {
+            last = Some(
+                block_on(
+                    self.db
+                        .append_value("turns", self.assistant, "body", chunk.clone()),
+                )
+                .expect("append streamed chunk"),
+            );
+        }
+        if let Some(write) = last {
+            block_on(write.wait(DurabilityTier::Local)).expect("streamed reply is durable");
+        }
+        chunk_count
+    }
+
+    /// A 64 KiB window from the middle of the audio attachment, as a player
+    /// requests when the user seeks.
+    pub fn attachment_seek(&self) -> Vec<u8> {
+        let start = (self.attachment_bytes / 2) as u64;
+        block_on(self.db.read_value_range(
+            "attachments",
+            self.attachment,
+            "payload",
+            start..start + SEEK_BYTES,
+        ))
+        .expect("read attachment window")
+    }
+
+    pub fn expected_attachment_seek(&self) -> Vec<u8> {
+        let start = self.attachment_bytes / 2;
+        attachment_pattern(start..start + SEEK_BYTES as usize)
     }
 
     pub fn append_assistant_tail(&self) {
@@ -127,13 +204,8 @@ impl Fixture {
 
     pub fn restarted_transcript(&self) -> Vec<String> {
         let reopened = open(schema(), self.storage.clone());
-        let conversation = row_id(1);
         let query = reopened
-            .prepare_query(
-                &Query::from("turns")
-                    .filter(eq(col("conversation"), lit(conversation.0)))
-                    .order_by("ordinal", OrderDirection::Asc),
-            )
+            .prepare_query(&transcript_query())
             .expect("prepare restarted transcript");
         let table = table(&schema(), "turns");
         reopened
@@ -146,6 +218,16 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+fn transcript_query() -> Query {
+    Query::from("turns")
+        .filter(eq(col("conversation"), lit(row_id(1).0)))
+        .order_by("ordinal", OrderDirection::Asc)
+}
+
+fn attachment_pattern(range: std::ops::Range<usize>) -> Vec<u8> {
+    range.map(|offset| (offset % 251) as u8).collect()
 }
 
 fn schema() -> JazzSchema {
@@ -203,6 +285,12 @@ fn insert(db: &BenchDb, table: &str, row: RowUuid, cells: BTreeMap<String, Value
     ))
     .expect("insert MusicAgent fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("durable fixture row");
+}
+
+fn history_turn_id(ordinal: usize) -> RowUuid {
+    let mut bytes = [0x5a; 16];
+    bytes[8..].copy_from_slice(&(ordinal as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
 }
 
 fn row_id(last: u8) -> RowUuid {

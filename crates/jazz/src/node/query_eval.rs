@@ -1276,40 +1276,27 @@ where
         let strips_policy_branches = matches!(policy, PolicyContext::System)
             || authorization_mode == QueryAuthorizationMode::ClientLocal;
         let (shape, binding) = if strips_policy_branches
-            && !shape.query().policy_branches.is_empty()
+            && let Some((shape, binding)) = self.policy_stripped_shape(shape, binding)?
         {
-            let schema = if shape.schema_version() == self.catalogue.local_schema_version_id {
-                &self.catalogue.schema
-            } else {
-                &self
-                    .catalogue
-                    .catalogue_schemas
-                    .get(&shape.schema_version())
-                    .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-                    .schema
-            };
-            let mut query = shape.query().clone();
-            query.policy_branches.clear();
-            residual_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
-            residual_binding = residual_shape.bind(
-                binding
-                    .values()
-                    .iter()
-                    .filter(|(name, _)| residual_shape.params().contains_key(*name))
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect(),
-            )?;
+            residual_shape = shape;
+            residual_binding = binding;
             (&residual_shape, &residual_binding)
         } else {
             (shape, binding)
         };
         let lowered_shape;
         let lowered_binding;
-        // Prepared binding sources are a serving-side optimization. Client
-        // local execution must lower concrete bindings into its locally
-        // available (already upstream-scoped at Global) data, rather
-        // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
+        // Global-tier client-local receivers must lower concrete bindings
+        // into their upstream-scoped settled views rather than evaluate a
+        // server-maintained binding graph. A Local-tier maintained client
+        // subscription has no settled view and reads unfiltered local data, so
+        // its bindings can share one prepared shape, like serving bindings do.
+        let client_local = authorization_mode == QueryAuthorizationMode::ClientLocal;
+        let client_local_prepared = client_local
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && matches!(output, CurrentQueryProgramOutput::MaintainedView);
+        let use_prepared_binding_source = (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1352,7 +1339,7 @@ where
             &input_shape,
         );
         let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
-        if use_prepared_binding_source {
+        if use_prepared_binding_source && !client_local {
             let policy_schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1370,6 +1357,9 @@ where
         // System reads bypass policy evaluation and have no session from
         // which a prepared claim can be bound. A policy-derived claim slot
         // must therefore never survive into their shared descriptor.
+        // Client-local reads evaluate no read policy, so they collect no
+        // policy-dependency claims above, but a claim the query itself reads
+        // stays a binding slot and is bound from the reader's session.
         if matches!(policy, PolicyContext::System) {
             binding_claim_params.clear();
         }
@@ -1438,8 +1428,8 @@ where
                     read_view,
                     &input_shape,
                 );
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
+        let mut program_binding = self
+            .program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
                 binding,
                 source_shape,
@@ -1447,7 +1437,15 @@ where
                 binding_claim_params,
                 &policy,
                 prepared_claim_binding_mode,
-            )?,
+            )?;
+        // Client-local and trusted-serving plans never share a binding source:
+        // their graphs differ in policy and source authority. Namespace the
+        // final name, since System authority re-derives it above.
+        if client_local && let Some(source_shape) = program_binding.source_shape.as_mut() {
+            source_shape.push_str(":client-local");
+        }
+        let input = RowSetProgramInput {
+            binding: program_binding,
             shape: input_shape,
         };
         let mut output_request = current_query_output_request(output, shape.query())?;
@@ -2189,6 +2187,74 @@ where
         })
     }
 
+    /// The query with its read-policy alternatives removed, for authorities
+    /// that do not evaluate them (System and client-local reads), or `None`
+    /// when it has none.
+    fn policy_stripped_shape(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<Option<(ValidatedQuery, Binding)>, Error> {
+        if shape.query().policy_branches.is_empty() {
+            return Ok(None);
+        }
+        let schema = if shape.schema_version() == self.catalogue.local_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema
+        };
+        let mut query = shape.query().clone();
+        query.policy_branches.clear();
+        let residual_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
+        let residual_binding = residual_shape.bind(
+            binding
+                .values()
+                .iter()
+                .filter(|(name, _)| residual_shape.params().contains_key(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )?;
+        Ok(Some((residual_shape, residual_binding)))
+    }
+
+    /// The binding-source name a prepared Local-tier client-local plan of
+    /// this query would share, or `None` when the query has no binding slot.
+    /// Mirrors the derivation in
+    /// [`Self::current_query_program_request_with_prepared_claim_mode`].
+    fn client_local_prepared_source_name(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<String>, Error> {
+        let residual = self.policy_stripped_shape(shape, binding)?;
+        let (shape, binding) = residual
+            .as_ref()
+            .map_or((shape, binding), |(shape, binding)| (shape, binding));
+        let source_shape = if matches!(
+            self.query_program_policy_context(identity),
+            PolicyContext::System
+        ) {
+            query_binding_source_shape_for_parts_if_needed(shape.params(), &BTreeMap::new())
+        } else {
+            let input_shape = self.normalized_row_set_shape(shape, binding)?;
+            let claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
+            query_binding_source_shape_for_parts_if_needed(shape.params(), &claim_params).map(
+                |source_shape| {
+                    self.active_session_claim_scope_key(identity)
+                        .map(|scope| format!("{source_shape}:session:{scope}"))
+                        .unwrap_or(source_shape)
+                },
+            )
+        };
+        Ok(source_shape.map(|source_shape| format!("{source_shape}:client-local")))
+    }
+
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.local_schema_version_id
             && !self.required_include_membership_is_identity_sensitive(shape)
@@ -2307,6 +2373,11 @@ where
             .await?;
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        // The historical program keeps unselected order keys for the sort
+        // above (`app_row_payload_projection`); drop them from public rows.
+        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -4068,6 +4139,32 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
+        // A lone Local-tier subscription gains nothing from routing through a
+        // shared binding source, and its literal graph hydrates faster. Share
+        // only once a sibling of the same shape with a different binding is
+        // open: the first subscriber keeps its literal graph for its lifetime
+        // and holds a token so later siblings know to prepare the shared
+        // shape. Reopening the same binding (a remount, or a resubscribe
+        // whose predecessor's teardown is still queued) gains nothing from
+        // sharing either, so it stays literal too.
+        let lone_client_local_source = if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && settled_binding_view.is_none()
+        {
+            self.client_local_prepared_source_name(&shape, &binding, identity)?
+                .filter(|source_shape| {
+                    !self
+                        .client_local_literal_shapes
+                        .get(source_shape)
+                        .is_some_and(|(token, literal_binding)| {
+                            token.strong_count() > 0 && *literal_binding != binding
+                        })
+                        && !self.database.prepared_binding_source_is_bound(source_shape)
+                })
+        } else {
+            None
+        };
         let mut request = self.current_query_program_request_with_prepared_claim_mode(
             &shape,
             &binding,
@@ -4078,7 +4175,7 @@ where
             settled_binding_view,
             authorization_mode,
             prepared_claim_binding_mode,
-            false,
+            lone_client_local_source.is_some(),
         )?;
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
@@ -4389,6 +4486,16 @@ where
         }
         if crate::debug_env::covered_input_trace() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
+        }
+        if let Some(source_shape) = lone_client_local_source {
+            let token = std::sync::Arc::new(());
+            self.client_local_literal_shapes
+                .retain(|_, (token, _)| token.strong_count() > 0);
+            self.client_local_literal_shapes.insert(
+                source_shape,
+                (std::sync::Arc::downgrade(&token), binding.clone()),
+            );
+            maintained.hold_client_local_literal_token(token);
         }
         Ok((
             subscription,
